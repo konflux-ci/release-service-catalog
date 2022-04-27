@@ -15,27 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
+        with:
+          fetch-depth: 2  # diff'ing the previous commit requires fetch depth=2
       - run: |
-          mkdir -vp $HOME/{bin,.kube} || true
-          pushd $HOME/bin
-          curl -LO https://dl.k8s.io/release/v1.23.0/bin/linux/amd64/kubectl
-          popd
-          PATH="$HOME/bin:$PATH"
+          mkdir -vp $HOME/.kube || true
           cat <<-EOF > $HOME/.kube/config
           apiVersion: v1
+          kind: Config
           clusters:
           - cluster:
-              insecure-skip-tls-verify: true
-              server: https://api.example.com:6443
-            name: api-example-dot-com:6443
+              server: _
+            name: _
           contexts:
           - context:
-              cluster: api-example-dot-com:6443
-              namespace: default
-              user: kube:admin/api-example-dot-com:6443
-            name: default/api-example-dot-com:6443/kube:admin
-          current-context: default/api-example-dot-com:6443/kube:admin
-          kind: Config
+              cluster: _
+            name: _
+          current-context: _
           EOF
       - uses: jerop/tkn@v0.1.0
       - uses: redhat-actions/podman-login@v1
@@ -44,29 +39,31 @@ jobs:
           password: ${{ env.REGISTRY_PASSWORD }}
           registry: ${{ env.IMAGE_REGISTRY }}
       - run: |
-          for dir in ${GITHUB_WORKSPACE}/*
+          declare -A bundle_dirs
+          while read file
           do
-            [[ -d "$dir" ]] || continue
-            printf 'Found Bundle dir: %s\n' $dir
-            BUNDLE_NAME="${dir##*/}"
+            [[ ${file%%/*} = \.* ]] && continue
+            bundle_dirs["${file%%/*}"]+="${file##*/} "
+          done < <(git diff-tree --no-commit-id --name-only -r ${{ github.sha }})
+          for BUNDLE_NAME in "${!bundle_dirs[@]}"
+          do
             BUNDLE_FILES=()
-            for file in  $dir/*.y{,a}ml
+            for file in $BUNDLE_NAME/*.y{,a}ml
             do
               [[ -e "$file" ]] || continue
-              printf " * %s\n" $file
               BUNDLE_FILES+=("$file")
             done
             printf -v bundle_files -- '-f %s ' ${BUNDLE_FILES[*]}
-            printf -v image_sha '%s/%s/%s:%s' \
+            printf -v image_tag_sha '%s/%s/%s:%s' \
               ${{ env.IMAGE_REGISTRY }} \
               ${{ env.IMAGE_NAMESPACE }} \
               "${BUNDLE_NAME}" \
               "${GITHUB_SHA:0:8}" ;
-            printf -v image_latest '%s/%s/%s:%s' \
+            printf -v image_tag_latest '%s/%s/%s:%s' \
               ${{ env.IMAGE_REGISTRY }} \
               ${{ env.IMAGE_NAMESPACE }} \
               "${BUNDLE_NAME}" \
               "latest" ;
-            tkn bundle push ${bundle_files} $image_sha ;
-            tkn bundle push ${bundle_files} $image_latest ;
+            tkn bundle push ${bundle_files} $image_tag_sha ;
+            tkn bundle push ${bundle_files} $image_tag_latest ;
           done
