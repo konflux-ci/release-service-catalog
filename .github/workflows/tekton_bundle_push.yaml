@@ -6,9 +6,10 @@ on:  # yamllint disable-line rule:truthy
   workflow_dispatch:
 env:
   IMAGE_REGISTRY: quay.io
-  IMAGE_NAMESPACE: hacbs-release
+  IMAGE_NAMESPACE: ${{ secrets.QUAY_NAMESPACE }}
   REGISTRY_USER: ${{ secrets.QUAY_ROBOT_USER }}
   REGISTRY_PASSWORD: ${{ secrets.QUAY_ROBOT_TOKEN }}
+  API_TOKEN: ${{ secrets.QUAY_API_TOKEN }}
 jobs:
   run-pipeline:
     name: Tekton Bundle
@@ -16,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
         with:
-          fetch-depth: 2  # diff'ing the previous commit requires fetch depth=2
+          fetch-depth: 2  # using git diff-tree requires fetch depth=2
       - run: |
           mkdir -vp $HOME/.kube || true
           cat <<-EOF > $HOME/.kube/config
@@ -48,22 +49,45 @@ jobs:
           for BUNDLE_NAME in "${!bundle_dirs[@]}"
           do
             BUNDLE_FILES=()
-            for file in $BUNDLE_NAME/*.y{,a}ml
+            for file in $BUNDLE_NAME/*.yaml
             do
               [[ -e "$file" ]] || continue
               BUNDLE_FILES+=("$file")
             done
             printf -v bundle_files -- '-f %s ' ${BUNDLE_FILES[*]}
-            printf -v image_tag_sha '%s/%s/%s:%s' \
+            printf -v image_string '%s/%s/%s' \
               ${{ env.IMAGE_REGISTRY }} \
               ${{ env.IMAGE_NAMESPACE }} \
-              "${BUNDLE_NAME}" \
-              "${GITHUB_SHA:0:8}" ;
-            printf -v image_tag_latest '%s/%s/%s:%s' \
-              ${{ env.IMAGE_REGISTRY }} \
-              ${{ env.IMAGE_NAMESPACE }} \
-              "${BUNDLE_NAME}" \
-              "latest" ;
-            tkn bundle push ${bundle_files} $image_tag_sha ;
-            tkn bundle push ${bundle_files} $image_tag_latest ;
+              "${BUNDLE_NAME}"
+
+            API_HTTP="https://${{ env.IMAGE_REGISTRY }}/api/v1"
+
+            mapfile -t repos < <(
+              curl \
+                --silent \
+                --request GET "${API_HTTP}/repository?namespace=${{ env.IMAGE_NAMESPACE }}" \
+                --header 'Authorization: Bearer ${{ secrets.QUAY_API_TOKEN }}' | \
+              jq '.repositories[].name'
+            )
+            if ! grep "${BUNDLE_NAME}" <<<${repos[*]}
+            then
+              # Need to create the repo
+              printf -v repo_string -- \
+                '{"namespace": "%s", "repository": "%s", "description": "%s", "visibility": "%s", "repo_kind": "%s"}' \
+                ${{ env.IMAGE_NAMESPACE }} \
+                ${BUNDLE_NAME} \
+                ${BUNDLE_NAME} \
+                public \
+                image
+              curl \
+                --silent \
+                --request POST "${API_HTTP}/repository?namespace=${{ env.IMAGE_NAMESPACE }}" \
+                --header 'Authorization: Bearer ${{ secrets.QUAY_API_TOKEN }}' \
+                --header 'Content-Type: application/json' \
+                --data "$repo_string"
+            fi
+
+            tkn bundle push ${bundle_files} "${image_string}:${GITHUB_SHA:0:8}"
+            tkn bundle push ${bundle_files} "${image_string}:latest"
+
           done
