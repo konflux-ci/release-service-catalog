@@ -17,7 +17,7 @@ do
   else
     printf 'NO MATCH: %s\n' "$file"
   fi
-done < <(git diff-tree --no-commit-id --name-only -r ${{ github.sha }})
+done < <(git diff-tree --no-commit-id --name-only -r ${GITHUB_SHA})
 # EO gathering changed definitions
 printf 'bundle_dirs: %s\n' "${!bundle_dirs[@]}"
 
@@ -49,31 +49,31 @@ do
 
   # note: {registry}/{namespace}/{repository}
   printf -v image_string '%s/%s/%s' \
-    ${{ env.IMAGE_REGISTRY }} \
-    ${{ env.IMAGE_NAMESPACE }} \
+    ${IMAGE_REGISTRY} \
+    ${IMAGE_NAMESPACE} \
     "${BUNDLE_NAME}"
 
-    API_HTTP="https://${{ env.IMAGE_REGISTRY }}/api/v1"
+    API_HTTP="https://${IMAGE_REGISTRY}/api/v1"
 
   # Test if the repo does not exist at {registry}/{namespace}.
   if ! grep "${BUNDLE_NAME}" < <(
     curl \
       --silent \
-      --request GET "${API_HTTP}/repository?namespace=${{ env.IMAGE_NAMESPACE }}" \
-      --header 'Authorization: Bearer ${{ secrets.QUAY_API_TOKEN }}' | \
+      --request GET "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
+      --header 'Authorization: Bearer ${QUAY_API_TOKEN}' | \
     jq '.repositories[].name'
   )
   then
     # Repo does not exist, so first create the repo.
     printf -v new_repo_string -- \
       '{"namespace": "%s", "repository": "%s", "description": "%s", "visibility": "%s", "repo_kind": "%s"}' \
-      "${{ env.IMAGE_NAMESPACE }}" "${BUNDLE_NAME}" "${BUNDLE_NAME}" "public" "image"
+      "${IMAGE_NAMESPACE}" "${BUNDLE_NAME}" "${BUNDLE_NAME}" "public" "image"
 
     printf 'Creating new repo: %s\n' "$image_string"
     curl \
       --silent \
-      --request POST "${API_HTTP}/repository?namespace=${{ env.IMAGE_NAMESPACE }}" \
-      --header 'Authorization: Bearer ${{ secrets.QUAY_API_TOKEN }}' \
+      --request POST "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
+      --header 'Authorization: Bearer ${QUAY_API_TOKEN}' \
       --header 'Content-Type: application/json' \
       --data "$new_repo_string"
   fi
@@ -81,7 +81,7 @@ do
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${GITHUB_SHA:0:7}"
   tkn bundle push ${bundle_files_args} "${image_string}:${GITHUB_SHA:0:7}"
 
-  printf 'Pushing image to repo: %s:%s\n' "$image_string" "${{ github.ref_name }}"
-  tkn bundle push ${bundle_files_args} "${image_string}:${{ github.ref_name }}"
+  printf 'Pushing image to repo: %s:%s\n' "$image_string" "${GITHUB_REFNAME}"
+  tkn bundle push ${bundle_files_args} "${image_string}:${GITHUB_REFNAME}"
 
 done
