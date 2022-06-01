@@ -60,7 +60,7 @@ do
     curl \
       --silent \
       --request GET "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
-      --header 'Authorization: Bearer ${QUAY_API_TOKEN}' | \
+      --header "Authorization: Bearer ${QUAY_API_TOKEN}" | \
     jq '.repositories[].name'
   )
   then
@@ -73,7 +73,7 @@ do
     curl \
       --silent \
       --request POST "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
-      --header 'Authorization: Bearer ${QUAY_API_TOKEN}' \
+      --header "Authorization: Bearer ${QUAY_API_TOKEN}" \
       --header 'Content-Type: application/json' \
       --data "$new_repo_string"
   fi
