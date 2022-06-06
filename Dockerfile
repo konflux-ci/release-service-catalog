@@ -6,6 +6,5 @@ RUN curl -L https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -
 
 RUN dnf -y --setopt=tsflags=nodocs install \
     git \
-    python3 \
     skopeo \
     && dnf clean all
