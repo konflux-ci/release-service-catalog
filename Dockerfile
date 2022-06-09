@@ -8,3 +8,6 @@ RUN dnf -y --setopt=tsflags=nodocs install \
     git \
     skopeo \
     && dnf clean all
+
+# Set HOME variable to something else than `/` to avoid 'permission denied' problems when writing files.
+ENV HOME=/tekton/home
