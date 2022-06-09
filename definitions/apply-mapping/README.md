@@ -7,6 +7,9 @@ The mapping is expected to be present in the passed `extraConfigPath`. If the fi
 the file contains no `mapping` key, the original Application Snapshot is returned. If there is a
 `mapping` key, it is merged with the `images` key in the Application Snapshot based on component.
 
+A `mapped` result is also returned from this task containing a simple true/false value that is
+meant to inform whether a mapped Application Snapshot is being returned or the original one.
+
 ## Parameters
 
 | Name | Description | Optional | Default value |
