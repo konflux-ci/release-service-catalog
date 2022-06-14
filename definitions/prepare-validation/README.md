@@ -22,5 +22,5 @@ tasks:
       name: prepare-validation
     params:
       - name: applicationSnapshot
-        value: '{"images":[{"component":"component1","pullSpec":"quay.io/repo/component1:digest"}}]}'
+        value: '{"components":[{"name":"component1","containerImage":"quay.io/repo/component1:digest"}}]}'
 ```
