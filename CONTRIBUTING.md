@@ -33,6 +33,10 @@ Once it’s filed:
 * A team member will try to reproduce the issue with your provided steps. If there are no reproduction steps or no obvious way to reproduce the issue, the team will ask you for those steps and mark the issue as `needs-reproducer`. Bugs with this tag will not be addressed until they are reproduced.
 * If the team is able to reproduce the issue, it will be marked `needs-fix` and left to be implemented by someone. Other labels can be used in addition to better describe the issue or its criticality.
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> 2deac63 (docs(HACBS-667): update repository documents)
 ## Requesting a feature
 
 Enhancement suggestions are tracked as [GitHub issues](/issues).
@@ -54,11 +58,19 @@ The commit message should contain an overall explanation about the change and th
 
 A well formatted commit would look something like this:
 
+<<<<<<< HEAD
 ```
 feat(issue-id): what this commit does
 
 Overall explanation of what this commit is achieving and the motivation behind it.
 
+=======
+ ```
+feat(issue-id): what this commit does
+ 
+Overall explanation of what this commit is achieving and the motivation behind it.
+ 
+>>>>>>> 2deac63 (docs(HACBS-667): update repository documents)
 Signed-off-by: Your Name <your-name@your-email.com>
 ```
 
@@ -81,6 +93,7 @@ Before a pull request can be merged:
 * The feature branch must be rebased so it contains the latest changes from the target branch
 * The CI has to pass successfully
 * Every comment has to be addressed and resolved
+<<<<<<< HEAD
 
 ## Testing
 
@@ -107,3 +120,5 @@ Unofficial (but useful) links:
 
 * [Ginkgo and Gomega gotchas](https://medium.com/@william.la.martin/ginkgotchas-yeh-also-gomega-13e39185ec96)
 * [Effective Ginkgo/Gomega](https://medium.com/swlh/effective-ginkgo-gomega-b6c28d476a09)
+=======
+>>>>>>> 2deac63 (docs(HACBS-667): update repository documents)
