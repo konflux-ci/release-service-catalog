@@ -11,7 +11,7 @@ This push happens automatically whenever a new bundle is added to the repository
 tags will be created or updated during this automatic process:
 
 * **main**: This tag will point always to the existing code in the repository main branch.
-* **commit-sha**: A tag with the commit-sha of the change will be created, so we can have multiple bundles per each
+* **<commit-sha>**: A tag with the commit-sha of the change will be created, so we can have multiple bundles per each
 change in the git repository.
 
 ## Adding new bundles
