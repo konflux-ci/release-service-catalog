@@ -4,20 +4,11 @@ printf 'Gathering new/modified bundle definitions.\n'
 
 # Gather new/modified bundle definitions.
 declare -A bundle_dirs  # associative array to hash bundle dirs in key space.
-while read file
+for file in ${ALL_CHANGED_FILES}
 do
-  # Only match yaml files in bundle dirs within definitions dir.
-  if [[ $file =~ .*[-,_]{2,} ]]
-  then
-    printf 'NO consecutive hyphen or underscores allowed: %s\n' "$file"
-  elif [[ ${file} =~ ^("./")?"definitions/"[a-z,A-Z,0-9,_-]+"/"[a-z,A-Z,0-9,_-]+".yaml"$ ]]
-  then
-    printf 'MATCHED: %s\n' "$file"
-    bundle_dirs["${file%/*}"]=""  # hash the bundle dir
-  else
-    printf 'NO MATCH: %s\n' "$file"
-  fi
-done < <(git diff-tree --no-commit-id --name-only -r ${GITHUB_SHA})
+  printf 'MATCHED: %s\n' "$file"
+  bundle_dirs["${file%/*}"]=""  # hash the bundle dir
+done
 # EO gathering changed definitions
 printf 'bundle_dirs: %s\n' "${!bundle_dirs[@]}"
 
