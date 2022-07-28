@@ -1,0 +1,106 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: release-pipeline
+spec:
+  params:
+    - name: applicationSnapshot
+      type: string
+      description: The ApplicationSnapshot in JSON format
+    - name: policy
+      type: string
+      description: Name of the policy to apply when validating the enterprise contract
+    - name: extraConfigGitUrl
+      type: string
+      description: URL to the remote Git repository containing the extra config
+      default: ""
+    - name: extraConfigGitRevision
+      type: string
+      description: Revision to fetch from the remote Git repository containing the extra config
+      default: ""
+    - name: extraConfigPath
+      type: string
+      description: Path to the extra config file within the repository
+      default: ""
+    - name: postCleanUp
+      type: string
+      description: Cleans up workspace after finishing executing the pipeline
+      default: "true"
+  workspaces:
+    - name: release-workspace
+  tasks:
+    - name: clone-config-file
+      taskRef:
+        name: git-clone
+        bundle: quay.io/redhat-appstudio/appstudio-tasks:583d33c8ddf0de2ea8e1a73d94a1ca4a6e6ed380-1
+      when:
+        - input: $(params.extraConfigGitUrl)
+          operator: notin
+          values: [""]
+      params:
+        - name: url
+          value: $(params.extraConfigGitUrl)
+        - name: revision
+          value: $(params.extraConfigGitRevision)
+        - name: subdirectory
+          value: "$(context.pipelineRun.uid)"
+      workspaces:
+        - name: output
+          workspace: release-workspace
+    - name: apply-mapping
+      taskRef:
+        name: apply-mapping
+        bundle: quay.io/hacbs-release/apply-mapping:main
+      params:
+        - name: applicationSnapshot
+          value: $(params.applicationSnapshot)
+        - name: extraConfigPath
+          value: "$(context.pipelineRun.uid)/$(params.extraConfigPath)"
+      when:
+        - input: $(tasks.clone-config-file.results.commit)
+          operator: notin
+          values: [""]
+      workspaces:
+        - name: config
+          workspace: release-workspace
+    - name: verify-enterprise-contract
+      taskRef:
+        name: verify-enterprise-contract-v2
+        bundle: quay.io/hacbs-release/verify-enterprise-contract-v2:main
+      params:
+        - name: IMAGES
+          value: $(tasks.apply-mapping.results.applicationSnapshot)
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.policy)
+        - name: STRICT
+          value: "0"
+    - name: push-application-snapshot
+      taskRef:
+        name: push-application-snapshot
+        bundle: quay.io/hacbs-release/push-application-snapshot:main
+      params:
+        - name: mappedApplicationSnapshot
+          value: $(tasks.apply-mapping.results.applicationSnapshot)
+      runAfter:
+        - verify-enterprise-contract
+  finally:
+    - name: cleanup
+      taskRef:
+        name: cleanup-workspace
+        bundle: quay.io/hacbs-release/cleanup-workspace:main
+      when:
+        - input: $(params.postCleanUp)
+          operator: in
+          values: ["true"]
+        - input: $(params.extraConfigGitUrl)
+          operator: notin
+          values: [""]
+      params:
+        - name: subdirectory
+          value: "$(context.pipelineRun.uid)"
+      workspaces:
+        - name: input
+          workspace: release-workspace
