@@ -10,13 +10,14 @@ All the bundles in this repository are pushed to our [Quay organization](https:/
 This push happens automatically whenever a new bundle is added to the repository or an existent one is updated. Two new
 tags will be created or updated during this automatic process:
 
+* **version**: This tag will point Catalog version of the Tekton resource, for example "0.1", 0.2", etc..
 * **main**: This tag will point always to the existing code in the repository main branch.
 * **<commit-sha>**: A tag with the commit-sha of the change will be created, so we can have multiple bundles per each
 change in the git repository.
 
 ## Adding new bundles
 
-To add new bundles to this repository, create a directory in the [definitions directory](definitions) and place inside
+To add new bundles to this repository, create a directory in the [catalog directory](catalog) and place inside
 yaml files containing the definition of the resources that should go inside the bundle. The directory name will be used
 as the name of the new bundle.
 
