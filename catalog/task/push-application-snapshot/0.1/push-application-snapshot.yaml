@@ -1,0 +1,56 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: push-application-snapshot
+spec:
+  params:
+    - name: mappedApplicationSnapshot
+      description: JSON string representing the ApplicationSnapshot
+      type: string
+    - name: retries
+      description: Retry copy N times.
+      type: string
+      default: "0"
+  steps:
+    - name: skopeo-copy
+      image: quay.io/hacbs-release/release-utils:latest
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+        application=$(jq -r '.application' <<<'$(params.mappedApplicationSnapshot)')
+        printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
+        while read line;
+        do
+          # Create array with component values
+          typeset -A data
+          while IFS== read -r key value; do
+            data["$key"]="$value"
+          done < <(jq -r '. | to_entries | .[] | .key + "=" + .value' <<<"$line")
+          data[tag]="${data[tag]:=latest}"
+          typeset -p data
+
+          source_digest=$(skopeo inspect \
+            --format '{{.Digest}}' \
+            "docker://${data[containerImage]}" 2>/dev/null)
+          # note: Inspection might fail on empty repos, hence `|| true`
+          destination_digest=$(
+            skopeo inspect \
+            --format '{{.Digest}}' \
+            "docker://${data[repository]}:${data[tag]}" 2>/dev/null || true)
+          if [[ "$destination_digest" != "$source_digest" || -z "$destination_digest" ]]
+          then
+            printf '* Pushing component: %s\n' "${data[name]}"
+            skopeo copy \
+              --all \
+              --preserve-digests \
+              --dest-precompute-digests \
+              --retry-times="$(params.retries)" \
+              "docker://${data[containerImage]}" \
+              "docker://${data[repository]}:${data[tag]}" ;
+          else
+            printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
+              "${data[name]}" "$source_digest"
+          fi
+        done < <(jq -rc '.components[]' <<<'$(params.mappedApplicationSnapshot)')
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
