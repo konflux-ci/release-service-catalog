@@ -1,0 +1,59 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: apply-mapping
+spec:
+  params:
+    - name: applicationSnapshot
+      type: string
+      description: The ApplicationSnapshot in JSON format to apply the mapping to
+    - name: extraConfigPath
+      type: string
+      description: The path to the config file containing the mapping
+      default: ""
+  workspaces:
+    - name: config
+      description: The workspace where the extra config file containing the mapping resides
+  results:
+    - name: applicationSnapshot
+      description: |
+        The AppicationSnapshot in JSON format with the mapping applied. If there is no mapping key in the
+        extraConfigPath, this result will be the same as the original applicationSnapshot parameter.
+    - name: mapped
+      description: A true/false value depicting whether or not the applicationSnapshot was mapped.
+  steps:
+    - name: apply-mapping
+      image: quay.io/hacbs-release/release-utils
+      env:
+        - name: "APPLICATION_SNAPSHOT"
+          value: '$(params.applicationSnapshot)'
+      script: |
+        #!/usr/bin/env sh
+        set -eux
+
+        CONFIG_FILE="$(workspaces.config.path)/$(params.extraConfigPath)"
+        if [ ! -f "${CONFIG_FILE}" ] ; then
+            echo "No valid config file was provided."
+            echo "${APPLICATION_SNAPSHOT}" | tee $(results.applicationSnapshot.path)
+            echo "false" | tee $(results.mapped.path)
+            exit 0
+        fi
+        if [[ $(yq '.mapping' "${CONFIG_FILE}") == "null" ]] ; then
+            echo "Config file contains no mapping key."
+            echo "${APPLICATION_SNAPSHOT}" | tee $(results.applicationSnapshot.path)
+            echo "false" | tee $(results.mapped.path)
+            exit 0
+        fi
+
+        # Create JSON representation of the config so we can use jq
+        CONFIG_JSON=$(yq -o=json -I=0 '.' "${CONFIG_FILE}")
+
+        # Merge the mapping key in the config file with the components key in the snapshot based on component name
+        # Save the output as a compact json in applicationSnapshot task result
+        jq -c -s '.[0] as $snapshot | .[0].components + .[1].mapping.components | group_by(.name)
+          | [.[] | select(length > 1)] | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents
+          | $snapshot | .components = $mergedComponents' \
+          <<< "${APPLICATION_SNAPSHOT}${CONFIG_JSON}" | tee $(results.applicationSnapshot.path)
+
+        echo "true" | tee $(results.mapped.path)
