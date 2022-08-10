@@ -1,6 +1,6 @@
 # Milestone-5 Release Pipeline
 
-Tekton pipeline to release HACBS Application Snapshot.
+Tekton pipeline to release HACBS Application Snapshot to Quay.
 
 ## Parameters
 
