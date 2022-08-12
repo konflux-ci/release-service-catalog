@@ -14,18 +14,24 @@ printf 'bundle_dirs: %s\n' "${!bundle_dirs[@]}"
 
 # Main loop
 printf 'Pushing any new/modified bundle definitions.\n'
-for BUNDLE_DIR in "${!bundle_dirs[@]}"
+for VERSION_DIR in "${!bundle_dirs[@]}"
 do
-  if [[ ! -d "$BUNDLE_DIR" ]]
+  if [[ ! -d "$VERSION_DIR" ]]
   then
-    printf 'Skipping non-existing bundle-path: %s\n' "$BUNDLE_DIR"
+    printf 'Skipping non-existing bundle-path: %s\n' "$VERSION_DIR"
     continue
   fi
   BUNDLE_FILES=()
+  BUNDLE_DIR=${VERSION_DIR%/*}
   BUNDLE_NAME=${BUNDLE_DIR##*/}
-  printf '* Bundle_dir: %s\n' $BUNDLE_DIR
+  RESOURCE_DIR=${BUNDLE_DIR%/*}
+  RESOURCE_TYPE=${RESOURCE_DIR#*/}
+  printf '* Version dir: %s\n' $VERSION_DIR
+  printf '* Bundle dir: %s\n' $BUNDLE_DIR
   printf '* Bundle name: %s\n' $BUNDLE_NAME
-  for file in $BUNDLE_DIR/*.yaml
+  printf '* Resource dir: %s\n' $RESOURCE_DIR
+  printf '* Resource type: %s\n' $RESOURCE_TYPE
+  for file in $VERSION_DIR/*.yaml
   do
     [[ -e "$file" ]] || continue
     printf '  * file: %s\n' "$file"
@@ -38,16 +44,17 @@ do
   printf -v bundle_files_args -- '-f %s ' ${BUNDLE_FILES[*]}
   unset BUNDLE_FILES
 
-  # note: {registry}/{namespace}/{repository}
-  printf -v image_string '%s/%s/%s' \
-    ${IMAGE_REGISTRY} \
-    ${IMAGE_NAMESPACE} \
-    "${BUNDLE_NAME}"
+  # note: {registry}/{namespace}/{type}-{name}
+  printf -v image_string '%s/%s/%s-%s' \
+    "$IMAGE_REGISTRY" \
+    "$IMAGE_NAMESPACE" \
+    "$RESOURCE_TYPE" \
+    "$BUNDLE_NAME"
 
     API_HTTP="https://${IMAGE_REGISTRY}/api/v1"
 
   # Test if the repo does not exist at {registry}/{namespace}.
-  if ! grep "${BUNDLE_NAME}" < <(
+  if ! grep "${RESOURCE_TYPE}-${BUNDLE_NAME}" < <(
     curl \
       --silent \
       --request GET "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
@@ -58,7 +65,7 @@ do
     # Repo does not exist, so first create the repo.
     printf -v new_repo_string -- \
       '{"namespace": "%s", "repository": "%s", "description": "%s", "visibility": "%s", "repo_kind": "%s"}' \
-      "${IMAGE_NAMESPACE}" "${BUNDLE_NAME}" "${BUNDLE_NAME}" "public" "image"
+      "$IMAGE_NAMESPACE" "$BUNDLE_NAME" "${RESOURCE_TYPE}-${BUNDLE_NAME}" "public" "image"
 
     printf 'Creating new repo: %s\n' "$image_string"
     curl \
@@ -74,5 +81,8 @@ do
 
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${GITHUB_REFNAME}"
   tkn bundle push ${bundle_files_args} "${image_string}:${GITHUB_REFNAME}"
+
+  printf 'Pushing image to repo: %s:%s\n' "$image_string" "${VERSION_DIR##*/}"
+  tkn bundle push ${bundle_files_args} "${image_string}:${VERSION_DIR##*/}"
 
 done
