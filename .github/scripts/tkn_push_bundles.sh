@@ -26,10 +26,9 @@ do
   # 2: resource dir
   # 3: name dir
   # 4: version dir
-  # 5: yaml file
   shift $#
   set -- ${VERSION_DIR////' '}  # Replace all forward-slash with white space
-  printf 'Resource: %s\nBundle: %s\nVersion: %s\nFile: %s' $2 $3 $4 $5
+  printf 'Resource: %s\nName: %s\nVersion: %s\n' "$2" "$3" "$4"
 
   # note: {registry}/{namespace}/{resource-type}-{name}
   printf -v image_string '%s/%s/%s-%s' \
@@ -38,7 +37,7 @@ do
     "$2" \
     "$3"
 
-    API_HTTP="https://${IMAGE_REGISTRY}/api/v1"
+  API_HTTP="https://${IMAGE_REGISTRY}/api/v1"
 
   # Test if the repo does not exist at {registry}/{namespace}.
   if ! grep "${2}-${3}" < <(
@@ -52,7 +51,7 @@ do
     # Repo does not exist, so first create the repo.
     printf -v new_repo_string -- \
       '{"namespace": "%s", "repository": "%s", "description": "%s", "visibility": "%s", "repo_kind": "%s"}' \
-      "$IMAGE_NAMESPACE" "$3" "${2}-${3}" "public" "image"
+      "$IMAGE_NAMESPACE" "${2}-${3}" "${2}-${3}" "public" "image"
 
     printf 'Creating new repo: %s\n' "$image_string"
     curl \
@@ -65,14 +64,14 @@ do
 
   # Tag with git commit sha hex
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${GITHUB_SHA:0:7}"
-  tkn bundle push -f "${VERSION_DIR}/${5}.yaml" "${image_string}:${GITHUB_SHA:0:7}"
+  tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${GITHUB_SHA:0:7}"
 
   # Tag with git branch string
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${GITHUB_REFNAME}"
-  tkn bundle push -f "${VERSION_DIR}/${5}.yaml" "${image_string}:${GITHUB_REFNAME}"
+  tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${GITHUB_REFNAME}"
 
   # Tag with version dir string
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${4}"
-  tkn bundle push -f "${VERSION_DIR}/${5}.yaml" "${image_string}:${4}"
+  tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${4}"
 
 done
