@@ -66,4 +66,9 @@ do
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${4}"
   tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${4}"
 
+  # Tag with catalog version + git commit sha hex
+  # {catalog_version}-{commit_sha1}
+  printf 'Pushing image to repo: %s:%s\n' "$image_string" "${4}-${GITHUB_SHA:0:7}"
+  tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${4}-${GITHUB_SHA:0:7}"
+
 done
