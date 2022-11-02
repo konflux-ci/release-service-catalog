@@ -1,0 +1,112 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: add-bundles-to-image-index
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+      Submit a build request to add operator bundles to an index image
+  params:
+    - name: IIB_URL 
+      description: IIB service url
+      default: "https://iib.engineering.redhat.com/api/v1"
+      type: string
+    - name: IIB_JSON_BUILD_ARGS
+      description: IIB JSON arguments to add a new build
+      type: string
+    - name: IIB_SECRET
+      type: string
+      default: "iib-service-secret"
+      description: Secret with iib credentials to be used
+    - name: IIB_BUILD_TIMEOUT_SECONDS
+      type: string
+      default: "300"
+      description:  Timeout seconds to receive the build state
+  results:
+    - name: json_build_info
+      description: JSON build information for the requested build
+    - name: build_state
+      description: IIB Service build state
+  steps:
+    - name: add-bundles-to-image-index
+      image: quay.io/hacbs-release/release-utils:latest
+      script: |
+        #!/usr/bin/env bash
+        #
+        # adds the json request parameters to a file to be used as input data
+        # for curl and preventing shell expansion.
+        #
+        json_input=/tmp/$$.tmp
+        cat > $json_input <<JSON
+        $(params.IIB_JSON_BUILD_ARGS)
+        JSON
+
+        # replaces {TOKEN} placeholder with credentials.
+        if [ -f /mnt/service-secret/registry_token ]; then
+            CREDS=$(cat /mnt/service-secret/registry_token)
+            sed -i "s/{TOKEN}/${CREDS}/g" ${json_input}
+        fi
+
+        # performs kerberos authentication.
+        export KRB5_CONFIG=/mnt/service-secret/krb5.conf
+        /usr/bin/kinit $(cat /mnt/service-secret/krb5_username) < /mnt/service-secret/krb5_password
+
+        # adds image to the index.
+        /usr/bin/curl -u : --negotiate -s -X POST -H "Content-Type: application/json" -d@${json_input} --insecure \
+        "$(params.IIB_URL)/builds/add" | jq | tee $(results.json_build_info.path)
+
+        # checks if the previous call returned an error.
+        ! jq -e -r ".error | select( . != null )" $(results.json_build_info.path)
+      volumeMounts:
+        - name: service-secret
+          mountPath: /mnt/service-secret
+    - name: wait-for-build-state
+      image: quay.io/hacbs-release/release-utils:latest
+      script: |
+        #!/usr/bin/env bash
+        #
+        TASKRUN="/tmp/$$.sh"
+        cat > ${TASKRUN} <<SH
+        #!/usr/bin/env bash
+        #
+        build_id=`jq -r ".id" $(results.json_build_info.path)`
+        state=""
+        while true; do
+            #
+            # fetching build information.
+            build_info=\$(/usr/bin/curl -s --insecure "$(params.IIB_URL)/builds/\${build_id}")
+
+            # get state from the build information.
+            state=\$(jq -r ".state" <<< \${build_info})
+            case \${state} in
+              "complete") break ;;
+              "failed") break ;;
+              *) echo -en "."; sleep 30; continue ;;
+            esac
+        done
+        echo
+        jq '{ "state": .state, "state_reason": .state_reason }' <<< \${build_info} | tee $(results.build_state.path)
+        test \${state} = "complete" && exit 0 || exit 1
+        SH
+
+        chmod +x ${TASKRUN}
+        echo -en "waiting for build state to exit..."
+
+        # adding timeout here due to the Task timeout not accepting $(params.IIB_BUILD_TIMEOUT_SECONDS)
+        # as parameter.
+        timeout $(params.IIB_BUILD_TIMEOUT_SECONDS) ${TASKRUN}
+        SYSEXIT=$?
+
+        [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the build to finish"
+
+        exit ${SYSEXIT}
+  volumes:
+    - name: service-secret
+      secret:
+        secretName: $(params.IIB_SECRET)
+        defaultMode: 0400
