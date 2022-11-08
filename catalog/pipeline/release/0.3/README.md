@@ -21,7 +21,7 @@ Tekton pipeline to release HACBS Application Snapshot to Quay.
   * Task `verify-enterprise-contract` was changed
     * Task parameter `POLICY_CONFIGURATION` value was changed
       * old: $(params.policy)
-      * new: $(params.enterprisecontractpolicy)
+      * new: $(params.enterpriseContractPolicy)
 
 ## Changes since 0.1 (milestone-5)
 
