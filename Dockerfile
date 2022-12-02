@@ -7,6 +7,7 @@ RUN curl -L https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 -
 RUN dnf -y --setopt=tsflags=nodocs install \
     git \
     skopeo \
+    krb5-workstation \
     && dnf clean all
 
 # Set HOME variable to something else than `/` to avoid 'permission denied' problems when writing files.
