@@ -1,4 +1,4 @@
-# push-application-snapshot
+# skopeo-copy
 
 Tekton task that pushes container images to a registry using `skopeo copy`.
 
@@ -10,4 +10,4 @@ Tekton task that pushes container images to a registry using `skopeo copy`.
 | destImageURL | Destination Image URL | No | 0 |
 | srcToken | Source auth token | No | - |
 | destToken | Destination auth token | No | - |
-| retries | JSON string representing the ApplicationSnapshot | Yes | 0 |
+| retries | JSON string representing the Snapshot | Yes | 0 |
