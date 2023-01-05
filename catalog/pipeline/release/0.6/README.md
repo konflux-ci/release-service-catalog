@@ -17,7 +17,8 @@ Tekton pipeline to release HACBS Snapshot to Quay.
 ## Changes since 0.5
 
 Pipeline definition was changed:
-* Task `verify-enterprise-contract-v2` points to new bundle location.
+* Taskref renamed from `verify-enterprise-contract-v2` to `verify-enterprise-contract`
+* Taskref `verify-enterprise-contract` points to new bundle location.
 
 ## Changes since 0.4
 
