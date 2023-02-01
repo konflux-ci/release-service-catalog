@@ -6,19 +6,7 @@ Tekton task that extracts sbom from a pull spec and pushes it to Pyxis.
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| imageURL | Image URL | No | - |
-
-## Example usage
-
-This is an example usage of the `push-sbom-to-pyxis` task:
-
-```
----
-tasks:
-  - name: push-sbom-to-pyxis
-    taskRef:
-      name: push-sbom-to-pyxis
-    params:
-      - name: imageURL
-        value: 'quay.io/my-org/my-repo:latest'
-```
+| imageURLs | Space separated list of binary image URLs that are used to obtain SBOMs via cosign | No | - |
+| containerImageIDs | Space separated list of Pyxis image IDs | No | - |
+| pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
+| server | The server type to use. Options are 'production' and 'stage' | Yes | production |

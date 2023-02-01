@@ -16,7 +16,7 @@ Tekton pipeline to push images to an external registry.
 | addSourceShaTag | When pushing the snapshot components, also push a tag with the image source sha | Yes | true |
 | addTimestampTag | When pushing the snapshot components, also push a tag with the current timestamp | Yes | false |
 | pyxisServerType | The Pyxis server type to use. Options are 'production' and 'stage' | No | - |
-| pyxisSecret | The kubernetes secret to use to authenticate to Pyxis | No | - |
+| pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
 ## Changes since 0.5
