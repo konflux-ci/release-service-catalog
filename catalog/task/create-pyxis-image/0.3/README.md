@@ -12,7 +12,7 @@ by a new line.
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
 | server | The server type to use. Options are 'production' and 'stage' | Yes | production |
-| pyxisSecret | The kubernetes secret to use to authenticate to Pyxis | No | - |
+| pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | certified | If set to true, the images will be marked as certified in their Pyxis entries | Yes | false |
 | tag | The tag to use when pushing the container image metadata to Pyxis | No | - |
 | isLatest | If set to true, the images will have a latest tag added with their Pyxis entries | Yes | false |
