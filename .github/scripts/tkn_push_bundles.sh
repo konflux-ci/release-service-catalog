@@ -39,29 +39,6 @@ do
 
   API_HTTP="https://${IMAGE_REGISTRY}/api/v1"
 
-  # Test if the repo does not exist at {registry}/{namespace}.
-  if ! grep "${2}-${3}" < <(
-    curl \
-      --silent \
-      --request GET "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
-      --header "Authorization: Bearer ${QUAY_API_TOKEN}" | \
-    jq '.repositories[].name'
-  )
-  then
-    # Repo does not exist, so first create the repo.
-    printf -v new_repo_string -- \
-      '{"namespace": "%s", "repository": "%s", "description": "%s", "visibility": "%s", "repo_kind": "%s"}' \
-      "$IMAGE_NAMESPACE" "${2}-${3}" "${2}-${3}" "public" "image"
-
-    printf 'Creating new repo: %s\n' "$image_string"
-    curl \
-      --silent \
-      --request POST "${API_HTTP}/repository?namespace=${IMAGE_NAMESPACE}" \
-      --header "Authorization: Bearer ${QUAY_API_TOKEN}" \
-      --header 'Content-Type: application/json' \
-      --data "$new_repo_string"
-  fi
-
   # Tag with version dir string
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${4}"
   tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${4}"
