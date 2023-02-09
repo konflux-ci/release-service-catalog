@@ -1,18 +1,19 @@
 # create-pyxis-image
 
-Tekton task that executes a python script to push a container image's metadata to Pyxis.
-The task expects a workspace to be mounted containing a file with the `skopeo inspect` output of the
-container that will have its metadata uploaded to Pyxis.
+Tekton task that pushes metadata to Pyxis for all container images contained in a snapshot. It first extracts
+the containerImages from the snapshot, then runs `skopeo inspect` on each, before finally pushing
+metadata to Pyxis.
 
-The ID of the created `containerImage` is stored as a task result.
+The IDs of the created `containerImage` Pyxis objects are stored as a task result with each ID separated
+by a new line.
 
 ## Parameters
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| server | The server type to use. Options are 'production' and 'stage' | No | production |
+| server | The server type to use. Options are 'production' and 'stage' | Yes | production |
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis | No | - |
-| certified | If set to true, the image will be marked as certified in its Pyxis entry | No | false |
+| certified | If set to true, the images will be marked as certified in their Pyxis entries | Yes | false |
 | tag | The tag to use when pushing the container image metadata to Pyxis | No | - |
-| isLatest | If set to true, the image will have a latest tag added with its pyxis entry | No | false |
-| skopeoInspectFile | The filename of the saved skopeo inspect output stored on the input workspace | No | skopeo-inspect.json |
+| isLatest | If set to true, the images will have a latest tag added with their Pyxis entries | Yes | false |
+| snapshot | The snapshot in JSON format | No | - |
