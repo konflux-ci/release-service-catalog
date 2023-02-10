@@ -10,7 +10,7 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task that executes a python script to push a container image's metadata to Pyxis
+    Tekton task that pushes metadata to Pyxis for all container images contained in a snapshot
   params:
     - name: server
       type: string
@@ -21,29 +21,25 @@ spec:
       description: The kubernetes secret to use to authenticate to Pyxis
     - name: certified
       type: string
-      description: If set to true, the image will be marked as certified in its Pyxis entry
+      description: If set to true, the images will be marked as certified in their Pyxis entries
       default: "false"
     - name: tag
       type: string
       description: The tag to use when pushing the container image metadata to Pyxis
     - name: isLatest
       type: string
-      description: If set to true, the image will have a latest tag added with its Pyxis entry
+      description: If set to true, the images will have a latest tag added with their Pyxis entries
       default: "false"
-    - name: skopeoInspectFile
+    - name: snapshot
       type: string
-      description: The filename of the saved skopeo inspect output stored on the input workspace
-      default: "skopeo-inspect.json"
+      description: The snapshot in JSON format
   results:
-    - name: containerImageID
-      description: ID of the created entry in Pyxis
-  workspaces:
-    - name: input
-      description: The workspace where the skopeoInspectFile is located
+    - name: containerImageIDs
+      description: IDs of the created entries in Pyxis, each on its own line
   steps:
     - name: create-pyxis-image
       image:
-        quay.io/hacbs-release/release-utils@sha256:dfd2872b10458a1f2f26985481c531910c4d298efde9e10510b43cf3d92641b9
+        quay.io/hacbs-release/release-utils@sha256:5298e31e7e7a97cab005750096abe8dbfca3f422cf049fd87de76a117072a9b5
       env:
         - name: pyxisCert
           valueFrom:
@@ -73,12 +69,17 @@ spec:
         echo "${pyxisCert}" > /tmp/crt
         echo "${pyxisKey}" > /tmp/key
 
-        PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
-          --pyxis-url $PYXIS_URL \
-          --certified $(params.certified) \
-          --tag $(params.tag) \
-          --is-latest $(params.isLatest) \
-          --verbose \
-          --skopeo-result $(workspaces.input.path)/$(params.skopeoInspectFile) | tee /tmp/output
+        for containerImage in $(jq -r '.components[].containerImage' <<< '$(params.snapshot)') ; do
 
-        grep 'The image id is' /tmp/output | awk '{print $NF}' > $(results.containerImageID.path)
+            skopeo inspect --no-tags "docker://${containerImage}" > /tmp/skopeo-inspect.json
+    
+            PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
+              --pyxis-url $PYXIS_URL \
+              --certified $(params.certified) \
+              --tag $(params.tag) \
+              --is-latest $(params.isLatest) \
+              --verbose \
+              --skopeo-result /tmp/skopeo-inspect.json | tee /tmp/output
+    
+            grep 'The image id is' /tmp/output | awk '{print $NF}' >> $(results.containerImageID.path)
+        done
