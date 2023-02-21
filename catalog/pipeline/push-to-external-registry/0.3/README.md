@@ -13,7 +13,7 @@ Tekton pipeline to push images to an external registry.
 | extraConfigPath | Path to the extra config file within the repository | No | - |
 | pyxisServerType | The Pyxis server type to use. Options are 'production' and 'stage' | No | - |
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis | No | - |
-| tag | The tag to use when pushing the container images' metadata to Pyxis | No | - |
+| tag | The default tag to use when mapping file does not contain a tag | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
 ## Changes since 0.1
