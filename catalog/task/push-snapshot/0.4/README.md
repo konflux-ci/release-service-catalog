@@ -4,10 +4,15 @@ Tekton task to push snapshot images to an image registry using `skopeo copy`.
 
 ## Parameters
 
-| Name | Description | Optional | Default value |
-|------|-------------|----------|---------------|
-| mappedSnapshot | JSON string representing the Snapshot | No | - |
-| retries | Retry copy N times | Yes | 0 |
+| Name           | Description                                                                                     | Optional | Default value |
+|----------------|-------------------------------------------------------------------------------------------------|----------|---------------|
+| mappedSnapshot | JSON string representing the Snapshot                                                           | No       | -             |
+| tag            | Default tag to use if mapping entry does not contain a tag | Yes     | latest        |
+| retries        | Retry copy N times                                                                              | Yes      | 0             |
+
+## Changes since 0.3
+
+* Default tag to use will default to `tag` parameter
 
 ## Changes since 0.2
 
