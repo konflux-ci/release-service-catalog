@@ -23,13 +23,33 @@ spec:
       description: Retry copy N times.
       type: string
       default: "0"
+    - name: addShaTag
+      description: Also push a tag with the sha for each image in the Snapshot
+      type: string
+      default: "true"
+    - name: addTimestampTag
+      description: Also push a tag with the current timestamp for each image in the Snapshot
+      type: string
+      default: "false"
   steps:
-    - name: skopeo-copy
+    - name: push-snapshot
       image:
         quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
       script: |
         #!/usr/bin/env bash
         set -eux
+
+        push_image () { # Expected arguments are [name, containerImage, repository, tag] from data array
+          printf '* Pushing component: %s to %s:%s\n' "$1" "$3" "$4"
+          skopeo copy \
+            --all \
+            --preserve-digests \
+            --dest-precompute-digests \
+            --retry-times="$(params.retries)" \
+            "docker://$2" \
+            "docker://$3:$4"
+        }
+
         application=$(jq -r '.application' <<<'$(params.mappedSnapshot)')
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
         while read line;
@@ -53,14 +73,22 @@ spec:
             "docker://${data[repository]}:${data[tag]}" 2>/dev/null || true)
           if [[ "$destination_digest" != "$source_digest" || -z "$destination_digest" ]]
           then
-            printf '* Pushing component: %s\n' "${data[name]}"
-            skopeo copy \
-              --all \
-              --preserve-digests \
-              --dest-precompute-digests \
-              --retry-times="$(params.retries)" \
-              "docker://${data[containerImage]}" \
-              "docker://${data[repository]}:${data[tag]}" ;
+            push_image "${data[name]}" "${data[containerImage]}" "${data[repository]}" "${data[tag]}"
+            if [ $(params.addTimestampTag) = true ] ; then
+              timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
+              push_image "${data[name]}" "${data[containerImage]}" "${data[repository]}" "$timestamp"
+            fi
+            if [ $(params.addShaTag) = true ] ; then
+              if [[ "${data[containerImage]}" == *"@sha256"* && \
+                $(echo "${data[containerImage]}" | tr -cd ':' | wc -c) -eq 1 ]]
+              then
+                sha=$(echo "${data[containerImage]}" | cut -d ':' -f 2)
+                push_image "${data[name]}" "${data[containerImage]}" "${data[repository]}" "$sha"
+              else
+                printf 'Asked to create sha based tag, but no sha found in %s\n' "${data[containerImage]}"
+                exit 1
+              fi
+            fi
           else
             printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
               "${data[name]}" "$source_digest"
