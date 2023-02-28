@@ -15,3 +15,7 @@ FBC Release Pipeline
 | addArches | List of arches the index image should be built for | Yes | "[]" |
 | requestUpdateTimeout | Max seconds to wait until the status is updated | Yes | - |
 | buildTimeoutSeconds | Max seconds to wait until the build finishes | Yes | - |
+
+## Changes since 0.5
+
+Upgrade create-internal-request task to version 0.3
