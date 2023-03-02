@@ -13,6 +13,9 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 | extraConfigPath | Path to the extra config file within the repository | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
+## Changes since 0.8
+
+Update tag of ec-task-bundle task
 
 ## Changes since 0.7
 
