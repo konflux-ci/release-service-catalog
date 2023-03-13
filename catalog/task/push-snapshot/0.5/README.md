@@ -18,6 +18,7 @@ Tekton task to push snapshot images to an image registry using `skopeo copy`.
   sha for each image in the snapshot
 * Parameter `addTimestampTag` was added. This parameter specifies whether or not to additionally push a tag with the
   current timestamp for each image in the snapshot
+* `skopeo inspect` has the `--no-tags` flag added to prevent timeouts on large repos
 
 ## Changes since 0.3
 
