@@ -15,3 +15,10 @@ Creates an InternalRequest resource to call IIB service
 | buildArches | List of `buildArches` the `fromIndex` should be built for | Yes | |
 | requestUpdateTimeout | List of `buildArches` the `fromIndex` should be built for | Yes | 360|
 | buildTimeoutSeconds | List of `buildArches` the `fromIndex` should be built for | Yes | 300|
+
+
+## Changelog
+
+### changes since 0.1
+- adds `resolvedIndexImage` result
+- adds params `requestUpdateTimeout` and `buildTimeoutSeconds`
