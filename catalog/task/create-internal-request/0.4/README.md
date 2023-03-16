@@ -13,10 +13,15 @@ Creates an InternalRequest resource to call IIB service
 | overwriteFromIndex | Boolean indicating if the `fromIndex` should be overwritten | Yes | |
 | buildTags | List of additional `buildTags` the internal `fromIndex` image copy should be tagged with | Yes | |
 | buildArches | List of `buildArches` the `fromIndex` should be built for | Yes | |
-| requestUpdateTimeout | List of `buildArches` the `fromIndex` should be built for | Yes | 360|
-| buildTimeoutSeconds | List of `buildArches` the `fromIndex` should be built for | Yes | 300|
+| requestUpdateTimeout | Max seconds to wait until the status is updated | Yes | 360 |
+| buildTimeoutSeconds | Max seconds to wait until the build finishes | Yes | 300 |
 
 ## Changelog
+
+### changes since 0.3
+- removes the additional logging
+- removes `resolvedIndexImage` and `resolvedFromIndexImage` results
+  as now the FBC-Release Pipeline uses `requestResults` to read required values.
 
 ### changes since 0.2
 - adds additional logging messages
