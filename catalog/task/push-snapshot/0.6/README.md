@@ -9,8 +9,15 @@ Tekton task to push snapshot images to an image registry using `skopeo copy`.
 | mappedSnapshot  | JSON string representing the Snapshot                                                           | No       | -             |
 | tag             | Default tag to use if mapping entry does not contain a tag                                      | Yes      | latest        |
 | retries         | Retry copy N times                                                                              | Yes      | 0             |
-| addShaTag       | Also push a tag with the sha for each image in the Snapshot                                     | Yes      | true          |
+| addGitShaTag    | Also push a tag with the git sha for each image in the Snapshot                                 | Yes      | true          |
+| addSourceShaTag | Also push a tag with the source sha for each image in the Snapshot                              | Yes      | true          |
 | addTimestampTag | Also push a tag with the current timestamp for each image in the Snapshot                       | Yes      | false         |
+
+## Changes since 0.5
+* JSON data interpretation logic was switched from creating a bash array to using `jq`
+* Parameter `addShaTag` was renamed to `addSourceShaTag`
+* Parameter `addGitShaTag` was added. This parameter specifies whether or not to additionally push a tag with the
+  git sha for each image in the snapshot
 
 ## Changes since 0.4
 
