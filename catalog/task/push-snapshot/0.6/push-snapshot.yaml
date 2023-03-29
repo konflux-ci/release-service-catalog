@@ -1,0 +1,110 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: push-snapshot
+  labels:
+    app.kubernetes.io/version: "0.6"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to push snapshot images to an image registry using `skopeo copy`
+  params:
+    - name: mappedSnapshot
+      description: JSON string representing the Snapshot
+      type: string
+    - name: tag
+      description: Default tag to use if mapping entry does not contain a tag
+      type: string
+      default: "latest"
+    - name: retries
+      description: Retry copy N times.
+      type: string
+      default: "0"
+    - name: addGitShaTag
+      description: Also push a tag with the git sha for each image in the Snapshot
+      type: string
+      default: "true"
+    - name: addSourceShaTag
+      description: Also push a tag with the source sha for each image in the Snapshot
+      type: string
+      default: "true"
+    - name: addTimestampTag
+      description: Also push a tag with the current timestamp for each image in the Snapshot
+      type: string
+      default: "false"
+  steps:
+    - name: push-snapshot
+      image:
+        quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        push_image () { # Expected arguments are [name, containerImage, repository, tag]
+          printf '* Pushing component: %s to %s:%s\n' "$1" "$3" "$4"
+          skopeo copy \
+            --all \
+            --preserve-digests \
+            --dest-precompute-digests \
+            --retry-times="$(params.retries)" \
+            "docker://$2" \
+            "docker://$3:$4"
+        }
+
+        application=$(jq -r '.application' <<<'$(params.mappedSnapshot)')
+        printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
+        for component in $(jq -rc '.components[]' <<< '$(params.mappedSnapshot)')
+        do
+          containerImage=$(jq -r '.containerImage' <<< $component)
+          repository=$(jq -r '.repository' <<< $component)
+          name=$(jq -r '.name' <<< $component)
+          git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
+          # take tag if present in mapping file, otherwise take ReleaseStrategy default provided as a task param
+          tag=$(params.tag)
+          if [ $(jq 'has("tag")' <<< $component) == "true" ] ; then
+              tag=$(jq -r '.tag' <<< $component)
+          fi
+
+          source_digest=$(skopeo inspect \
+            --no-tags \
+            --format '{{.Digest}}' \
+            "docker://${containerImage}" 2>/dev/null)
+          # note: Inspection might fail on empty repos, hence `|| true`
+          destination_digest=$(
+            skopeo inspect \
+            --no-tags \
+            --format '{{.Digest}}' \
+            "docker://${repository}:${tag}" 2>/dev/null || true)
+          if [[ "$destination_digest" != "$source_digest" || -z "$destination_digest" ]]; then
+            push_image "${name}" "${containerImage}" "${repository}" "${tag}"
+            if [ $(params.addTimestampTag) = true ] ; then
+              timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
+              push_image "${name}" "${containerImage}" "${repository}" "$timestamp"
+            fi
+            if [ $(params.addGitShaTag) = true ] ; then
+              if [ "${git_sha}" != "null" ] ; then
+                push_image "${name}" "${containerImage}" "${repository}" "${git_sha}"
+              else
+                printf 'Asked to create git sha based tag, but no git sha found in %s\n' "${component}"
+                exit 1
+              fi
+            fi
+            if [ $(params.addSourceShaTag) = true ] ; then
+              if [[ "${containerImage}" == *"@sha256"* && $(echo "${containerImage}" | tr -cd ':' | wc -c) -eq 1 ]]
+              then
+                sha=$(echo "${containerImage}" | cut -d ':' -f 2)
+                push_image "${name}" "${containerImage}" "${repository}" "${sha}"
+              else
+                printf 'Asked to create source sha based tag, but no sha found in %s\n' "${containerImage}"
+                exit 1
+              fi
+            fi
+          else
+            printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
+              "${name}" "$source_digest"
+          fi
+        done
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
