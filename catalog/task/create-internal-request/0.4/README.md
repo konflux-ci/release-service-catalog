@@ -22,6 +22,8 @@ Creates an InternalRequest resource to call IIB service
 - removes the additional logging
 - removes `resolvedIndexImage` and `resolvedFromIndexImage` results
   as now the FBC-Release Pipeline uses `requestResults` to read required values.
+- The syntax for `taskRef.bundle` and `pipelineRef.bundle` is deprecated,
+  bundles resolver is used with new format.
 
 ### changes since 0.2
 - adds additional logging messages

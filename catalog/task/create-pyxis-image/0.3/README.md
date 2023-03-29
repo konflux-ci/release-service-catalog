@@ -21,6 +21,8 @@ by a new line.
 ## Changes since 0.2
 
 * Use tag present in mapping file if present.
+* The syntax for `taskRef.bundle` and `pipelineRef.bundle` is deprecated,
+  bundles resolver is used with new format.
 
 ## Changes since 0.1
 
