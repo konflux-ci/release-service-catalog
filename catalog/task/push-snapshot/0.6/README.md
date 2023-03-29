@@ -18,6 +18,8 @@ Tekton task to push snapshot images to an image registry using `skopeo copy`.
 * Parameter `addShaTag` was renamed to `addSourceShaTag`
 * Parameter `addGitShaTag` was added. This parameter specifies whether or not to additionally push a tag with the
   git sha for each image in the snapshot
+* The syntax for `taskRef.bundle` and `pipelineRef.bundle` is deprecated,
+  bundles resolver is used with new format.
 
 ## Changes since 0.4
 

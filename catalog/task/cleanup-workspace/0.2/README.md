@@ -28,3 +28,5 @@ tasks:
 ## Changes since 0.1
 
   * Base image was changed from `release-utils` to `release-base-image`
+  * The syntax for `taskRef.bundle` and `pipelineRef.bundle` is deprecated,
+  bundles resolver is used with new format.
