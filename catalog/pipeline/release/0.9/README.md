@@ -11,15 +11,11 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 | extraConfigGitUrl |URL to the remote Git repository containing the extra config | No | - |
 | extraConfigGitRevision | Revision to fetch from the remote Git repository containing the extra config | No | - |
 | extraConfigPath | Path to the extra config file within the repository | No | - |
-| addGitShaTag | When pushing the snapshot components, also push a tag with the image git sha | Yes | false |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
 ## Changes since 0.8
 
-* Update tag of ec-task-bundle task
-* Upgrade push-snapshot task for v0.6 parameter
-  * addGitShaTag parameter is now supported and passed as a pipeline parameter to the task with value false
-
+Update tag of ec-task-bundle task
 
 ## Changes since 0.7
 
