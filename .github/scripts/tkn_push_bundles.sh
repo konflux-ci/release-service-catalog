@@ -38,6 +38,8 @@ do
     "$3"
 
   API_HTTP="https://${IMAGE_REGISTRY}/api/v1"
+  VERSION=$(echo ${VERSION_DIR} | grep -o '[^/]*$')
+  LATEST_VERSION=$(ls ${VERSION_DIR}/.. --hide=OWNERS | sort -V | tail -n 1)
 
   # Test if the repo does not exist at {registry}/{namespace}.
   if ! grep "${2}-${3}" < <(
@@ -71,7 +73,13 @@ do
   printf 'Pushing image to repo: %s:%s\n' "$image_string" "${4}-${GITHUB_SHA:0:7}"
   tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:${4}-${GITHUB_SHA:0:7}"
 
-  # Tag with main
-  printf 'Pushing image to repo: %s:%s\n' "$image_string" "main"
-  tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:main"
+  # Tag with main if this is the latest version
+  if [ "${LATEST_VERSION}" == "${VERSION}" ]
+  then
+    printf 'Pushing image to repo: %s:%s\n' "$image_string" "main"
+    tkn bundle push -f "${VERSION_DIR}/${3}.yaml" "${image_string}:main"
+  else
+    printf 'Did not push %s:%s to main as current latest version found to be %s\n' \
+      "${image_string}" "${VERSION}" "${LATEST_VERSION}"
+  fi
 done
