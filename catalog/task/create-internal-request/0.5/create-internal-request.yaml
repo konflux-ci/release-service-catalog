@@ -1,0 +1,123 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: create-internal-request
+  labels:
+    app.kubernetes.io/version: "0.4"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+      Creates an InternalRequest resource to call IIB service
+  params:
+    - name: pipelineRunName
+      type: string
+      description: The name of the Parent PipelineRun of this task
+    - name: binaryImage
+      type: string
+      description: FBC Image to be added to index image
+    - name: fbcFragment
+      type: string
+      description: FBC fragment built by HACBS
+    - name: fromIndex
+      type: string
+      description: Index image (catalog of catalogs) the FBC fragment will be added to    
+    - name: overwriteFromIndex
+      type: string
+      description: Boolean indicating if the fromIndex should be overwritten
+    - name: buildTags
+      type: string
+      description: List of additional tags the internal index image copy should be tagged with
+    - name: addArches
+      type: string
+      description: List of arches the index image should be built for
+    - name: requestUpdateTimeout
+      type: string
+      default: "360"
+      description: Max seconds waiting for the status update
+    - name:  buildTimeoutSeconds
+      type: string
+      default: "300"
+      description: Max seconds waiting for the status update
+  results:
+    - name: requestMessage
+      description: Internal Request message
+    - name: requestReason
+      description: Internal Request reason
+    - name: requestResults
+      description: Internal Request results
+  workspaces:
+    - name: common 
+      description: Workspace to store the params and responses for the internalRequest
+  steps:
+    - name: create-internal-request
+      image: 
+        quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
+      script: |
+        #!/usr/bin/env sh
+        PATH=/bin:/usr/bin:/usr/local/bin
+        export PATH
+
+        resourceRequest="/tmp/$$"
+        fbcComponentJson="/tmp/fbc-component-$$.json"
+
+        cat > ${fbcComponentJson} <<JSON
+        $(params.fbcFragment)
+        JSON
+
+        cat > ${resourceRequest} <<YAML
+        ---
+        apiVersion: appstudio.redhat.com/v1alpha1
+        kind: InternalRequest
+        metadata:
+          name: "ir-$(params.pipelineRunName)"
+        spec:
+          request: "iib"
+          params:
+            binaryImage: `printf "%q" '$(params.binaryImage)'`
+            fbcFragment: `jq .components[0].containerImage < ${fbcComponentJson}`
+            fromIndex: $(params.fromIndex)
+            overwriteFromIndex: "$(params.overwriteFromIndex)"
+            buildTags: "$(params.buildTags)"
+            addArches: "$(params.addArches)"
+            buildTimeoutSeconds: `printf "\"%q\"" '$(params.buildTimeoutSeconds)'`
+        YAML
+        kubectl create -f ${resourceRequest}
+    - name: watch-internal-request-status
+      image:
+        quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
+      script: |
+        #!/usr/bin/env sh
+        PATH=/bin:/usr/bin:/usr/local/bin
+        TASKRUN="/tmp/$$.sh"
+
+        cat > ${TASKRUN} <<SH
+        #!/usr/bin/env sh
+        IR="ir-$(params.pipelineRunName)"
+        while true; do
+          STATUS=\$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}')
+          case "\${STATUS}" in
+            True | False )
+              echo "InternalRequest finished"
+              kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].reason}' \
+              | tee $(results.requestReason.path)
+              kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].message}' \
+              | tee $(results.requestMessage.path)
+              kubectl get internalrequest \${IR} -o jsonpath='{.status.results}' | jq -cR \
+              | tee $(results.requestResults.path)
+              break
+              ;;
+            "*")
+              ;;
+          esac
+          sleep 30
+        done
+        [ \$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}') == "True" ]
+        SH
+        chmod +x ${TASKRUN}
+        timeout $(params.requestUpdateTimeout) ${TASKRUN}
+        SYSEXIT=$?
+        [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the internal request update"
+        exit ${SYSEXIT}
