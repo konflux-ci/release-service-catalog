@@ -1,0 +1,165 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: fbc-release
+  labels:
+    app.kubernetes.io/version: "0.8"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton release pipeline to interact with FBC Pipeline
+  params:
+    - name: snapshot
+      type: string
+      description: The Snapshot in JSON format
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON representation of the EnterpriseContractPolicy
+    - name: fromIndex
+      type: string
+      description: The source Index image (catalog of catalogs) FBC fragment
+    - name: targetIndex
+      type: string
+      description: Index image (catalog of catalogs) the FBC fragment will be added to
+    - name: overwriteFromIndex
+      type: string
+      description: Boolean indicating if the fromIndex should be overwritten
+    - name: binaryImage
+      type: string
+      default: ""
+      description: OCP binary image to be baked into the index image
+    - name: buildTags
+      type: string
+      default: "[]"
+      description: List of additional tags the internal index image copy should be tagged with
+    - name: addArches
+      type: string
+      default: "[]"
+      description: List arches to be added to be built
+    - name: requester
+      type: string
+      description: Name of the user that requested the signing, for auditing purposes
+    - name: signingConfigMapName
+      type: string
+      default: "hacbs-signing-pipeline-config"
+      description: The ConfigMap to be used by the signing Pipeline
+    - name: requestUpdateTimeout
+      type: string
+      description: Max seconds to wait until the status is updated
+    - name: buildTimeoutSeconds
+      type: string
+      description: Max seconds to wait until the build finishes
+  workspaces:
+    - name: release-workspace
+  results:
+    - name: requestMessage
+      value: $(tasks.add-fbc-contribution-to-index-image.results.requestMessage)
+    - name: requestReason
+      value: $(tasks.add-fbc-contribution-to-index-image.results.requestReason)
+    - name: requestResults
+      value: $(tasks.add-fbc-contribution-to-index-image.results.requestResults)
+  tasks:
+    - name: verify-enterprise-contract
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-contract/ec-task-bundle:snapshot
+          - name: kind
+            value: task
+          - name: name
+            value: verify-enterprise-contract
+      params:
+        - name: IMAGES
+          value: $(params.snapshot)
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          value: "1"
+    - name: prepare-iib-request
+      workspaces:
+        - name: common
+          workspace: release-workspace
+      taskRef:
+        resolver: "bundles"
+        params:
+            - name: bundle
+              value: quay.io/lmendes/iib:prepare
+            - name: kind
+              value: task
+            - name: name
+              value: prepare-internal-request
+      params:
+        - name: pipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: request
+          value: "iib"
+        - name: params
+          value:
+              - name: binaryImage
+                value: "$(params.binaryImage)"
+              - name: fromIndex
+                value: "$(params.fromIndex)"
+              - name: overwriteFromIndex
+                value: "$(params.overwriteFromIndex)"
+              - name: buildTags
+                value: "$(params.buildTags)"
+              - name: addArches
+                value: "$(params.addArches)"
+              - name: buildTimeoutSeconds
+                value: "$(params.buildTimeoutSeconds)"
+              - name: fbcFragment
+                value: '{sanitize}$(params.snapshot){/sanitize}'
+                jsonKey: ".components[0].containerImage"
+      runAfter:
+        - verify-enterprise-contract
+    - name: add-fbc-contribution-to-index-image
+      workspaces:
+        - name: common
+          workspace: release-workspace
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/lmendes/iib:main
+          - name: kind
+            value: task
+          - name: name
+            value: create-internal-request
+      params:
+        - name: pipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: request
+          value: "iib"
+        - name: requestUpdateTimeout
+          value: $(params.requestUpdateTimeout)
+      runAfter:
+        - prepare-iib-request
+    - name: sign-index-image
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-release/task-sign-index-image:0.1
+          - name: kind
+            value: task
+          - name: name
+            value: sign-index-image
+      params:
+        - name: pipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: requestJsonResults
+          value: $(tasks.add-fbc-contribution-to-index-image.results.requestResults)
+        - name: targetIndex
+          value: $(params.targetIndex)
+        - name: requester
+          value: $(params.requester)
+        - name: configMapName
+          value: $(params.signingConfigMapName)
+        - name: requestUpdateTimeout
+          value: $(params.requestUpdateTimeout)
