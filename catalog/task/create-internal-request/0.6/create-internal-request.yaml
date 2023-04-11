@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-internal-request
   labels:
-    app.kubernetes.io/version: "0.4"
+    app.kubernetes.io/version: "0.6"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -18,6 +18,9 @@ spec:
     - name: request
       type: string
       description: request type
+    - name: params
+      type: string
+      description: Internal Request parameters
     - name: requestUpdateTimeout
       type: string
       default: "360"
@@ -33,6 +36,59 @@ spec:
     - name: common 
       description: Workspace to store the params and responses for the internalRequest
   steps:
+    - name: prepare-internal-request
+      image:
+        quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
+      script: |
+          #!/usr/bin/env bash
+          #
+          set -e
+          # Tekton wraps the $(param.params) in a JSON string that in some usecase
+          # might contain another JSON string that breaks jq parsing, so we need to
+          # sanitize it before parsing.
+
+          # sanitize
+          #
+          # param string `file`
+          sanitize() {
+            TEMP="${1}-tmp"
+            # UNESCAPED=$(grep -Po  "(?<=.sanitize.)(.*)+(?=./sanitize.)" ${1})
+            UNESCAPED=$(awk -e '{match($0, /"{.*}"/, m); {start=index($0, m[0])+1; end=length(m[0])-2} print substr($0, start, end) }' ${1})
+            awk -v sanitized=${UNESCAPED} -e '{gsub(/"{.*}"/, sanitized); gsub("\\\\","\\\\\\"); print}' ${1} > ${TEMP}
+            if jq "." ${TEMP}; then
+              mv ${TEMP} ${1}
+            else
+                return 1
+            fi
+          }
+
+          # saving the parameters preserving the string as is
+          JSON_PARAMS="/tmp/json-params-$$.txt"
+          cat > ${JSON_PARAMS} <<JSON
+          $(params.params)
+          JSON
+
+          # sanitizing the string
+          sanitize ${JSON_PARAMS}
+
+          # building the InternalRequest yaml
+          #
+          IR="/workspace/common/ir-$(params.pipelineRunName)-$(params.request).yaml"
+          cat > ${IR} <<YAML
+          apiVersion: appstudio.redhat.com/v1alpha1
+          kind: InternalRequest
+          metadata:
+            name: "ir-$(params.pipelineRunName)"
+          spec:
+            request: "$(params.request)"
+            params:
+          YAML
+
+          LENGTH=`jq ". | length" ${JSON_PARAMS}`
+          for (( i=0; i<${LENGTH}; i++ )); do
+            INPUT=$(jq -r ".[${i}]|[.name, .value]| @tsv" ${JSON_PARAMS})
+            read -r PARAM VALUE <<< "${INPUT}"
+            if [ `jq -e ".[${i}]| has(\"jsonKey\")" ${JSON_PARAMS}` == "true" ]; then
     - name: create-internal-request
       image: 
         quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
