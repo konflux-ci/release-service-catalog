@@ -21,6 +21,13 @@
 
 ## Changelog
 
+### Changes since 0.9
+- changes on the following tasks due to `create-internal-request` changes:
+    - `add-fbc-contribution-to-index-image` now accepts dynamic parameters
+    - `sign-index-image` now accepts dynamic parameters
+- changes on `publish-index-image` task to read data from its `inputDataFile` parameter
+- adds cleanup task
+
 ### Changes since 0.8
 - fixes in the README.md file
 - adds param `fbcPublishingCredentials`
