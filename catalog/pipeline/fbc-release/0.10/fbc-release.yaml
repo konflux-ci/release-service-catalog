@@ -46,6 +46,10 @@ spec:
       type: string
       default: "hacbs-signing-pipeline-config"
       description: The ConfigMap to be used by the signing Pipeline
+    - name: fbcPublishingCredentials
+      type: string
+      default: "fbc-publishing-credentials"
+      description: Secret used to publish the built index image
     - name: requestUpdateTimeout
       type: string
       description: Max seconds to wait until the status is updated
@@ -59,8 +63,6 @@ spec:
       value: $(tasks.add-fbc-contribution-to-index-image.results.requestMessage)
     - name: requestReason
       value: $(tasks.add-fbc-contribution-to-index-image.results.requestReason)
-    - name: requestResults
-      value: $(tasks.add-fbc-contribution-to-index-image.results.requestResults)
   tasks:
     - name: verify-enterprise-contract
       taskRef:
@@ -81,7 +83,7 @@ spec:
           value: $(params.enterpriseContractPolicy)
         - name: STRICT
           value: "1"
-    - name: prepare-iib-request
+    - name: add-fbc-contribution-to-index-image
       workspaces:
         - name: common
           workspace: release-workspace
@@ -89,17 +91,17 @@ spec:
         resolver: "bundles"
         params:
             - name: bundle
-              value: quay.io/lmendes/iib:prepare
+              value: quay.io/lmendes/iib:main
             - name: kind
               value: task
             - name: name
-              value: prepare-internal-request
+              value: create-internal-request
       params:
         - name: pipelineRunName
           value: $(context.pipelineRun.name)
         - name: request
           value: "iib"
-        - name: params
+         name: params
           value:
               - name: binaryImage
                 value: "$(params.binaryImage)"
@@ -114,11 +116,11 @@ spec:
               - name: buildTimeoutSeconds
                 value: "$(params.buildTimeoutSeconds)"
               - name: fbcFragment
-                value: '{sanitize}$(params.snapshot){/sanitize}'
+                value: '$(params.snapshot)'
                 jsonKey: ".components[0].containerImage"
       runAfter:
         - verify-enterprise-contract
-    - name: add-fbc-contribution-to-index-image
+    - name: sign-index-image
       workspaces:
         - name: common
           workspace: release-workspace
@@ -135,31 +137,40 @@ spec:
         - name: pipelineRunName
           value: $(context.pipelineRun.name)
         - name: request
-          value: "iib"
-        - name: requestUpdateTimeout
-          value: $(params.requestUpdateTimeout)
+          value: "hacbs-signing-pipeline"
+        - name: params
+          value:
+              - name: manifest_digest
+                value: "sharedRequestFile:json:.jsonBuildInfo"
+                jsonKey: ".index_image_resolved"
+              - name: pipeline_image
+                value: "quay.io/redhat-isv/operator-pipelines-images:released"
+              - name: reference
+                value: $(params.targetIndex)
+              - name: requester
+                value: $(params.requester)
+              - name: config_map_name
+                value: $(params.signingConfigMapName)
       runAfter:
-        - prepare-iib-request
-    - name: sign-index-image
+        - add-fbc-contribution-to-index-image
+    - name: publish-index-image
       taskRef:
         resolver: "bundles"
         params:
           - name: bundle
-            value: quay.io/hacbs-release/task-sign-index-image:0.1
+            value: quay.io/hacbs-release/task-publish-index-image:0.1
           - name: kind
             value: task
           - name: name
-            value: sign-index-image
+            value: publish-index-image
       params:
-        - name: pipelineRunName
-          value: $(context.pipelineRun.name)
         - name: requestJsonResults
           value: $(tasks.add-fbc-contribution-to-index-image.results.requestResults)
         - name: targetIndex
           value: $(params.targetIndex)
-        - name: requester
-          value: $(params.requester)
-        - name: configMapName
-          value: $(params.signingConfigMapName)
-        - name: requestUpdateTimeout
-          value: $(params.requestUpdateTimeout)
+        - name: retries
+          value: "0"
+        - name: fbcPublishingCredentials
+          value: $(params.fbcPublishingCredentials)
+      runAfter:
+        - sign-index-image

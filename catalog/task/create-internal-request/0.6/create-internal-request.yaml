@@ -43,9 +43,9 @@ spec:
           #!/usr/bin/env bash
           #
           set -e
-          # Tekton wraps the $(param.params) in a JSON string that in some usecase
-          # might contain another JSON string that breaks jq parsing, so we need to
-          # sanitize it before parsing.
+          # Tekton wraps the $(param.params) in a JSON string that in some usecases might contain another JSON string
+          # that breaks jq parsing, so we need to sanitize it before parsing it. Currently it supports only single
+          # nested JSON string.
 
           # sanitize
           #
@@ -53,9 +53,9 @@ spec:
           sanitize() {
             TEMP="${1}-tmp"
             # UNESCAPED=$(grep -Po  "(?<=.sanitize.)(.*)+(?=./sanitize.)" ${1})
-            UNESCAPED=$(awk -e '{match($0, /"{.*}"/, m); {start=index($0, m[0])+1; end=length(m[0])-2} print substr($0, start, end) }' ${1})
-            awk -v sanitized=${UNESCAPED} -e '{gsub(/"{.*}"/, sanitized); gsub("\\\\","\\\\\\"); print}' ${1} > ${TEMP}
-            if jq "." ${TEMP}; then
+            SANITIZED_JSON=$(awk -e '{match($0, /"{.*}"/, m); {start=index($0, m[0])+1; end=length(m[0])-2} print substr($0, start, end) }' ${1} | jq -Rc "." | sed 's|\\|\\\\|g')
+            awk -v sanitized=${SANITIZED_JSON} -e '{gsub(/"{.*}"/, sanitized); gsub("\\\\","\\\\\\"); print}' ${1} > ${TEMP}
+            if jq "." ${TEMP} >/dev/null; then
               mv ${TEMP} ${1}
             else
                 return 1
@@ -78,7 +78,7 @@ spec:
           apiVersion: appstudio.redhat.com/v1alpha1
           kind: InternalRequest
           metadata:
-            name: "ir-$(params.pipelineRunName)"
+            name: "ir-$(params.pipelineRunName)-$(params.request)"
           spec:
             request: "$(params.request)"
             params:
@@ -89,6 +89,24 @@ spec:
             INPUT=$(jq -r ".[${i}]|[.name, .value]| @tsv" ${JSON_PARAMS})
             read -r PARAM VALUE <<< "${INPUT}"
             if [ `jq -e ".[${i}]| has(\"jsonKey\")" ${JSON_PARAMS}` == "true" ]; then
+                JSON_KEY=`jq -r ".[${i}]|[.jsonKey]| @tsv" ${JSON_PARAMS}`
+                # check if the request needs the sharedRequestFile;
+                # otherwise the source is a json string
+                IFS=":" read -r SOURCE TYPE KEY  <<< $VALUE
+                if [ "${SOURCE}" == "sharedRequestFile" ]; then
+                    case ${TYPE} in
+                        "json")
+                            # it has a nested json string
+                            VALUE=`jq -cr "${KEY}" /workspace/common/$(params.pipelineRunName)-results.txt \
+                            | jq -cr "${JSON_KEY}"`
+                        ;;
+                    esac
+                else
+                    VALUE=$(echo "${VALUE}" |tr -d "\\" 2>/dev/null |tr -d "\'" |jq -cr "${JSON_KEY}")
+                fi
+            fi
+            echo "    ${PARAM}: \"${VALUE}\"" >> ${IR}
+          done
     - name: create-internal-request
       image: 
         quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
@@ -109,7 +127,7 @@ spec:
 
         cat > ${TASKRUN} <<SH
         #!/usr/bin/env sh
-        IR="ir-$(params.pipelineRunName)"
+        IR="ir-$(params.pipelineRunName)-$(params.request)"
         while true; do
           STATUS=\$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}')
           case "\${STATUS}" in
@@ -119,8 +137,8 @@ spec:
               | tee $(results.requestReason.path)
               kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].message}' \
               | tee $(results.requestMessage.path)
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.results}' | jq -cR \
-              | tee $(results.requestResults.path)
+              kubectl get internalrequest \${IR} -o jsonpath='{.status.results}' \
+              | tee /workspace/common/$(params.pipelineRunName)-results.txt $(results.requestResults.path)
               break
               ;;
             "*")
