@@ -6,9 +6,13 @@ Publish a built FBC index image using skopeo
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| requestJsonResults | The JSON result of the IIB build internal request | No | |
 | targetIndex | targetIndex signing image | No | |
+| inputDataFile | Optional file to read data from | No | |
 | retries | Number of skopeo retries | Yes | "0" |
 | publishingCredentials | The credentials used to access the registries | Yes | "fbc-publishing-credentials" |
 | requestUpdateTimeout | Max seconds waiting for the status update | Yes | 360 |
 
+## Changelog
+
+### changes since 0.1
+- adds `inputDataFile` parameter to read the image source from it

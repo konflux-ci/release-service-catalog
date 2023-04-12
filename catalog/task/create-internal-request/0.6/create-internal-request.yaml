@@ -21,6 +21,10 @@ spec:
     - name: params
       type: string
       description: Internal Request parameters
+    - name: inputDataFile
+      type: string
+      description: Optional file to read data from
+      default: ""
     - name: requestUpdateTimeout
       type: string
       default: "360"
@@ -30,10 +34,10 @@ spec:
       description: Internal Request message
     - name: requestReason
       description: Internal Request reason
-    - name: requestResults
-      description: Internal Request results
+    - name: requestResultsFile
+      description: Internal Request results file
   workspaces:
-    - name: common 
+    - name: input
       description: Workspace to store the params and responses for the internalRequest
   steps:
     - name: prepare-internal-request
@@ -73,7 +77,7 @@ spec:
 
           # building the InternalRequest yaml
           #
-          IR="/workspace/common/ir-$(params.pipelineRunName)-$(params.request).yaml"
+          IR="$(workspaces.input.path)/ir-$(params.pipelineRunName)-$(context.taskRun.uid).yaml"
           cat > ${IR} <<YAML
           apiVersion: appstudio.redhat.com/v1alpha1
           kind: InternalRequest
@@ -97,7 +101,7 @@ spec:
                     case ${TYPE} in
                         "json")
                             # it has a nested json string
-                            VALUE=`jq -cr "${KEY}" /workspace/common/$(params.pipelineRunName)-results.txt \
+                            VALUE=`jq -cr "${KEY}" $(params.inputDataFile) \
                             | jq -cr "${JSON_KEY}"`
                         ;;
                     esac
@@ -111,45 +115,50 @@ spec:
       image: 
         quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
       script: |
-        #!/usr/bin/env sh
-        PATH=/bin:/usr/bin:/usr/local/bin
-        export PATH
+          #!/usr/bin/env sh
+          PATH=/bin:/usr/bin:/usr/local/bin
+          export PATH
 
-        IR="/workspace/common/ir-$(params.pipelineRunName)-$(params.request).yaml"
-        kubectl create -f ${IR}
+          IR="$(workspaces.input.path)/ir-$(params.pipelineRunName)-$(context.taskRun.uid).yaml"
+          kubectl create -f ${IR}
     - name: watch-internal-request-status
       image:
         quay.io/hacbs-release/release-base-image@sha256:9e7fd1a3ccf0d2c8077f565c78e50862a7cc4792d548b5c01c8b09077e6d23a7
       script: |
-        #!/usr/bin/env sh
-        PATH=/bin:/usr/bin:/usr/local/bin
-        TASKRUN="/tmp/$$.sh"
+          #!/usr/bin/env sh
+          PATH=/bin:/usr/bin:/usr/local/bin
+          TASKRUN="/tmp/$$.sh"
 
-        cat > ${TASKRUN} <<SH
-        #!/usr/bin/env sh
-        IR="ir-$(params.pipelineRunName)-$(params.request)"
-        while true; do
-          STATUS=\$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}')
-          case "\${STATUS}" in
-            True | False )
-              echo "InternalRequest finished"
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].reason}' \
-              | tee $(results.requestReason.path)
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].message}' \
-              | tee $(results.requestMessage.path)
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.results}' \
-              | tee /workspace/common/$(params.pipelineRunName)-results.txt $(results.requestResults.path)
-              break
-              ;;
-            "*")
-              ;;
-          esac
-          sleep 30
-        done
-        [ \$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}') == "True" ]
-        SH
-        chmod +x ${TASKRUN}
-        timeout $(params.requestUpdateTimeout) ${TASKRUN}
-        SYSEXIT=$?
-        [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the internal request update"
-        exit ${SYSEXIT}
+          cat > ${TASKRUN} <<SH
+          #!/usr/bin/env sh
+          #
+          # the task might need to get input from a shared file
+          RESULTSFILE="$(workspaces.input.path)/$(params.pipelineRunName)-$(context.taskRun.uid)-results.txt"
+          echo -n \${RESULTSFILE} |tee $(results.requestResultsFile.path)
+
+          IR="ir-$(params.pipelineRunName)-$(params.request)"
+          while true; do
+            STATUS=\$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}')
+            case "\${STATUS}" in
+              True | False )
+                echo "InternalRequest finished"
+                kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].reason}' \
+                | tee $(results.requestReason.path)
+                kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].message}' \
+                | tee $(results.requestMessage.path)
+                kubectl get internalrequest \${IR} -o jsonpath='{.status.results}' \
+                | tee \${RESULTSFILE}
+                break
+                ;;
+              "*")
+                ;;
+            esac
+            sleep 30
+          done
+          [ \$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}') == "True" ]
+          SH
+          chmod +x ${TASKRUN}
+          timeout $(params.requestUpdateTimeout) ${TASKRUN}
+          SYSEXIT=$?
+          [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the internal request update"
+          exit ${SYSEXIT}

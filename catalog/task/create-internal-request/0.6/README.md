@@ -7,16 +7,15 @@ Creates an InternalRequest resource to call IIB service
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
 | pipelineRunName | The name of the Parent PipelineRun for this task | No | `ir-$(context.pipelineRun.name)` |
-| binaryImage | OCP `binaryImage` to be baked into the `fromIndex` image | Yes | |
-| fbcFragment | `fbcFragment` built by HACBS | No | |
-| fromIndex | `fromIndex` image (catalog of catalogs) the fbcFragment will be added to | Yes | |
-| overwriteFromIndex | Boolean indicating if the `fromIndex` should be overwritten | Yes | |
-| buildTags | List of additional `buildTags` the internal `fromIndex` image copy should be tagged with | Yes | |
-| buildArches | List of `buildArches` the `fromIndex` should be built for | Yes | |
+| request | Internal pipeline request name | No | |
+| params | Internal Request parameters | No | |
+| inputDataFile | Optional file to read data from | Yes | "" |
 | requestUpdateTimeout | Max seconds to wait until the status is updated | Yes | 360 |
-| buildTimeoutSeconds | Max seconds to wait until the build finishes | Yes | 300 |
 
 ## Changelog
+
+### changes since 0.5
+- full rewrite to accept dynamic parameters
 
 ### changes since 0.3
 - removes the additional logging
