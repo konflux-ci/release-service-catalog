@@ -19,6 +19,10 @@ Tekton pipeline to push images to an external registry.
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
+## Changes since 0.6
+Add `push-sbom-to-pyxis` task to the pipeline. This will ensure that sbom components
+for the image are pushed to Pyxis as part of this pipeline.
+
 ## Changes since 0.5
 The syntax for `taskRef.bundle` and `pipelineRef.bundle` is deprecated,
 bundles resolver is used with new format.
