@@ -4,7 +4,7 @@ Contributions of all kinds are welcome. In particular pull requests are apprecia
 
 ## Code of Conduct
 
-Our [company values](https://www.redhat.com/en/about/brand/standards/culture) guide us in our day-to-day interactions and decision-making. Our open source projects are no exception and they will define the standards for how to engage with the project through a [code of conduct](CODE_OF_CONDUCT.md). 
+Our [company values](https://www.redhat.com/en/about/brand/standards/culture) guide us in our day-to-day interactions and decision-making. Our open source projects are no exception and they will define the standards for how to engage with the project through a [code of conduct](CODE_OF_CONDUCT.md).
 
 Please, make sure you read both of them before contributing, so you can help us to maintain a healthy community.
 
@@ -57,9 +57,9 @@ A well formatted commit would look something like this:
 
  ```
 feat(issue-id): what this commit does
- 
+
 Overall explanation of what this commit is achieving and the motivation behind it.
- 
+
 Signed-off-by: Your Name <your-name@your-email.com>
 ```
 
@@ -82,3 +82,62 @@ Before a pull request can be merged:
 * The feature branch must be rebased so it contains the latest changes from the target branch
 * The CI has to pass successfully
 * Every comment has to be addressed and resolved
+
+### Tekton Task Testing
+
+When a pull request is opened, Tekton Task tests are run for all the task version
+directories that are modified.
+
+The Github workflow is defined in
+[.github/workflows/tekton_task_tests.yaml](.github/workflows/tekton_task_tests.yaml)
+
+#### Adding new Tekton Task tests
+
+Tests are defined as Tekton Pipelines inside the `tests` subdirectory of the task version
+directory. Their filenames must match `test*.yaml` and the Pipeline name must be
+the same as the filename (sans `.yaml`).
+
+E.g. to add a test pipeline for `catalog/task/apply-mapping/0.3`, you can add a pipeline
+such as `catalog/task/apply-mapping/0.3/tests/test-apply-mapping.yaml`.
+
+To reference the task under test in a test pipeline, use just the name - the test
+script will install the task CR locally. For example:
+
+```
+- name: run-task
+    taskRef:
+      name: apply-mapping
+```
+
+Currently task tests are not required, so if a task version directory is modified
+in a PR and there are no tests, that directory will be skipped.
+
+##### Workspaces
+
+Some tasks require one or multiple workspaces. This means that the test pipeline will also
+have to declare a workspace and bind it to the workspace(s) required by the task under test.
+
+Currently, the test script will pass a single workspace named `tests-workspace` mapping
+to a 10Mi volume when starting the pipelinerun. This workspace can be used in the test pipeline.
+
+#### Running Tekton Task tests manually
+
+Requirements:
+
+* A k8s cluster running and kubectl default context pointing to it (e.g. [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation))
+* Tekton installed in the cluster ([docs](https://tekton.dev/docs/pipelines/install/))
+
+    ```kubectl apply --filename https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml```
+
+* tkn cli installed ([docs](https://tekton.dev/docs/cli/))
+
+* jq installed
+
+Once you have everything ready, you can run the test script and pass task version directories
+as arguments, e.g.
+
+```
+./.github/scripts/test_tekton_tasks.sh catalog/task/apply-mapping/0.3
+```
+
+This will install the task and run all test pipelines matching `tests/test*.yaml`.
