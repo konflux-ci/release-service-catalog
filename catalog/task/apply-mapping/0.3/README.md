@@ -17,25 +17,6 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 | snapshot | The Snapshot in JSON format to apply the mapping to | No | - |
 | extraConfigPath | The path to the config file containing the mapping | Yes | - |
 
-## Example usage
-
-This is an example usage of the `apply-mapping` task:
-
-```
----
-tasks:
-  - name: apply-mapping
-    taskRef:
-      name: apply-mapping
-    params:
-      - name: snapshot
-        value: '{"components":[{"name":"component1","containerImage":"quay.io/repo/component1:digest"}}]}'
-      - name: extraConfigPath
-        value: "path/to/file"
-    workspaces:
-      - name: config
-        workspace: config_workspace
-```
 ## Changes since 0.2
 
   * Base image was changed from `release-utils` to `release-base-image`
