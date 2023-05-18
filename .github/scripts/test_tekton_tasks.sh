@@ -87,6 +87,14 @@ do
     kubectl apply -f $TEST_PATH
     TEST_NAME=${TEST_PATH##*/}
     TEST_NAME=${TEST_NAME%.*}
+
+    # Sometimes the pipeline is not available immediately
+    while ! kubectl get pipeline $TEST_NAME > /dev/null 2>&1
+    do
+      echo "  Pipeline $TEST_NAME not ready. Waiting 5s..."
+      sleep 5
+    done
+
     PIPELINERUN=$(tkn p start $TEST_NAME -w name=tests-workspace,volumeClaimTemplateFile=$WORKSPACE_TEMPLATE -o json | jq -r '.metadata.name')
     echo "  Started pipelinerun $PIPELINERUN"
     tkn pr logs $PIPELINERUN -f
