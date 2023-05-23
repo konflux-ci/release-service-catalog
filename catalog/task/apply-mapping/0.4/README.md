@@ -16,6 +16,12 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 |------|-------------|----------|---------------|
 | snapshot | The Snapshot in JSON format to apply the mapping to | No | - |
 | extraConfigPath | The path to the config file containing the mapping | Yes | - |
+| failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+
+## Changes since 0.3
+
+  * New optional parameter `failOnEmptyResult` was added. When enabled, the task
+    will fail if the resulting snapshot contains 0 components.
 
 ## Changes since 0.2
 
