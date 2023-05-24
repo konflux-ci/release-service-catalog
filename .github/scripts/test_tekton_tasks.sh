@@ -104,13 +104,47 @@ do
       sleep 5
     done
 
-    if [ "$(kubectl get pr $PIPELINERUN -o=jsonpath='{.status.conditions[0].status}')" == "True" ]
+    PR_STATUS=$(kubectl get pr $PIPELINERUN -o=jsonpath='{.status.conditions[0].status}')
+
+    ASSERT_TASK_FAILURE=$(yq '.metadata.annotations.test/assert-task-failure' < $TEST_PATH)
+    if [ "$ASSERT_TASK_FAILURE" != "null" ]
     then
-      echo "  Pipelinerun succeeded"
+      if [ "$PR_STATUS" == "True" ]
+      then
+        echo "  Pipeline $TEST_NAME succeeded but was expected to fail"
+        exit 1
+      else
+        echo "  Pipeline $TEST_NAME failed (expected). Checking that it failed in task ${ASSERT_TASK_FAILURE}..."
+
+        # Check that the pipelinerun failed on the tested task and not somewhere else
+        TASKRUN=$(kubectl get pr $PIPELINERUN -o json|jq -r ".status.childReferences[] | select(.pipelineTaskName == \"${ASSERT_TASK_FAILURE}\") | .name")
+        if [ -z "$TASKRUN" ]
+        then
+          echo "    Unable to find task $ASSERT_TASK_FAILURE in childReferences of pipelinerun $PIPELINERUN. Pipelinerun failed earlier?"
+          exit 1
+        else
+          echo "    Found taskrun $TASKRUN"
+        fi
+        if [ $(kubectl get tr $TASKRUN -o=jsonpath='{.status.conditions[0].status}') != "False" ]
+        then
+          echo "    Taskrun did not fail - pipelinerun failed later on?"
+          exit 1
+        else
+          echo "    Taskrun failed as expected"
+        fi
+
+      fi
     else
-      echo "  Pipelinerun failed"
-      exit 1
+      if [ "$PR_STATUS" == "True" ]
+      then
+        echo "  Pipelinerun $TEST_NAME succeeded"
+      else
+        echo "  Pipelinerun $TEST_NAME failed"
+        exit 1
+      fi
     fi
+
+    echo
   done
 
 done
