@@ -158,6 +158,31 @@ script will install the task CR locally. For example:
 Currently task tests are not required, so if a task version directory is modified
 in a PR and there are no tests, that directory will be skipped.
 
+##### Testing scenarios where the Task is expected to fail
+
+When testing Tasks, most tests will test a positive outcome - that for some input, the task will pass
+and provide the correct output. But sometimes it's desirable to test that a Task fails when
+it's expected to fail, for example when invalid data is supplied as input for the Task.
+But if the Task under test fails in the test Pipeline, the whole Pipeline will fail too. So we need
+a way to tell the test script that the given test Pipeline is expected to fail.
+
+You can do this by adding the annotation `test/assert-task-failure`
+to the test pipeline object. This annotation will specify which task (`.spec.tasks[*].name`)
+in the pipeline is expected to fail. For example:
+
+```
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-fail-on-empty
+  annotations:
+    test/assert-task-failure: "run-task"
+```
+
+When this annotation is present, the test script will test that the pipeline fails
+and also that it fails in the expected task.
+
 ##### Workspaces
 
 Some tasks require one or multiple workspaces. This means that the test pipeline will also
