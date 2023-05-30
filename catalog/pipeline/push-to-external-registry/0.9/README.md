@@ -19,6 +19,10 @@ Tekton pipeline to push images to an external registry.
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
+## Changes since 0.8
+* Use version 0.4 of apply-mapping task and set the new failOnEmptyResult parameter to true
+  * This will ensure that if the result of mapping is an empty component list, the task will fail
+
 ## Changes since 0.7
 * Upgrade push-snapshot task to version 0.7
   * Only the first 7 characters are used for the git sha tag in Quay.

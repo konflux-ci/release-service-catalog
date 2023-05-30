@@ -14,6 +14,10 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 | addGitShaTag | When pushing the snapshot components, also push a tag with the image git sha | Yes | false |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 
+## Changes since 0.11
+* Use version 0.4 of apply-mapping task and set the new failOnEmptyResult parameter to true
+  * This will ensure that if the result of mapping is an empty component list, the task will fail
+
 ## Changes since 0.10
 
 Update tag of ec-task-bundle task
