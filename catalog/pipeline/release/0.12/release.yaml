@@ -1,0 +1,149 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: release
+  labels:
+    app.kubernetes.io/version: "0.11"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton pipeline to release HACBS Snapshot to Quay
+  params:
+    - name: snapshot
+      type: string
+      description: The Snapshot in JSON format
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON representation of the EnterpriseContractPolicy
+    - name: extraConfigGitUrl
+      type: string
+      description: URL to the remote Git repository containing the extra config
+      default: ""
+    - name: extraConfigGitRevision
+      type: string
+      description: Revision to fetch from the remote Git repository containing the extra config
+      default: ""
+    - name: extraConfigPath
+      type: string
+      description: Path to the extra config file within the repository
+      default: ""
+    - name: addGitShaTag
+      type: string
+      description: When pushing the snapshot components, also push a tag with the image git sha
+      default: "false"
+    - name: postCleanUp
+      type: string
+      description: Cleans up workspace after finishing executing the pipeline
+      default: "true"
+  workspaces:
+    - name: release-workspace
+  tasks:
+    - name: clone-config-file
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/redhat-appstudio/appstudio-tasks:583d33c8ddf0de2ea8e1a73d94a1ca4a6e6ed380-1
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+      when:
+        - input: $(params.extraConfigGitUrl)
+          operator: notin
+          values: [""]
+      params:
+        - name: url
+          value: $(params.extraConfigGitUrl)
+        - name: revision
+          value: $(params.extraConfigGitRevision)
+        - name: subdirectory
+          value: "$(context.pipelineRun.uid)"
+      workspaces:
+        - name: output
+          workspace: release-workspace
+    - name: apply-mapping
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-release/task-apply-mapping:main
+          - name: kind
+            value: task
+          - name: name
+            value: apply-mapping
+      params:
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: extraConfigPath
+          value: "$(context.pipelineRun.uid)/$(params.extraConfigPath)"
+      when:
+        - input: $(tasks.clone-config-file.results.commit)
+          operator: notin
+          values: [""]
+      workspaces:
+        - name: config
+          workspace: release-workspace
+    - name: verify-enterprise-contract
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-contract/ec-task-bundle:cf58b68b872dacbbcb2cc571efac135b2989d638
+          - name: kind
+            value: task
+          - name: name
+            value: verify-enterprise-contract
+      params:
+        - name: IMAGES
+          value: $(tasks.apply-mapping.results.snapshot)
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          value: "1"
+    - name: push-snapshot
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-release/task-push-snapshot:main
+          - name: kind
+            value: task
+          - name: name
+            value: push-snapshot
+      params:
+        - name: mappedSnapshot
+          value: $(tasks.apply-mapping.results.snapshot)
+        - name: addGitShaTag
+          value: $(params.addGitShaTag)
+      runAfter:
+        - verify-enterprise-contract
+  finally:
+    - name: cleanup
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-release/task-cleanup-workspace:main
+          - name: kind
+            value: task
+          - name: name
+            value: cleanup-workspace
+      when:
+        - input: $(params.postCleanUp)
+          operator: in
+          values: ["true"]
+        - input: $(params.extraConfigGitUrl)
+          operator: notin
+          values: [""]
+      params:
+        - name: subdirectory
+          value: "$(context.pipelineRun.uid)"
+      workspaces:
+        - name: input
+          workspace: release-workspace
