@@ -21,6 +21,11 @@
 
 ## Changelog
 
+### Changes since 0.10
+- updates tasks that uses `create-internal-request` task to 0.6
+- `publish-index-image` now uses `create-internal-request`
+- only executes `public-index-image` when extraData result has `fbc_opt_in=true` set
+
 ### Changes since 0.9
 - changes on the following tasks due to `create-internal-request` changes:
     - `add-fbc-contribution-to-index-image` now accepts dynamic parameters
