@@ -1,0 +1,73 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: test-cleanup-workspace
+spec:
+  description: |
+    Run the cleanup-workspace task with a custom workspace
+    and verify that the cleanup is performed in the given subdirectory.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: input
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: input
+        steps:
+          - name: put-content-in-workspace
+            image: quay.io/hacbs-release/release-utils:5b1a1cd9fd68625cab5573ce62e0d87e6f93f341
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              KEPT_DIR="$(workspaces.input.path)/dir-to-be-kept"
+              REMOVED_DIR="$(workspaces.input.path)/dir-to-be-cleaned-up"
+              mkdir -p $REMOVED_DIR
+              echo "This file and dir will be deleted" >> $REMOVED_DIR/cleanup_test.txt
+              mkdir -p $KEPT_DIR
+              echo "Test successful" >> $KEPT_DIR/cleanup_check.txt
+    - name: run-task
+      taskRef:
+        name: cleanup-workspace
+      params:
+        - name: subdirectory
+          value: "dir-to-be-cleaned-up"
+      runAfter:
+        - setup
+      workspaces:
+        - name: input
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: input
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: input
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:5b1a1cd9fd68625cab5573ce62e0d87e6f93f341
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              KEPT_DIR="$(workspaces.input.path)/dir-to-be-kept"
+              REMOVED_DIR="$(workspaces.input.path)/dir-to-be-cleaned-up"
+              # Check REMOVED_DIR is deleted and KEPT_DIR is present!
+              if [ -d "$REMOVED_DIR" ]
+              then
+                  echo Dir $REMOVED_DIR is expected to be deleted, but still exists
+                  exit 1
+              fi
+
+              if [ ! -d "$KEPT_DIR" ] || [ ! -f "${KEPT_DIR}/cleanup_check.txt" ]
+              then
+                  echo File ${KEPT_DIR}/cleanup_check.txt is expected to exist, but it does not
+                  exit 1
+              fi   
