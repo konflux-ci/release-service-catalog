@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: release
   labels:
-    app.kubernetes.io/version: "0.14"
+    app.kubernetes.io/version: "0.15"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -12,9 +12,22 @@ spec:
   description: >-
     Tekton pipeline to release HACBS Snapshot to Quay
   params:
+    - name: release
+      type: string
+      description:
+        The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
+    - name: releaseplan
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlan
+    - name: releaseplanadmission
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releasestrategy
+      type: string
+      description: The namespaced name (namespace/name) of the releaseStrategy
     - name: snapshot
       type: string
-      description: The Snapshot in JSON format
+      description: The namespaced name (namespace/name) of the snapshot
     - name: enterpriseContractPolicy
       type: string
       description: JSON representation of the EnterpriseContractPolicy
@@ -44,6 +57,30 @@ spec:
   workspaces:
     - name: release-workspace
   tasks:
+    - name: collect-data
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/hacbs-release/task-collect-data:0.1
+          - name: kind
+            value: task
+          - name: name
+            value: collect-data
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releaseplan
+          value: $(params.releaseplan)
+        - name: releaseplanadmission
+          value: $(params.releaseplanadmission)
+        - name: releasestrategy
+          value: $(params.releasestrategy)
+        - name: snapshot
+          value: $(params.snapshot)
+      workspaces:
+        - name: data
+          workspace: release-workspace
     - name: clone-config-file
       taskRef:
         resolver: "bundles"
@@ -73,14 +110,12 @@ spec:
         resolver: "bundles"
         params:
           - name: bundle
-            value: quay.io/hacbs-release/task-apply-mapping:0.4
+            value: quay.io/hacbs-release/task-apply-mapping:0.5
           - name: kind
             value: task
           - name: name
             value: apply-mapping
       params:
-        - name: snapshot
-          value: $(params.snapshot)
         - name: extraConfigPath
           value: "$(context.pipelineRun.uid)/$(params.extraConfigPath)"
         - name: failOnEmptyResult
@@ -92,6 +127,8 @@ spec:
       workspaces:
         - name: config
           workspace: release-workspace
+      runAfter:
+        - collect-data
     - name: verify-enterprise-contract
       taskRef:
         resolver: "bundles"
@@ -104,28 +141,34 @@ spec:
             value: verify-enterprise-contract
       params:
         - name: IMAGES
-          value: $(tasks.apply-mapping.results.snapshot)
+          value: "mapped_snapshot.json"
         - name: SSL_CERT_DIR
           value: /var/run/secrets/kubernetes.io/serviceaccount
         - name: POLICY_CONFIGURATION
           value: $(params.enterpriseContractPolicy)
         - name: STRICT
           value: "1"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - apply-mapping
     - name: push-snapshot
       taskRef:
         resolver: "bundles"
         params:
           - name: bundle
-            value: quay.io/hacbs-release/task-push-snapshot:0.7
+            value: quay.io/hacbs-release/task-push-snapshot:0.8
           - name: kind
             value: task
           - name: name
             value: push-snapshot
       params:
-        - name: mappedSnapshot
-          value: $(tasks.apply-mapping.results.snapshot)
         - name: addGitShaTag
           value: $(params.addGitShaTag)
+      workspaces:
+        - name: data
+          workspace: release-workspace
       runAfter:
         - verify-enterprise-contract
   finally:
