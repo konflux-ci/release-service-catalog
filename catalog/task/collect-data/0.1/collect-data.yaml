@@ -1,0 +1,84 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: collect-data
+  labels:
+    app.kubernetes.io/version: "0.2"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to collect extra data from release resources and optionally save CRs to a workspace
+  params:
+    - name: release
+      type: string
+      description: The namespaced name of the Release
+    - name: releasePlan
+      type: string
+      description: The namespaced name of the ReleasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name of the ReleasePlanAdmission
+    - name: releaseStrategy
+      type: string
+      description: The namespaced name of the ReleaseStrategy
+    - name: snapshot
+      type: string
+      description: The namespaced name of the Snapshot
+  workspaces:
+    - name: data
+      description: Workspace to save the CR jsons to
+  results:
+    - name: extraData
+      description: |
+        Result of merging the `extraData` field of all the release resources
+  steps:
+    - name: collect-data
+      image: quay.io/hacbs-release/release-utils:f486f350df43974706fc484a13bfeefc2c8fa95a
+      env:
+        - name: "RELEASE"
+          value: '$(params.release)'
+        - name: "RELEASE_PLAN"
+          value: '$(params.releasePlan)'
+        - name: "RELEASE_PLAN_ADMISSION"
+          value: '$(params.releasePlanAdmission)'
+        - name: "RELEASE_STRATEGY"
+          value: '$(params.releaseStrategy)'
+        - name: "SNAPSHOT"
+          value: '$(params.snapshot)'
+      script: |
+        #!/usr/bin/env sh
+
+        if ! release_result=$(get-resource "release" "${RELEASE}" "{.spec.extraData}"); then
+          exit 1
+        fi
+
+        if ! release_plan_result=$(get-resource "releaseplan" "${RELEASE_PLAN}" "{.spec.extraData}"); then
+          exit 1
+        fi
+
+        if ! release_plan_admission_result=$(get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
+            "{.spec.extraData}"); then
+          exit 1
+        fi
+
+        get-resource "release" "${RELEASE}" > "$(workspaces.data.path)/release.json"
+
+        get-resource "releaseplan" "${RELEASE_PLAN}" > "$(workspaces.data.path)/release_plan.json"
+
+        get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
+          > "$(workspaces.data.path)/release_plan_admission.json"
+
+        get-resource "releasestrategy" "${RELEASE_STRATEGY}" > "$(workspaces.data.path)/release_strategy.json"
+
+        get-resource "snapshot" "${SNAPSHOT}" "{.spec}" > "$(workspaces.data.path)/snapshot_spec.json"
+
+        # Merge Release and ReleasePlan keys. ReleasePlan has higher priority
+        merged_output=$(merge-json "$release_result" "$release_plan_result")
+
+        # Merge now with ReleasePlanAdmission keys. ReleasePlanAdmission has higher priority
+        merged_output=$(merge-json "$release_result" "$release_plan_admission_result")
+
+        echo "$merged_output" | tee $(results.extraData.path)
