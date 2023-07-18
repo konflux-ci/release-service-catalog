@@ -6,7 +6,11 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| snapshot | The Snapshot in JSON format | No | - |
+| release | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No | - |
+| releaseplan | The namespaced name (namespace/name) of the releasePlan | No | - |
+| releaseplanadmission | The namespaced name (namespace/name) of the releasePlanAdmission | No | - |
+| releasestrategy | The namespaced name (namespace/name) of the releaseStrategy | No | - |
+| snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | extraConfigGitUrl |URL to the remote Git repository containing the extra config | No | - |
 | extraConfigGitRevision | Revision to fetch from the remote Git repository containing the extra config | No | - |
@@ -15,10 +19,16 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
+## Changes since 0.14
+* the collect-data task was added
+  * this includes adding the required parameters release, releaseplan, releaseplanadmission,
+      and releasestrategy as pipeline parameters
+* the snapshot parameter is now a namespaced name instead of a JSON string
+  * task versions were updated in accordance with this change
+
 ## Changes since 0.13
 * the verify_ec_task_bundle parameter was added
   * with this addition, the verify-enterprise-contract task version is no longer static
-* push-snapshot task pinned to version 0.7 instead of main
 
 ## Changes since 0.12
 * addGitShaTag now defaults to true instead of false
