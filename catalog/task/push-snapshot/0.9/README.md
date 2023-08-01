@@ -1,6 +1,6 @@
 # push-snapshot
 
-Tekton task to push snapshot images to an image registry using `skopeo copy`.
+Tekton task to push snapshot images to an image registry using `cosign copy`.
 
 ## Parameters
 
@@ -13,10 +13,16 @@ Tekton task to push snapshot images to an image registry using `skopeo copy`.
 | addSourceShaTag | Also push a tag with the source sha for each image in the Snapshot                              | Yes      | true                 |
 | addTimestampTag | Also push a tag with the current timestamp for each image in the Snapshot                       | Yes      | false                |
 
+## Changes since 0.8
+* `cosign copy` replaces `skopeo copy` so the signatures and attestations are also copied
+  * As part of this change, the image used in this task was updated to the release-utils image
+  * Some flags that exist for `skopeo copy`, but not for `cosign copy` were dropped, but the functionality
+    seems to be unchanged
+
 ## Changes since 0.7
 * mappedSnapshot parameter was removed and snapshotPath parameter was added
   * Instead of passing a json string representing the snapshot, the snapshot spec should exist in the data workspace
-    in the filename provided by snapshotPath.
+    in the filename provided by snapshotPath
 
 ## Changes since 0.6
 * Only the first seven characters of the git sha are used when creating the sha tag in Quay
