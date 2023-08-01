@@ -1,0 +1,160 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: test-collect-data
+spec:
+  description: |
+    Run the collect-data task and verify that all resources are stored in the workspace.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+
+              cat > releaseplan << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlan
+              metadata:
+                name: releaseplan-sample
+                namespace: default
+              spec:
+                application: foo
+                target: foo
+              EOF
+              kubectl apply -f releaseplan
+
+              cat > releaseplanadmission << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlanAdmission
+              metadata:
+                name: releaseplanadmission-sample
+                namespace: default
+              spec:
+                application: foo
+                origin: foo
+                releaseStrategy: foo
+              EOF
+              kubectl apply -f releaseplanadmission
+
+              cat > releasestrategy << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleaseStrategy
+              metadata:
+                name: releasestrategy-sample
+                namespace: default
+              spec:
+                pipeline: foo
+                policy: foo
+              EOF
+              kubectl apply -f releasestrategy
+
+              cat > snapshot << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Snapshot
+              metadata:
+                name: snapshot-sample
+                namespace: default
+              spec:
+                application: foo
+                components:
+                  - name: name
+                    containerImage: newimage
+              EOF
+              kubectl apply -f snapshot
+    - name: run-task
+      taskRef:
+        name: collect-data
+      params:
+        - name: release
+          value: default/release-sample
+        - name: releaseplan
+          value: default/releaseplan-sample
+        - name: releaseplanadmission
+          value: default/releaseplanadmission-sample
+        - name: releasestrategy
+          value: default/releasestrategy-sample
+        - name: snapshot
+          value: default/snapshot-sample
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      params:
+        - name: fbcFragment
+          value: $(tasks.run-task.results.fbcFragment)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: fbcFragment
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+            env:
+              - name: "FBC_FRAGMENT"
+                value: '$(params.fbcFragment)'
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that Release CR was saved to workspace
+              test $(cat "$(workspaces.data.path)/release.json" | jq -r '.metadata.name') == release-sample
+
+              echo Test that ReleasePlan CR was saved to workspace
+              test $(cat "$(workspaces.data.path)/release_plan.json" | jq -r '.metadata.name') == releaseplan-sample
+
+              echo Test that ReleasePlanAdmission CR was saved to workspace
+              test $(cat "$(workspaces.data.path)/release_plan_admission.json" \
+                  | jq -r '.metadata.name') == releaseplanadmission-sample
+
+              echo Test that ReleaseStrategy CR was saved to workspace
+              test $(cat "$(workspaces.data.path)/release_strategy.json" \
+                  | jq -r '.metadata.name') == releasestrategy-sample
+
+              echo Test that Snapshot spec was saved to workspace
+              test $(cat "$(workspaces.data.path)/snapshot_spec.json" | jq -r '.application') == foo
+
+              echo Test the fbcFragment result was properly set
+              test $(echo $FBC_FRAGMENT) == '"newimage"'
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-sample
+              kubectl delete releaseplan releaseplan-sample
+              kubectl delete releaseplanadmission releaseplanadmission-sample
+              kubectl delete releasestrategy releasestrategy-sample
+              kubectl delete snapshot snapshot-sample
