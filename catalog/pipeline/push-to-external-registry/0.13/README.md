@@ -24,6 +24,9 @@ Tekton pipeline to push images to an external registry.
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
+## Changes since 0.12
+* the push-snapshot task was updated to version 0.9 to use `cosign copy` instead of `skopeo copy`
+
 ## Changes since 0.11
 * the collect-data task was added
   * this includes adding the required parameters release, releaseplan, releaseplanadmission,

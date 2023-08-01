@@ -19,6 +19,9 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
+## Changes since 0.15
+* the push-snapshot task was updated to version 0.9 to use `cosign copy` instead of `skopeo copy`
+
 ## Changes since 0.14
 * the collect-data task was added
   * this includes adding the required parameters release, releaseplan, releaseplanadmission,
