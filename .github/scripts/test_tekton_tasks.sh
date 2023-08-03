@@ -78,6 +78,12 @@ do
     continue
   fi
 
+  if [ -f ${TESTS_DIR}/pre-apply-task-hook.sh ]
+  then
+    echo Found pre-apply-task-hook.sh file in dir: $TESTS_DIR. Executing...
+    ${TESTS_DIR}/pre-apply-task-hook.sh
+  fi
+
   echo "  Installing task"
   kubectl apply -f $TASK_PATH
 
