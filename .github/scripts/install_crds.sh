@@ -16,6 +16,11 @@ install_appstudio_repo_crds () {
 if ! kubectl get crd snapshots.appstudio.redhat.com ; then
     install_appstudio_repo_crds "application-api"
 fi
+
+if ! kubectl get crd releases.appstudio.redhat.com ; then
+    install_appstudio_repo_crds "internal-services"
+fi
+
 if ! kubectl get crd releases.appstudio.redhat.com ; then
     install_appstudio_repo_crds "release-service"
 fi
