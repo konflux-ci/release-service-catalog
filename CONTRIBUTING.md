@@ -145,6 +145,19 @@ have to declare a workspace and bind it to the workspace(s) required by the task
 Currently, the test script will pass a single workspace named `tests-workspace` mapping
 to a 10Mi volume when starting the pipelinerun. This workspace can be used in the test pipeline.
 
+##### Test Setup
+
+Some task tests will require setup on the kind cluster before the test pipeline can run.
+Certain things can be done in a setup task as part of the test pipeline, but others cannot.
+For example, something like installing a CRD or modifying permissions for the service account that will
+execute the test pipeline must be done before the test pipeline is executed.
+
+In order to achieve this, a `pre-apply-task-hook.sh` script can be created in the `tests` directory for
+a task. When the CI runs the testing, it will first check for this file. If it is found, it is executed
+before the test pipeline. This script will run as the `kubeadmin` user. This approach is copied from the
+tekton catalog repository. For more details and examples, look
+[here](https://github.com/tektoncd/catalog/blob/main/CONTRIBUTING.md#end-to-end-testing).
+
 #### Running Tekton Task tests manually
 
 Requirements:
