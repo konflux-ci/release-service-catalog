@@ -5,6 +5,7 @@ set -eux
 
 function cosign() {
   echo Mock cosign called with: $*
+  echo $* >> $(workspaces.data.path)/mock_cosign.txt
 
   if [[ "$*" != "download sbom --output-file myImageID"[12]".json imageurl"[12] ]]
   then
@@ -17,6 +18,7 @@ function cosign() {
 
 function upload_sbom() {
   echo Mock upload_sbom called with: $*
+  echo $* >> $(workspaces.data.path)/mock_upload_sbom.txt
 
   if [[ "$*" != "--retry --sbom-path "*".json" ]]
   then
