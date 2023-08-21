@@ -1,0 +1,65 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: run-file-updates
+  labels:
+    app.kubernetes.io/version: "0.2"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to run file updates
+  params:
+    - name: jsonKey
+      type: string
+      description: The json key containing the file updates
+      default: ".spec.extraData.fileUpdates"
+    - name: fileUpdatesPath
+      type: string
+      description: The path to the file containing the file updates
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+      default: "snapshot_spec.json"
+    - name: request
+      type: string
+      description: Name of the request
+      default: "file-updates"
+    - name: synchronously
+      type: string
+      description: Whether to run synchronously or not
+      default: "true"
+  workspaces:
+    - name: data
+      description: Workspace where the file updates to apply are defined
+  steps:
+    - name: run-script
+      image: quay.io/hacbs-release/release-utils:a918b3a7cbd40add5955a2f1acb4c3dbb29c44e9
+      script: |
+        #!/bin/sh
+        #
+        #
+        set -ex
+
+        # Extract the key from the JSON file
+        fileUpdates=$(jq -rc "$(params.jsonKey)" $(workspaces.data.path)/$(params.fileUpdatesPath))
+  
+        # Iterate over the extracted array and call the script
+        fileUpdatesLength=$(jq '. | length' <<< "${fileUpdates}")
+        for((i=0; i<fileUpdatesLength; i++)); do
+          item=$(jq -cr ".[$i]" <<< "${fileUpdates}")
+
+          repo=$(jq -cr '.repo' <<< "${item}")
+          ref=$(jq -cr '.ref // "main"' <<< "${item}")
+          paths=$(jq -cr '.paths // "[]"' <<< "${item}")
+
+          updatedPaths=$(update-paths -p "${paths}" -f $(workspaces.data.path)/$(params.snapshotPath))
+
+          internal-request -r "$(params.request)" \
+                           -p repo="${repo}" \
+                           -p ref="${ref}" \
+                           -p paths="${updatedPaths}" \
+                           -s "$(params.synchronously)"
+        done
