@@ -4,13 +4,13 @@ kind: Task
 metadata:
   name: apply-mapping
   labels:
-    app.kubernetes.io/version: "0.5"
+    app.kubernetes.io/version: "0.6"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task to apply a mapping to a Snapshot
+    Tekton task to apply a mapping to a Snapshot. It will override the Snapshot file.
   params:
     - name: snapshotPath
       type: string
@@ -39,13 +39,14 @@ spec:
         set -eux
 
         SNAPSHOT_SPEC_FILE="$(workspaces.config.path)/$(params.snapshotPath)"
+        SNAPSHOT_SPEC_FILE_ORIG="${SNAPSHOT_SPEC_FILE}.orig"
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
             echo "No valid snapshot file was provided."
             exit 1
         fi
 
-        # The mapped_snapshot file will be overwritten below if the CONFIG_FILE is valid
-        cp "${SNAPSHOT_SPEC_FILE}" "$(workspaces.config.path)/mapped_snapshot.json"
+        # Copy the original Snapshot spec file before overriding
+        cp "${SNAPSHOT_SPEC_FILE}" "${SNAPSHOT_SPEC_FILE_ORIG}"
 
         CONFIG_FILE="$(workspaces.config.path)/$(params.extraConfigPath)"
         if [ ! -f "${CONFIG_FILE}" ] ; then
@@ -64,15 +65,15 @@ spec:
 
         # Merge the mapping key in the config file with the components key in the snapshot based on component name
         # Save the output as a compact json in mapped_snapshot.json file in the workspace
-        { echo -n $(cat "${SNAPSHOT_SPEC_FILE}"); echo "${CONFIG_JSON}"; } | jq -c -s '.[0] as $snapshot
+        { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${CONFIG_JSON}"; } | jq -c -s '.[0] as $snapshot
           | .[0].components + .[1].mapping.components | group_by(.name) | [.[] | select(length > 1)]
           | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents | $snapshot | .components = $mergedComponents' \
-          > "$(workspaces.config.path)/mapped_snapshot.json"
+          > "${SNAPSHOT_SPEC_FILE}"
 
         echo "true" | tee $(results.mapped.path)
 
         if [ "$(params.failOnEmptyResult)" = "true" ] && \
-          [ $(cat "$(workspaces.config.path)/mapped_snapshot.json" | jq '.components | length') -eq 0 ]
+          [ $(cat "${SNAPSHOT_SPEC_FILE}" | jq '.components | length') -eq 0 ]
         then
           echo "ERROR: Resulting snapshot contains 0 components"
           exit 1

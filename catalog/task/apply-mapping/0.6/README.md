@@ -18,6 +18,12 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 | extraConfigPath | The path to the config file containing the mapping | Yes | - |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
 
+## Changes since 0.5
+  * Instead of saving the mapped json to a new file, override the original snapshot spec file
+    * We never really use the original after the mapping anyway and this way we can continue to use the path to the snapshot
+      that we already know in other tasks of the pipeline (at the moment the mapped json file is hardcoded in other places
+      of the pipeline that use it).
+
 ## Changes since 0.4
   * The snapshot parameter was replaced with the snapshotPath parameter
     * The snapshot is now provided via the workspace instead of directly as a parameter
