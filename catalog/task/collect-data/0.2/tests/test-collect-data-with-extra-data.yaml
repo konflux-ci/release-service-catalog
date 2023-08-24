@@ -1,0 +1,141 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: test-collect-data-with-extra-data
+spec:
+  description: |
+    Run the collect-data task and verify that extraData task result is accurate.
+    Releases and ReleasePlans don't currently support extraData, so it is only
+    added to the ReleasePlanAdmission.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+
+              cat > releaseplan << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlan
+              metadata:
+                name: releaseplan-sample
+                namespace: default
+              spec:
+                application: foo
+                target: foo
+              EOF
+              kubectl apply -f releaseplan
+
+              cat > releaseplanadmission << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlanAdmission
+              metadata:
+                name: releaseplanadmission-sample
+                namespace: default
+              spec:
+                application: foo
+                origin: foo
+                releaseStrategy: foo
+                extraData:
+                  foo: bar
+                  one:
+                    two: three
+                    four:
+                      - five
+                      - six
+              EOF
+              kubectl apply -f releaseplanadmission
+
+              cat > releasestrategy << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleaseStrategy
+              metadata:
+                name: releasestrategy-sample
+                namespace: default
+              spec:
+                pipeline: foo
+                policy: foo
+              EOF
+              kubectl apply -f releasestrategy
+
+              cat > snapshot << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Snapshot
+              metadata:
+                name: snapshot-sample
+                namespace: default
+              spec:
+                application: foo
+              EOF
+              kubectl apply -f snapshot
+    - name: run-task
+      taskRef:
+        name: collect-data
+      params:
+        - name: release
+          value: default/release-sample
+        - name: releaseplan
+          value: default/releaseplan-sample
+        - name: releaseplanadmission
+          value: default/releaseplanadmission-sample
+        - name: releasestrategy
+          value: default/releasestrategy-sample
+        - name: snapshot
+          value: default/snapshot-sample
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      runAfter:
+        - run-task
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              EXTRA_DATA_JSON=$(cat "$(workspaces.data.path)/$(context.pipelineRun.uid)/extra_data.json")
+              echo Test that extraData result was set properly
+              test $EXTRA_DATA_JSON == '{"foo":"bar","one":{"four":["five","six"],"two":"three"}}'
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-sample
+              kubectl delete releaseplan releaseplan-sample
+              kubectl delete releaseplanadmission releaseplanadmission-sample
+              kubectl delete releasestrategy releasestrategy-sample
+              kubectl delete snapshot snapshot-sample
