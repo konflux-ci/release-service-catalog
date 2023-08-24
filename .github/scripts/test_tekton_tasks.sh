@@ -103,12 +103,13 @@ do
 
     PIPELINERUN=$(tkn p start $TEST_NAME -w name=tests-workspace,volumeClaimTemplateFile=$WORKSPACE_TEMPLATE -o json | jq -r '.metadata.name')
     echo "  Started pipelinerun $PIPELINERUN"
-    tkn pr logs $PIPELINERUN -f
+    sleep 1  # allow a second for the pr object to appear (including a status condition)
     while [ "$(kubectl get pr $PIPELINERUN -o=jsonpath='{.status.conditions[0].status}')" == "Unknown" ]
     do
-      echo "  PipelineRun $PIPELINERUN status Unknown. Waiting for update..."
+      echo "  PipelineRun $PIPELINERUN in progress (status Unknown). Waiting for update..."
       sleep 5
     done
+    tkn pr logs $PIPELINERUN
 
     PR_STATUS=$(kubectl get pr $PIPELINERUN -o=jsonpath='{.status.conditions[0].status}')
 
