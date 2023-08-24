@@ -16,7 +16,7 @@ This task also stores the passed resources as json files in a workspace.
 | releaseplanadmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
 | releasestrategy      | Namespaced name of the ReleaseStrategy             | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
-| subdirectory      | Subdirectory inside the workspace to be used. | Yes       | -             |
+| subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
 ## Changes since 0.1
   * Added new `subdirectory` parameter to specify a subdirectory inside the workspace dir to be used
