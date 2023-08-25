@@ -19,6 +19,12 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
+## Changes since 0.17
+* use new version of collect-data task with subdirectory parameter
+* use PipelineRun UID for subdirectory inside the workspace
+    * this will avoid the issue of parallel PipelineRuns overriding each other's data
+* also use new version of apply-mapping which overrides the original snapshot_spec file
+
 ## Changes since 0.16
 * git resolvers are used in place of release bundle resolvers
 
