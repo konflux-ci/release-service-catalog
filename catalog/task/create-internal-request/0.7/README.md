@@ -15,6 +15,11 @@ Creates an InternalRequest resource to call IIB service
 
 ## Changelog
 
+### changes since 0.6
+- add new subdirectory parameter to be used for storing of results file
+    - this will enable us to clean up only the current pipelinerun's
+      data in the fbc-release pipeline
+
 ### changes since 0.5
 - adds `updateGenericResult` parameter to control whether the `genericResult`
   result is updated

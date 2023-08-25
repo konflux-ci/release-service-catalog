@@ -31,6 +31,7 @@ Tekton release pipeline to interact with FBC Pipeline
 - use new version of collect-data task with subdirectory parameter
 - use PipelineRun UID for subdirectory inside the workspace
     - this will avoid the issue of parallel PipelineRuns overriding each other's data
+- use new version of create-internal-requests task with subdirectory parameter
 
 ### Changes since 0.16
 - git resolvers are used in place of release bundle resolvers
