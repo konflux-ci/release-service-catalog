@@ -14,6 +14,11 @@ Tekton pipeline to verify Snapshot prior to Deployment
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
+## Changes since 0.5
+- use new version of collect-data task with subdirectory parameter
+- use PipelineRun UID for subdirectory inside the workspace
+    - this will avoid the issue of parallel PipelineRuns overriding each other's data
+
 ## Changes since 0.4
 - git resolvers are used in place of release bundle resolvers
 
