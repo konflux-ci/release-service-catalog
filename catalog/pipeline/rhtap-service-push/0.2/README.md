@@ -25,3 +25,9 @@
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
+
+## Changes since 0.1
+- use new version of collect-data task with subdirectory parameter
+- use PipelineRun UID for subdirectory inside the workspace
+    - this will avoid the issue of parallel PipelineRuns overriding each other's data
+- also use new version of apply-mapping which overrides the original snapshot_spec file
