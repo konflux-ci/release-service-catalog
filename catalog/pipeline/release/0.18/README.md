@@ -24,6 +24,7 @@ Tekton pipeline to release Stonesoup Snapshot to Quay.
 * use PipelineRun UID for subdirectory inside the workspace
     * this will avoid the issue of parallel PipelineRuns overriding each other's data
 * also use new version of apply-mapping which overrides the original snapshot_spec file
+    * and specify snapshotPath for this task to point to the subdir
 
 ## Changes since 0.16
 * git resolvers are used in place of release bundle resolvers

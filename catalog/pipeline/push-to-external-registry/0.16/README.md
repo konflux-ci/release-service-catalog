@@ -29,6 +29,7 @@ Tekton pipeline to push images to an external registry.
 - use PipelineRun UID for subdirectory inside the workspace
     - this will avoid the issue of parallel PipelineRuns overriding each other's data
 - also use new version of apply-mapping which overrides the original snapshot_spec file
+    - and specify snapshotPath for this task to point to the subdir
 
 ## Changes since 0.14
 * update push-snapshot task to be v0.10
