@@ -19,6 +19,9 @@ Creates an InternalRequest resource to call IIB service
 - add new subdirectory parameter to be used for storing of results file
     - this will enable us to clean up only the current pipelinerun's
       data in the fbc-release pipeline
+- changes the task step `watch-internal-request-status` to check for
+  `.status.condition[0].reason` instead of `.status.condition[0].status` to determine
+  if the request has Succeeded of Failed.
 
 ### changes since 0.5
 - adds `updateGenericResult` parameter to control whether the `genericResult`
