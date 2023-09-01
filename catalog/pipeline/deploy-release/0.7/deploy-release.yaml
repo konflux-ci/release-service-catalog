@@ -1,0 +1,116 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: deploy-release
+  labels:
+    app.kubernetes.io/version: "0.7"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton pipeline to verify Snapshot prior to Deployment
+  params:
+    - name: release
+      type: string
+      description:
+        The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
+    - name: releaseplan
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlan
+    - name: releaseplanadmission
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releasestrategy
+      type: string
+      description: The namespaced name (namespace/name) of the releaseStrategy
+    - name: snapshot
+      type: string
+      description: The namespaced name (namespace/name) of the snapshot
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON representation of the EnterpriseContractPolicy
+    - name: verify_ec_task_bundle
+      type: string
+      description: The location of the bundle containing the verify-enterprise-contract task
+    - name: postCleanUp
+      type: string
+      description: Cleans up workspace after finishing executing the pipeline
+      default: "true"
+  workspaces:
+    - name: release-workspace
+  tasks:
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/redhat-appstudio/release-service-bundles.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: catalog/task/collect-data/0.2/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releaseplan
+          value: $(params.releaseplan)
+        - name: releaseplanadmission
+          value: $(params.releaseplanadmission)
+        - name: releasestrategy
+          value: $(params.releasestrategy)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      workspaces:
+        - name: data
+          workspace: release-workspace
+    - name: verify-enterprise-contract
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: $(params.verify_ec_task_bundle)
+          - name: kind
+            value: task
+          - name: name
+            value: verify-enterprise-contract
+      params:
+        - name: IMAGES
+          value: "$(workspaces.data.path)/$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          value: "1"
+        - name: IGNORE_REKOR
+          value: "true"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - collect-data
+  finally:
+    - name: cleanup
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/redhat-appstudio/release-service-bundles.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: catalog/task/cleanup-workspace/0.2/cleanup-workspace.yaml
+      when:
+        - input: $(params.postCleanUp)
+          operator: in
+          values: ["true"]
+      params:
+        - name: subdirectory
+          value: "$(context.pipelineRun.uid)"
+      workspaces:
+        - name: input
+          workspace: release-workspace
