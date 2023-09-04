@@ -24,7 +24,15 @@
 | pyxisServerType | The Pyxis server type to use. Options are 'production' and 'stage' | No | - |
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
-| verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
+| verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
+| verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
+| verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
+
+## Changes since 0.2
+- explicitly set IGNORE_REKOR value to "true" in the verify-enterprise-contract task
+- use git resolvers for the verify-enterprise-contract task
+    - the verify_ec_task_bundle parameter was placed with verify_ec_task_git_url,
+      verify_ec_task_git_revision, and verify_ec_task_git_pathInRepo
 
 ## Changes since 0.1
 - use new version of collect-data task with subdirectory parameter
