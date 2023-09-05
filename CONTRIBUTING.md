@@ -103,7 +103,7 @@ such as `catalog/task/apply-mapping/0.3/tests/test-apply-mapping.yaml`.
 To reference the task under test in a test pipeline, use just the name - the test
 script will install the task CR locally. For example:
 
-```
+```yaml
 - name: run-task
     taskRef:
       name: apply-mapping
@@ -124,7 +124,7 @@ You can do this by adding the annotation `test/assert-task-failure`
 to the test pipeline object. This annotation will specify which task (`.spec.tasks[*].name`)
 in the pipeline is expected to fail. For example:
 
-```
+```yaml
 ---
 apiVersion: tekton.dev/v1beta1
 kind: Pipeline
@@ -157,6 +157,77 @@ a task. When the CI runs the testing, it will first check for this file. If it i
 before the test pipeline. This script will run as the `kubeadmin` user. This approach is copied from the
 tekton catalog repository. For more details and examples, look
 [here](https://github.com/tektoncd/catalog/blob/main/CONTRIBUTING.md#end-to-end-testing).
+
+##### Mocking commands executed in task scripts
+
+Mocks are needed when we want to test tasks which call external services (e.g. `scopeo copy`,
+`cosign download`, or even a python script from our release-utils image such as `upload_sbom` that would
+call Pyxis API). The way to do this is to create a file with mock shell functions (with the same names
+as the commands you want to mock) and inject this file to the beginning of each `script` field in
+the task step that needs mocking.
+
+For reference implementation, check [push-sbom-to-pyxis/0.2/tests/](/catalog/task/push-sbom-to-pyxis/0.2/tests/). Here's a break down of how it's done:
+
+1. Create a `mocks.sh` file in the tests directory of your task, e.g.
+    `catalog/task/push-sbom-to-pyxis/0.2/tests/mocks.sh`. This file will contain the mock function
+    definitions. It also needs to contain a shebang at the top as it will get injected to the top
+    of the original script. For example:
+
+    ```sh
+    #!/usr/bin/env sh
+    set -eux
+
+    function cosign() {
+      echo Mock cosign called with: $*
+      echo $* >> $(workspaces.data.path)/mock_cosign.txt
+
+      if [[ "$*" != "download sbom --output-file myImageID"[12]".json imageurl"[12] ]]
+      then
+        echo Error: Unexpected call
+        exit 1
+      fi
+
+      touch /workdir/sboms/${4}
+    }
+    ```
+
+    In the example above, you can notice two things:
+    - Each time the mock function is called, the full argument list is saved in a file in the
+      workspace. This is optional and depends on your task's workspace name. It allows us to
+      check mock calls after task execution in our test pipeline.
+    - In this case the function touches a file that would otherwise be created by the actual `cosign`
+      call. This is specific to the task and will depend on your use case.
+
+1. In your `pre-apply-task-hook.sh` file (see the Test Setup section above for explanation), include
+    `yq` commands to inject the `mocks.sh` file to the top of your task step scripts, e.g.:
+
+    ```sh
+    #!/usr/bin/env sh
+
+    SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
+    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' $SCRIPT_DIR/../push-sbom-to-pyxis.yaml
+    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' $SCRIPT_DIR/../push-sbom-to-pyxis.yaml
+    ```
+
+    In this case we inject the file to both steps in the task under test. This will depend on
+    the given task. You only need to inject mocks for the steps where something needs to be mocked.
+
+1. (Optional) In your test pipeline, you can have a task after the main task under test that will
+    check that the mock functions had the expected calls. This only applies if you saved your mock
+    calls to a file. In our example, it will look something like this:
+
+    ```sh
+    if [ $(cat $(workspaces.data.path)/mock_cosign.txt | wc -l) != 2 ]; then
+      echo Error: cosign was expected to be called 2 times. Actual calls:
+      cat $(workspaces.data.path)/mock_cosign.txt
+      exit 1
+    fi
+    ```
+
+Note: The approach described above shows the recommended approach. But there may be variations
+depending on your needs. For example, you could have several mocks files and inject different
+files to different steps in your task.
 
 #### Running Tekton Task tests manually
 
