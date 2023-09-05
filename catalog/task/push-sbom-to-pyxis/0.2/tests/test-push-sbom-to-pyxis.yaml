@@ -1,0 +1,82 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: test-push-sbom-to-pyxis
+spec:
+  description: |
+    Run the push-sbom-to-pyxis task with required parameters - a happy path scenario.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/hacbs-release/release-utils:5b1a1cd9fd68625cab5573ce62e0d87e6f93f341
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/test_snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "containerImage": "imageurl1"
+                  },
+                  {
+                    "containerImage": "imageurl2"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: push-sbom-to-pyxis
+      params:
+        - name: snapshotPath
+          value: test_snapshot_spec.json
+        - name: containerImageIDs
+          value: myImageID1 myImageID2
+        - name: pyxisSecret
+          value: test-push-sbom-to-pyxis-cert
+        - name: server
+          value: production
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:de40e7e7b9d90de5cff5a4266d429f633bd1a1c2
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_cosign.txt | wc -l) != 2 ]; then
+                echo Error: cosign was expected to be called 2 times. Actual calls:
+                cat $(workspaces.data.path)/mock_cosign.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_upload_sbom.txt | wc -l) != 2 ]; then
+                echo Error: upload_sbom was expected to be called 2 times. Actual calls:
+                cat $(workspaces.data.path)/mock_upload_sbom.txt
+                exit 1
+              fi
+      runAfter:
+        - run-task
