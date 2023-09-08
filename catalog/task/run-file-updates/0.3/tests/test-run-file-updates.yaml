@@ -1,0 +1,178 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: test-run-file-updates
+spec:
+  description: |
+    Run the run-file-updates task and verify if the internalrequests were created and the replacements were done
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/hacbs-release/release-utils:a918b3a7cbd40add5955a2f1acb4c3dbb29c44e9
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              yq -o json > "$(workspaces.data.path)/rpa.json" << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlanAdmission
+              metadata:
+                name: releaseplanadmission-sample
+                namespace: default
+              spec:
+                application: foo
+                origin: foo
+                releaseStrategy: foo
+                extraData:
+                      fileUpdates:
+                        - repo: https://gitlab.cee.redhat.com/foo
+                          paths:
+                            - path: foo
+                              replacements:
+                                - key: bar
+                                  replacement: baz
+                        - repo: https://gitlab.cee.redhat.com/bar
+                          paths:
+                            - path: bar
+                              replacements:
+                                - key: baz
+                                  replacement: qux
+                        - repo: https://gitlab.cee.redhat.com/foobar
+                          paths:
+                            - path: foobar
+                              replacements:
+                                - key: ".spec.containers[].image"
+                                  replacement: "|image:.*|image: {{ .components[].containerImage }}|"
+              EOF
+
+              yq -o json > "$(workspaces.data.path)/snapshot_spec.json" << EOF
+              {
+                  "application": "foo-app",
+                  "artifacts": {},
+                  "components": [
+                      {
+                          "containerImage": "test-container-foo:bar",
+                          "name": "test-container-foo",
+                          "source": {
+                              "git": {
+                                  "context": "./",
+                                  "dockerfileUrl": "build/Dockerfile",
+                                  "revision": "foo",
+                                  "url": "https://github.com/foo/bar"
+                              }
+                          },
+                          "repository": "test/foo/bar"
+                      }]
+              }
+              EOF
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: run-file-updates
+      params:
+        - name: fileUpdatesPath
+          value: "rpa.json"
+        - name: synchronously
+          value: "false"
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:a918b3a7cbd40add5955a2f1acb4c3dbb29c44e9
+            script: |
+              #!/bin/sh
+              set -ex
+
+              # Get application
+              application=$(jq -r '.application' $(workspaces.data.path)/snapshot_spec.json)
+              
+              # Parse the input json file
+              fileUpdates=$(jq -r '.spec.extraData.fileUpdates | length' "$(workspaces.data.path)/rpa.json")
+              
+              # Fetch all the InternalRequest resources
+              allRequests=$(kubectl get InternalRequest -o json)
+              
+              # Count the number of InternalRequests
+              requestsCount=$(echo "$allRequests" | jq -r '.items | length')
+              
+              # Check if the number of InternalRequests is as expected
+              if [ "$requestsCount" -ne "$fileUpdates" ]; then
+                echo "Unexpected number of InternalRequests. Expected: $fileUpdates, Found: $requestsCount"
+                exit 1
+              fi
+                
+              # Loop over the fileUpdates
+              i=0
+              while [ "$i" -lt "$fileUpdates" ]
+              do
+                repo=$(jq -r --argjson i "$i" '.spec.extraData.fileUpdates[$i].repo' \
+                        "$(workspaces.data.path)/rpa.json")
+                paths=$(jq -r --argjson i "$i" '.spec.extraData.fileUpdates[$i].paths' \
+                        "$(workspaces.data.path)/rpa.json")
+              
+                # Check if ref is present in the input file. If not, set it to 'main'
+                ref=$(jq -r --argjson i "$i" '.spec.extraData.fileUpdates[$i].ref // "main"' \
+                        "$(workspaces.data.path)/rpa.json")
+              
+                # check if requestApplication is correct
+                requestApplication=$(echo "$allRequests" | \
+                  jq -r --arg application "$application" '.items[] | select(.spec.params.application == $application)')
+                if [ -z "$requestApplication" ]; then
+                  echo "No InternalRequest found with application: $application"
+                  exit 1
+                fi
+              
+                # Check if an InternalRequest with the same repo exists
+                requestRepo=$(echo "$allRequests" | \
+                              jq -r --arg repo "$repo" '.items[] | select(.spec.params.repo == $repo)')
+              
+                if [ -z "$requestRepo" ]; then
+                  echo "No InternalRequest found with repo: $repo"
+                  exit 1
+                fi
+                
+                # Check if the 'request' field contains 'file-updates'
+                if [ "$(echo "$requestRepo" | jq -r '.spec.request' )" != "file-updates" ]; then
+                  echo "InternalRequest for repo: $repo doesn't contain 'file-updates' in 'request' field"
+                  exit 1
+                fi
+                
+                # Check if the 'ref' field matches
+                if [ "$(echo "$requestRepo" | jq -r '.spec.params.ref')" != "$ref" ]; then
+                  echo "InternalRequest for repo: $repo has different 'ref'. Expected: $ref"
+                  exit 1
+                fi
+
+                requestPaths="$(echo "$requestRepo" | jq -r '.spec.params.paths')"
+                replacements="$(echo "$requestPaths" | jq '.[] | select(.path == "foobar") | .replacements[]')"
+                if [ -n "${replacements}" ]; then
+                  if [[ ! $(echo "${replacements}" | jq '.replacement') =~ "test-container-foo:bar" ]]; then
+                    echo "InternalRequest for repo: $repo has different 'replacement' for foobar. 
+                          Expected: 'test-container-foo:bar'"
+                    exit 1
+                  fi
+                fi
+
+                i=$((i+1))
+              done
+                
+              echo "All checks passed successfully."
