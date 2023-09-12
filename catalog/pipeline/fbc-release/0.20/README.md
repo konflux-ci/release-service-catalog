@@ -12,6 +12,7 @@ Tekton release pipeline to interact with FBC Pipeline
 | releasestrategy | The namespaced name (namespace/name) of the releaseStrategy | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the EnterpriseContractPolicy | No | - |
+| enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | fromIndex | The source Index image (catalog of catalogs) FBC fragment | No | - |
 | targetIndex | Index image (catalog of catalogs) the FBC fragment will be added to | No | - |
 | binaryImage | OCP binary image to be baked into the index image | Yes | "" |
@@ -32,6 +33,7 @@ Tekton release pipeline to interact with FBC Pipeline
 ### Changes since 0.19
 - adds new tasks `get-ocp-version` and `update-ocp-tag` to update version tag
   for `targetIndex`, `fromIndex` and `binaryImage` with valid OCP Version
+- add new enterpriseContractPublicKey parameter
 
 ### Changes since 0.18
 - explicitly set IGNORE_REKOR value to "true" in the verify-enterprise-contract task
