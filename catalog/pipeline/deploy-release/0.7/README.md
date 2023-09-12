@@ -12,6 +12,7 @@ Tekton pipeline to verify Snapshot prior to Deployment
 | releasestrategy | The namespaced name (namespace/name) of the releaseStrategy | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
+| enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
@@ -21,6 +22,7 @@ Tekton pipeline to verify Snapshot prior to Deployment
 - use git resolvers for the verify-enterprise-contract task
     - the verify_ec_task_bundle parameter was placed with verify_ec_task_git_url,
       verify_ec_task_git_revision, and verify_ec_task_git_pathInRepo
+- add new enterpriseContractPublicKey parameter
 
 ## Changes since 0.5
 - use new version of collect-data task with subdirectory parameter

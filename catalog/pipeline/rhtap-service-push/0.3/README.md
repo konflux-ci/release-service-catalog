@@ -14,6 +14,7 @@
 | releasestrategy | The namespaced name (namespace/name) of the releaseStrategy | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
+| enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | extraConfigGitUrl |URL to the remote Git repository containing the extra config | No | - |
 | extraConfigGitRevision | Revision to fetch from the remote Git repository containing the extra config | No | - |
 | extraConfigPath | Path to the extra config file within the repository | No | - |
@@ -33,6 +34,7 @@
 - use git resolvers for the verify-enterprise-contract task
     - the verify_ec_task_bundle parameter was placed with verify_ec_task_git_url,
       verify_ec_task_git_revision, and verify_ec_task_git_pathInRepo
+- add new enterpriseContractPublicKey parameter
 
 ## Changes since 0.1
 - use new version of collect-data task with subdirectory parameter

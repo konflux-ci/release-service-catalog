@@ -12,6 +12,7 @@ Tekton pipeline to push images to an external registry.
 | releasestrategy | The namespaced name (namespace/name) of the releaseStrategy | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
+| enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | extraConfigGitUrl |URL to the remote Git repository containing the extra config | No | - |
 | extraConfigGitRevision | Revision to fetch from the remote Git repository containing the extra config | No | - |
 | extraConfigPath | Path to the extra config file within the repository | No | - |
@@ -28,6 +29,7 @@ Tekton pipeline to push images to an external registry.
 
 ## Changes since 0.17
 - run-file-updates now included
+- add new enterpriseContractPublicKey parameter
 
 ## Changes since 0.16
 - explicitly set IGNORE_REKOR value to "true" in the verify-enterprise-contract task
