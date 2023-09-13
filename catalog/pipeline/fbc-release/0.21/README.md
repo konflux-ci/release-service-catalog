@@ -30,6 +30,10 @@ Tekton release pipeline to interact with FBC Pipeline
 
 ## Changelog
 
+### Changes since 0.20
+- iibIndexImage and iibIndexImageResolved pipelineResults were added. These come from the
+  task results in extract-index-image
+
 ### Changes since 0.19
 - adds new tasks `get-ocp-version` and `update-ocp-tag` to update version tag
   for `targetIndex`, `fromIndex` and `binaryImage` with valid OCP Version
