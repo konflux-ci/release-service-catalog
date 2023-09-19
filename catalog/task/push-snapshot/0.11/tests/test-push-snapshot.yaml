@@ -1,0 +1,85 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-snapshot
+spec:
+  description: |
+    Run the push-snapshot task with additional tags turned off.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/hacbs-release/release-utils:85ab98a7ec63c3d8d9ec3c4982ff0e581bcb3c83
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "registry.io/image:tag",
+                    "repository": "prod-registry.io/prod-location"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: push-snapshot
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: tag
+          value: latest
+        - name: retries
+          value: 0
+        - name: addGitShaTag
+          value: false
+        - name: addSourceShaTag
+          value: false
+        - name: addTimestampTag
+          value: false
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:85ab98a7ec63c3d8d9ec3c4982ff0e581bcb3c83
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_cosign.txt | wc -l) != 1 ]; then
+                echo Error: cosign was expected to be called 1 times. Actual calls:
+                cat $(workspaces.data.path)/mock_cosign.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_skopeo.txt | wc -l) != 2 ]; then
+                echo Error: skopeo was expected to be called 2 times. Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+      runAfter:
+        - run-task
