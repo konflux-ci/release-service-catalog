@@ -1,0 +1,60 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: create-github-release
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task that creates a release on github.com via the GitHub API
+  params:
+    - name: repository
+      type: string
+      description: "The github repository where the release should be created"
+    - name: release_version
+      type: string
+      description: "The version string of the new release"
+    - name: githubSecret
+      type: string
+      description: "The kube secret to use to authenticate to GitHub, containing one key: token"
+    - name: content_directory
+      type: string
+      description: "The directory inside the workspace to find files for release"
+  workspaces:
+    - name: data
+      description: The workspace where the binaries to release reside
+  results:
+    - name: url
+      type: string
+      description: URL to inspect the created release
+  steps:
+    - name: create-release-from-binaries
+      image: registry.access.redhat.com/ubi9/ubi:latest@sha256:351ed8b24d440c348486efd99587046e88bb966890a9207a5851d3a34a4dd346
+      script: |
+        curl -L \
+          https://github.com/cli/cli/releases/download/v2.32.1/gh_2.32.1_linux_amd64.tar.gz \
+          --output gh_2.32.1_linux_amd64.tar.gz
+        tar -zvxf gh_2.32.1_linux_amd64.tar.gz
+        mv gh_2.32.1_linux_amd64/bin/gh /bin/gh
+        chmod +x /bin/gh
+        cd "$(workspaces.data.path)/$CONTENT_DIRECTORY"
+        gh release create "$RELEASE_VERSION" *.zip *.json *SHA256SUMS --repo "$REPOSITORY"
+        # We will add .sig file when we have the sigining step is done
+        #gh release create $RELEASE_VERSION *.zip *.json *.sig --repo $REPO
+        echo -n "https://github.com/$REPOSITORY/releases/tag/$RELEASE_VERSION" >  $(results.url.path)
+      env:
+        - name: GH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: $(params.githubSecret)
+              key: token
+        - name: REPOSITORY
+          value: $(params.repository)
+        - name: RELEASE_VERSION
+          value: $(params.release_version)
+        - name: CONTENT_DIRECTORY
+          value: $(params.content_directory)
