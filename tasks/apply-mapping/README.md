@@ -3,9 +3,10 @@
 Tekton task to apply a mapping to an Snapshot.
 
 The purpose of this task is to merge a mapping with the components contained in an Snapshot.
-The mapping is expected to be present in the passed `extraConfigPath`. If the file is not found or
-the file contains no `mapping` key, the original Snapshot is returned. If there is a
-`mapping` key, it is merged with the `components` key in the Snapshot based on component name.
+The mapping is expected to be present in the data field of the ReleasePlanAdmission provided in
+the `releasePlanAdmissionPath`. If the data field does not contain a `mapping` key, the original
+Snapshot is returned. If there is a `mapping` key, it is merged with the `components` key in the
+Snapshot based on component name.
 
 A `mapped` result is also returned from this task containing a simple true/false value that is
 meant to inform whether a mapped Snapshot is being returned or the original one.
@@ -15,8 +16,13 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
 | snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | Yes | snapshot_spec.json |
-| extraConfigPath | The path to the config file containing the mapping | Yes | - |
+| releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | Yes | release_plan_admission.json |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+
+## Changes since 0.7.0
+  * No longer uses extraConfigPath
+    * The mapping is provided by the ReleasePlanAdmission now instead. This change includes replacing the `extraConfigPath`
+      parameter with the `releasePlanAdmissionPath` parameter
 
 ## Changes since 0.6
   * Update Tekton API to v1
