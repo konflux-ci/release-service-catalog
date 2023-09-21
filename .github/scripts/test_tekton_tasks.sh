@@ -10,12 +10,12 @@
 # - tkn installed
 #
 # Examples of usage:
-# export TASK_DIRS="mydir/task/apply-mapping/0.3 some/other/dir/0.1"
+# export TASK_DIRS="mydir/tasks/apply-mapping some/other/dir"
 # ./test_tekton_tasks.sh
 #
 # or
 #
-# ./test_tekton_tasks.sh mydir/task/apply-mapping/0.3 some/other/dir/0.1
+# ./test_tekton_tasks.sh mydir/tasks/apply-mapping some/other/dir
 
 # yield empty strings for unmatched patterns
 shopt -s nullglob

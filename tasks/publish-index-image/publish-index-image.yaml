@@ -1,0 +1,73 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: publish-index-image
+  labels:
+    app.kubernetes.io/version: "0.3.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+      Publish a built FBC index image using skopeo
+  params:
+    - name: targetIndex
+      type: string
+      description: targetIndex signing image
+    - name: inputDataFile
+      type: string
+      default: ""
+    - name: retries
+      type: string
+      default: "0"
+      description: Number of skopeo retries
+    - name: publishingCredentials
+      type: string
+      default: "fbc-publishing-credentials"
+      description: The credentials used to access the registries
+    - name: requestUpdateTimeout
+      type: string
+      default: "360"
+      description: Max seconds waiting for the status update
+  workspaces:
+    - name: input
+      description: Workspace to store the params and responses for the internalRequest
+  results:
+    - name: requestMessage
+      type: string
+  steps:
+    - name: publish-index-image
+      env:
+        - name: SOURCE_INDEX_CREDENTIAL
+          valueFrom:
+            secretKeyRef:
+              key: sourceIndexCredential
+              name: $(params.publishingCredentials)
+        - name: TARGET_INDEX_CREDENTIAL
+          valueFrom:
+            secretKeyRef:
+              key: targetIndexCredential
+              name: $(params.publishingCredentials)
+      image: >-
+        quay.io/hacbs-release/release-utils@sha256:5733ece907aa70d6ebced36484c936731e8b27bfcf87fed226a0ecf95047a6b8
+      script: |
+        #!/usr/bin/env sh
+        PATH=/bin:/usr/bin:/usr/local/bin
+        export PATH
+
+        set -e
+        indexImageResolved=`jq -cr .jsonBuildInfo $(params.inputDataFile)\
+        | jq -cr .index_image_resolved`
+
+        (skopeo copy \
+        --all \
+        --preserve-digests \
+        --retry-times "$(params.retries)" \
+        --src-tls-verify=false \
+        --src-creds "${SOURCE_INDEX_CREDENTIAL}" \
+        "docker://${indexImageResolved}" \
+        --dest-creds "${TARGET_INDEX_CREDENTIAL}" \
+        "docker://$(params.targetIndex)" && \
+        echo "Index Image Published successfully" || \
+        echo "Failed publishing Index Image") | tee $(results.requestMessage.path)
