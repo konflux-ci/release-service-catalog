@@ -1,0 +1,120 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-data
+  labels:
+    app.kubernetes.io/version: "0.4.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to collect extra data from release resources and optionally save CRs to a workspace
+  params:
+    - name: release
+      type: string
+      description: The namespaced name of the Release
+    - name: releaseplan
+      type: string
+      description: The namespaced name of the ReleasePlan
+    - name: releaseplanadmission
+      type: string
+      description: The namespaced name of the ReleasePlanAdmission
+    - name: releasestrategy
+      type: string
+      description: The namespaced name of the ReleaseStrategy
+    - name: snapshot
+      type: string
+      description: The namespaced name of the Snapshot
+    - name: subdirectory
+      description: Subdirectory inside the workspace to be used
+      type: string
+      default: ""
+  workspaces:
+    - name: data
+      description: Workspace to save the CR jsons to
+  results:
+    - name: release
+      type: string
+      description: The relative path in the workspace to the stored release json
+    - name: releasePlan
+      type: string
+      description: The relative path in the workspace to the stored releasePlan json
+    - name: releasePlanAdmission
+      type: string
+      description: The relative path in the workspace to the stored releasePlanAdmission json
+    - name: releaseStrategy
+      type: string
+      description: The relative path in the workspace to the stored releaseStrategy json
+    - name: snapshotSpec
+      type: string
+      description: The relative path in the workspace to the stored snapshotSpec json
+    - name: fbcFragment
+      type: string
+      description: The first component's containerImage in the snapshot to use in the fbc pipelines
+    - name: extraData
+      type: string
+      description: The relative path in the workspace to the stored extraData json
+  steps:
+    - name: collect-data
+      image: quay.io/hacbs-release/release-utils:4d8649dbb2b626f5fe9f4ff83c1bc3be268fad31
+      env:
+        - name: "RELEASE"
+          value: '$(params.release)'
+        - name: "RELEASE_PLAN"
+          value: '$(params.releaseplan)'
+        - name: "RELEASE_PLAN_ADMISSION"
+          value: '$(params.releaseplanadmission)'
+        - name: "RELEASE_STRATEGY"
+          value: '$(params.releasestrategy)'
+        - name: "SNAPSHOT"
+          value: '$(params.snapshot)'
+      script: |
+        #!/usr/bin/env sh
+        set -e
+
+        if [ -n "$(params.subdirectory)" ]; then
+          mkdir -p $(workspaces.data.path)/$(params.subdirectory)
+        fi
+
+        RELEASE_PATH=$(params.subdirectory)/release.json
+        echo -n $RELEASE_PATH > $(results.release.path)
+        get-resource "release" "${RELEASE}" > $(workspaces.data.path)/$RELEASE_PATH
+
+        RELEASEPLAN_PATH=$(params.subdirectory)/release_plan.json
+        echo -n $RELEASEPLAN_PATH > $(results.releasePlan.path)
+        get-resource "releaseplan" "${RELEASE_PLAN}" > $(workspaces.data.path)/$RELEASEPLAN_PATH
+
+        RELEASEPLANADMISSION_PATH=$(params.subdirectory)/release_plan_admission.json
+        echo -n $RELEASEPLANADMISSION_PATH > $(results.releasePlanAdmission.path)
+        get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
+          > $(workspaces.data.path)/$RELEASEPLANADMISSION_PATH
+
+        RELEASESTRATEGY_PATH=$(params.subdirectory)/release_strategy.json
+        echo -n $RELEASESTRATEGY_PATH > $(results.releaseStrategy.path)
+        get-resource "releasestrategy" "${RELEASE_STRATEGY}" > $(workspaces.data.path)/$RELEASESTRATEGY_PATH
+
+        SNAPSHOTSPEC_PATH=$(params.subdirectory)/snapshot_spec.json
+        echo -n $SNAPSHOTSPEC_PATH > $(results.snapshotSpec.path)
+        get-resource "snapshot" "${SNAPSHOT}" "{.spec}" > $(workspaces.data.path)/$SNAPSHOTSPEC_PATH
+
+        cat $(workspaces.data.path)/$SNAPSHOTSPEC_PATH | jq -cr '.components[0].containerImage' | tr -d "\n" \
+          | tee $(results.fbcFragment.path)
+
+        release_result=$(get-resource "release" "${RELEASE}" "{.spec.extraData}")
+
+        release_plan_result=$(get-resource "releaseplan" "${RELEASE_PLAN}" "{.spec.extraData}")
+
+        release_plan_admission_result=$(get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
+            "{.spec.extraData}")
+
+        # Merge Release and ReleasePlan keys. ReleasePlan has higher priority
+        merged_output=$(merge-json "$release_result" "$release_plan_result")
+
+        # Merge now with ReleasePlanAdmission keys. ReleasePlanAdmission has higher priority
+        merged_output=$(merge-json "$release_result" "$release_plan_admission_result")
+
+        EXTRADATA_PATH=$(params.subdirectory)/extra_data.json
+        echo -n $EXTRADATA_PATH > $(results.extraData.path)
+        echo "$merged_output" > $(workspaces.data.path)/$EXTRADATA_PATH
