@@ -30,6 +30,12 @@ Tekton release pipeline to interact with FBC Pipeline
 
 ## Changelog
 
+## Changes since 0.22.0
+- Introduce new initial task - verify-access-to-resources
+  - protection to verify that service accounts have required permissions to access
+    resources before we start a pipeline.
+  - If verification does not pass, the pipeline fails
+
 ### Changes since 0.21
 - update Tekton API to v1
     - includes bumping all tasks to versions that use Tekton API v1
