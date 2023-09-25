@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: push-to-external-registry
   labels:
-    app.kubernetes.io/version: "0.19.0"
+    app.kubernetes.io/version: "0.20.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -85,6 +85,58 @@ spec:
   workspaces:
     - name: release-workspace
   tasks:
+    - name: verify-access-to-resources
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/redhat-appstudio/release-service-catalog.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: hub/kubernetes-actions/kubernetes-actions.yaml
+      params:
+        - name: image
+          value: "quay.io/hacbs-release/cloud-builders-kubectl\
+            @sha256:8ab94be8b2b4f3d117f02d868b39540fddd225447abf4014f7ba4765cb39f753"
+        - name: script
+          value: |
+            ORIGIN_NAMESPACE=$(echo $(params.release) | cut -f1 -d/)
+            TARGET_NAMESPACE=$(echo $(params.releaseplanadmission) | cut -f1 -d/)
+
+            RELEASE_NAME=$(echo $(params.release) | cut -f2 -d/)
+            RELEASEPLAN_NAME=$(echo $(params.releaseplan) | cut -f2 -d/)
+            RELEASEPLANADMISSION_NAME=$(echo $(params.releaseplanadmission) | cut -f2 -d/)
+            SNAPSHOT_NAME=$(echo $(params.snapshot) | cut -f2 -d/)
+
+            CAN_I_READ_RELEASES=$(kubectl auth can-i get release/${RELEASE_NAME} -n ${ORIGIN_NAMESPACE})
+            CAN_I_READ_RELEASEPLANS=$(kubectl auth can-i get releaseplan/${RELEASEPLAN_NAME} -n ${ORIGIN_NAMESPACE})
+            CAN_I_READ_RELEASEPLANADMISSIONS=$(kubectl auth can-i get releaseplanadmission/${RELEASEPLANADMISSION_NAME} -n ${TARGET_NAMESPACE})
+            CAN_I_READ_SNAPSHOTS=$(kubectl auth can-i get snapshot/${SNAPSHOT_NAME} -n ${ORIGIN_NAMESPACE})
+            CAN_I_CREATE_INTERNALREQUESTS=$(kubectl auth can-i create internalrequest -n ${TARGET_NAMESPACE})
+
+            echo ""
+            echo "CAN_I_READ_RELEASES? ${CAN_I_READ_RELEASES}"
+            echo "CAN_I_READ_RELEASEPLANS? ${CAN_I_READ_RELEASEPLANS}"
+            echo "CAN_I_READ_RELEASEPLANADMISSIONS? ${CAN_I_READ_RELEASEPLANADMISSIONS}"
+            echo "CAN_I_READ_SNAPSHOTS? ${CAN_I_READ_SNAPSHOTS}"
+            echo ""
+            echo "CAN_I_CREATE_INTERNALREQUESTS? ${CAN_I_CREATE_INTERNALREQUESTS}"
+            echo ""
+
+            if [ "${CAN_I_READ_RELEASES}" == "no" ] ||\
+                [ "${CAN_I_READ_RELEASEPLANS}" == "no" ] ||\
+                [ "${CAN_I_READ_RELEASEPLANADMISSIONS}" == "no" ] ||\
+                [ "${CAN_I_READ_SNAPSHOTS}" == "no" ] ||\
+                [ "${CAN_I_CREATE_INTERNALREQUESTS}" == "no" ] ; then
+              echo "Error: Cannot read or create required Release resources!"
+              echo ""
+              echo "This indicates that your workspace is not correctly setup"
+              echo "Please reach out to a workspace administrator"
+              exit 1
+            fi
+
+            echo "Access to Release resources verified"
     - name: collect-data
       taskRef:
         resolver: "git"
@@ -111,6 +163,8 @@ spec:
       workspaces:
         - name: data
           workspace: release-workspace
+      runAfter:
+        - verify-access-to-resources
     - name: clone-config-file
       taskRef:
         resolver: "git"

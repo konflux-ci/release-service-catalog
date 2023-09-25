@@ -17,6 +17,12 @@ Tekton pipeline to verify Snapshot prior to Deployment
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
+## Changes since 0.8.0
+- Introduce new initial task - verify-access-to-resources
+    - protection to verify that service accounts have required permissions to access
+      resources before we start a pipeline.
+    - If verification does not pass, the pipeline fails
+
 ## Changes since 0.7
 - update Tekton API to v1
     - includes bumping all tasks to versions that use Tekton API v1
