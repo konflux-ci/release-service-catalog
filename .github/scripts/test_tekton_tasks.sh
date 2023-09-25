@@ -53,18 +53,18 @@ done
 for DIR in $TASK_DIRS
 do
   echo Task dir: $DIR
-  TASK_NAME=${DIR%/*}
-  TASK_NAME=${TASK_NAME##*/}
+  TASK_NAME=$(echo $DIR | cut -d '/' -f 2)
   echo "  Task name: $TASK_NAME"
 
-  TASK_PATH=${DIR}/${TASK_NAME}.yaml
+  TASK_DIR=$(echo $DIR | cut -d '/' -f -2)
+  TASK_PATH=${TASK_DIR}/${TASK_NAME}.yaml
   if [ ! -f $TASK_PATH ]
   then
     echo Error: Task file does not exist: $TASK_PATH
     exit 1
   fi
 
-  TESTS_DIR=${DIR}/tests
+  TESTS_DIR=${TASK_DIR}/tests
   if [ ! -d $TESTS_DIR ]
   then
     echo Error: tests dir does not exist: $TESTS_DIR
