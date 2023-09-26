@@ -1,0 +1,71 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-data-keys
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to check that all required information is present for the specified system(s)
+  params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use
+      type: string
+      default: "data.json"
+    - name: systems
+      description: The systems to check that all data keys are present for
+      type: array
+      default: []
+  workspaces:
+    - name: data
+      description: The workspace where the data JSON file resides
+  steps:
+    - name: check-data-keys
+      image: quay.io/hacbs-release/release-utils:6e92a6f8df8ef1cbecfb4c25b73ec6d92bded527
+      args: ["$(params.systems[*])"]
+      script: |
+        #!/usr/bin/env sh
+        set -ex
+
+        KEYS_JSON='{
+            "advisory": [
+                "spec.product_id",
+                "spec.cpe",
+                "spec.type",
+                "spec.issues.fixed",
+                "spec.content.images",
+                "spec.synopsis",
+                "spec.topic",
+                "spec.description",
+                "spec.solution",
+                "spec.references"
+            ]
+        }'
+
+        if [ ! -f "$(workspaces.data.path)/$(params.dataPath)" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        RC=0
+
+        for SYSTEM in "$@" ; do
+            if [ $(jq -r ".$SYSTEM" <<< $KEYS_JSON) == null ] ; then
+                echo "Unsupported system value: $SYSTEM"
+                RC=1
+            fi
+
+            echo "Checking all required keys exist for: $SYSTEM"
+            for KEY in $(jq -r ".$SYSTEM[]" <<< $KEYS_JSON) ; do
+                if [[ $(jq ".$SYSTEM.$KEY" "$(workspaces.data.path)/$(params.dataPath)") == "null" ]] ; then
+                    echo "Missing required $SYSTEM key: $KEY"
+                    RC=1
+                fi
+            done
+        done
+
+        exit $RC
