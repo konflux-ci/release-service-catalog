@@ -30,6 +30,10 @@ Tekton release pipeline to interact with FBC Pipeline
 
 ## Changelog
 
+### Changes since 0.23.0
+- adds new tasks `validate-single-component` to validate that the 
+  snapshot only contains a single component. The pipeline should fail otherwise.
+
 ## Changes since 0.22.0
 - Introduce new initial task - verify-access-to-resources
   - protection to verify that service accounts have required permissions to access
