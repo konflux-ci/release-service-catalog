@@ -91,8 +91,7 @@ do
   do
     echo "  Installing test pipeline: $TEST_PATH"
     kubectl apply -f $TEST_PATH
-    TEST_NAME=${TEST_PATH##*/}
-    TEST_NAME=${TEST_NAME%.*}
+    TEST_NAME=$(yq '.metadata.name' $TEST_PATH)
 
     # Sometimes the pipeline is not available immediately
     while ! kubectl get pipeline $TEST_NAME > /dev/null 2>&1
