@@ -41,7 +41,7 @@ spec:
         #!/bin/sh
         #
         #
-        set -ex
+        set -e
 
         # Obtain application from snapshot
         application=$(jq -rc .application $(workspaces.data.path)/$(params.snapshotPath))
@@ -59,13 +59,38 @@ spec:
           ref=$(jq -cr '.ref // "main"' <<< "${item}")
           paths=$(jq -cr '.paths // "[]"' <<< "${item}")
 
-          updatedPaths=$(update-paths -p "${paths}" -f $(workspaces.data.path)/$(params.snapshotPath))
+          echo "=== Updates for repo: ${repo} ==="
 
+          echo -en "  Evaluating '{{ }}' expressions..."
+          updatedPaths=$(update-paths -p "${paths}" -f $(workspaces.data.path)/$(params.snapshotPath))
+          echo "done"
+
+          echo -en "  Creating InternalRequest to produce file-updates..."
           internal-request -r "$(params.request)" \
                            -p upstream_repo="${upstream_repo}" \
                            -p repo="${repo}" \
                            -p ref="${ref}" \
                            -p paths="${updatedPaths}" \
                            -p application=${application} \
-                           -s "$(params.synchronously)"
+                           -s "$(params.synchronously)" \
+                           > $(workspaces.data.path)/ir-result.txt || \
+                           (grep "^\[" $(workspaces.data.path)/ir-result.txt | jq . && exit 1)
+          
+          internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-result.txt | xargs)
+          echo "done (${internalRequest})"
+
+          results=$(kubectl get internalrequest $internalRequest -o=jsonpath='{.status.results}')
+          if [ $(jq -jr '.buildState' <<< "${results}") == "Failed" ]; then
+            echo -en "  FileUpdates Error: "
+            jq -r '.jsonBuildInfo | fromjson | .error' <<< "${results}"
+            echo -e "  Diff (content might be truncated): "
+            jq -r '.jsonBuildInfo | fromjson | .str | tostring' <<< "${results}" | awk '{ print "\t"$0 }'
+            echo -e "=== Finished ===\n"
+            exit 1
+          else
+            echo -en "  MR Created: "
+            jq -r '.jsonBuildInfo | fromjson | fromjson | .merge_request' <<< "${results}"
+          fi
+          echo -e "=== Finished ===\n"
+
         done
