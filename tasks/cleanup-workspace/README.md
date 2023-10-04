@@ -4,9 +4,10 @@ Tekton task to delete a given directory in a passed workspace.
 
 ## Parameters
 
-| Name | Description | Optional | Default value |
-|------|-------------|----------|---------------|
-| subdirectory | The directory to remove within the workspace | No | - |
+| Name         | Description                                                                                                      | Optional | Default value |
+|--------------|------------------------------------------------------------------------------------------------------------------|----------|---------------|
+| subdirectory | The directory to remove within the workspace                                                                     | No       | -             |
+| delay        | Time in seconds to delay execution. Needed to allow other finally tasks to access workspace before being deleted | Yes      | 60            |
 
 ## Example usage
 
@@ -25,6 +26,10 @@ tasks:
       - name: input
         workspace: input_workspace
 ```
+
+## Changes since 0.3.0
+
+* Add delay parameter with a default of 60 (in seconds)
 
 ## Changes since 0.2
 
