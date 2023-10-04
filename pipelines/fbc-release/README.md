@@ -9,7 +9,6 @@ Tekton release pipeline to interact with FBC Pipeline
 | release | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No | - |
 | releaseplan | The namespaced name (namespace/name) of the releasePlan | No | - |
 | releaseplanadmission | The namespaced name (namespace/name) of the releasePlanAdmission | No | - |
-| releasestrategy | The namespaced name (namespace/name) of the releaseStrategy | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the EnterpriseContractPolicy | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
@@ -28,7 +27,8 @@ Tekton release pipeline to interact with FBC Pipeline
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
-## Changelog
+## Changelog since 0.24.0
+- Remove releasestrategy parameter
 
 ### Changes since 0.23.0
 - adds new tasks `validate-single-component` to validate that the 
