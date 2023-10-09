@@ -20,9 +20,12 @@ also a task result for the fbcFragment extracted from the snapshot's first compo
 | release              | Namespaced name of the Release                     | No       | -             |
 | releaseplan          | Namespaced name of the ReleasePlan                 | No       | -             |
 | releaseplanadmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
-| releasestrategy      | Namespaced name of the ReleaseStrategy             | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes since 0.4
+  * Remove releasestrategy param and result from the task
+  * Collect data field instead of extraData as the Release Service API has changed
 
 ## Changes since 0.3
   * Update Tekton API to v1
