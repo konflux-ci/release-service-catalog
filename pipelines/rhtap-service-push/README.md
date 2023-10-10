@@ -21,16 +21,19 @@
 | addGitShaTag | When pushing the snapshot components, also push a tag with the image git sha | Yes | true |
 | addSourceShaTag | When pushing the snapshot components, also push a tag with the image source sha | Yes | true |
 | addTimestampTag | When pushing the snapshot components, also push a tag with the current timestamp | Yes | false |
-| pyxisServerType | The Pyxis server type to use. Options are 'production' and 'stage' | No | - |
-| pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
+## Changes since 0.7.0
+- pyxisSecret and pyxisServerType parameters were removed
+  - They are now pulled from the data.json created by merging the Release CR data fields
+  - This includes adding a new task `collect-pyxis-params` to emit the values as results
+
 ## Changes since 0.6.0
 - Remove releasestrategy parameter
-- 
+
 ## Changes since 0.5.0
 - Introduce new initial task - verify-access-to-resources
   - protection to verify that service accounts have required permissions to access
