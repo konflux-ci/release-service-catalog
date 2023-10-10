@@ -12,9 +12,6 @@ Tekton pipeline to push images to an external registry.
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
-| extraConfigGitUrl |URL to the remote Git repository containing the extra config | No | - |
-| extraConfigGitRevision | Revision to fetch from the remote Git repository containing the extra config | No | - |
-| extraConfigPath | Path to the extra config file within the repository | No | - |
 | tag | The default tag to use when mapping file does not contain a tag | No | - |
 | addGitShaTag | When pushing the snapshot components, also push a tag with the image git sha | Yes | true |
 | addSourceShaTag | When pushing the snapshot components, also push a tag with the image source sha | Yes | true |
@@ -23,6 +20,11 @@ Tekton pipeline to push images to an external registry.
 | verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
+
+## Changes since 0.22.0
+- Remove extraConfig parameters as the information is now passed in the RPA data field
+- Remove the git clone task
+- Fix apply-mapping parameters
 
 ## Changes since 0.21.0
 - pyxisSecret and pyxisServerType parameters were removed
