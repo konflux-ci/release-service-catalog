@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "0.11.0"
+    app.kubernetes.io/version: "0.12.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -17,9 +17,17 @@ spec:
       type: string
       default: "mapped_snapshot.json"
     - name: tag
-      description: Default tag to use if mapping entry does not contain a tag
+      description: Default tag to use if mapping entry does not contain a tag. Not used when tagPrefix is set
       type: string
       default: "latest"
+    - name: tagPrefix
+      description: The prefix used to build the tag in <prefix>-<timestamp> format
+      type: string
+      default: ""
+    - name: timestampFormat
+      description: Timestamp format used to build the tag when tagPrefix is set
+      type: string
+      default: "%s"
     - name: retries
       description: Retry copy N times.
       type: string
@@ -36,6 +44,10 @@ spec:
       description: Also push a tag with the current timestamp for each image in the Snapshot
       type: string
       default: "false"
+  results:
+    - name: commonTag
+      type: string
+      description: Common tag for downstream tasks. Only set if tagPrefix length is nonzero
   workspaces:
     - name: data
       description: The workspace where the snapshot spec json file resides
@@ -66,6 +78,12 @@ spec:
             exit 1
         fi
 
+        prefixedTag=""
+        if [ -n "$(params.tagPrefix)" ]; then
+            prefixedTag="$(params.tagPrefix)-$(date "+$(params.timestampFormat)")"
+        fi
+        echo -n "${prefixedTag}" > $(results.commonTag.path)
+
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
         for component in $(jq -rc '.components[]' "${SNAPSHOT_SPEC_FILE}")
@@ -74,10 +92,20 @@ spec:
           repository=$(jq -r '.repository' <<< $component)
           name=$(jq -r '.name' <<< $component)
           git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
-          # take tag if present in mapping file, otherwise take ReleaseStrategy default provided as a task param
-          tag=$(params.tag)
-          if [ $(jq 'has("tag")' <<< $component) == "true" ] ; then
-              tag=$(jq -r '.tag' <<< $component)
+          #
+          # The tag is determined as follows:
+          #
+          # If the value of the task parameter `tagPrefix` has a non-zero length, the tag value is built by
+          # the task in `<prefix>-<timestamp>` format, where prefix is the value of `tagPrefix` and `timestamp`
+          # is the output of the date command using the value of `timestampFormat` as argument.
+          #
+          # Otherwise the tag used is the one existent in the component or in case it is absent, it uses
+          # the value set for the task parameter `tag`.
+          #
+          if [ -n "${prefixedTag}" ] ; then
+              tag="${prefixedTag}"
+          else
+              tag=$(jq -r '.tag // "$(params.tag)"' <<< $component)
           fi
 
           source_digest=$(skopeo inspect \

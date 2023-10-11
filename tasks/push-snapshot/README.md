@@ -7,11 +7,17 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | Name            | Description                                                                                     | Optional | Default value        |
 |-----------------|-------------------------------------------------------------------------------------------------|----------|----------------------|
 | snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace                       | Yes      | mapped_snapshot.json |
-| tag             | Default tag to use if mapping entry does not contain a tag                                      | Yes      | latest               |
+| tag             | Default tag to use if mapping entry does not contain a tag. Not used when tagPrefix is set      | Yes      | latest               |
+| tagPrefix       | The prefix used to build the tag in <prefix>-<timestamp> format                                 | Yes      | ""                   |
+| timestampFormat | Timestamp format used to build the tag when tagPrefix is set                                    | Yes      | %s                   |
 | retries         | Retry copy N times                                                                              | Yes      | 0                    |
 | addGitShaTag    | Also push a tag with the git sha for each image in the Snapshot                                 | Yes      | true                 |
 | addSourceShaTag | Also push a tag with the source sha for each image in the Snapshot                              | Yes      | true                 |
 | addTimestampTag | Also push a tag with the current timestamp for each image in the Snapshot                       | Yes      | false                |
+
+## Changes since 0.11
+* Adds `tagPrefix` parameter
+* The task now generates a tag in <prefix>-<timestamp> format when `tagPrefix` length is non zero
 
 ## Changes since 0.10
 * Update Tekton API to v1
