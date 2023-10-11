@@ -4,13 +4,13 @@ kind: Pipeline
 metadata:
   name: rh-push-to-registry-redhat-io
   labels:
-    app.kubernetes.io/version: "0.20.0"
+    app.kubernetes.io/version: "0.1.0"
   annotations:
-    tekton.dev/pipelines.minVersion: "0.1.0"
+    tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton pipeline to release content to registry.redhat.io
+    Tekton pipeline to release content to registry.redhat.io registry
   params:
     - name: release
       type: string
@@ -22,9 +22,6 @@ spec:
     - name: releaseplanadmission
       type: string
       description: The namespaced name (namespace/name) of the releasePlanAdmission
-    - name: releasestrategy
-      type: string
-      description: The namespaced name (namespace/name) of the releaseStrategy
     - name: snapshot
       type: string
       description: The namespaced name (namespace/name) of the snapshot
@@ -35,18 +32,14 @@ spec:
       type: string
       description: Public key to use for validation by the enterprise contract
       default: k8s://openshift-pipelines/public-key
-    - name: extraConfigGitUrl
+    - name: tagPrefix
       type: string
-      description: URL to the remote Git repository containing the extra config
+      description: The prefix used to build the tag in <prefix>-<timestamp> format
       default: ""
-    - name: extraConfigGitRevision
+    - name: timestampFormat
       type: string
-      description: Revision to fetch from the remote Git repository containing the extra config
-      default: ""
-    - name: extraConfigPath
-      type: string
-      description: Path to the extra config file within the repository
-      default: ""
+      description: Timestamp format used to build the tag when tagPrefix is set
+      default: "%s"
     - name: tag
       type: string
       description: The default tag to use when mapping file does not contain a tag
@@ -62,13 +55,6 @@ spec:
       type: string
       description: When pushing the snapshot components, also push a tag with the current timestamp
       default: "false"
-    - name: pyxisServerType
-      type: string
-      description: The Pyxis server type to use. Options are 'production' and 'stage'
-    - name: pyxisSecret
-      type: string
-      description: |
-        The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert
     - name: postCleanUp
       type: string
       description: Cleans up workspace after finishing executing the pipeline
@@ -155,8 +141,6 @@ spec:
           value: $(params.releaseplan)
         - name: releaseplanadmission
           value: $(params.releaseplanadmission)
-        - name: releasestrategy
-          value: $(params.releasestrategy)
         - name: snapshot
           value: $(params.snapshot)
         - name: subdirectory
@@ -166,30 +150,6 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-access-to-resources
-    - name: clone-config-file
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: https://github.com/redhat-appstudio/build-definitions.git
-          - name: revision
-            value: dedce1f59906394ea777606683eec9eb2de465ac
-          - name: pathInRepo
-            value: task/git-clone/0.1/git-clone.yaml
-      when:
-        - input: $(params.extraConfigGitUrl)
-          operator: notin
-          values: [""]
-      params:
-        - name: url
-          value: $(params.extraConfigGitUrl)
-        - name: revision
-          value: $(params.extraConfigGitRevision)
-        - name: subdirectory
-          value: "$(context.pipelineRun.uid)/extraConfig"
-      workspaces:
-        - name: output
-          workspace: release-workspace
     - name: apply-mapping
       taskRef:
         resolver: "git"
@@ -201,16 +161,10 @@ spec:
           - name: pathInRepo
             value: tasks/apply-mapping/apply-mapping.yaml
       params:
-        - name: extraConfigPath
-          value: "$(context.pipelineRun.uid)/extraConfig/$(params.extraConfigPath)"
         - name: failOnEmptyResult
           value: "true"
         - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
-      when:
-        - input: $(tasks.clone-config-file.results.commit)
-          operator: notin
-          values: [""]
       workspaces:
         - name: config
           workspace: release-workspace
@@ -255,6 +209,10 @@ spec:
           - name: pathInRepo
             value: tasks/push-snapshot/push-snapshot.yaml
       params:
+        - name: tagPrefix
+          value: $(params.tagPrefix)
+        - name: timestampFormat
+          value: $(params.timestampFormat)
         - name: tag
           value: $(params.tag)
         - name: addGitShaTag
@@ -270,6 +228,24 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-enterprise-contract
+    - name: collect-pyxis-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/redhat-appstudio/release-service-catalog.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/collect-pyxis-params/collect-pyxis-params.yaml
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - collect-data
     - name: create-pyxis-image
       taskRef:
         resolver: "git"
@@ -282,9 +258,9 @@ spec:
             value: tasks/create-pyxis-image/create-pyxis-image.yaml
       params:
         - name: server
-          value: $(params.pyxisServerType)
+          value: $(tasks.collect-pyxis-params.results.server)
         - name: pyxisSecret
-          value: $(params.pyxisSecret)
+          value: $(tasks.collect-pyxis-params.results.secret)
         - name: tag
           value: $(params.tag)
         - name: snapshotPath
@@ -308,9 +284,9 @@ spec:
         - name: containerImageIDs
           value: $(tasks.create-pyxis-image.results.containerImageIDs)
         - name: server
-          value: $(params.pyxisServerType)
+          value: $(tasks.collect-pyxis-params.results.server)
         - name: pyxisSecret
-          value: $(params.pyxisSecret)
+          value: $(tasks.collect-pyxis-params.results.secret)
         - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
       workspaces:
