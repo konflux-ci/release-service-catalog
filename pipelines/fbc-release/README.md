@@ -4,37 +4,40 @@ Tekton release pipeline to interact with FBC Pipeline
 
 ## Parameters
 
-| Name | Description | Optional | Default value |
-|------|-------------|----------|---------------|
-| release | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No | - |
-| releaseplan | The namespaced name (namespace/name) of the releasePlan | No | - |
-| releaseplanadmission | The namespaced name (namespace/name) of the releasePlanAdmission | No | - |
-| snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
-| enterpriseContractPolicy | JSON representation of the EnterpriseContractPolicy | No | - |
-| enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
-| fromIndex | The source Index image (catalog of catalogs) FBC fragment | No | - |
-| targetIndex | Index image (catalog of catalogs) the FBC fragment will be added to | No | - |
-| binaryImage | OCP binary image to be baked into the index image | Yes | "" |
-| buildTags | List of additional tags the internal index image copy should be tagged with | Yes | "[]" |
-| addArches | List of arches the index image should be built for | Yes | "[]" |
-| signingConfigMapName | The ConfigMap to be used by the signing Pipeline | Yes | "hacbs-signing-pipeline-config" |
-| iibServiceConfigSecret | Secret that contains IIB's service configuration | Yes | "iib-services-config" |
-| iibOverwriteFromIndexCredential | Secret that stores IIB's overwrite_from_index_token parameter value | Yes | "iib-overwrite-fromimage-credentials" |
-| fbcPublishingCredentials | Secret used to publish the built index image | Yes | "fbc-publishing-credentials" |
-| requestUpdateTimeout | Max seconds to wait until the status is updated | Yes | - |
-| buildTimeoutSeconds | Max seconds to wait until the build finishes | Yes | - |
-| verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
+| Name                            | Description                                                                                              | Optional  | Default value                                   |
+|---------------------------------|----------------------------------------------------------------------------------------------------------|-----------|-------------------------------------------------|
+| release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution   | No        | -                                               |
+| releaseplan                     | The namespaced name (namespace/name) of the releasePlan                                                  | No        | -                                               |
+| releaseplanadmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                         | No        | -                                               |
+| snapshot                        | The namespaced name (namespace/name) of the snapshot                                                     | No        | -                                               |
+| enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                      | No        | -                                               |
+| enterpriseContractPublicKey     | Public key to use for validation by the enterprise contract                                              | Yes       | k8s://openshift-pipelines/public-key            |
+| fromIndex                       | The source Index image (catalog of catalogs) FBC fragment                                                | No        | -                                               |
+| targetIndex                     | Index image (catalog of catalogs) the FBC fragment will be added to                                      | No        | -                                               |
+| binaryImage                     | OCP binary image to be baked into the index image                                                        | Yes       | ""                                              |
+| buildTags                       | List of additional tags the internal index image copy should be tagged with                              | Yes       | "[]"                                            |
+| addArches                       | List of arches the index image should be built for                                                       | Yes       | "[]"                                            |
+| signingConfigMapName            | The ConfigMap to be used by the signing Pipeline                                                         | Yes       | "hacbs-signing-pipeline-config-openshifthosted" |
+| iibServiceConfigSecret          | Secret that contains IIB's service configuration                                                         | Yes       | "iib-services-config"                           |
+| iibOverwriteFromIndexCredential | Secret that stores IIB's overwrite_from_index_token parameter value                                      | Yes       | "iib-overwrite-fromimage-credentials"           |
+| fbcPublishingCredentials        | Secret used to publish the built index image                                                             | Yes       | "fbc-publishing-credentials"                    |
+| requestUpdateTimeout            | Max seconds to wait until the status is updated                                                          | Yes       | -                                               |
+| buildTimeoutSeconds             | Max seconds to wait until the build finishes                                                             | Yes       | -                                               |
+| verify_ec_task_git_url          | The git repo url of the verify-enterprise-contract task                                                  | No        | -                                               |
+| verify_ec_task_git_revision     | The git repo revision the verify-enterprise-contract task                                                | No        | -                                               |
+| verify_ec_task_git_pathInRepo   | The location of the verify-enterprise-contract task in its repo                                          | No        | -                                               |
 
-## Changelog since 0.24.0
+### Changes since 0.25.0
+- change default value of signingConfigMapName
+
+### Changelog since 0.24.0
 - Remove releasestrategy parameter
 
 ### Changes since 0.23.0
 - adds new tasks `validate-single-component` to validate that the 
   snapshot only contains a single component. The pipeline should fail otherwise.
 
-## Changes since 0.22.0
+### Changes since 0.22.0
 - Introduce new initial task - verify-access-to-resources
   - protection to verify that service accounts have required permissions to access
     resources before we start a pipeline.
