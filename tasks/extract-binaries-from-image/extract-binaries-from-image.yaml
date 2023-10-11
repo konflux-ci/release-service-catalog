@@ -1,0 +1,69 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: extract-binaries-from-image
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task that extracts binaries to be released on github.com from an image
+  params:
+    - name: image_binaries_path
+      type: string
+      description: Path inside the image where the binaries to extract are stored
+      default: "/releases"
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      default: snapshot.json
+    - name: subdirectory
+      description: Subdirectory inside the workspace to be used for storing the binaries
+      type: string
+      default: ""
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot is stored. The extracted binaries will be stored here as well.
+  results:
+    - name: binaries_path
+      type: string
+      description: The directory inside the workspace where the binaries are stored
+  steps:
+    - name: extract-binaries-from-image
+      image: quay.io/hacbs-release/release-utils:48a1cd6c939eda25382472135be4afe2c9b4b703
+      script: |
+        SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "Error: No valid snapshot file was provided."
+            exit 1
+        fi
+        IMAGE_URL=$(jq -r '.components[0].containerImage' "${SNAPSHOT_SPEC_FILE}")
+        if [ -z "${IMAGE_URL}" ] ; then
+            echo "Error: Unable to get image url from snapshot."
+            exit 1
+        fi
+
+        BINARIES_DIR=binaries
+        BINARIES_PATH=$(workspaces.data.path)/$(params.subdirectory)/$BINARIES_DIR
+        mkdir -p $BINARIES_PATH
+
+        TMP_DIR=$(mktemp -d)
+        skopeo copy docker://$IMAGE_URL dir:$TMP_DIR
+
+        cd $TMP_DIR
+
+        for DIGEST in $(jq -r ".layers[].digest" manifest.json)
+        do
+            FILE=${DIGEST#sha256:}
+            tar -xzvf $FILE "$IMAGE_PATH"
+        done
+
+        cp "$IMAGE_PATH"/* $BINARIES_PATH/
+
+        echo -n $(params.subdirectory)/$BINARIES_DIR | tee $(results.binaries_path.path)
+      env:
+        - name: "IMAGE_PATH"
+          value: '$(params.image_binaries_path)'
