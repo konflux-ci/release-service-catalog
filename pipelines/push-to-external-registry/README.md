@@ -12,14 +12,14 @@ Tekton pipeline to push images to an external registry.
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
-| tag | The default tag to use when mapping file does not contain a tag | No | - |
-| addGitShaTag | When pushing the snapshot components, also push a tag with the image git sha | Yes | true |
-| addSourceShaTag | When pushing the snapshot components, also push a tag with the image source sha | Yes | true |
-| addTimestampTag | When pushing the snapshot components, also push a tag with the current timestamp | Yes | false |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
+
+## Changes since 0.23.0
+- Removed tag, addGitShaTag, addSourceShaTag, addTimestampTag parameters
+  - These are now provided in the data json that is collected in the collect-data task
 
 ## Changes since 0.22.0
 - Remove extraConfig parameters as the information is now passed in the RPA data field
