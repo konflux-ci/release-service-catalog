@@ -14,9 +14,15 @@ by a new line.
 | server | The server type to use. Options are 'production' and 'stage' | Yes | production |
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | certified | If set to true, the images will be marked as certified in their Pyxis entries | Yes | false |
-| tag | The tag to use when pushing the container image metadata to Pyxis | No | - |
 | isLatest | If set to true, the images will have a latest tag added with their Pyxis entries | Yes | false |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace | Yes | data.json |
+
+## Changes since 0.5
+* The tag parameter is removed
+  * The default tag is now provided by the 'images.defaultTag' key in the data JSON file as the pipeline parameter will
+    no longer be passed.
+  * dataPath parameter to point to the data JSON file in the data workspace was added.
 
 ## Changes since 0.4
 * Update Tekton API to v1
