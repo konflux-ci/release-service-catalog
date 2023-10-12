@@ -2,7 +2,7 @@
 
 * Tekton pipeline based on "push-to-external-registry".
 * In addition, it creates a GH pull request in infra-deployments.
-  * The parameter in extraData.infra-deployment-update-script within the ReleasePlanAdmission CR is used to optionally specify a script that can alter files before a PR is created.
+  * The parameter in data.infra-deployment-update-script within the ReleasePlanAdmission CR is used to optionally specify a script that can alter files before a PR is created.
 
 ## Parameters
 
@@ -14,14 +14,16 @@
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
-| tag | The default tag to use when mapping file does not contain a tag | No | - |
-| addGitShaTag | When pushing the snapshot components, also push a tag with the image git sha | Yes | true |
-| addSourceShaTag | When pushing the snapshot components, also push a tag with the image source sha | Yes | true |
-| addTimestampTag | When pushing the snapshot components, also push a tag with the current timestamp | Yes | false |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
+
+## Changes 0.9.0
+- Removed tag, addGitShaTag, addSourceShaTag, addTimestampTag parameters
+  - These are now provided in the data json that is collected in the collect-data task
+- slack-webhook-notification and update-infra-deployments task now accept dataJsonPath instead of
+  extraDataJsonPath. This is due to a change in the ReleasePlanAdmission API
 
 ## Changes since 0.8.0
 - Remove extraConfig parameters as the information is now passed in the RPA data field
