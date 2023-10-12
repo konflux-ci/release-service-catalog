@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "0.12.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -16,41 +16,21 @@ spec:
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
       default: "mapped_snapshot.json"
-    - name: tag
-      description: Default tag to use if mapping entry does not contain a tag. Not used when tagPrefix is set
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-      default: "latest"
-    - name: tagPrefix
-      description: The prefix used to build the tag in <prefix>-<timestamp> format
-      type: string
-      default: ""
-    - name: timestampFormat
-      description: Timestamp format used to build the tag when tagPrefix is set
-      type: string
-      default: "%s"
+      default: "data.json"
     - name: retries
       description: Retry copy N times.
       type: string
       default: "0"
-    - name: addGitShaTag
-      description: Also push a tag with the git sha for each image in the Snapshot
-      type: string
-      default: "true"
-    - name: addSourceShaTag
-      description: Also push a tag with the source sha for each image in the Snapshot
-      type: string
-      default: "true"
-    - name: addTimestampTag
-      description: Also push a tag with the current timestamp for each image in the Snapshot
-      type: string
-      default: "false"
   results:
     - name: commonTag
       type: string
-      description: Common tag for downstream tasks. Only set if tagPrefix length is nonzero
+      description: Common tag for downstream tasks. Only set if tagPrefix length in the data JSON is nonzero
   workspaces:
     - name: data
-      description: The workspace where the snapshot spec json file resides
+      description: The workspace where the snapshot spec and data json files reside
   steps:
     - name: push-snapshot
       image:
@@ -78,9 +58,16 @@ spec:
             exit 1
         fi
 
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
         prefixedTag=""
-        if [ -n "$(params.tagPrefix)" ]; then
-            prefixedTag="$(params.tagPrefix)-$(date "+$(params.timestampFormat)")"
+        timestampFormat=$(jq -r '.images.timestampFormat // "%s"' $DATA_FILE)
+        if [ $(jq '.images | has("tagPrefix")' $DATA_FILE) == true ]; then
+            prefixedTag="$(jq -r '.images.tagPrefix' $DATA_FILE)-$(date "+$timestampFormat")"
         fi
         echo -n "${prefixedTag}" > $(results.commonTag.path)
 
@@ -105,7 +92,8 @@ spec:
           if [ -n "${prefixedTag}" ] ; then
               tag="${prefixedTag}"
           else
-              tag=$(jq -r '.tag // "$(params.tag)"' <<< $component)
+              defaultTag=$(jq -r '.images.defaultTag // "latest"' "${DATA_FILE}")
+              tag=$(jq -r '.tag // "${defaultTag}"' <<< $component)
           fi
 
           source_digest=$(skopeo inspect \
@@ -120,11 +108,11 @@ spec:
             "docker://${repository}:${tag}" 2>/dev/null || true)
           if [[ "$destination_digest" != "$source_digest" || -z "$destination_digest" ]]; then
             push_image "${name}" "${containerImage}" "${repository}" "${tag}"
-            if [ $(params.addTimestampTag) = true ] ; then
+            if [[ $(jq -r ".images.addTimestampTag" "${DATA_FILE}") == "true" ]] ; then # Default to false
               timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
               push_image "${name}" "${containerImage}" "${repository}" "$timestamp"
             fi
-            if [ $(params.addGitShaTag) = true ] ; then
+            if [[ $(jq -r ".images.addGitShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
               if [ "${git_sha}" != "null" ] ; then
                 push_image "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}"
                 push_image "${name}" "${containerImage}" "${repository}" "${git_sha}"
@@ -133,7 +121,7 @@ spec:
                 exit 1
               fi
             fi
-            if [ $(params.addSourceShaTag) = true ] ; then
+            if [[ $(jq -r ".images.addSourceShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
               if [[ "${containerImage}" == *"@sha256"* && $(echo "${containerImage}" | tr -cd ':' | wc -c) -eq 1 ]]
               then
                 sha=$(echo "${containerImage}" | cut -d ':' -f 2)
