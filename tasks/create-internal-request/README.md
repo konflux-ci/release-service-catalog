@@ -8,12 +8,20 @@ Creates an InternalRequest resource to call IIB service
 |------|-------------|----------|---------------|
 | pipelineRunName | The name of the Parent PipelineRun for this task | No | `ir-$(context.pipelineRun.name)` |
 | request | Internal pipeline request name | No | |
-| params | Internal Request parameters | No | |
+| internalRequestParams | Internal Request parameters | No | |
+| dataPath | Path to the JSON file of the merged data to use in the data workspace | Yes | "data.json" |
 | inputDataFile | Optional file to read data from | Yes | "" |
 | updateGenericResult | Should the task update the genericResult result  | Yes | "false" |
 | requestUpdateTimeout | Max seconds to wait until the status is updated | Yes | 360 |
+| subdirectory | Subdirectory inside the workspace to be used | Yes | "" |
 
 ## Changelog
+
+### changes since 0.8
+- add parameter `dataPath` to support data JSON file
+- add step `merge-internal-request-parameters` to merge data from data.json
+  with the internal-request parameters
+- modify step `prepare-internal-request` to read the data from `data.json`
 
 ### changes since 0.7
 - update Tekton API to v1

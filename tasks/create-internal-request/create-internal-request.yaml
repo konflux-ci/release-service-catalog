@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-internal-request
   labels:
-    app.kubernetes.io/version: "0.8.0"
+    app.kubernetes.io/version: "0.9.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -18,9 +18,13 @@ spec:
     - name: request
       type: string
       description: request type
-    - name: params
+    - name: internalRequestParams
       type: string
       description: Internal Request parameters
+    - name: dataPath
+      description: Path to the JSON file of the merged data to use in the data workspace
+      type: string
+      default: "data.json"
     - name: inputDataFile
       type: string
       description: Optional file to read data from
@@ -28,10 +32,6 @@ spec:
     - name: updateGenericResult
       default: "false"
       description: Should the task update the genericResult result
-    - name: requestUpdateTimeout
-      type: string
-      default: "360"
-      description: Max seconds waiting for the status update
     - name: subdirectory
       description: Subdirectory inside the workspace to be used
       type: string
@@ -50,9 +50,46 @@ spec:
       type: string
       description: genericResult field from the InternalRequest Status to expose to the PipelineRun
   workspaces:
-    - name: input
+    - name: data
       description: Workspace to store the params and responses for the internalRequest
   steps:
+    - name: merge-internal-request-parameters
+      image:
+        quay.io/hacbs-release/release-utils@sha256:5733ece907aa70d6ebced36484c936731e8b27bfcf87fed226a0ecf95047a6b8
+      script: |
+          #!/usr/bin/env bash
+          DATA_FILE="$(workspaces.data.path)/$(params.subdirectory)/$(params.dataPath)"
+          if [ ! -f "${DATA_FILE}" ] ; then
+            echo "Data JSON file does not exist: ${DATA_FILE}"
+            exit 1
+          fi
+
+          IR_PARAMS_FILE="$(workspaces.data.path)/$(params.subdirectory)/ir-params-$$.txt"
+          cat > ${IR_PARAMS_FILE} <<JSON
+          $(params.internalRequestParams)
+          JSON
+
+          # the data json should be merged with the internalrequest parameters
+          JSON_PARAMS="$(jq -c '.' ${IR_PARAMS_FILE})"
+          ARRAY_PARAMS=$(jq -c '.fbc | [ to_entries[] | { name: .key, value } ]' \
+            $(workspaces.data.path)/$(params.subdirectory)/$(params.dataPath))
+          ARRAY_PARAMS_LENGTH=$(jq '. | length' <<< "${ARRAY_PARAMS}")
+
+          INDEX=$(jq '. | length' ${IR_PARAMS_FILE})
+          for(( i=0; i<$ARRAY_PARAMS_LENGTH; i++ )); do
+            PARAM=$(jq -r ".[${i}].name" <<< "${ARRAY_PARAMS}")
+            VALUE=$(jq -r ".[${i}].value" <<< "${ARRAY_PARAMS}")
+
+            # parameters from the task should replace the ones from the data.json
+            if [[ -n $(jq ".[] | select(.name==\"${PARAM}\")" $IR_PARAMS_FILE) ]]; then
+              continue
+            fi
+
+            JSON_PARAMS=$(jq ".[${INDEX}] += {name: \"${PARAM}\", value: \"$(echo ${VALUE})\"}" \
+              <<< "${JSON_PARAMS}")
+            let INDEX=$(( INDEX + 1 ))
+          done
+          echo $JSON_PARAMS > $(workspaces.data.path)/$(params.subdirectory)/prepared-json-params.txt
     - name: prepare-internal-request
       image:
         quay.io/hacbs-release/release-utils@sha256:5733ece907aa70d6ebced36484c936731e8b27bfcf87fed226a0ecf95047a6b8
@@ -85,17 +122,14 @@ spec:
           }
 
           # saving the parameters preserving the string as is
-          JSON_PARAMS="/tmp/json-params-$$.txt"
-          cat > ${JSON_PARAMS} <<JSON
-          $(params.params)
-          JSON
+          JSON_PARAMS="$(workspaces.data.path)/$(params.subdirectory)/prepared-json-params.txt"
 
           # sanitizing the string
           sanitize ${JSON_PARAMS}
 
           # building the InternalRequest yaml
           #
-          IR_DIR="$(workspaces.input.path)/$(params.subdirectory)/internal-request"
+          IR_DIR="$(workspaces.data.path)/$(params.subdirectory)/internal-request"
           [ -d "${IR_DIR}" ] || mkdir ${IR_DIR}
           IR="${IR_DIR}/ir-$(params.pipelineRunName)-$(context.taskRun.uid).yaml"
           cat > ${IR} <<YAML
@@ -139,7 +173,7 @@ spec:
           PATH=/bin:/usr/bin:/usr/local/bin
           export PATH
 
-          IR_DIR="$(workspaces.input.path)/$(params.subdirectory)/internal-request"
+          IR_DIR="$(workspaces.data.path)/$(params.subdirectory)/internal-request"
           IR="${IR_DIR}/ir-$(params.pipelineRunName)-$(context.taskRun.uid).yaml"
           kubectl create -f ${IR}
     - name: watch-internal-request-status
@@ -149,12 +183,13 @@ spec:
           #!/usr/bin/env sh
           PATH=/bin:/usr/bin:/usr/local/bin
           TASKRUN="/tmp/$$.sh"
+          JSON_PARAMS="$(workspaces.data.path)/$(params.subdirectory)/prepared-json-params.txt"
 
           cat > ${TASKRUN} <<SH
           #!/usr/bin/env sh
           #
           # the task might need to get input from a shared file
-          IR_DIR="$(workspaces.input.path)/$(params.subdirectory)/internal-request"
+          IR_DIR="$(workspaces.data.path)/$(params.subdirectory)/internal-request"
           RESULTSFILE="\${IR_DIR}/$(params.pipelineRunName)-$(context.taskRun.uid)-results.txt"
           echo -n \${RESULTSFILE} |tee $(results.requestResultsFile.path)
 
@@ -185,7 +220,7 @@ spec:
             jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}') == "Succeeded" ]
           SH
           chmod +x ${TASKRUN}
-          timeout $(params.requestUpdateTimeout) ${TASKRUN}
+          timeout $(jq -cr '.[]| select(.name=="requestUpdateTimeout") |.value' ${JSON_PARAMS}) ${TASKRUN}
           SYSEXIT=$?
           [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the internal request update"
           exit ${SYSEXIT}
