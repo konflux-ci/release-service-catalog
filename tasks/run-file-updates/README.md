@@ -1,19 +1,22 @@
 # run-file-udpates
 
 Tekton task to create InternalRequests for each repository that needs to be updated. This information is extracted from
-the field `spec.extraData.fileUpdates` in the ReleasePlanAdmission resource.
+the field `spec.data.fileUpdates` in the ReleasePlanAdmission resource.
 
 ## Parameters
 
-| Name            | Description                                                   | Optional | Default value                 |
-|-----------------|---------------------------------------------------------------|----------|-------------------------------|
-| jsonKey         | JSON key where the information is defined                     | Yes      | .spec.extraData.fileUpdates[] |
-| fileUpdatesPath | Path to the JSON file containing the key                      | No       |                               |
-| snapshotPath    | Path to the JSON string of the Snapshot spec in the data workspace | No | snapshot_spec.json |
-| request         | Type of request to be created                                 | Yes      | file-updates                  |
-| synchronously   | Whether the task should wait for InternalRequests to complete | Yes      | true                          |
+| Name            | Description                                                        | Optional | Default value            |
+|-----------------|--------------------------------------------------------------------|----------|--------------------------|
+| jsonKey         | JSON key where the information is defined                          | Yes      | .spec.data.fileUpdates[] |
+| fileUpdatesPath | Path to the JSON file containing the key                           | No       |                          |
+| snapshotPath    | Path to the JSON string of the Snapshot spec in the data workspace | No       | snapshot_spec.json       |
+| request         | Type of request to be created                                      | Yes      | file-updates             |
+| synchronously   | Whether the task should wait for InternalRequests to complete      | Yes      | true                     |
 
 ## Changelog
+
+### Changes since 0.4.1
+- jsonKey default changed to .spec.data.fileUpdates{} due to API changes
 
 ### changes since 0.3
 - update Tekton API to v1
