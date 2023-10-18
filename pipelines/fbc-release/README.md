@@ -12,20 +12,16 @@ Tekton release pipeline to interact with FBC Pipeline
 | snapshot                        | The namespaced name (namespace/name) of the snapshot                                                     | No        | -                                               |
 | enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                      | No        | -                                               |
 | enterpriseContractPublicKey     | Public key to use for validation by the enterprise contract                                              | Yes       | k8s://openshift-pipelines/public-key            |
-| fromIndex                       | The source Index image (catalog of catalogs) FBC fragment                                                | No        | -                                               |
-| targetIndex                     | Index image (catalog of catalogs) the FBC fragment will be added to                                      | No        | -                                               |
-| binaryImage                     | OCP binary image to be baked into the index image                                                        | Yes       | ""                                              |
-| buildTags                       | List of additional tags the internal index image copy should be tagged with                              | Yes       | "[]"                                            |
-| addArches                       | List of arches the index image should be built for                                                       | Yes       | "[]"                                            |
-| signingConfigMapName            | The ConfigMap to be used by the signing Pipeline                                                         | Yes       | "hacbs-signing-pipeline-config-openshifthosted" |
-| iibServiceConfigSecret          | Secret that contains IIB's service configuration                                                         | Yes       | "iib-services-config"                           |
-| iibOverwriteFromIndexCredential | Secret that stores IIB's overwrite_from_index_token parameter value                                      | Yes       | "iib-overwrite-fromimage-credentials"           |
-| fbcPublishingCredentials        | Secret used to publish the built index image                                                             | Yes       | "fbc-publishing-credentials"                    |
-| requestUpdateTimeout            | Max seconds to wait until the status is updated                                                          | Yes       | -                                               |
-| buildTimeoutSeconds             | Max seconds to wait until the build finishes                                                             | Yes       | -                                               |
 | verify_ec_task_git_url          | The git repo url of the verify-enterprise-contract task                                                  | No        | -                                               |
 | verify_ec_task_git_revision     | The git repo revision the verify-enterprise-contract task                                                | No        | -                                               |
 | verify_ec_task_git_pathInRepo   | The location of the verify-enterprise-contract task in its repo                                          | No        | -                                               |
+| postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                            |
+
+### Changes since 0.26.0
+- change pipeline and tasks definitions to support usage of data JSON file
+- remove parameters `fromIndex`, `targetIndex`, `binaryImage`, `buildTags`, `addArches`
+  `signingConfigMapName`, `iibServiceConfigSecret`, `iibOverwriteFromIndexCredential`,
+  `fbcPublishingCredentials`, `requestUpdateTimeout` and `buildTimeoutSeconds`
 
 ### Changes since 0.25.0
 - change default value of signingConfigMapName

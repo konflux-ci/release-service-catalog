@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: fbc-release
   labels:
-    app.kubernetes.io/version: "0.26.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -32,46 +32,6 @@ spec:
       type: string
       description: Public key to use for validation by the enterprise contract
       default: k8s://openshift-pipelines/public-key
-    - name: fromIndex
-      type: string
-      description: The source Index image (catalog of catalogs) FBC fragment
-    - name: targetIndex
-      type: string
-      description: Index image (catalog of catalogs) the FBC fragment will be added to
-    - name: binaryImage
-      type: string
-      default: ""
-      description: OCP binary image to be baked into the index image
-    - name: buildTags
-      type: string
-      default: "[]"
-      description: List of additional tags the internal index image copy should be tagged with
-    - name: addArches
-      type: string
-      default: "[]"
-      description: List of arches the index image should be built for
-    - name: signingConfigMapName
-      type: string
-      default: "hacbs-signing-pipeline-config-openshifthosted"
-      description: The ConfigMap to be used by the signing Pipeline
-    - name: iibServiceConfigSecret
-      default: "iib-services-config"
-      type: string
-      description: Secret that contains IIB's service configuration
-    - name: iibOverwriteFromIndexCredential
-      default: "iib-overwrite-fromimage-credentials"
-      type: string
-      description: Secret that stores IIB's overwrite_from_index_token parameter value
-    - name: fbcPublishingCredentials
-      type: string
-      default: "fbc-publishing-credentials"
-      description: Secret used to publish the built index image
-    - name: requestUpdateTimeout
-      type: string
-      description: Max seconds to wait until the status is updated
-    - name: buildTimeoutSeconds
-      type: string
-      description: Max seconds to wait until the build finishes
     - name: verify_ec_task_git_url
       type: string
       description: The git repo url of the verify-enterprise-contract task
@@ -242,6 +202,9 @@ spec:
       runAfter:
         - verify-enterprise-contract
     - name: update-ocp-tag
+      workspaces:
+        - name: data
+          workspace: release-workspace
       taskRef:
         resolver: "git"
         params:
@@ -252,17 +215,13 @@ spec:
           - name: pathInRepo
             value: tasks/update-ocp-tag/update-ocp-tag.yaml
       params:
-        - name: fromIndex
-          value: "$(params.fromIndex)"
-        - name: targetIndex
-          value: "$(params.targetIndex)"
-        - name: binaryImage
-          value: "$(params.binaryImage)"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
         - name: ocpVersion
           value: "$(tasks.get-ocp-version.results.stored-version)"
     - name: add-fbc-contribution-to-index-image
       workspaces:
-        - name: input
+        - name: data
           workspace: release-workspace
       taskRef:
         resolver: "git"
@@ -282,24 +241,12 @@ spec:
           value: "true"
         - name: subdirectory
           value: $(context.pipelineRun.uid)
-        - name: requestUpdateTimeout
-          value: "$(params.requestUpdateTimeout)"
-        - name: params
+        - name: internalRequestParams
           value:
             - name: binaryImage
               value: "$(tasks.update-ocp-tag.results.updated-binaryImage)"
             - name: fromIndex
               value: "$(tasks.update-ocp-tag.results.updated-fromIndex)"
-            - name: buildTags
-              value: "$(params.buildTags)"
-            - name: addArches
-              value: "$(params.addArches)"
-            - name: buildTimeoutSeconds
-              value: "$(params.buildTimeoutSeconds)"
-            - name: iibServiceConfigSecret
-              value: "$(params.iibServiceConfigSecret)"
-            - name: iibOverwriteFromIndexCredential
-              value: "$(params.iibOverwriteFromIndexCredential)"
             - name: fbcFragment
               value: "$(tasks.collect-data.results.fbcFragment)"
       runAfter:
@@ -333,7 +280,7 @@ spec:
         - verify-access-to-resources
     - name: sign-index-image
       workspaces:
-        - name: input
+        - name: data
           workspace: release-workspace
       taskRef:
         resolver: "git"
@@ -353,26 +300,24 @@ spec:
           value: "hacbs-signing-pipeline"
         - name: subdirectory
           value: $(context.pipelineRun.uid)
-        - name: params
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: internalRequestParams
           value:
             - name: manifest_digest
               value: "sharedRequestFile:json:.jsonBuildInfo"
               jsonKey: ".index_image_resolved"
             - name: pipeline_image
               value: "quay.io/redhat-isv/operator-pipelines-images:released"
-            - name: reference
-              value: $(params.targetIndex)
             - name: requester
               value: $(tasks.extract-requester-from-release.results.output-result)
-            - name: config_map_name
-              value: $(params.signingConfigMapName)
       when:
         - input: "$(tasks.add-fbc-contribution-to-index-image.results.genericResult)"
           operator: in
           values: ["fbc_opt_in=true"]
     - name: extract-index-image
       workspaces:
-        - name: input
+        - name: data
           workspace: release-workspace
       taskRef:
         resolver: "git"
@@ -388,7 +333,7 @@ spec:
           value: $(tasks.add-fbc-contribution-to-index-image.results.requestResultsFile)
     - name: publish-index-image
       workspaces:
-        - name: input
+        - name: data
           workspace: release-workspace
       taskRef:
         resolver: "git"
@@ -408,15 +353,15 @@ spec:
           value: "publish-index-image-pipeline"
         - name: subdirectory
           value: $(context.pipelineRun.uid)
-        - name: params
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: internalRequestParams
           value:
             - name: sourceIndex
               value: "sharedRequestFile:json:.jsonBuildInfo"
               jsonKey: ".index_image_resolved"
             - name: targetIndex
               value: $(tasks.update-ocp-tag.results.updated-targetIndex)
-            - name: publishingCredentials
-              value: $(params.fbcPublishingCredentials)
             - name: retries
               value: "0"
       when:
