@@ -1,9 +1,9 @@
 # collect-data
 
-Tekton task to collect the information added to the extraData field of the release resources.
+Tekton task to collect the information added to the data field of the release resources.
 
-The purpose of this task is to collect all the extra data and supply it to the other task in the pipeline by creating
-a json file called `extra-data.json` in the workspace.
+The purpose of this task is to collect all the data and supply it to the other task in the pipeline by creating
+a json file called `data.json` in the workspace.
 
 This task also stores the passed resources as json files in a workspace.
 
@@ -22,6 +22,10 @@ also a task result for the fbcFragment extracted from the snapshot's first compo
 | releaseplanadmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes since 1.0.0
+  * Replace all references to extraData with data due to change in the Release CRDs
+  * Bump the image used in the task to get a bug fix in the merge-json script
 
 ## Changes since 0.4
   * Remove releasestrategy param and result from the task
