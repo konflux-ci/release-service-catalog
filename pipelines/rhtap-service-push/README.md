@@ -19,6 +19,9 @@
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
+## Changes since 1.0.0
+- Added parameter for releasePlanAdmissionPath to apply-mapping as the file is in a subdirectory
+
 ## Changes 0.9.0
 - Removed tag, addGitShaTag, addSourceShaTag, addTimestampTag parameters
   - These are now provided in the data json that is collected in the collect-data task
