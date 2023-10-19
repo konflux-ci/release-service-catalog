@@ -1,0 +1,149 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-internal-request
+spec:
+  description: |
+    Run the create-advisory-internal-request task and verify the internalrequest was created with the proper params
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/hacbs-release/release-utils:6e92a6f8df8ef1cbecfb4c25b73ec6d92bded527
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              cat > $(workspaces.data.path)/test_release_plan_admission.json << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlanAdmission",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "applications": [
+                    "app"
+                  ],
+                  "policy": "policy",
+                  "pipelineRef": {
+                    "resolver": "git",
+                    "params": [
+                      {
+                        "name": "url",
+                        "value": "github.com"
+                      },
+                      {
+                        "name": "revision",
+                        "value": "main"
+                      },
+                      {
+                        "name": "pathInRepo",
+                        "value": "pipeline.yaml"
+                      }
+                    ]
+                  },
+                  "serviceAccount": "sa",
+                  "origin": "dev"
+                }
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/test_snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "repository": "repo"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "advisory": {
+                  "repo": "myrepo.com",
+                  "spec": {
+                    "foo": "bar"
+                  }
+                }
+              }
+              EOF
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: create-advisory-internal-request
+      params:
+        - name: releasePlanAdmissionPath
+          value: "test_release_plan_admission.json"
+        - name: snapshotPath
+          value: "test_snapshot_spec.json"
+        - name: dataPath
+          value: "data.json"
+        - name: synchronously
+          value: "false"
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:6e92a6f8df8ef1cbecfb4c25b73ec6d92bded527
+            script: |
+              #!/bin/sh
+              set -ex
+
+              # Count the number of InternalRequests
+              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
+              
+              # Check if the number of InternalRequests is as expected
+              if [ "$requestsCount" -ne 1 ]; then
+                echo "Unexpected number of InternalRequests. Expected: 1, Found: $requestsCount"
+                exit 1
+              fi
+
+              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+
+              # Check the request field
+              if [ "$(echo "$internalRequest" | jq -r '.spec.request' )" != "create-advisory" ]; then
+                echo "InternalRequest doesn't contain 'create-advisory' in 'request' field"
+                exit 1
+              fi
+
+              # Check the application parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.application' )" != "myapp" ]; then
+                echo "InternalRequest has the wrong application parameter"
+                exit 1
+              fi
+
+              # Check the origin parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.origin' )" != "dev" ]; then
+                echo "InternalRequest has the wrong origin parameter"
+                exit 1
+              fi
+
+              # Check the advisory_json parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.advisory_json' )" != \
+              '{"repo":"myrepo.com","spec":{"foo":"bar"}}' ]; then
+                echo "InternalRequest has the wrong advisory_json parameter"
+                exit 1
+              fi
