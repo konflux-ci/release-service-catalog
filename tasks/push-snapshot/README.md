@@ -10,6 +10,9 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries      | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes since 1.0.0
+* Fixed bug where the defaultTag was not being properly read
+
 ## Changes since 0.12
 * The tag parameters are now pulled from the images key in the data json
   * A new parameter exists called dataPath that specifies the path to the JSON string of merged data in the workspace
