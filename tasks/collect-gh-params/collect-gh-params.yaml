@@ -1,0 +1,70 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-gh-params
+  labels:
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task that collects GitHub configuration options from the data file
+  params:
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data containing the pyxis configuration options to use
+      default: data.json
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      default: mapped_snapshot.json
+    - name: binariesPath
+      description: Path to the binaries directory to release
+      type: string
+      default: binaries
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot spec json file resides
+  results:
+    - name: repository
+      type: string
+      description: "The github repository where the release should be created"
+    - name: release_version
+      type: string
+      description: "The version string of the new release"
+    - name: githubSecret
+      type: string
+      description: "The kube secret to use to authenticate to GitHub, containing one key: token"
+  steps:
+    - name: collect-gh-params
+      image:
+        quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      script: |
+        #!/usr/bin/env sh
+        set -x
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        BINARIES_PATH="$(workspaces.data.path)/$(params.binariesPath)"
+        CHECKSUMS_FILE=$(ls "$BINARIES_PATH" | grep SHA256SUMS) 
+
+        if [ $(jq '.github | has("githubSecret")' $DATA_FILE) == false ] ; then
+            echo "GitHub secret missing in data JSON file"
+            exit 1
+        fi
+
+        jq -jr '.github.githubSecret' $DATA_FILE > $(results.githubSecret.path)
+        jq -jr '.components[0].source.git.url' "${SNAPSHOT_SPEC_FILE}" > $(results.repository.path)
+        echo $CHECKSUMS_FILE | cut -d '_' -f 2 | tr -d $'\n' > $(results.release_version.path)
