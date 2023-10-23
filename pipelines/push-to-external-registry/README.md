@@ -18,7 +18,10 @@ Tekton pipeline to push images to an external registry.
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
-## Changs since 1.0.1
+## Changes since 1.1.0
+- Pass path to ReleasePlanAdmission to the apply-mapping task
+
+## Changes since 1.0.1
 - Switch back to using bundle resolvers for the verify-enterprise-contract task
 
 ## Changes since 1.0.0
