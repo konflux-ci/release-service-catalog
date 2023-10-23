@@ -28,14 +28,17 @@ function skopeo() {
   echo Mock skopeo called with: $*
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
 
-  if [[ "$*" != "inspect --no-tags --format {{.Digest}} docker://"* ]]
-  then
-    echo Error: Unexpected call
-    exit 1
+  if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://"* ]]; then
+    echo $5
+    return
+  fi
+  if [[ "$*" == "inspect --no-tags docker://"* ]]; then
+    return
   fi
 
-  # echo the docker:// image string so the task knows if two images are the same
-  echo $5
+  # If neither of the above matched, it's an unexpected call
+  echo Error: Unexpected call
+  exit 1
 }
 
 function date() {
