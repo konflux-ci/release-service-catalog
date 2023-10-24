@@ -18,6 +18,9 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
+## Changes since 1.1.0
+* Pass path to ReleasePlanAdmission to the apply-mapping task
+
 ## Changes since 1.0.0
 * Switch back to using bundle resolvers for the verify-enterprise-contract task
 
