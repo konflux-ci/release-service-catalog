@@ -1,0 +1,115 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-image-multiple-components
+spec:
+  description: Test creating internal requests to sign images
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/hacbs-release/release-utils:85ab98a7ec63c3d8d9ec3c4982ff0e581bcb3c83
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "registry.io/image0@sha256:0000",
+                    "repository": "prod-registry.io/prod-location"
+                  },
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1@sha256:0001",
+                    "repository": "prod-registry.io/prod-location"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2@sha256:0002",
+                    "repository": "prod-registry.io/prod-location"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "sign": {
+                  "request": "hacbs-signing-pipeline",
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: rh-sign-image
+      params:
+        - name: requester
+          value: testuser
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:a9603c0ae1982be5e1142d44765b1475adc7ad40
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
+
+              for((ir=0; ir<irsLength; ir++)); do
+                internalRequestName=$(jq -r ".items[$ir].metadata.name" <<< "${internalRequests}")
+                params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
+                if [ $(jq -r '.reference' <<< "${params}") != "registry.io/image${ir}@sha256:000${ir}" ]; then
+                  echo "reference does not match"
+                  exit 1
+                fi
+
+                if [ $(jq -r '.manifest_digest' <<< "${params}") != "sha256:000${ir}" ]; then
+                  echo "manifest_digest does not match"
+                  exit 1
+                fi
+
+                if [ $(jq -r '.config_map_name' <<< "${params}") != "signing-config-map" ]
+                then
+                  echo "config_map_name does not match"
+                  exit 1
+                fi
+
+                if [ $(jq -r '.requester' <<< "${params}") != "testuser" ]
+                then
+                  echo "requester does not match"
+                  exit 1
+                fi
+
+                if [ $(jq -r '.pipeline_image' <<< "${params}") != \
+                  "quay.io/redhat-isv/operator-pipelines-images:released" ]
+                then
+                  echo "pipeline_image does not match"
+                  exit 1
+                fi
+              done
+      runAfter:
+        - run-task
