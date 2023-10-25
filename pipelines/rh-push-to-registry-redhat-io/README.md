@@ -18,6 +18,11 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
+
+## Changes since 1.1.1
+* Add tasks extract-requester-from-release and rh-sign-image so the pipeline can sign
+  component images using the requester username
+
 ## Changes since 1.1.0
 * Pass path to ReleasePlanAdmission to the apply-mapping task
 
