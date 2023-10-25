@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: rh-push-to-registry-redhat-io
   labels:
-    app.kubernetes.io/version: "1.1.1"
+    app.kubernetes.io/version: "1.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -135,6 +135,33 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-access-to-resources
+    - name: extract-requester-from-release
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/redhat-appstudio/release-service-catalog.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: hub/kubernetes-actions/kubernetes-actions.yaml
+      params:
+        - name: image
+          value: "quay.io/hacbs-release/cloud-builders-kubectl\
+            @sha256:8ab94be8b2b4f3d117f02d868b39540fddd225447abf4014f7ba4765cb39f753"
+        - name: script
+          value: |
+            set -x
+
+            NAMESPACE=$(echo $(params.release) | cut -d '/' -f 1)
+            NAME=$(echo $(params.release) | cut -d '/' -f 2)
+
+            AUTHOR=$(kubectl get release ${NAME} -n ${NAMESPACE} \
+            -o=jsonpath='{.status.attribution.author}' | tee $(results.output-result.path))
+
+            if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
+      runAfter:
+        - verify-access-to-resources
     - name: apply-mapping
       taskRef:
         resolver: "git"
@@ -185,6 +212,28 @@ spec:
           workspace: release-workspace
       runAfter:
         - apply-mapping
+    - name: rh-sign-image
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/redhat-appstudio/release-service-catalog.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/rh-sign-image/rh-sign-image.yaml
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: requester
+          value: $(tasks.extract-requester-from-release.results.output-result)
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - verify-enterprise-contract
     - name: push-snapshot
       taskRef:
         resolver: "git"
@@ -204,7 +253,7 @@ spec:
         - name: data
           workspace: release-workspace
       runAfter:
-        - verify-enterprise-contract
+        - rh-sign-image
     - name: collect-pyxis-params
       taskRef:
         resolver: "git"
