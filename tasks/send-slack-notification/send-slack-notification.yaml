@@ -1,0 +1,88 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  labels:
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: "release"
+  name: send-slack-notification
+spec:
+  description: >-
+    Sends message to Slack using postMessage API
+  params:
+    - name: message
+      description: Message to be sent
+    - name: tasksStatus
+      description: status of tasks execution
+    - name: secretName
+      description: |
+        Name of secret which contains authentication token for app
+    - name: secretKeyName
+      description: |
+        Name of key within secret which contains webhook URL
+  volumes:
+    - name: slack-token
+      secret:
+        secretName: $(params.secretName)
+  steps:
+    - name: send-message
+      image: >-
+        quay.io/hacbs-release/release-utils@sha256:5733ece907aa70d6ebced36484c936731e8b27bfcf87fed226a0ecf95047a6b8
+      volumeMounts:
+        - name: slack-token
+          mountPath: "/etc/secrets"
+          readOnly: true
+      env:
+        - name: MESSAGE
+          value: $(params.message)
+        - name: KEYNAME
+          value: $(params.secretKeyName)
+        - name: TASKSSTATUS
+          value: $(params.tasksStatus)
+      script: |
+        #!/usr/bin/env sh
+        set -eux
+
+        if [ -z "${MESSAGE}" ]; then
+          echo "Message is empty - No message will be sent to Slack"
+          exit
+        fi
+
+        if [ -z "${KEYNAME}" ] ; then
+          echo "No secret key name provided via 'slack.slack-webhook-notification-secret-keyname' key in Data."
+          echo "No message will be sent to Slack"
+          exit
+        fi
+
+        if [ -f "/etc/secrets/${KEYNAME}" ]; then
+          WEBHOOK_URL=$(cat "/etc/secrets/${KEYNAME}")
+        else
+          echo "Error: Secret not defined properly. The key to use (${KEYNAME}) is defined in the Release data \
+              but the Secret does not contain the key"
+          exit 1
+        fi
+
+        # set a default for circleType
+        # circleType is the emoji that will be used in the message
+        #
+        circleType="white_circle"
+        if [ "${TASKSSTATUS}" == "Failed" ]; then
+          circleType="red_circle"
+        fi
+        if [ "${TASKSSTATUS}" == "Succeeded" ]; then
+          circleType="large_green_circle"
+        fi
+        MESSAGE=$(echo "${MESSAGE}" | sed "s/@@CIRCLE_TYPE@@/${circleType}/g")
+        MESSAGE=$(echo "${MESSAGE}" | sed "s/@@STATUS_TEXT@@/${TASKSSTATUS}/g")
+
+        cat > /tmp/release.json << EOF
+        ${MESSAGE}
+        EOF
+
+        curl  -H "Content-type: application/json" --data-binary "@/tmp/release.json"  \
+          "${WEBHOOK_URL}"
+  workspaces:
+    - name: data
+      description: The workspace where the data json file resides
