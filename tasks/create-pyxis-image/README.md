@@ -15,8 +15,19 @@ by a new line.
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | certified | If set to true, the images will be marked as certified in their Pyxis entries | Yes | false |
 | isLatest | If set to true, the images will have a latest tag added with their Pyxis entries | Yes | false |
+| rhPush | If set to true, the registry and repository entries in the Pyxis Container Image object will be converted to use Red Hat's official registry. E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted to use registry "registry.access.redhat.com" and repository "product/my-image". Also, the image
+        will be marked as published. | Yes | false |
+| commonTag | If set, the 'tag' in the Pyxis Container Image object will be set to it | Yes | "" |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
-| dataPath | Path to the JSON string of the merged data to use in the data workspace | Yes | data.json |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace. The file is only needed if commonTag parameter is empty in which case it's used to determine the tag to use. | Yes | data.json |
+
+## Changes since 1.0.0
+* Add optional `rhPush` parameter
+  * This will be used in the `rh-push-to-registry-redhat-io` to use the proper `registry` and `repository` values when
+    creating the Container Image object in Pyxis. Also, the image will be marked as published.
+* Add optional `commonTag` parameter
+  * If set, the `tag` in the Pyxis Container Image object will be set to it
+
 
 ## Changes since 0.5
 * The tag parameter is removed

@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -28,13 +28,28 @@ spec:
       type: string
       description: If set to true, the images will have a latest tag added with their Pyxis entries
       default: "false"
+    - name: rhPush
+      type: string
+      description: >
+        If set to true, the registry and repository entries in the Pyxis Container Image object will be
+        converted to use Red Hat's official registry. E.g. a mapped repository of
+        "quay.io/redhat-pending/product---my-image" will be converted to use registry
+        "registry.access.redhat.com" and repository "product/my-image". Also, the image will be
+        marked as published.
+      default: "false"
+    - name: commonTag
+      type: string
+      description: If set, the 'tag' in the Pyxis Container Image object will be set to it
+      default: ""
     - name: snapshotPath
       type: string
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       default: mapped_snapshot.json
     - name: dataPath
       type: string
-      description: Path to the JSON string of the merged data to use in the data workspace
+      description: >
+        Path to the JSON string of the merged data to use in the data workspace.
+        The file is only needed if commonTag parameter is empty in which case it's used to determine the tag to use.
       default: data.json
   workspaces:
     - name: data
@@ -45,8 +60,7 @@ spec:
       description: IDs of the created entries in Pyxis, each on its own line
   steps:
     - name: create-pyxis-image
-      image:
-        quay.io/hacbs-release/release-utils:b198ed78e14490f194f69cc33137900abe07b848
+      image: quay.io/hacbs-release/release-utils:3f444c112061fc224bc414d3f5e78b5e654729ae
       env:
         - name: pyxisCert
           valueFrom:
@@ -79,10 +93,16 @@ spec:
             exit 1
         fi
 
-        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No data JSON was provided."
-            exit 1
+        if [ -n "$(params.commonTag)" ]; then
+          TAG="$(params.commonTag)"
+        else
+          # DATA_FILE is only needed for defaultTag which is only needed if commonTag is empty
+          DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+          if [ ! -f "${DATA_FILE}" ] ; then
+              echo "No data JSON was provided."
+              exit 1
+          fi
+          TAG=$(jq -r '.images.defaultTag' "${DATA_FILE}")
         fi
 
         echo "${pyxisCert}" > /tmp/crt
@@ -96,11 +116,12 @@ spec:
             PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
               --pyxis-url $PYXIS_URL \
               --certified $(params.certified) \
-              --tag $(jq -r '.images.defaultTag' "${DATA_FILE}") \
+              --tag $TAG \
               --is-latest $(params.isLatest) \
               --verbose \
               --skopeo-result /tmp/skopeo-inspect.json \
-              --media-type "$MEDIA_TYPE" | tee /tmp/output
+              --media-type "$MEDIA_TYPE" \
+              --rh-push $(params.rhPush) | tee /tmp/output
 
             grep 'The image id is' /tmp/output | awk '{print $NF}' >> $(results.containerImageIDs.path)
         done
