@@ -1,0 +1,27 @@
+#!/usr/bin/env sh
+set -eux
+
+# mocks to be injected into task step scripts
+
+function curl() {
+  echo Mock curl called with: $* >&2
+  echo $* >> $(workspaces.data.path)/mock_curl.txt
+
+  CALL_ID=$(cat $(workspaces.data.path)/mock_curl.txt | wc -l)
+
+  if [[ "$*" == "--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/registry/${PYXIS_REGISTRY}/repository/my-product/my-image"?" -X GET" ]]
+  then
+    # condition for missing Pyxis Repository scenario
+    if [[ "$*" == *"my-image9"* ]]; then
+      echo '{"detail": "Document in containerRepository not found.", "status": 404, "title": "Not Found", "type": "about:blank", "trace_id": "0x4d7be17d142d24c5f2b10b5f1745cc89"}'
+    else
+      echo '{"_id": "'$CALL_ID'"}'
+    fi
+  elif [[ "$*" == '--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/id/'?' -X PATCH -H Content-Type: application/json --data-binary {"published": true}' ]]
+  then
+    : # no-op - do nothing
+  else
+    echo Error: Unexpected call
+    exit 1
+  fi
+}
