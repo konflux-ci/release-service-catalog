@@ -19,6 +19,11 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
 
+## Changes since 1.3.0
+* add component `pushSourceContainer` to `push-snapshot`, this will
+  enable push of the source container image and fail the pipeline if the
+  image is not available. 
+
 ## Changes since 1.2.0
 * Set rhPush and commonTag when calling create-pyxis-image task
 * Add publish-pyxis-repository task
