@@ -4,10 +4,10 @@ set -eux
 # mocks to be injected into task step scripts
 
 function create_container_image() {
-  echo Mock create_container_image called with: $* >> $(workspaces.data.path)/mock_create_container_image.txt
+  echo $* >> $(workspaces.data.path)/mock_create_container_image.txt
   echo The image id is 0000
 
-  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tag testtag --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type" ]]
+  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tag "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --rh-push "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
