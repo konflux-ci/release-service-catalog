@@ -1,0 +1,96 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: publish-pyxis-repository
+  labels:
+    app.kubernetes.io/version: "0.0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >
+    Tekton task to mark all repositories in the mapped snapshot as published in Pyxis.
+    This is currently only intended for the rh-push-to-registry-redhat-io pipeline,
+    so it will convert the values to the ones used for registry.redhat.io releases.
+    E.g. repository "quay.io/redhat-prod/my-product----my-image" will be converted
+    to use registry "registry.access.redhat.com" and repository "my-product/my-image"
+    to identify the right Container Registry object in Pyxis.
+  params:
+    - name: server
+      type: string
+      description: The server type to use. Options are 'production' and 'stage'
+      default: production
+    - name: pyxisSecret
+      type: string
+      description: |
+        The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert
+    - name: snapshotPath
+      description: Path to the JSON file containing the mapped Snapshot spec in the data workspace
+      type: string
+      default: "snapshot_spec.json"
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot spec json file resides
+  steps:
+    - name: publish-pyxis-repository
+      image: quay.io/hacbs-release/release-utils:3f444c112061fc224bc414d3f5e78b5e654729ae
+      env:
+        - name: pyxisCert
+          valueFrom:
+            secretKeyRef:
+              name: $(params.pyxisSecret)
+              key: cert
+        - name: pyxisKey
+          valueFrom:
+            secretKeyRef:
+              name: $(params.pyxisSecret)
+              key: key
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        PYXIS_REGISTRY=registry.access.redhat.com
+
+        if [[ "$(params.server)" == "production" ]]
+        then
+            PYXIS_URL="https://pyxis.api.redhat.com"
+        elif [[ "$(params.server)" == "stage" ]]
+        then
+            PYXIS_URL="https://pyxis.preprod.api.redhat.com"
+        else
+            echo "Invalid server parameter. Only 'production' and 'stage' are allowed."
+            exit 1
+        fi
+
+        echo "${pyxisCert}" > /tmp/crt
+        echo "${pyxisKey}" > /tmp/key
+
+        SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
+
+        for REPOSITORY in $(jq -r '.components[].repository' "${SNAPSHOT_SPEC_FILE}")
+        do
+            PYXIS_REPOSITORY=${REPOSITORY##*/}
+            # Replace "----" with "/"
+            PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
+            PYXIS_REPOSITORY_JSON=$(curl --retry 5 --key /tmp/key --cert /tmp/crt \
+                "${PYXIS_URL}/v1/repositories/registry/${PYXIS_REGISTRY}/repository/${PYXIS_REPOSITORY}" -X GET)
+            PYXIS_REPOSITORY_ID=$(jq -r '._id // ""' <<< $PYXIS_REPOSITORY_JSON)
+            if [ -z "$PYXIS_REPOSITORY_ID" ]; then
+                echo Error: Unable to get Container Repository object id from Pyxis
+                echo Pyxis response:
+                echo $PYXIS_REPOSITORY_JSON
+                exit 1
+            fi
+            curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
+                -X PATCH -H 'Content-Type: application/json' --data-binary '{"published": true}'
+        done
+
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"

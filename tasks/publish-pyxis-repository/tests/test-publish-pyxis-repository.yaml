@@ -1,0 +1,87 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-pyxis-repository
+spec:
+  description: |
+    Run the publish-pyxis-repository task with multiple components.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/hacbs-release/release-utils:3f444c112061fc224bc414d3f5e78b5e654729ae
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "my-app",
+                "components": [
+                  {
+                    "repository": "quay.io/redhat-prod/my-product----my-image1"
+                  },
+                  {
+                    "repository": "quay.io/redhat-prod/my-product----my-image2"
+                  },
+                  {
+                    "repository": "quay.io/redhat-prod/my-product----my-image3"
+                  }
+                ]
+              }
+              EOF
+
+    - name: run-task
+      taskRef:
+        name: publish-pyxis-repository
+      params:
+        - name: pyxisSecret
+          value: test-publish-pyxis-repository-cert
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/hacbs-release/release-utils:3f444c112061fc224bc414d3f5e78b5e654729ae
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_curl.txt | wc -l) != 6 ]; then
+                  echo Error: curl was expected to be called 6 times. Actual calls:
+                  cat $(workspaces.data.path)/mock_curl.txt
+                  exit 1
+              fi
+
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 1) \
+                  == *"/my-product/my-image1 "* ]]
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 2 | tail -n 1) \
+                  == *"/id/1 "* ]]
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 3 | tail -n 1) \
+                  == *"/my-product/my-image2 "* ]]
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 4 | tail -n 1) \
+                  == *"/id/3 "* ]]
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 5 | tail -n 1) \
+                  == *"/my-product/my-image3 "* ]]
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 6 | tail -n 1) \
+                  == *"/id/5 "* ]]
+      runAfter:
+        - run-task
