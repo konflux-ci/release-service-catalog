@@ -21,6 +21,10 @@ by a new line.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. The file is only needed if commonTag parameter is empty in which case it's used to determine the tag to use. | Yes | data.json |
 
+## Changes since 1.1.0
+* Update image used in the task
+  * The new image contains fix for missing image_id field when creating the Pyxis Container Image object
+
 ## Changes since 1.0.0
 * Add optional `rhPush` parameter
   * This will be used in the `rh-push-to-registry-redhat-io` to use the proper `registry` and `repository` values when
