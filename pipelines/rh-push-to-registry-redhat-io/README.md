@@ -16,6 +16,11 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
 
+## Changes since 1.4.0
+* The parameter `pushSourceContainer` in the `push-snapshot` task
+  was not added correctly in the previous version, the new version
+  fixes the issue.
+ 
 ## Changes since 1.3.0
 * add parameter `pushSourceContainer` to `push-snapshot`, this will
   enable push of the source container image and fail the pipeline if the
