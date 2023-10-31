@@ -14,9 +14,6 @@ Tekton pipeline to push images to an external registry.
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | Switch back to using bundle resolvers for the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
 ## Changes since 1.1.0
 - Pass path to ReleasePlanAdmission to the apply-mapping task

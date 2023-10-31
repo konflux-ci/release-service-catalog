@@ -15,9 +15,6 @@ affected by RHTAP services or which results could affect the RHTAP workflow.
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_url | The git repo url of the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_revision | The git repo revision the verify-enterprise-contract task | No | - |
-| verify_ec_task_git_pathInRepo | The location of the verify-enterprise-contract task in its repo | No | - |
 
 ## Changes since 0.1.0
 * Switch to using bundle resolvers for the verify-enterprise-contract task

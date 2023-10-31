@@ -13,9 +13,6 @@ Tekton release pipeline to interact with FBC Pipeline
 | enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                      | No        | -                                               |
 | enterpriseContractPublicKey     | Public key to use for validation by the enterprise contract                                              | Yes       | k8s://openshift-pipelines/public-key            |
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                | No        | -                                               |
-| verify_ec_task_git_url          | The git repo url of the verify-enterprise-contract task                                                  | No        | -                                               |
-| verify_ec_task_git_revision     | The git repo revision the verify-enterprise-contract task                                                | No        | -                                               |
-| verify_ec_task_git_pathInRepo   | The location of the verify-enterprise-contract task in its repo                                          | No        | -                                               |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                            |
 
 ### Changes since 1.0.0
