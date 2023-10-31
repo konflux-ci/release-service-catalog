@@ -16,6 +16,7 @@ function create_container_image() {
 }
 
 function skopeo() {
+  echo $* >> $(workspaces.data.path)/mock_skopeo.txt
   if [[ "$*" == "inspect --raw docker://"* ]]
   then
     echo '{"mediaType": "my_media_type"}'
