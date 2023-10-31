@@ -11,6 +11,9 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | pushSourceContainer| Push the source container to the mapped target                            | Yes      | false                |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes since 1.1.0
+* The source container source pullspec was updated to use a git sha tag instead of the image digest.
+
 ## Changes since 1.0.1
 * The new functionality is added to publish source containers to a given target
   * A new parameter exists called pushSourceContainer to enable/disable the source container push,
