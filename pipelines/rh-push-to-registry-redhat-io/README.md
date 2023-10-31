@@ -20,7 +20,7 @@ Tekton pipeline to release content to registry.redhat.io registry.
 
 
 ## Changes since 1.3.0
-* add component `pushSourceContainer` to `push-snapshot`, this will
+* add parameter `pushSourceContainer` to `push-snapshot`, this will
   enable push of the source container image and fail the pipeline if the
   image is not available. 
 
