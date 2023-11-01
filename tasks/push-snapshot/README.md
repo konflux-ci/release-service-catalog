@@ -8,8 +8,10 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 |--------------------|---------------------------------------------------------------------------|----------|----------------------|
 | snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | mapped_snapshot.json |
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
-| pushSourceContainer| Push the source container to the mapped target                            | Yes      | false                |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
+
+## Changes since 1.1.1
+* The pushSourceContainer parameter was removed in favor of reading it from the data.json
 
 ## Changes since 1.1.0
 * The source container source pullspec was updated to use a git sha tag instead of the image digest.
