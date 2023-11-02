@@ -16,6 +16,6 @@ the right Container Registry object in Pyxis.
 | pyxisSecret  | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No       | -                  |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | Yes      | snapshot_spec.json |
 
-## Changes since 0.1
+## Changes since 0.0.1
 
 * Minor change to logging to provide more context about the pyxis repo request on failure
