@@ -20,6 +20,12 @@ by a new line.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. The file is only needed if commonTag parameter is empty in which case it's used to determine the tag to use. | Yes | data.json |
 
+## Changes since 1.2.0
+* Create a floating tag when tagPrefix is set
+  * This is in addition to the tag tagPrefix-timestamp a.k.a. commonTag that we create in Pyxis now
+* Update image used in the task
+  * The new image supports multiple tags in the create_pyxis_image Python script
+
 ## Changes since 1.1.2
 * Update image used in the task
   * When rhPush is true, now we'll create two entries in ContainerImage.repositories - one is the normal one and the other
