@@ -16,15 +16,21 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
 
+## Changes since 1.4.2
+* Move from commonTag to commonTags
+  - The result of push-snapshot was renamed to commonTags and now it contains both the fixed and floating
+    tags, e.g. tagprefix-timestamp and tagprefix. The consuming tasks (rh-sign-image and create-pyxis-image)
+    were also modified to take advantage of this
+
 ## Changes since 1.4.0
 * The parameter `pushSourceContainer` in the `push-snapshot` task
   was not added correctly in the previous version, the new version
   fixes the issue.
- 
+
 ## Changes since 1.3.0
 * add parameter `pushSourceContainer` to `push-snapshot`, this will
   enable push of the source container image and fail the pipeline if the
-  image is not available. 
+  image is not available.
 
 ## Changes since 1.2.0
 * Set rhPush and commonTag when calling create-pyxis-image task
@@ -42,4 +48,4 @@ Tekton pipeline to release content to registry.redhat.io registry.
 
 ## Changes since 0.1.0
 * Removed tagPrefix, timestampFormat, tag, addGitShaTag, addSourceShaTag, addTimestampTag parameters
-  * These are now provided in the data json that is collected in the collect-data task
+  - These are now provided in the data json that is collected in the collect-data task

@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "1.2.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -25,16 +25,17 @@ spec:
       type: string
       default: "0"
   results:
-    - name: commonTag
+    - name: commonTags
       type: string
-      description: Common tag for downstream tasks. Only set if tagPrefix length in the data JSON is nonzero
+      description: >
+        Space separated list of common tags for downstream tasks.
+        Only set if tagPrefix length in the data JSON is nonzero
   workspaces:
     - name: data
       description: The workspace where the snapshot spec and data json files reside
   steps:
     - name: push-snapshot
-      image:
-        quay.io/hacbs-release/release-utils@sha256:fbe973077b00242eeb3d25101def1be286c621436c5a003527736eabb48f0398
+      image: quay.io/hacbs-release/release-utils@sha256:fbe973077b00242eeb3d25101def1be286c621436c5a003527736eabb48f0398
       script: |
         #!/usr/bin/env bash
         set -eux
@@ -64,12 +65,14 @@ spec:
             exit 1
         fi
 
-        prefixedTag=""
+        tagPrefix=$(jq -r '.images.tagPrefix // ""' $DATA_FILE)
         timestampFormat=$(jq -r '.images.timestampFormat // "%s"' $DATA_FILE)
-        if [ $(jq '.images | has("tagPrefix")' $DATA_FILE) == true ]; then
-            prefixedTag="$(jq -r '.images.tagPrefix' $DATA_FILE)-$(date "+$timestampFormat")"
+        timestamp="$(date "+$timestampFormat")"
+        if [ -n $tagPrefix ]; then
+            echo -n "${tagPrefix}-${timestamp} ${tagPrefix}" > $(results.commonTags.path)
+        else
+            echo -n "" > $(results.commonTags.path)
         fi
-        echo -n "${prefixedTag}" > $(results.commonTag.path)
 
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
@@ -82,18 +85,16 @@ spec:
           #
           # The tag is determined as follows:
           #
-          # If the value of the task parameter `tagPrefix` has a non-zero length, the tag value is built by
-          # the task in `<prefix>-<timestamp>` format, where prefix is the value of `tagPrefix` and `timestamp`
-          # is the output of the date command using the value of `timestampFormat` as argument.
+          # If `tagPrefix` is non-empty, we push to $tagPrefix and $tagPrefix-$timestamp.
           #
           # Otherwise the tag used is the one existent in the component or in case it is absent, it uses
           # the value set for the task parameter `tag`.
           #
-          if [ -n "${prefixedTag}" ] ; then
-              tag="${prefixedTag}"
+          if [ -n "${tagPrefix}" ] ; then
+              tag="${tagPrefix}-${timestamp}"
           else
               defaultTag=$(jq -r '.images.defaultTag // "latest"' "${DATA_FILE}")
-              tag=$(jq -r --arg tag $defaultTag '.tag // $tag' <<< $component)
+              tag=$(jq -r --arg defaultTag $defaultTag '.tag // $defaultTag' <<< $component)
           fi
 
           source_digest=$(skopeo inspect \
@@ -110,6 +111,9 @@ spec:
           if [[ "$destination_digest" != "$source_digest" || -z "$destination_digest" ]]; then
             # Push the container image
             push_image "${name}" "${containerImage}" "${repository}" "${tag}"
+            if [ -n "${tagPrefix}" ] ; then
+              push_image "${name}" "${containerImage}" "${repository}" "${tagPrefix}"
+            fi
             if [[ $(jq -r ".images.addTimestampTag" "${DATA_FILE}") == "true" ]] ; then # Default to false
               timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
               push_image "${name}" "${containerImage}" "${repository}" "$timestamp"
@@ -142,8 +146,11 @@ spec:
                 echo "Error: Source container ${sourceContainer} not found!"
                 exit 1
               fi
-              sourceTag="${prefixedTag}-source"
-              push_image "${name}" "${sourceContainer}" "${repository}" "${sourceTag}"
+              if [ -z "$tagPrefix" ]; then
+                echo "Error: tagPrefix needs to be set when pushing source containers"
+                exit 1
+              fi
+              push_image "${name}" "${sourceContainer}" "${repository}" "${tagPrefix}-${timestamp}-source"
             fi
           else
             printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \

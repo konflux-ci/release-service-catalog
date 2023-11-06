@@ -10,6 +10,11 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes since 1.2.0
+* Push to floating tags when tagPrefix is set
+  * In addition to pushing to $prefix-$timestamp, we now also push to $prefix
+  * Rename result commonTag to commonTags and save both tags in it
+
 ## Changes since 1.1.1
 * The pushSourceContainer parameter was removed in favor of reading it from the data.json
 
@@ -19,7 +24,7 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 ## Changes since 1.0.1
 * The new functionality is added to publish source containers to a given target
   * A new parameter exists called pushSourceContainer to enable/disable the source container push,
-    the value is set to false by default 
+    the value is set to false by default
   * a new tag `sourceTag = <prefix>-<integer timestamp>-source` is added for source container push
 
 ## Changes since 1.0.0
