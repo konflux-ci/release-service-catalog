@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: sign-index-image
   labels:
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -12,109 +12,67 @@ spec:
   description: >-
     Task to create an internalrequest to sign a FBC Index Image.
   params:
-    - name: requestJsonResults
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-      default: "{}"
-      description: The JSON results of the Internal Request
-    - name: targetIndex
+      default: "data.json"
+    - name: request
       type: string
-      description: targetIndex signing image
-    - name: requestUpdateTimeout
+      description: Signing pipeline name to handle this request
+      default: "hacbs-signing-pipeline"
+    - name: referenceImage
       type: string
-      default: "360"
-      description: Max seconds waiting for the status update
-    - name: signingPipelineImage
+      description: The image to be signed.
+    - name: manifestDigestImage
       type: string
-      default: "quay.io/redhat-isv/operator-pipelines-images:released"
-      description: An image with CLI tools needed for the signing
+      default: ""
+      description: Manifest Digest Image used to extract the SHA
     - name: requester
       type: string
-      value: ""
       description: Name of the user that requested the signing, for auditing purposes
-    - name: configMapName
+    - name: requestTimeout
       type: string
-      description: ConfigMap Name for this request
-    - name: pipelineRunName
-      type: string
-      description: The name of the Parent PipelineRun of this task
-  results:
-    - name: requestMessage
-      type: string
-      description: Internal Request message
-    - name: requestReason
-      type: string
-      description: Internal Request reason
-    - name: requestResults
-      type: string
-      description: Internal Request results
+      default: "180"
+      description: InternalRequest timeout
+  workspaces:
+    - name: data
+      description: workspace to read and save files
   steps:
     - name: sign-index-image
-      image:
-        quay.io/hacbs-release/release-utils@sha256:5733ece907aa70d6ebced36484c936731e8b27bfcf87fed226a0ecf95047a6b8
+      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
       script: |
         #!/usr/bin/env sh
-        PATH=/bin:/usr/bin:/usr/local/bin
-        export PATH
+        set -e
 
-        jsonInputFile="/tmp/$$.json"
-        cat > ${jsonInputFile} <<JSON
-        $(params.requestJsonResults)
-        JSON
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
 
-        internalIndexImageCopyResolved=`jq -cr .jsonBuildInfo ${jsonInputFile} \
-        | jq -cr .internal_index_image_copy_resolved`
+        request=$(jq -r '.sign.request // .fbc.request // "$(params.request)"' ${DATA_FILE})
+        default_pipeline_image="quay.io/redhat-isv/operator-pipelines-images:released"
+        pipeline_image=$(jq -r --arg default_pipeline_image ${default_pipeline_image} \
+            '.sign.pipelineImage // .fbc.pipelineImage // $default_pipeline_image' ${DATA_FILE})
+        config_map_name=$(jq -r '.sign.configMapName // .fbc.configMapName // "signing-config-map"' ${DATA_FILE})
+        reference_image=$(params.referenceImage)
+        if [ -n "$(params.manifestDigestImage)" ]; then
+          manifestDigestImage="$(params.manifestDigestImage)"
+          manifest_digest="${manifestDigestImage#*@}"
+        else
+          manifest_digest="${reference_image#*@}"
+        fi
 
-        internalRequest="/tmp/$$"
-        cat > ${internalRequest} <<YAML
-        ---
-        apiVersion: appstudio.redhat.com/v1alpha1
-        kind: InternalRequest
-        metadata:
-          name: "ir-sign-$(params.pipelineRunName)"
-        spec:
-          request: "hacbs-signing-pipeline"
-          params:
-            pipeline_image: "$(params.signingPipelineImage)"
-            # gets all chars after "@"
-            manifest_digest: "${internalIndexImageCopyResolved#*@}"
-            reference: "$(params.targetIndex)"
-            requester: "$(params.requester)"
-            config_map_name: "$(params.configMapName)"
-        YAML
-        kubectl create -f ${internalRequest}
-    - name: watch-internal-request-status
-      image:
-        quay.io/hacbs-release/release-utils@sha256:5733ece907aa70d6ebced36484c936731e8b27bfcf87fed226a0ecf95047a6b8
-      script: |
-        #!/usr/bin/env sh
-        PATH=/bin:/usr/bin:/usr/local/bin
-        TASKRUN="/tmp/$$.sh"
+        echo "Creating InternalRequest to sign image:"
+        echo "- reference=${reference_image}"
+        echo "- manifest_digest=${manifest_digest}"
+        echo "- requester=$(params.requester)"
 
-        cat > ${TASKRUN} <<SH
-        #!/usr/bin/env sh
-        IR="ir-sign-$(params.pipelineRunName)"
-        while true; do
-          STATUS=\$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}')
-          case "\${STATUS}" in
-            True | False )
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].reason}' \
-              | tee $(results.requestReason.path)
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].message}' \
-              | tee $(results.requestMessage.path)
-              kubectl get internalrequest \${IR} -o jsonpath='{.status.results}' | jq -cR \
-              | tee $(results.requestResults.path)
-              break
-              ;;
-            "*")
-              ;;
-          esac
-          sleep 30
-        done
-        echo ""
-        [ \$(kubectl get internalrequest \${IR} -o jsonpath='{.status.conditions[0].status}') == "True" ]
-        SH
-        chmod +x ${TASKRUN}
-        timeout $(params.requestUpdateTimeout) ${TASKRUN}
-        SYSEXIT=$?
-        [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the internal request update"
-        exit ${SYSEXIT}
+        internal-request -r "${request}" \
+            -p pipeline_image=${pipeline_image} \
+            -p reference=${reference_image} \
+            -p manifest_digest=${manifest_digest} \
+            -p requester=$(params.requester) \
+            -p config_map_name=${config_map_name} \
+            -t $(params.requestTimeout)
+        echo "done"

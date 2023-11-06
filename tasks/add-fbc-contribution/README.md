@@ -11,3 +11,6 @@ Task to create a internalrequest to add fbc contributions to index images
 | requestTimeout | InternalRequest timeout                                                   | Yes      | 180                  |
 | binaryImage    | binaryImage value updated by update-ocp-tag task                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                            | No       |                      |
+
+## changes in 1.1.0
+- add `requestTargetIndex` result

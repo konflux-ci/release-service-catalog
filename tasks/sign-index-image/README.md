@@ -4,15 +4,30 @@ Creates an InternalRequest to sign an index image
 
 ## Parameters
 
-| Name                 | Description                                                        | Optional  | Default value                                         |
-|----------------------|--------------------------------------------------------------------|-----------|-------------------------------------------------------|
-| requestJsonResults   | The JSON result of the IIB build internal request                  | Yes       | "{}"                                                  |
-| targetIndex          | targetIndex signing image                                          | Yes       | -                                                     |
-| requestUpdateTimeout | Max seconds waiting for the status update                          | Yes       | 360                                                   |
-| signingPipelineImage | An image with CLI tools needed for the signing                     | Yes       | quay.io/redhat-isv/operator-pipelines-images:released |
-| requester            | Name of the user that requested the signing, for auditing purposes | No        | -                                                     |
-| configMapName        | ConfigMap Name for this request                                    | No        | -                                                     |
-| pipelineRunName      | The name of the Parent PipelineRun for this task                   | Yes       | `ir-$(context.pipelineRun.name)`                      |
+| Name                 | Description                                                             | Optional | Default value          |
+|----------------------|-------------------------------------------------------------------------|----------|------------------------|
+| dataPath             | Path to the JSON string of the merged data to use in the data workspace | Yes      | data.json              |
+| request              | Signing pipeline name to handle this request                            | Yes      | hacbs-signing-pipeline |
+| referenceImage       | The image to be signed                                                  | No       |                        |
+| manifestDigestImage  | Manifest Digest Image used to extract the SHA                           | Yes      | ""                     |
+| requester            | Name of the user that requested the signing, for auditing purposes      | No       |                        |
+| requestTimeout       | InternalRequest timeout                                                 | Yes      | 180                    |
+
+## Signing data parameters
+
+ The signing configuration should be set as `data.sign` in the _releasePlanAdmission_. Previously it used to be
+ set also in the `data.fbc`. The data should be set in the _ReleasePlanAdmission_ as follows:
+
+```
+data:
+    sign:
+        request: <signing pipeline name>
+        pipelineImage: <image pullspec>
+        configMapName: <configmap name>
+```
+
+## Changes in 1.1.0
+- change the task to use the `internal-request` script
 
 ## Changes since 0.1
 - update Tekton API to v1
