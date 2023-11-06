@@ -13,6 +13,7 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 ## Changes since 1.2.0
 * Push to floating tags when tagPrefix is set
   * In addition to pushing to $prefix-$timestamp, we now also push to $prefix
+  * Rename result commonTag to commonTags and save both tags in it
 
 ## Changes since 1.1.1
 * The pushSourceContainer parameter was removed in favor of reading it from the data.json

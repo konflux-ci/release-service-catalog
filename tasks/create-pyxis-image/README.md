@@ -16,9 +16,9 @@ by a new line.
 | certified | If set to true, the images will be marked as certified in their Pyxis entries | Yes | false |
 | isLatest | If set to true, the images will have a latest tag added with their Pyxis entries | Yes | false |
 | rhPush | If set to true, an additional entry will be created in ContainerImage.repositories with the registry and repository fields converted to use Red Hat's official registry. E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted to use registry "registry.access.redhat.com" and repository "product/my-image". Also, this repository entry will be marked as published. | Yes | false |
-| commonTag | If set, the 'tag' in the Pyxis Container Image object will be set to it | Yes | "" |
+| commonTags | Space separated list of common tags to be used when publishing. If set, these tags will be added to the Pyxis Container Image object. | Yes | "" |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
-| dataPath | Path to the JSON string of the merged data to use in the data workspace. The file is only needed if commonTag parameter is empty in which case it's used to determine the tag to use. | Yes | data.json |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | Yes | data.json |
 
 ## Changes since 1.2.0
 * Create a floating tag when tagPrefix is set
