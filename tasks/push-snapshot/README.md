@@ -10,6 +10,10 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes since 2.0.0
+* Rename tagPrefix to floatingTag
+  * The optional parameter provided in RPA's data.images changes its name to clarify its meaning
+
 ## Changes since 1.2.0
 * Push to floating tags when tagPrefix is set
   * In addition to pushing to $prefix-$timestamp, we now also push to $prefix
