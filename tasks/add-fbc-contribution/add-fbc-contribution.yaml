@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: add-fbc-contribution
   labels:
-    app.kubernetes.io/version: "1.2.0"
+    app.kubernetes.io/version: "1.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -31,8 +31,10 @@ spec:
       default: "180"
       description: InternalRequest timeout
   results:
-    - name: fbcOptIn
-      description: Result to set weather the contribution is FBC opt in
+    - name: mustSignIndexImage
+      description: Whether the index image should be signed
+    - name: mustPublishIndexImage
+      description: Whether the index image should be published
     - name: requestTargetIndex
       description: The targetIndex used in this request
     - name: requestResultsFile
@@ -71,12 +73,23 @@ spec:
         iib_service_account_secret=$(jq -r '.fbc.iibServiceAccountSecret // "iib-service-account"' ${DATA_FILE})
         build_tags=$(jq '.fbc.buildTags // []' ${DATA_FILE})
         add_arches=$(jq '.fbc.addArches // []' ${DATA_FILE})
+        hotfix=$(jq -r '.fbc.hotfix // "false"' ${DATA_FILE})
         build_timeout_seconds=$(jq -r --arg build_timeout_seconds ${default_build_timeout_seconds} \
             '.fbc.buildTimeoutSeconds // $build_timeout_seconds' ${DATA_FILE})
         target_index=$(jq -r '.fbc.targetIndex' ${DATA_FILE})
         fbc_fragment=$(jq -cr '.components[0].containerImage' ${SNAPSHOT_PATH})
 
-        # saves the target index required to sign
+        if [ "${hotfix}" == "true" ]; then
+          timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' ${DATA_FILE})
+          timestamp=$(date "+${timestamp_format}")
+          issue_id=$(jq -r '.fbc.issueId // empty' ${DATA_FILE})
+          if [ -z "${issue_id}" ]; then
+            echo "Hotfix releases requires the issue id."
+            exit 1
+          fi
+          tag="${issue_id}-${timestamp}"
+          target_index="${target_index}-${tag}"
+        fi
         echo -n $target_index > $(results.requestTargetIndex.path)
 
         # The internal-request script will create the InternalRequest and wait until it finishes to get its status
@@ -93,6 +106,7 @@ spec:
             -p buildTimeoutSeconds=${build_timeout_seconds} \
             -p buildTags=${build_tags} \
             -p addArches=${add_arches} \
+            -p hotfix=${hotfix} \
             -t $(params.requestTimeout) |tee $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log
 
         internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log | xargs)
@@ -105,6 +119,10 @@ spec:
         conditions=$(kubectl get internalrequest ${internalRequest} \
           -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
 
-        jq '.genericResult' <<< "${results}" | tee $(results.fbcOptIn.path)
+        jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.sign_index_image' |tr -d "\n" \
+            | tee $(results.mustSignIndexImage.path)
+        jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.publish_index_image' |tr -d "\n" \
+            | tee $(results.mustPublishIndexImage.path)
+
         jq '.reason // "Unset"'  <<< "${conditions}" | tee $(results.requestReason.path)
         jq '.message // "Unset"' <<< "${conditions}" | tee $(results.requestMessage.path)
