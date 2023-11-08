@@ -27,6 +27,9 @@ tasks:
         workspace: input_workspace
 ```
 
+## Changes since 0.4.0
+* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 0.3.0
 
 * Add delay parameter with a default of 60 (in seconds)

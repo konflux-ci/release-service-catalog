@@ -17,6 +17,9 @@ Creates an InternalRequest resource to call IIB service
 
 ## Changelog
 
+## Changes since 0.9.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ### changes since 0.8
 - add parameter `dataPath` to support data JSON file
 - add step `merge-internal-request-parameters` to merge data from data.json

@@ -15,6 +15,9 @@ the field `spec.data.fileUpdates` in the ReleasePlanAdmission resource.
 
 ## Changelog
 
+## Changes since 0.5.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ### Changes since 0.4.1
 - jsonKey default changed to .spec.data.fileUpdates{} due to API changes
 

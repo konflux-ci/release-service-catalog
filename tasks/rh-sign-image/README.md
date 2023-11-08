@@ -12,6 +12,9 @@ Task to create internalrequests to sign snapshot components
 | commonTags      | Space separated list of common tags to be used when publishing           | No       |                      |
 | requestTimeout | InternalRequest timeout                                                   | Yes      | 180                  |
 
+## Changes since 1.0.1
+* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 1.0.0
 * Translate docker-reference when signing images
   - Before this change, signing request would be sent with the actual quay location of the image. Instead, the reference

@@ -25,6 +25,10 @@ tasks:
         value: '{"components":[{"name":"component1","containerImage":"quay.io/repo/component1:digest"}}]}'
 ```
 
+## Changes since 0.4.0
+  
+  * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 0.3
 
   * Update Tekton API to v1

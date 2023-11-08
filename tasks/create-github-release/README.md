@@ -13,3 +13,6 @@ a `release` dir.
 | repository | The github repository to release to | No | - |
 | release_version | The version string to use creating the release | No | - |
 | content_directory | The directory inside the workspace to find files for release | No | - |
+
+## Changes since 0.1.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

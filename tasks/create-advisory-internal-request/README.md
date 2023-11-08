@@ -13,3 +13,6 @@ the ReleasePlanAdmission and Application from the Snapshot are also used. The ad
 | dataPath                 | Path to data JSON in the data workspace                                 | Yes      | data.json                   |
 | request                  | Type of request to be created                                           | Yes      | create-advisory             |
 | synchronously            | Whether the task should wait for InternalRequests to complete           | Yes      | true                        |
+
+## Changes since 0.1.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

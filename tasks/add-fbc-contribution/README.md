@@ -12,5 +12,8 @@ Task to create a internalrequest to add fbc contributions to index images
 | binaryImage    | binaryImage value updated by update-ocp-tag task                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                            | No       |                      |
 
+## changes in 1.2.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## changes in 1.1.0
 - add `requestTargetIndex` result
