@@ -83,6 +83,15 @@ Before a pull request can be merged:
 * The CI has to pass successfully
 * Every comment has to be addressed and resolved
 
+### Image References
+
+Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/redhat-appstudio/release-service-utils).
+When referencing this image, the url should be `quay.io/redhat-appstudio/release-service-utils:$tag` where `$tag` is the Git SHA based tag.
+
+For other images, the reference should always either specify an image by a non-moving tag (e.g. `registry.access.redhat.com/ubi8/ubi:8.8-1067.1698056881`)
+or by its digest (e.g. `registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded`).
+Floating tags like `latest` or `8.8` in the case of the ubi image should be avoided.
+
 ### Tekton Task Testing
 
 When a pull request is opened, Tekton Task tests are run for all the task version
