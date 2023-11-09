@@ -15,6 +15,10 @@ Tekton release pipeline to interact with FBC Pipeline
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                | No        | -                                               |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                            |
 
+
+### Changes since 1.1.0
+- update task definition `sign-index-image`
+
 ### Changes since 1.0.0
 - Switch back to using bundle resolvers for the verify-enterprise-contract task
 
