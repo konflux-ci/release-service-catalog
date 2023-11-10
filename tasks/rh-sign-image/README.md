@@ -12,6 +12,14 @@ Task to create internalrequests to sign snapshot components
 | commonTags      | Space separated list of common tags to be used when publishing           | No       |                      |
 | requestTimeout | InternalRequest timeout                                                   | Yes      | 180                  |
 
+## Changes since 1.0.0
+* Translate docker-reference when signing images
+  - Before this change, signing request would be sent with the actual quay location of the image. Instead, the reference
+    need to be translated to the public facing reference.
+    - E.g. quay.io/redhat-prod/rhtas-tech-preview----tuf-server-rhel9:1.0.beta needs to be translated to
+      registry.redhat.io/rhtas-tech-preview/tuf-server-rhel9:1.0.beta. Similarly, quay.io/redhat-pending references
+      need to be translated to registry.stage.redhat.io.
+
 ## Changes since 0.1.0
 * Also sign floating tag
   - In addition to pushing $tagPrefix-$timestamp tag, we now also push
