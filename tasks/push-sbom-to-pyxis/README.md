@@ -11,6 +11,11 @@ Tekton task that extracts sboms from pull specs and pushes them to Pyxis.
 | pyxisSecret | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No | - |
 | server | The server type to use. Options are 'production' and 'stage' | Yes | production |
 
+## Changes since 0.3.0
+* Update image reference
+  - The new image includes performance optimizations which should increase the performance of pushing sbom
+    components to Pyxis by over 50 %
+
 ## Changes since 0.2
 * Update Tekton API to v1
 
