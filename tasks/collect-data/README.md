@@ -23,6 +23,9 @@ also a task result for the fbcFragment extracted from the snapshot's first compo
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes since 1.0.1
+  * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 1.0.0
   * Replace all references to extraData with data due to change in the Release CRDs
   * Bump the image used in the task to get a bug fix in the merge-json script

@@ -10,6 +10,9 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes since 3.0.0
+* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 2.0.0
 * Rename tagPrefix to floatingTag
   * The optional parameter provided in RPA's data.images changes its name to clarify its meaning

@@ -14,3 +14,6 @@ Currently, `advisory` is the only supported system.
 |----------|---------------------------------------------------------|----------|---------------|
 | dataPath | Path to the JSON string of the merged data to use       | Yes      | data.json     |
 | systems  | The systems to check that all data keys are present for | Yes      | []            |
+
+## Changes since 0.1.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

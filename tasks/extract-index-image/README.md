@@ -11,5 +11,8 @@ the workspace name for this task *must* be input.
 |------|-------------|----------|---------------|
 | inputDataFile | File to read json data from | No | - |
 
+## Changes since 0.2.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 0.1
 - update Tekton API to v1

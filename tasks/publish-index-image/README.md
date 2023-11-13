@@ -14,6 +14,9 @@ Publish a built FBC index image using skopeo
 
 ## Changelog
 
+### Changes since 0.3.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ### changes since 0.2
 - update Tekton API to v1
 

@@ -19,6 +19,9 @@
 | githubAppID             | ID of Github app used for updating PR                                                        | true     | 305606                                                                                                                                           |
 | githubAppInstallationID | Installation ID of Github app in the organization                                            | true     | 35269675                                                                                                                                         |
 
+## Changes since 0.4.1
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 0.4.0
 - add protection to prevent failures if there are no updated files.
 

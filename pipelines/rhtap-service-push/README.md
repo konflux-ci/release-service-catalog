@@ -17,6 +17,9 @@
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
+## Changes since 1.1.0
+- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 1.0.1
 - Switch back to using bundle resolvers for the verify-enterprise-contract task
 

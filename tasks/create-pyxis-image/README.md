@@ -20,6 +20,9 @@ by a new line.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | Yes | data.json |
 
+## Changes since 2.0.0
+* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+
 ## Changes since 1.2.0
 * Create a floating tag when tagPrefix is set
   * This is in addition to the tag tagPrefix-timestamp a.k.a. commonTag that we create in Pyxis now
