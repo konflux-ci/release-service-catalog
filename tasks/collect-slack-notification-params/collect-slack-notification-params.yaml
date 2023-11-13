@@ -1,0 +1,185 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-slack-notification-params
+  labels:
+    app.kubernetes.io/version: "0.0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task that collects slack notification configuration options from Release CRs and the data file
+  params:
+    - name: releasePath
+      type: string
+      description:
+        Path to the JSON string of the Release CR
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+      default: snapshot_spec.json
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data containing the configuration options to use
+      default: data.json
+    - name: hacUrl
+      type: string
+      description: Root URL of HAC UI (hybrid access console)
+      default: "https://console.redhat.com/preview/application-pipeline/workspaces"
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot spec json file resides
+  results:
+    - name: message
+      type: string
+      description: the formatted message to use in downstream tasks
+    - name: slack-notification-secret
+      type: string
+      description: Name of secret which contains keyname=webhookURLs
+    - name: slack-notification-secret-keyname
+      type: string
+      description: Name of key within secret which contains webhook URL
+  steps:
+    - name: create-message
+      image: quay.io/hacbs-release/release-utils:85ab98a7ec63c3d8d9ec3c4982ff0e581bcb3c83
+      script: |
+        #!/usr/bin/env sh
+        set -x
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+        SNAPSHOT_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+        RELEASE_FILE="$(workspaces.data.path)/$(params.releasePath)"
+        if [ ! -f "${RELEASE_FILE}" ] ; then
+            echo "No valid release file was provided."
+            exit 1
+        fi
+
+        if [ $(jq '.slack | has("slack-notification-secret")' $DATA_FILE) == false ] ; then
+            echo "No secret name provided via 'slack.slack-notification-secret' key in Data."
+            echo -n "" > $(results.message.path)
+            echo -n "" > $(results.slack-notification-secret.path)
+            echo -n "" > $(results.slack-notification-secret-keyname.path)
+            exit
+        fi
+        slack_notification_secret=$(jq -r '.slack."slack-notification-secret"' $DATA_FILE)
+        echo -n "${slack_notification_secret}" > $(results.slack-notification-secret.path)
+
+        if [ $(jq '.slack | has("slack-webhook-notification-secret-keyname")' $DATA_FILE) == false ] ; then
+            echo "No secret key name provided via 'slack.slack-webhook-notification-secret-keyname' key in Data."
+            echo -n "" > $(results.message.path)
+            echo -n "" > $(results.slack-notification-secret-keyname.path)
+            exit
+        fi
+        slack_notification_secret_keyname=$(jq -r '.slack."slack-webhook-notification-secret-keyname"' $DATA_FILE)
+        echo -n "${slack_notification_secret_keyname}" > $(results.slack-notification-secret-keyname.path)
+
+        origin_namespace=$(jq -jr '.metadata.namespace' $RELEASE_FILE)
+        target_namespace=$(jq -r '.status.target' $RELEASE_FILE)
+
+        origin_workspace=$(echo $origin_namespace | sed 's/-tenant//g')   
+        target_workspace=$(echo $target_namespace | sed 's/-tenant//g')
+
+        release_name=$(jq -jr '.metadata.name' $RELEASE_FILE)
+        release_pipeline_name="$(jq -jr '.status.processing.pipelineRun' $RELEASE_FILE)"
+        
+        application=$(jq -rc .application ${SNAPSHOT_FILE})
+        
+        release_url="$(params.hacUrl)/${origin_workspace}/applications/${application}/releases/${release_name}"
+        release_plr_url="$(params.hacUrl)/${target_workspace}/applications/${application}/pipelineruns/${release_pipeline_name}"
+        
+        cat > $(results.message.path) << EOF
+        {
+          "blocks": [
+            {
+              "type": "header",
+              "text": {
+                "type": "plain_text",
+                "text": "RHTAP Release Service\n",
+                "emoji": true
+              }
+            },
+            {
+              "type": "divider"
+            },
+            {
+              "type": "rich_text",
+              "elements": [
+                {
+                  "type": "rich_text_section",
+                  "elements": [
+                    {
+                      "type": "text",
+                      "text": "Release ",
+                      "style": {
+                        "bold": true
+                      }
+                    },
+                    {
+                      "type": "text",
+                      "text": "${origin_workspace}/${release_name}"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "divider"
+            },
+            {
+              "type": "rich_text",
+              "elements": [
+                {
+                  "type": "rich_text_section",
+                  "elements": [
+                    {
+                      "type": "emoji",
+                      "name": "@@CIRCLE_TYPE@@"
+                    },
+                    {
+                      "type": "text",
+                      "text": " "
+                    },
+                    {
+                      "type": "text",
+                      "text": " @@STATUS_TEXT@@ ",
+                      "style": {
+                        "bold": true
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "divider"
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "<${release_url}|Release Details>"
+              }
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "<${release_plr_url}|Release PipelineRun Logs>"
+              }
+            },
+            {
+              "type": "divider"
+            }
+          ]
+        }
+        EOF
