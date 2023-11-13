@@ -20,6 +20,9 @@ by a new line.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | Yes | data.json |
 
+## Changes in 2.2.0
+* `source-container-enabled` flag set to true if `pushSourceContainer` is set to true in the data file's `images` key
+
 ## Changes since 2.0.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 

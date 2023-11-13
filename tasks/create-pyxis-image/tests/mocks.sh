@@ -7,7 +7,7 @@ function create_container_image() {
   echo $* >> $(workspaces.data.path)/mock_create_container_image.txt
   echo The image id is 0000
 
-  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --rh-push "* ]]
+  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --rh-push "*" --source-container-enabled "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
