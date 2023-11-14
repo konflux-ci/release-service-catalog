@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-pyxis-repository
   labels:
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -15,7 +15,9 @@ spec:
     so it will convert the values to the ones used for registry.redhat.io releases.
     E.g. repository "quay.io/redhat-prod/my-product----my-image" will be converted
     to use registry "registry.access.redhat.com" and repository "my-product/my-image"
-    to identify the right Container Registry object in Pyxis.
+    to identify the right Container Registry object in Pyxis. The task also optionally
+    marks the repositories as source_container_image_enabled true if pushSourceContainer
+    is true in the data JSON.
   params:
     - name: server
       type: string
@@ -29,6 +31,10 @@ spec:
       description: Path to the JSON file containing the mapped Snapshot spec in the data workspace
       type: string
       default: "snapshot_spec.json"
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+      default: "data.json"
   workspaces:
     - name: data
       description: The workspace where the snapshot spec json file resides
@@ -72,6 +78,13 @@ spec:
             exit 1
         fi
 
+        PAYLOAD='{"published":true}'
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [[ -f "${DATA_FILE}" && $(jq -r '.images.pushSourceContainer' ${DATA_FILE}) == "true" ]] ; then
+            PAYLOAD=$(jq -c '. += {"source_container_image_enabled":true}' <<< $PAYLOAD)
+        fi
+
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
 
@@ -90,7 +103,7 @@ spec:
                 exit 1
             fi
             curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
-                -X PATCH -H 'Content-Type: application/json' --data-binary '{"published": true}'
+                -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
         done
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
