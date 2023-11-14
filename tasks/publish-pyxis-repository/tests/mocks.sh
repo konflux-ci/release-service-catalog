@@ -17,7 +17,10 @@ function curl() {
     else
       echo '{"_id": "'$CALL_ID'"}'
     fi
-  elif [[ "$*" == '--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/id/'?' -X PATCH -H Content-Type: application/json --data-binary {"published": true}' ]]
+  elif [[ "$*" == '--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/id/'?' -X PATCH -H Content-Type: application/json --data-binary {"published":true}' ]]
+  then
+    : # no-op - do nothing
+  elif [[ "$*" == '--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/id/'?' -X PATCH -H Content-Type: application/json --data-binary {"published":true,"source_container_image_enabled":true}' ]]
   then
     : # no-op - do nothing
   else

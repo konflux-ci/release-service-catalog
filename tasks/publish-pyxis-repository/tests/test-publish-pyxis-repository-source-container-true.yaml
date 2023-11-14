@@ -1,0 +1,84 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-pyxis-repository-source-container-true
+spec:
+  description: |
+    Run the publish-pyxis-repository task with a single component and pushSourceContainer
+    set to true in the data JSON. A curl call should be executed to set the
+    source_container_image_enabled to true for the component.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "my-app",
+                "components": [
+                  {
+                    "repository": "quay.io/redhat-prod/my-product----my-image1"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/mydata.json << EOF
+              {
+                "images": {
+                  "pushSourceContainer": "true"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: publish-pyxis-repository
+      params:
+        - name: pyxisSecret
+          value: test-publish-pyxis-repository-cert
+        - name: dataPath
+          value: mydata.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_curl.txt | wc -l) != 2 ]; then
+                  echo Error: curl was expected to be called 2 times. Actual calls:
+                  cat $(workspaces.data.path)/mock_curl.txt
+                  exit 1
+              fi
+
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | head -n 1) \
+                  == *"/my-product/my-image1 "* ]]
+              [[ $(cat $(workspaces.data.path)/mock_curl.txt | tail -n 1) \
+                  == *'"source_container_image_enabled":true}' ]]
+      runAfter:
+        - run-task

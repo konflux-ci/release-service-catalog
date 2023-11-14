@@ -16,6 +16,11 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 
 
+## Changes in 1.6.0
+* The publish-pyxis-repository task now has a dataPath parameter. It is used to set 
+  source_container_image_enabled if `pushSourceContainer` is present in the data `images` key
+  and set to true
+
 ## Changes since 1.4.2
 * Move from commonTag to commonTags
   - The result of push-snapshot was renamed to commonTags and now it contains both the fixed and floating
