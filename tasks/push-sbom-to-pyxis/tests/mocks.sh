@@ -7,7 +7,7 @@ function cosign() {
   echo Mock cosign called with: $*
   echo $* >> $(workspaces.data.path)/mock_cosign.txt
 
-  if [[ "$*" != "download sbom --output-file myImageID"[12]".json imageurl"[12] ]]
+  if [[ "$*" != "download sbom --output-file myImageID"*".json imageurl"[1-5] ]]
   then
     echo Error: Unexpected call
     exit 1
@@ -24,5 +24,17 @@ function upload_sbom() {
   then
     echo Error: Unexpected call
     exit 1
+  fi
+
+  if [[ "$3" == myImageID1Failing.json ]]
+  then
+    echo "Simulating a failing sbom push..."
+    return 1
+  fi
+
+  if [[ "$3" == myImageID?Parallel.json ]]
+  then
+    echo "Adding a small sleep"
+    sleep 0.3
   fi
 }
