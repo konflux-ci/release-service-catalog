@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-index-image
   labels:
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -12,62 +12,55 @@ spec:
   description: >-
       Publish a built FBC index image using skopeo
   params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+      default: "data.json"
+    - name: sourceIndex
+      type: string
+      description: Pullspec to pull the image from
     - name: targetIndex
       type: string
-      description: targetIndex signing image
-    - name: inputDataFile
-      type: string
-      default: ""
+      description: Pullspec to push the image to
     - name: retries
       type: string
       default: "0"
       description: Number of skopeo retries
-    - name: publishingCredentials
-      type: string
-      default: "fbc-publishing-credentials"
-      description: The credentials used to access the registries
-    - name: requestUpdateTimeout
+    - name: requestTimeout
       type: string
       default: "360"
       description: Max seconds waiting for the status update
   workspaces:
-    - name: input
+    - name: data
       description: Workspace to store the params and responses for the internalRequest
   results:
     - name: requestMessage
       type: string
   steps:
     - name: publish-index-image
-      env:
-        - name: SOURCE_INDEX_CREDENTIAL
-          valueFrom:
-            secretKeyRef:
-              key: sourceIndexCredential
-              name: $(params.publishingCredentials)
-        - name: TARGET_INDEX_CREDENTIAL
-          valueFrom:
-            secretKeyRef:
-              key: targetIndexCredential
-              name: $(params.publishingCredentials)
       image: >-
         quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
       script: |
         #!/usr/bin/env sh
-        PATH=/bin:/usr/bin:/usr/local/bin
-        export PATH
-
         set -e
-        indexImageResolved=`jq -cr .jsonBuildInfo $(params.inputDataFile)\
-        | jq -cr .index_image_resolved`
 
-        (skopeo copy \
-        --all \
-        --preserve-digests \
-        --retry-times "$(params.retries)" \
-        --src-tls-verify=false \
-        --src-creds "${SOURCE_INDEX_CREDENTIAL}" \
-        "docker://${indexImageResolved}" \
-        --dest-creds "${TARGET_INDEX_CREDENTIAL}" \
-        "docker://$(params.targetIndex)" && \
-        echo "Index Image Published successfully" || \
-        echo "Failed publishing Index Image") | tee $(results.requestMessage.path)
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        request="publish-index-image-pipeline"
+        credentials=$(jq -r '.fbc.publishingCredentials' $DATA_FILE)
+
+        echo "Creating internal request to publish image:"
+        echo "- from: $(params.sourceIndex)"
+        echo "- to: $(params.targetIndex)"
+
+        internal-request -r "${request}" \
+            -p sourceIndex=$(params.sourceIndex) \
+            -p targetIndex=$(params.targetIndex) \
+            -p publishingCredentials=${credentials} \
+            -p retries=$(params.retries) \
+            -t $(params.requestTimeout)
+        echo "done"
