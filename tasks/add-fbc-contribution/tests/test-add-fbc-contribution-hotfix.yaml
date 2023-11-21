@@ -1,0 +1,142 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-hotfix
+spec:
+  description: Test creating a internal request for the IIB pipeline
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "registry.io/image0@sha256:0000",
+                    "repository": "prod-registry.io/prod-location0"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "fbc": {
+                  "iibServiceConfigSecret": "test-iib-service-config-secret",
+                  "iibOverwriteFromIndexCredential": "test-iib-overwrite-fromindex-credential",
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "targetIndex": "quay.io/scoheb/fbc-target-index-testing:latest",
+                  "hotfix": true,
+                  "issueId": "bz123456",
+                  "buildTimeoutSeconds": 420
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: binaryImage
+          value: "registry.redhat.io/openshift4/ose-operator-registry:v4.12"
+        - name: fromIndex
+          value: "quay.io/scoheb/fbc-index-testing:latest"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              #
+              set -eux
+
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                tac | tail -1)"
+
+              requestParams=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.iibServiceConfigSecret' <<< "${requestParams}") != "test-iib-service-config-secret" ]; then
+                echo "iibServiceConfigSecret does not match"
+                exit 1
+              fi
+
+              value=$(jq -r '.iibOverwriteFromIndexCredential' <<< "${requestParams}")
+              if [ "${value}" != "test-iib-overwrite-fromindex-credential" ]
+              then
+                echo "iibOverwriteFromIndexCredential does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.fromIndex' <<< "${requestParams}") != "quay.io/scoheb/fbc-index-testing:latest" ]; then
+                echo "fromIndex does not match"
+                exit 1
+              fi
+
+              value=$(jq -r '.binaryImage' <<< "${requestParams}")
+              if [ "${value}" != "registry.redhat.io/openshift4/ose-operator-registry:v4.12" ]
+              then
+                echo "binaryImage does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.buildTimeoutSeconds' <<< "${requestParams}") != "420" ]
+              then
+                echo "buildTimeoutSeconds does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.fbcFragment' <<< "${requestParams}") != "registry.io/image0@sha256:0000" ]
+              then
+                echo "fbcFragment does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.hotfix' <<< "${requestParams}") != "true" ]
+              then
+                echo "hotfix does not match"
+                exit 1
+              fi
+
+              TS=1696946200 # ts set in the mocked `date`
+              value=$(jq -r '.targetIndex' <<< "${requestParams}")
+              if [  "${value}" != "quay.io/scoheb/fbc-target-index-testing:latest-bz123456-${TS}" ]; then
+                echo "targetIndex does not match"
+                exit 1
+              fi
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all

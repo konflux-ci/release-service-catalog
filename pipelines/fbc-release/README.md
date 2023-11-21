@@ -17,6 +17,10 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | main                                                            |
 
+### Changes in 1.4.0
+- rename task results accordingly to the changes contained in the task
+  `add-fbc-contribution`
+
 ### Changes in 1.3.0
 - taskGitUrl parameter is added. It is used to provide the git repo for the release-service-catalog tasks
 - taskGitRevision parameter is added. It is used to provide the revision to be used in the taskGitUrl repo
