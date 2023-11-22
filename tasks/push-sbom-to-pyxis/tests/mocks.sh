@@ -34,7 +34,12 @@ function upload_sbom() {
 
   if [[ "$3" == myImageID?Parallel.json ]]
   then
-    echo "Adding a small sleep"
-    sleep 0.3
+    LOCK_FILE=$(workspaces.data.path)/${3}.lock
+    touch $LOCK_FILE
+    sleep 1
+    LOCK_FILE_COUNT=$(ls $(workspaces.data.path)/*.lock | wc -l)
+    echo $LOCK_FILE_COUNT > $(workspaces.data.path)/${3}.count
+    sleep 1
+    rm $LOCK_FILE
   fi
 }
