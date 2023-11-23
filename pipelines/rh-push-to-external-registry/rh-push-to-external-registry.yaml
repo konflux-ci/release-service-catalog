@@ -2,15 +2,15 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: release
+  name: rh-push-to-external-registry
   labels:
-    app.kubernetes.io/version: "1.2.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton pipeline to release HACBS Snapshot to Quay
+    Tekton pipeline to release Red Hat Snapshots to an external registry. This pipeline includes pyxis interactions.
   params:
     - name: release
       type: string
@@ -142,6 +142,8 @@ spec:
       params:
         - name: failOnEmptyResult
           value: "true"
+        - name: releasePlanAdmissionPath
+          value: "$(context.pipelineRun.uid)/release_plan_admission.json"
         - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
       workspaces:
@@ -197,6 +199,93 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-enterprise-contract
+    - name: collect-pyxis-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/collect-pyxis-params/collect-pyxis-params.yaml
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - collect-data
+    - name: create-pyxis-image
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/create-pyxis-image/create-pyxis-image.yaml
+      params:
+        - name: server
+          value: $(tasks.collect-pyxis-params.results.server)
+        - name: pyxisSecret
+          value: $(tasks.collect-pyxis-params.results.secret)
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - push-snapshot
+    - name: push-sbom-to-pyxis
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/push-sbom-to-pyxis/push-sbom-to-pyxis.yaml
+      params:
+        - name: containerImageIDs
+          value: $(tasks.create-pyxis-image.results.containerImageIDs)
+        - name: server
+          value: $(tasks.collect-pyxis-params.results.server)
+        - name: pyxisSecret
+          value: $(tasks.collect-pyxis-params.results.secret)
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+    - name: run-file-updates
+      params:
+        - name: fileUpdatesPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: jsonKey
+          value: ".fileUpdates"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+      runAfter:
+        - push-sbom-to-pyxis
+      taskRef:
+        kind: Task
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/run-file-updates/run-file-updates.yaml
+        resolver: git
+      workspaces:
+        - name: data
+          workspace: release-workspace
   finally:
     - name: cleanup
       taskRef:
