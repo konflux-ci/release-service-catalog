@@ -17,6 +17,9 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | main                                                            |
 
+### Changes in 1.5.0
+- modify the task `publish-index-image` to use a dedicated task instead of using the `create-internal-request` task
+
 ### Changes in 1.4.0
 - rename task results accordingly to the changes contained in the task
   `add-fbc-contribution`
