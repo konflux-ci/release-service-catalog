@@ -14,6 +14,10 @@ a `release` dir.
 | release_version | The version string to use creating the release | No | - |
 | content_directory | The directory inside the workspace to find files for release | No | - |
 
+## Changes since 1.0.0
+- Added the `.sig` files to the release
+- Updated test with a `.sig` file
+
 ## Changes since 0.2.0
 - Removed the installation of the `gh` CLI, since it is now part of the release image
 - Changed way to send the results, piping from the `gh` command to make it cleaner
