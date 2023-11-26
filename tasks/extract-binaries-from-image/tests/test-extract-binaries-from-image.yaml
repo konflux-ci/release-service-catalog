@@ -1,0 +1,111 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-extract-binaries-from-image
+spec:
+  description: |
+    Run the extract-binaries-from-image task
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-snapshot
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "registry.io/image:tag"
+                  }
+                ]
+              }
+              EOF
+
+              mkdir -p $(workspaces.data.path)/image_data
+              cd $(workspaces.data.path)/image_data
+
+              cat > manifest.json <<EOF
+              {
+                "layers": [
+                  {"digest": "sha256:1111"},
+                  {"digest": "sha256:2222"}
+                ]
+              }
+              EOF
+
+              TAR_IN1=$(mktemp -d)
+              TAR_IN2=$(mktemp -d)
+
+              mkdir -p $TAR_IN1/my-binaries-path
+              echo text1 > $TAR_IN1/my-binaries-path/file1.txt
+              tar czf 1111 -C $TAR_IN1 my-binaries-path
+
+              mkdir -p $TAR_IN2/my-binaries-path
+              echo text2 > $TAR_IN2/my-binaries-path/file2.txt
+              tar czf 2222 -C $TAR_IN2 my-binaries-path
+    - name: run-task
+      taskRef:
+        name: extract-binaries-from-image
+      params:
+        - name: image_binaries_path
+          value: my-binaries-path
+        - name: snapshotPath
+          value: snapshot.json
+        - name: subdirectory
+          value: my-subdir
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: binaries_path
+          value: $(tasks.run-task.results.binaries_path)
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: binaries_path
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_skopeo.txt | wc -l) != 1 ]; then
+                echo Error: skopeo was expected to be called 1 time. Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+
+              if [ "$(params.binaries_path)" != "my-subdir/binaries" ]; then
+                  echo Error: Unexpected binaries_path result
+                  exit 1
+              fi
+
+              cd $(workspaces.data.path)/$(params.binaries_path)
+
+              test "$(< file1.txt)" = "text1"
+              test "$(< file2.txt)" = "text2"
+      runAfter:
+        - run-task
