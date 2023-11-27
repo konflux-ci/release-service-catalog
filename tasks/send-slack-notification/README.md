@@ -10,5 +10,8 @@ Sends message to Slack using postMessage API
 | secretName      | Name of secret which contains authentication token for app | Yes      | slack-notification-secret |
 | secretKeyName   | Name of key within secret which contains webhook URL       | No       |                           |
 
+## Changes in 1.1.1
+* Correct behaviour when secret is not found
+
 ## Changes in 1.1.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
