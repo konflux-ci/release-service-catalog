@@ -12,7 +12,7 @@ Task to create a internalrequest to add fbc contributions to index images
 | binaryImage    | binaryImage value updated by update-ocp-tag task                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                            | No       |                      |
 
-## changes in 1.3.1
+## changes in 1.4.0
 - add the possibility of setting a stagedIndex tag
  
 ## changes in 1.3.0
