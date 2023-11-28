@@ -1,0 +1,77 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-image-timeout
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: >
+    Test a scenario when the IR processing times out. The timeout happens
+    because the requestTimeout parameter of the task is set to 1 and this
+    is passed to the wait-for-ir call. So the mock would mark the IR as passed
+    in 10 seconds, but it will time out before that happens.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:4713b58df57b06e5ca248f1c8227a8493ceb5b01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "registry.io/image0@sha256:0000",
+                    "repository": "quay.io/redhat-prod/myproduct----myrepo"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "sign": {
+                  "request": "hacbs-signing-pipeline",
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: rh-sign-image
+      params:
+        - name: requester
+          value: testuser-single
+        - name: commonTags
+          value: "some-prefix-12345 some-prefix"
+        - name: requestTimeout
+          value: 1
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:4713b58df57b06e5ca248f1c8227a8493ceb5b01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all
