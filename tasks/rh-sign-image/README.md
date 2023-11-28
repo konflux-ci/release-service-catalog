@@ -4,13 +4,18 @@ Task to create internalrequests to sign snapshot components
 
 ## Parameters
 
-| Name           | Description                                                               | Optional | Default value        |
-|----------------|---------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | snapshot_spec.json   |
-| dataPath       | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
-| requester      | Name of the user that requested the signing, for auditing purpose         | No       |                      |
-| commonTags      | Space separated list of common tags to be used when publishing           | No       |                      |
-| requestTimeout | InternalRequest timeout                                                   | Yes      | 180                  |
+| Name            | Description                                                               | Optional | Default value        |
+|-----------------|---------------------------------------------------------------------------|----------|----------------------|
+| snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | snapshot_spec.json   |
+| dataPath        | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
+| requester       | Name of the user that requested the signing, for auditing purpose         | No       |                      |
+| commonTags      | Space separated list of common tags to be used when publishing            | No       |                      |
+| requestTimeout  | InternalRequest timeout                                                   | Yes      | 180                  |
+| concurrentLimit | The maximum number of images to be processed at once                      | Yes      | 4                    |
+
+## Changes in 1.2.0
+* Optimize the task to process multiple images in parallel. This will improve the performance of the task.
+* Add a new `concurrentLimit` parameter that controls the number of images to be processed in parallel
 
 ## Changes since 1.0.1
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
