@@ -1,0 +1,81 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-base64-blob
+  labels:
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Task to create an internalrequest to sign a base64 encoded blob.
+  params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+      default: "data.json"
+    - name: request
+      type: string
+      description: Signing pipeline name to handle this request
+      default: "blob-signing-pipeline"
+    - name: blob
+      type: string
+      description: The base64 encoded blob to be signed.
+    - name: requester
+      type: string
+      description: Name of the user that requested the signing, for auditing purposes
+    - name: requestTimeout
+      type: string
+      default: "180"
+      description: InternalRequest timeout
+    - name: binariesPath
+      type: string
+      description: The directory inside the workspace where the binaries are stored
+      default: binaries
+  workspaces:
+    - name: data
+      description: workspace to read and save files
+  steps:
+    - name: sign-base64-blob
+      image:
+        quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      script: |
+        #!/usr/bin/env sh
+        set -ex
+        set -o pipefail
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        request=$(jq -r '.sign.request // "$(params.request)"' ${DATA_FILE})
+        default_pipeline_image="quay.io/redhat-isv/operator-pipelines-images:released"
+        pipeline_image=$(jq -r --arg default_pipeline_image ${default_pipeline_image} \
+            '.sign.pipelineImage // $default_pipeline_image' ${DATA_FILE})
+        config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' ${DATA_FILE})
+
+        echo "Creating InternalRequest to sign blob:"
+        echo "- blob=$(params.blob)"
+        echo "- requester=$(params.requester)"
+
+        internal-request -r "${request}" \
+            -p pipeline_image=${pipeline_image} \
+            -p blob=$(params.blob) \
+            -p requester=$(params.requester) \
+            -p config_map_name=${config_map_name} \
+            -t $(params.requestTimeout) \
+            > $(workspaces.data.path)/ir-result.txt || \
+            (grep "^\[" $(workspaces.data.path)/ir-result.txt | jq . && exit 1)
+          
+        internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-result.txt | xargs)
+        echo "done (${internalRequest})"
+        
+        payload=$(kubectl get internalrequest $internalRequest -o=jsonpath='{.status.results.signed_payload}')
+
+        # Build .sig file
+        checksum_file_name=$(ls $(workspaces.data.path)/$(params.binariesPath) | grep SHA256SUMS) 
+        echo -n $payload | tee $(workspaces.data.path)/$(params.binariesPath)/${checksum_file_name}.sig
