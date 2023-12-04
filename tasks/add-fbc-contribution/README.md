@@ -12,6 +12,9 @@ Task to create a internalrequest to add fbc contributions to index images
 | binaryImage    | binaryImage value updated by update-ocp-tag task                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                            | No       |                      |
 
+## changes in 1.5.0
+- add the result `buildTimestamp` to be used in the downstream tasks
+
 ## changes in 1.4.0
 - add the possibility of setting a stagedIndex tag
  
