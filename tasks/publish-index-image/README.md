@@ -11,8 +11,12 @@ Publish a built FBC index image using skopeo
 | targetIndex    | Pullspec to push the image to                                           | No       |               |
 | retries        | Number of skopeo retries                                                | Yes      | 0             |
 | requestTimeout | Max seconds waiting for the status update                               | Yes      | 360           |
+| buildTimestamp | Build timestamp for the publishing image                                | No       |               |
 
 ## Changelog
+
+### Changes in 2.0.0
+- Add the parameter `buildTimestamp` to push also a timestamp-based tag
 
 ### Changes in 1.0.0
 - Refactor to use the `internal-request` script
