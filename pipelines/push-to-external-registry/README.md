@@ -15,7 +15,7 @@ Tekton pipeline to release Snapshots to an external registry.
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
-| taskGitRevision | The revision in the taskGitUrl repo to be used | Yes | development |
+| taskGitRevision | The revision in the taskGitUrl repo to be used | Yes | staging |
 
 ## Changes in 2.0.0
 - Pipeline renamed from `release` to `push-to-external-registry`
