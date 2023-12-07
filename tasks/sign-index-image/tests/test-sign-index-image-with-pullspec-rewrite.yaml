@@ -1,0 +1,103 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-sign-index-image-with-pullspec-rewrite
+spec:
+  description: Test creating a internal request to sign an image
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "sign": {
+                  "request": "hacbs-signing-pipeline",
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: sign-index-image
+      params:
+        - name: requester
+          value: testuser
+        - name: referenceImage
+          value: quay.io/redhat/redhat----testimage:tag
+        - name: manifestDigestImage
+          value: quay.io/redhat/redhat----testimage@sha256:0000
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.reference' <<< "${params}") != "registry.redhat.io/redhat/testimage:tag" ]; then
+                echo "reference image does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.manifest_digest' <<< "${params}") != "sha256:0000" ]; then
+                echo "manifest_digest does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.config_map_name' <<< "${params}") != "signing-config-map" ]
+              then
+                echo "config_map_name does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.requester' <<< "${params}") != "testuser" ]
+              then
+                echo "requester does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.pipeline_image' <<< "${params}") != \
+                 "quay.io/redhat-isv/operator-pipelines-images:released" ]
+              then
+                echo "pipeline_image does not match"
+                exit 1
+              fi
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all
