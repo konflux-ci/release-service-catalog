@@ -26,6 +26,9 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 1.2.1
+- add image pullspec rewriting
+
 ## Changes in 1.2.0
 - Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
