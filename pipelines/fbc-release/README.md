@@ -15,7 +15,7 @@ Tekton release pipeline to interact with FBC Pipeline
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                | No        | -                                                               |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                                            |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
-| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | development                                                            |
+| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | staging                                                            |
 
 ### Changes in 1.6.0
 - modify the task `publish-index-image` to accept the new parameter `buildTimestamp` used
