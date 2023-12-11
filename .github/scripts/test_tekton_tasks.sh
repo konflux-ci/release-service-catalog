@@ -24,39 +24,45 @@ WORKSPACE_TEMPLATE=${BASH_SOURCE%/*/*}/resources/workspace-template.yaml
 
 if [ $# -gt 0 ]
 then
-  TASK_DIRS=$@
+  TEST_ITEMS=$@
 fi
 
-if [ -z "${TASK_DIRS}" ]
+if [ -z "${TEST_ITEMS}" ]
 then
   echo Error: No task directories.
   echo Usage:
-  echo "$0 [DIR1] [DIR2] [...]"
+  echo "$0 [item1] [item2] [...]"
   echo
   echo or
   echo
-  echo "export TASK_DIRS=\"DIR1 DIR2 ...\""
+  echo "export TEST_ITEMS=\"item1 item2 ...\""
   echo "$0"
+  echo
+  echo Items can be task directories or paths to task test yaml files
+  echo "(useful when working on a single test)"
   exit 1
 fi
 
 # Check that all directories exist. If not, fail
-for DIR in $TASK_DIRS
+for ITEM in $TEST_ITEMS
 do
-  if [ ! -d "$DIR" ]
-  then
-    echo "Error: Directory does not exist: $DIR"
+  if [[ "$ITEM" == *tests/test-*.yaml && -f "$ITEM" ]]; then
+    true
+  elif [[ -d "$ITEM" ]]; then
+    true
+  else
+    echo "Error: Invalid file or directory: $ITEM"
     exit 1
   fi
 done
 
-for DIR in $TASK_DIRS
+for ITEM in $TEST_ITEMS
 do
-  echo Task dir: $DIR
-  TASK_NAME=$(echo $DIR | cut -d '/' -f 2)
+  echo Task item: $ITEM
+  TASK_NAME=$(echo $ITEM | cut -d '/' -f 2)
   echo "  Task name: $TASK_NAME"
 
-  TASK_DIR=$(echo $DIR | cut -d '/' -f -2)
+  TASK_DIR=$(echo $ITEM | cut -d '/' -f -2)
   TASK_PATH=${TASK_DIR}/${TASK_NAME}.yaml
   if [ ! -f $TASK_PATH ]
   then
@@ -71,7 +77,11 @@ do
     exit 1
   fi
 
-  TEST_PATHS=($TESTS_DIR/test*.yaml)
+  if [[ "$ITEM" == *tests/test-*.yaml ]]; then
+    TEST_PATHS=($ITEM)
+  else
+    TEST_PATHS=($TESTS_DIR/test*.yaml)
+  fi
   if [ ${#TEST_PATHS[@]} -eq 0 ]
   then
     echo "  Warning: No tests. Skipping..."
