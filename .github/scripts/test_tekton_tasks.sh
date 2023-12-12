@@ -88,14 +88,20 @@ do
     continue
   fi
 
+  # Use a copy of the task file to prevent modifying to original task file
+  TASK_COPY=$(mktemp)
+  cp "$TASK_PATH" "$TASK_COPY"
+
   if [ -f ${TESTS_DIR}/pre-apply-task-hook.sh ]
   then
     echo Found pre-apply-task-hook.sh file in dir: $TESTS_DIR. Executing...
-    ${TESTS_DIR}/pre-apply-task-hook.sh
+    ${TESTS_DIR}/pre-apply-task-hook.sh "$TASK_COPY"
   fi
 
   echo "  Installing task"
-  kubectl apply -f $TASK_PATH
+  kubectl apply -f "$TASK_COPY"
+
+  rm -f "$TASK_COPY"
 
   for TEST_PATH in ${TEST_PATHS[@]}
   do
