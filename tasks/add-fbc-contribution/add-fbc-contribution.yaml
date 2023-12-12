@@ -27,6 +27,10 @@ spec:
   results:
     - name: buildTimestamp
       description: Build timestamp used in the tag
+    - name: mustSignIndexImage
+      description: Whether the index image should be signed
+    - name: mustPublishIndexImage
+      description: Whether the index image should be published
     - name: requestResultsFile
       description: Internal Request results file
     - name: requestMessage
@@ -42,7 +46,7 @@ spec:
       script: |
         #!/usr/bin/env sh
         #
-        set -xeo pipefail
+        set -eo pipefail
 
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
@@ -111,12 +115,14 @@ spec:
               -p stagedIndex=${staged_index} \
               -t $(params.requestTimeout) |tee $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log
 
-          internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log | xargs)
+          internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log \
+            | xargs)
+
           echo "done (${internalRequest})"
 
           # Fetching InternalRequest status and populating results
-          results=$(kubectl get internalrequest ${internalRequest} -o jsonpath='{.status.results}')
-          echo "${results}" > "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json"
+          results=$(kubectl get internalrequest ${internalRequest} -o jsonpath='{.status.results}' \
+            | tee "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json")
 
           conditions=$(kubectl get internalrequest ${internalRequest} \
             -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
@@ -132,14 +138,21 @@ spec:
            --arg indexImageResolved "${indexImageResolved}"\
            --arg mustSign "${mustSign}"\
            --arg mustPublish "${mustPublish}" \
-           ".components[$componentIndex].indexImaged |= $indexImage |
-            .components[$componentIndex].indexImageResolved |= $indexImageResolved |
-            .components[$componentIndex].mustSign |= $mustSign |
-            .components[$componentIndex].mustPublish |= $mustPublish" ${SNAPSHOT_PATH} \
+           ".components[$componentIndex].indexImaged |= \$indexImage |
+            .components[$componentIndex].indexImageResolved |= \$indexImageResolved |
+            .components[$componentIndex].mustSign |= \$mustSign |
+            .components[$componentIndex].mustPublish |= \$mustPublish" ${SNAPSHOT_PATH} \
           | tee $(workspaces.data.path)/temp_snapshot_spec.json
           mv $(workspaces.data.path)/temp_snapshot_spec.json ${SNAPSHOT_PATH}
-
-          jq '.reason // "Unset"'  <<< "${conditions}" | tee $(results.requestReason.path)
-          jq '.message // "Unset"' <<< "${conditions}" | tee $(results.requestMessage.path)
         done
-        cat ${SNAPSHOT_PATH}
+
+        # Setting all results
+        # We only publish/sign if all components has the mustSign and mustPublish attributes set to true
+        jq -cr '[.components[].mustSign] | unique | if( . | length) != 1 then "false"  else .[0] end' ${SNAPSHOT_PATH} \
+        | tr -d "\n" | tee $(results.mustSignIndexImage.path)
+
+        jq -cr '[.components[].mustPublish] | unique | if( . | length) != 1 then "false"  else .[0] end' ${SNAPSHOT_PATH} \
+        | tr -d "\n" | tee $(results.mustPublishIndexImage.path)
+
+        jq '.reason // "Unset"'  <<< "${conditions}" | tee $(results.requestReason.path)
+        jq '.message // "Unset"' <<< "${conditions}" | tee $(results.requestMessage.path)
