@@ -213,10 +213,11 @@ For reference implementation, check [push-sbom-to-pyxis/tests/](/tasks/push-sbom
     ```sh
     #!/usr/bin/env sh
 
+    TASK_PATH=$1
     SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' $SCRIPT_DIR/../push-sbom-to-pyxis.yaml
-    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' $SCRIPT_DIR/../push-sbom-to-pyxis.yaml
+    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' $TASK_PATH
+    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' $TASK_PATH
     ```
 
     In this case we inject the file to both steps in the task under test. This will depend on
@@ -259,3 +260,12 @@ as arguments, e.g.
 ```
 
 This will install the task and run all test pipelines matching `tests/test*.yaml`.
+
+Another option is to run one or more tests directly:
+
+```
+./.github/scripts/test_tekton_tasks.sh tasks/apply-mapping/tests/test-apply-mapping.yaml
+```
+
+This will still install the task and run `pre-apply-task-hook.sh` if present, but it will then
+run only the specified test pipeline.
