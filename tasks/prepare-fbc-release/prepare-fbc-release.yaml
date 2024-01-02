@@ -1,0 +1,116 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-fbc-release
+  labels:
+    app.kubernetes.io/version: "1.0.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    A tekton task to prepare FBC Release by collecting a valid
+    OCP version for each component from given
+    containerImage(fbcFragment) in the snapshot, and update
+    the fromIndex, targetIndex and binaryImage with collected
+    OCP version and store updated values to snapshot respective
+    to each component, so other task can use them.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+      type: string
+      default: "snapshot_spec.json"
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+      default: "data.json"
+  workspaces:
+    - name: data
+      description: Workspace where the snapshot and data json is stored
+  steps:
+    - name: prepare-fbc-release
+      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
+        if [ ! -f "${SNAPSHOT_PATH}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi        
+        
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi        
+
+        pattern="^v[0-9]+\.[0-9]+$"
+
+        # Read components and initial values
+        components=$(jq -c '.components[]' "$SNAPSHOT_PATH")
+        fromIndex=$(jq -r '.fbc.fromIndex' "$DATA_FILE")
+        targetIndex=$(jq -r '.fbc.targetIndex' "$DATA_FILE")
+        binaryImage=$(jq -r '.fbc.binaryImage' "$DATA_FILE")
+
+        # Print initial values
+        echo "Initial fromIndex: $fromIndex"
+        echo "Initial targetIndex: $targetIndex"
+        echo "Initial binaryImage: $binaryImage"
+        echo
+
+        # Get the number of components
+        num_components=$(jq '.components | length' "$SNAPSHOT_PATH")
+        echo "Found $num_components components"
+
+        # Function to replace tag in an image
+        replace_tag() {
+            local updatedImage="${1%:*}:${2}"
+            echo "$updatedImage"
+        }
+
+        # Iterate over component indices
+        for ((i=0; i<num_components; i++)); do
+            component=$(jq -c ".components[$i]" "$SNAPSHOT_PATH")
+            containerImage=$(jq -r '.containerImage' <<< "$component")
+            componentName=$(jq -r '.name' <<< "$component")
+
+            # Extract OCP version from container image using Skopeo.
+            # This command retrieves the 'org.opencontainers.image.base.name' annotation,
+            # which includes the OCP version, formatted as "registry:version".
+            # Example: "registry.redhat.io/openshift4/ose-operator-registry:v4.12"
+            # The script then isolates the version part (e.g., "v4.12") from this string.
+            ocpVersion=$(skopeo inspect --raw docker://"$containerImage" \
+                | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2)
+
+            # Check if the version matches the pattern
+            if ! [[ "$ocpVersion" =~ $pattern ]]; then
+                echo "Invalid format for image $containerImage."
+                exit 1
+            fi
+
+            # Compute updated values
+            updatedFromIndex=$(replace_tag "$fromIndex" "$ocpVersion")
+            updatedTargetIndex=$(replace_tag "$targetIndex" "$ocpVersion")
+            updatedBinaryImage=$(replace_tag "$binaryImage" "$ocpVersion")
+
+            # Print updated values
+            echo "Component: $componentName"
+            echo "ocpVersion: $ocpVersion"
+            echo "Updated fromIndex for $componentName: $updatedFromIndex"
+            echo "Updated targetIndex for $componentName: $updatedTargetIndex"
+            echo "Updated binaryImage for $componentName: $updatedBinaryImage"
+            echo
+
+            # Apply each update directly
+            jq ".components[$i].ocpVersion |= \"$ocpVersion\"" \
+              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+            jq ".components[$i].updatedFromIndex |= \"$updatedFromIndex\"" \
+              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+            jq ".components[$i].updatedTargetIndex |= \"$updatedTargetIndex\"" \
+              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+            jq ".components[$i].updatedBinaryImage |= \"$updatedBinaryImage\"" \
+              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+        done

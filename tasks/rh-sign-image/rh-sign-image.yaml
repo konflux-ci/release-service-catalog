@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: rh-sign-image
   labels:
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "1.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -30,17 +30,22 @@ spec:
       type: string
       default: "180"
       description: InternalRequest timeout
+    - name: concurrentLimit
+      type: string
+      description: The maximum number of images to be processed at once
+      default: 4
   workspaces:
     - name: data
       description: workspace to read and save files
   steps:
     - name: sign-image
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:4713b58df57b06e5ca248f1c8227a8493ceb5b01
       script: |
         #!/usr/bin/env sh
         #
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
         RUNDIR="$(workspaces.data.path)/$(context.taskRun.uid)"
+        IDENTIFIER=$(context.taskRun.uid)
 
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
@@ -57,6 +62,8 @@ spec:
             '.sign.pipelineImage // $default_pipeline_image' ${DATA_FILE})
         config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' ${DATA_FILE})
 
+        N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
+        count=0
         COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
 
@@ -85,8 +92,15 @@ spec:
                   -p manifest_digest=${manifest_digest} \
                   -p requester=$(params.requester) \
                   -p config_map_name=${config_map_name} \
-                  -t $(params.requestTimeout)
-            done
+                  -i $IDENTIFIER \
+                  -s false
+              ((++count))
 
-            echo "done"
+              if [ "$count" -eq "$N" ]; then
+                  wait-for-ir -i $IDENTIFIER -t $(params.requestTimeout)
+                  count=0
+              fi
+            done
         done
+        wait-for-ir -i $IDENTIFIER -t $(params.requestTimeout)
+        echo "done"

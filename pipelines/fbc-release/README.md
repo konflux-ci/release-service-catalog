@@ -18,8 +18,8 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | staging                                                            |
 
 ### Changes in 1.6.0
-- modify the task `publish-index-image` to accept the new parameter `buildTimestamp` used
-  to append to the publishing image tag
+- add new parameter `buildTimestamp` when calling the `publish-index-image` task
+  - this new parameter is used for adding a timestamped tag to the index image
 
 ### Changes in 1.5.0
 - modify the task `publish-index-image` to use a dedicated task instead of using the `create-internal-request` task

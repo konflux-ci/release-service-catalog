@@ -21,5 +21,5 @@ function kubectl() {
     exit 1
   fi
 
-  echo "dummy-payload"
+  echo -n "dummy-payload" | base64
 }

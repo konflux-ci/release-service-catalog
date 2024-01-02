@@ -19,6 +19,10 @@
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | Yes | staging |
 
+## Changes in 1.3.1
+- `send-slack-notification` task is only called if slack notification secret is set in data file
+  - the taskrun would fail to start with an empty `secretName` parameter
+
 ## Changes in 1.3.0
 - taskGitUrl parameter is added. It is used to provide the git repo for the release-service-catalog tasks
 - taskGitRevision parameter is added. It is used to provide the revision to be used in the taskGitUrl repo
