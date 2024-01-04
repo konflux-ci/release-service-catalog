@@ -20,12 +20,6 @@ spec:
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
       default: "data.json"
-    - name: binaryImage
-      type: string
-      description: binaryImage value updated by update-ocp-tag task
-    - name: fromIndex
-      type: string
-      description: fromIndex value updated by update-ocp-tag task
     - name: requestTimeout
       type: string
       default: "180"
@@ -37,14 +31,8 @@ spec:
       description: Whether the index image should be signed
     - name: mustPublishIndexImage
       description: Whether the index image should be published
-    - name: requestTargetIndex
-      description: The targetIndex used in this request
     - name: requestResultsFile
       description: Internal Request results file
-    - name: requestMessage
-      description: Internal Request message
-    - name: requestReason
-      description: Internal Request reason
   workspaces:
     - name: data
       description: workspace to read and save files
@@ -78,12 +66,10 @@ spec:
         hotfix=$(jq -r '.fbc.hotfix // "false"' ${DATA_FILE})
         staged_index=$(jq -r '.fbc.stagedIndex // "false"' ${DATA_FILE})
         build_timeout_seconds=$(jq -r --arg build_timeout_seconds ${default_build_timeout_seconds} \
-            '.fbc.buildTimeoutSeconds // $build_timeout_seconds' ${DATA_FILE})
-        target_index=$(jq -r '.fbc.targetIndex' ${DATA_FILE})
-        fbc_fragment=$(jq -cr '.components[0].containerImage' ${SNAPSHOT_PATH})
+          '.fbc.buildTimeoutSeconds // $build_timeout_seconds' ${DATA_FILE})
 
         timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' ${DATA_FILE})
-        timestamp=$(date "+${timestamp_format}")
+        timestamp=$(date "+${timestamp_format}" | tee $(results.buildTimestamp.path))
 
         if [ "${hotfix}" == "true" ]; then
           issue_id=$(jq -r '.fbc.issueId // empty' ${DATA_FILE})
@@ -91,44 +77,75 @@ spec:
             echo "Hotfix releases requires the issue id."
             exit 1
           fi
-          tag="${issue_id}-${timestamp}"
-          target_index="${target_index}-${tag}"
         fi
-        echo -n $timestamp > $(results.buildTimestamp.path)
-        echo -n $target_index > $(results.requestTargetIndex.path)
 
-        # The internal-request script will create the InternalRequest and wait until it finishes to get its status
-        # If it fails (Failed, Rejected or Timed out) the script will exit and display the reason.
-        echo "Creating InternalRequest to add FBC contribution to index image:"
-        internal-request -r "${request}" \
-            -p binaryImage=$(params.binaryImage) \
-            -p fromIndex=$(params.fromIndex) \
-            -p targetIndex=${target_index} \
-            -p fbcFragment=${fbc_fragment} \
-            -p iibServiceConfigSecret=${iib_service_config_secret} \
-            -p iibServiceAccountSecret=${iib_service_account_secret} \
-            -p iibOverwriteFromIndexCredential=${iib_overwrite_from_index_credential} \
-            -p buildTimeoutSeconds=${build_timeout_seconds} \
-            -p buildTags=${build_tags} \
-            -p addArches=${add_arches} \
-            -p hotfix=${hotfix} \
-            -p stagedIndex=${staged_index} \
-            -t $(params.requestTimeout) |tee $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log
+        componentsCount=$(jq '.components | length'  ${SNAPSHOT_PATH})
+        for((componentIndex=0; componentIndex < componentsCount; componentIndex++)); do
 
-        internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log | xargs)
-        echo "done (${internalRequest})"
+          fbc_fragment=$(jq -cr ".components[$componentIndex].containerImage" ${SNAPSHOT_PATH})
+          binary_image=$(jq -cr ".components[$componentIndex].updatedBinaryImage" ${SNAPSHOT_PATH})
+          from_index=$(jq -cr ".components[$componentIndex].updatedFromIndex" ${SNAPSHOT_PATH})
+          target_index=$(jq -cr ".components[$componentIndex].updatedTargetIndex" ${SNAPSHOT_PATH})
 
-        # Fetching InternalRequest status and populating results
-        results=$(kubectl get internalrequest ${internalRequest} -o jsonpath='{.status.results}')
-        echo "${results}" > "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json"
+          if [ "${issue_id}" ]; then
+            tag="${issue_id}-${timestamp}"
+            target_index="${target_index}-${tag}"
+          fi
 
-        conditions=$(kubectl get internalrequest ${internalRequest} \
-          -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
+          # The internal-request script will create the InternalRequest and wait until it finishes to get its status
+          # If it fails (Failed, Rejected or Timed out) the script will exit and display the reason.
+          echo "Creating InternalRequest to add FBC contribution to index image:"
+          internal-request -r "${request}" \
+              -p binaryImage=${binary_image} \
+              -p fromIndex=${from_index} \
+              -p targetIndex=${target_index} \
+              -p fbcFragment=${fbc_fragment} \
+              -p iibServiceConfigSecret=${iib_service_config_secret} \
+              -p iibServiceAccountSecret=${iib_service_account_secret} \
+              -p iibOverwriteFromIndexCredential=${iib_overwrite_from_index_credential} \
+              -p buildTimeoutSeconds=${build_timeout_seconds} \
+              -p buildTags=${build_tags} \
+              -p addArches=${add_arches} \
+              -p hotfix=${hotfix} \
+              -p stagedIndex=${staged_index} \
+              -t $(params.requestTimeout) |tee $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log
 
-        jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.sign_index_image' |tr -d "\n" \
-            | tee $(results.mustSignIndexImage.path)
-        jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.publish_index_image' |tr -d "\n" \
-            | tee $(results.mustPublishIndexImage.path)
+          internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log \
+            | xargs)
 
-        jq '.reason // "Unset"'  <<< "${conditions}" | tee $(results.requestReason.path)
-        jq '.message // "Unset"' <<< "${conditions}" | tee $(results.requestMessage.path)
+          echo "done (${internalRequest})"
+
+          # Fetching InternalRequest status and populating results
+          results=$(kubectl get internalrequest ${internalRequest} -o jsonpath='{.status.results}' \
+            | tee "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json")
+
+          conditions=$(kubectl get internalrequest ${internalRequest} \
+            -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
+
+          indexImage=$(jq -r '.jsonBuildInfo' <<< "${results}" | jq -r '.index_image' |tr -d "\n")
+          indexImageResolved=$(jq -r '.jsonBuildInfo' <<< "${results}" | jq -r '.index_image_resolved' |tr -d "\n")
+
+          mustSign=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.sign_index_image' |tr -d "\n")
+          mustPublish=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.publish_index_image' |tr -d "\n")
+
+          jq -cr \
+            --arg indexImage "${indexImage}" \
+            --arg indexImageResolved "${indexImageResolved}"\
+            --arg mustSign "${mustSign}"\
+            --arg mustPublish "${mustPublish}" \
+            ".components[$componentIndex].indexImaged |= \$indexImage |
+             .components[$componentIndex].indexImageResolved |= \$indexImageResolved |
+             .components[$componentIndex].mustSign |= \$mustSign |
+             .components[$componentIndex].mustPublish |= \$mustPublish" ${SNAPSHOT_PATH} \
+            | tee $(workspaces.data.path)/temp_snapshot_spec.json
+
+          mv $(workspaces.data.path)/temp_snapshot_spec.json ${SNAPSHOT_PATH}
+        done
+
+        # Setting all results
+        # We only publish/sign if all components has the mustSign and mustPublish attributes set to true
+        jq -cr '[.components[].mustSign] | unique | if( . | length) != 1 then "false"  else "true" end' ${SNAPSHOT_PATH} \
+        | tr -d "\n" > $(results.mustSignIndexImage.path)
+
+        jq -cr '[.components[].mustPublish] | unique | if( . | length) != 1 then "false"  else "true" end' ${SNAPSHOT_PATH} \
+        | tr -d "\n" > $(results.mustPublishIndexImage.path)

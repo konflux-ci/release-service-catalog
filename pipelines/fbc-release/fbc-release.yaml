@@ -38,30 +38,17 @@ spec:
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
-      default: https://github.com/redhat-appstudio/release-service-catalog.git
+      default: https://github.com/theflockers/release-service-catalog.git
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-      default: development
+      default: rhtaprel_651
     - name: postCleanUp
       type: string
       description: Cleans up workspace after finishing executing the pipeline
       default: "true"
   workspaces:
     - name: release-workspace
-  results:
-    - name: requestMessage
-      type: string
-      value: $(tasks.add-fbc-contribution-to-index-image.results.requestMessage)
-    - name: requestReason
-      type: string
-      value: $(tasks.add-fbc-contribution-to-index-image.results.requestReason)
-    - name: iibIndexImage
-      type: string
-      value: $(tasks.extract-index-image.results.indexImage)
-    - name: iibIndexImageResolved
-      type: string
-      value: $(tasks.extract-index-image.results.indexImageResolved)
   tasks:
     - name: verify-access-to-resources
       taskRef:
@@ -142,24 +129,6 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-access-to-resources
-    - name: validate-single-component
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/validate-single-component/validate-single-component.yaml
-      params:
-        - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      runAfter:
-        - collect-data
     - name: verify-enterprise-contract
       taskRef:
         resolver: "bundles"
@@ -187,23 +156,8 @@ spec:
         - name: data
           workspace: release-workspace
       runAfter:
-        - validate-single-component
-    - name: get-ocp-version
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/get-ocp-version/get-ocp-version.yaml
-      params:
-        - name: fbcFragment
-          value: "$(tasks.collect-data.results.fbcFragment)"
-      runAfter:
-        - verify-enterprise-contract
-    - name: update-ocp-tag
+        - collect-data
+    - name: prepare-fbc-release 
       workspaces:
         - name: data
           workspace: release-workspace
@@ -215,12 +169,14 @@ spec:
           - name: revision
             value: $(params.taskGitRevision)
           - name: pathInRepo
-            value: tasks/update-ocp-tag/update-ocp-tag.yaml
+            value: tasks/prepare-fbc-release/prepare-fbc-release.yaml
       params:
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
-        - name: ocpVersion
-          value: "$(tasks.get-ocp-version.results.stored-version)"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+      runAfter:
+        - verify-enterprise-contract
     - name: add-fbc-contribution-to-index-image
       workspaces:
         - name: data
@@ -239,12 +195,8 @@ spec:
           value: "$(context.pipelineRun.uid)/data.json"
         - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
-        - name: binaryImage
-          value: "$(tasks.update-ocp-tag.results.updated-binaryImage)"
-        - name: fromIndex
-          value: "$(tasks.update-ocp-tag.results.updated-fromIndex)"
       runAfter:
-        - verify-enterprise-contract
+        - prepare-fbc-release
     - name: extract-requester-from-release
       taskRef:
         resolver: "git"
@@ -288,62 +240,50 @@ spec:
       params:
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
-        - name: referenceImage
-          value: $(tasks.add-fbc-contribution-to-index-image.results.requestTargetIndex)
-        - name: manifestDigestImage
-          value: $(tasks.extract-index-image.results.indexImageResolved)
         - name: requester
           value: $(tasks.extract-requester-from-release.results.output-result)
       when:
         - input: "$(tasks.add-fbc-contribution-to-index-image.results.mustSignIndexImage)"
           operator: in
           values: ["true"]
-    - name: extract-index-image
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/extract-index-image/extract-index-image.yaml
-      params:
-        - name: inputDataFile
-          value: $(tasks.add-fbc-contribution-to-index-image.results.requestResultsFile)
-    - name: publish-index-image
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/publish-index-image/publish-index-image.yaml
-      params:
-        - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
-        - name: sourceIndex
-          value: $(tasks.extract-index-image.results.indexImageResolved)
-        - name: targetIndex
-          value: $(tasks.add-fbc-contribution-to-index-image.results.requestTargetIndex)
-        - name: buildTimestamp
-          value: $(tasks.add-fbc-contribution-to-index-image.results.buildTimestamp)
-        - name: retries
-          value: "3"
-      when:
-        - input: $(tasks.add-fbc-contribution-to-index-image.results.mustPublishIndexImage)
-          operator: in
-          values: ["true"]
-      runAfter:
-        - sign-index-image
+#    - name: extract-index-image
+#      workspaces:
+#        - name: data
+#          workspace: release-workspace
+#      taskRef:
+#        resolver: "git"
+#        params:
+#          - name: url
+#            value: $(params.taskGitUrl)
+#          - name: revision
+#            value: $(params.taskGitRevision)
+#          - name: pathInRepo
+#            value: tasks/extract-index-image/extract-index-image.yaml
+#      params:
+#        - name: inputDataFile
+#          value: $(tasks.add-fbc-contribution-to-index-image.results.requestResultsFile)
+#    - name: publish-index-image
+#      workspaces:
+#        - name: data
+#          workspace: release-workspace
+#      taskRef:
+#        resolver: "git"
+#        params:
+#          - name: url
+#            value: $(params.taskGitUrl)
+#          - name: revision
+#            value: $(params.taskGitRevision)
+#          - name: pathInRepo
+#            value: tasks/publish-index-image/publish-index-image.yaml
+#      params:
+#        - name: dataPath
+#          value: "$(context.pipelineRun.uid)/data.json"
+#        - name: buildTimestamp
+#          value: $(tasks.add-fbc-contribution-to-index-image.results.buildTimestamp)
+#        - name: retries
+#          value: "3"
+#      runAfter:
+#        - sign-index-image
   finally:
     - name: cleanup
       taskRef:
