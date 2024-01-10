@@ -1,4 +1,4 @@
-# Release Service Catalog
+## Release Service Catalog
 
 This repository contains a collection of Tekton resources to be used with the
 [Release Service](https://github.com/redhat-appstudio/release-service). The main purpose of these
