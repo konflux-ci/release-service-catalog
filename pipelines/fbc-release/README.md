@@ -15,10 +15,11 @@ Tekton release pipeline to interact with FBC Pipeline
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                | No        | -                                                               |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                                            |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
-| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | See Note Below                                                  |
+| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
 
-* Note: The default taskGitRevision value is taken from whatever branch of release-service-catalog the file is in. It is not maintained
-  in the README, but it can be found by looking in the pipeline yaml definition.
+### Changes in 1.7.0
+- taskGitRevision no longer has a default. It will be provided by the operator and will always have the same value as
+  the git revision in the PipelineRef definition of the PipelineRun if using a git resolver. See RHTAPREL-790 for details
 
 ### Changes in 1.6.0
 - add new parameter `buildTimestamp` when calling the `publish-index-image` task
