@@ -1,31 +1,17 @@
 # cleanup-workspace
 
-Tekton task to delete a given directory in a passed workspace.
+Tekton task to delete a given directory in a passed workspace and cleanup InternalRequests related to the current PipelineRun.
 
 ## Parameters
 
-| Name         | Description                                                                                                      | Optional | Default value |
-|--------------|------------------------------------------------------------------------------------------------------------------|----------|---------------|
-| subdirectory | The directory to remove within the workspace                                                                     | No       | -             |
-| delay        | Time in seconds to delay execution. Needed to allow other finally tasks to access workspace before being deleted | Yes      | 60            |
+| Name           | Description                                                                                                      | Optional | Default value |
+|----------------|------------------------------------------------------------------------------------------------------------------|----------|---------------|
+| subdirectory   | The directory to remove within the workspace                                                                     | No       | -             |
+| delay          | Time in seconds to delay execution. Needed to allow other finally tasks to access workspace before being deleted | Yes      | 60            |
+| pipelineRunUid | The uid of the current pipelineRun. It is only available at the pipeline level                                   | Yes      | ""            |
 
-## Example usage
-
-This is an example usage of the `cleanup-workpace` task:
-
-```
----
-tasks:
-  - name: cleanup-workspace
-    taskRef:
-      name: cleanup-workspace
-    params:
-      - name: subdirectory
-        value: "some/directory"
-    workspaces:
-      - name: input
-        workspace: input_workspace
-```
+## Changes in 0.6.0
+* The task now removes all internalrequest CRs for the current pipelinerun via the pipelineRunUid parameter
 
 ## Changes since 0.4.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
