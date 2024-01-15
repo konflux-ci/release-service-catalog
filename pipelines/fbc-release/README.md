@@ -17,6 +17,10 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
 
+### Changes in 1.8.0
+- the task `add-fbc-contribution` now requires the `targetIndex` parameter set with the `updated-targetIndex`
+  result from the task `update-ocp-tag`
+
 ### Changes in 1.7.1
 - tasks that interact with InternalRequests now have a pipelineRunUid parameter added to them to help with cleanup
 

@@ -12,6 +12,11 @@ Task to create a internalrequest to add fbc contributions to index images
 | binaryImage    | binaryImage value updated by update-ocp-tag task                                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                                            | No       |                      |
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
+| targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
+
+## changes in 2.1.0
+- add the parameter `targetIndex` to receive the `updated-targetIndex` result from
+  the task `update-ocp-tag` as input
 
 ## changes in 2.0.0
 - The internalrequest CR is created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter
