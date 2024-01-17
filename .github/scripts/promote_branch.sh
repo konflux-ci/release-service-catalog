@@ -25,7 +25,7 @@ set -e
 ORG="redhat-appstudio"
 REPO="release-service-catalog"
 
-OPTIONS=$(getopt --long "target-branch:,force-to-staging:,override:,debug,help" -o "tgt:,h" -- "$@")
+OPTIONS=$(getopt --long "target-branch:,force-to-staging:,override:,dry-run:,help" -o "tgt:,h" -- "$@")
 eval set -- "$OPTIONS"
 while true; do
     case "$1" in
@@ -41,9 +41,9 @@ while true; do
             OVERRIDE="$2"
             shift 2
             ;;
-        --debug)
-            DEBUG="true"
-            shift
+        --dry-run)
+            DRY_RUN="$2"
+            shift 2
             ;;
         -h|--help)
             print_help
@@ -58,7 +58,7 @@ while true; do
 done
 
 print_help(){
-    echo "Usage: $0 --target-branch branch [--force-to-staging false] [--override false] [--debug]"
+    echo "Usage: $0 --target-branch branch [--force-to-staging false] [--override false] [--dry-run false]"
     echo
     echo "  --target-branch:    The name of the branch to be promoted. Options are staging"
     echo "                      and production."
@@ -66,8 +66,8 @@ print_help(){
     echo "                      if staging and production differ."
     echo "  --override:         If passed with value true, allow promotion to production"
     echo "                      even if the change has not been in staging for one week."
-    echo "  --debug:            For debugging purposes, do everything except for the git"
-    echo "                      push and deleting the temp repo."
+    echo "  --dry-run:          If passed with value true, print out the changes that would"
+    echo "                      be promoted but do not git push or delete the temp repo."
     echo
     echo "  --target-branch has to be specified."
 }
@@ -120,7 +120,7 @@ mkdir -p ${releaseServiceCatalogDir}
 
 echo -e "---\nPromoting release-service-catalog ${SOURCE_BRANCH} to ${TARGET_BRANCH}\n---\n"
 
-git clone "git@github.com:$ORG/$REPO.git" ${releaseServiceCatalogDir}
+git clone "https://oauth2:$GITHUB_TOKEN@github.com/$ORG/$REPO.git" ${releaseServiceCatalogDir}
 cd ${releaseServiceCatalogDir}
 
 # A change cannot go into production if the changes in staging are less than a week old
@@ -132,7 +132,6 @@ fi
 # A change cannot go into staging if staging and production differ
 if [[ "${TARGET_BRANCH}" == "staging" && "${FORCE_TO_STAGING}" != "true" ]] ; then
     git checkout origin/staging
-    update_taskGitRevision_in_pipelines production
     check_if_branch_differs production
 fi
 
@@ -147,7 +146,7 @@ do
   git show --oneline --no-patch $COMMIT
 done
 
-if [ "${DEBUG}" == "true" ] ; then
+if [ "${DRY_RUN}" == "true" ] ; then
     exit
 fi
 
