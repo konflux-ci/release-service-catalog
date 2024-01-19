@@ -17,6 +17,9 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
 
+### Changes in 1.7.1
+- tasks that interact with InternalRequests now have a pipelineRunUid parameter added to them to help with cleanup
+
 ### Changes in 1.7.0
 - taskGitRevision no longer has a default. It will be provided by the operator and will always have the same value as
   the git revision in the PipelineRef definition of the PipelineRun if using a git resolver. See RHTAPREL-790 for details

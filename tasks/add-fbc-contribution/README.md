@@ -4,13 +4,18 @@ Task to create a internalrequest to add fbc contributions to index images
 
 ## Parameters
 
-| Name           | Description                                                               | Optional | Default value        |
-|----------------|---------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | snapshot_spec.json   |
-| dataPath       | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
-| requestTimeout | InternalRequest timeout                                                   | Yes      | 180                  |
-| binaryImage    | binaryImage value updated by update-ocp-tag task                          | No       |                      |
-| fromIndex      | fromIndex value updated by update-ocp-tag task                            | No       |                      |
+| Name           | Description                                                                               | Optional | Default value        |
+|----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
+| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | Yes      | snapshot_spec.json   |
+| dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json            |
+| requestTimeout | InternalRequest timeout                                                                   | Yes      | 180                  |
+| binaryImage    | binaryImage value updated by update-ocp-tag task                                          | No       |                      |
+| fromIndex      | fromIndex value updated by update-ocp-tag task                                            | No       |                      |
+| pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
+
+## changes in 2.0.0
+- The internalrequest CR is created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter
+  - This change comes with a bump in the image used for the task
 
 ## changes in 1.5.0
 - add the result `buildTimestamp` to be used in the downstream tasks

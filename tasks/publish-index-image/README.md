@@ -4,16 +4,21 @@ Publish a built FBC index image using skopeo
 
 ## Parameters
 
-| Name           | Description                                                             | Optional | Default value |
-|----------------|-------------------------------------------------------------------------|----------|---------------|
-| dataPath       | Path to the JSON string of the merged data to use in the data workspace | Yes      | data.json     |
-| sourceIndex    | Pullspec to pull the image from                                         | No       |               |
-| targetIndex    | Pullspec to push the image to                                           | No       |               |
-| retries        | Number of skopeo retries                                                | Yes      | 0             |
-| requestTimeout | Max seconds waiting for the status update                               | Yes      | 360           |
-| buildTimestamp | Build timestamp for the publishing image                                | No       |               |
+| Name           | Description                                                                               | Optional | Default value |
+|----------------|-------------------------------------------------------------------------------------------|----------|---------------|
+| dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json     |
+| sourceIndex    | Pullspec to pull the image from                                                           | No       |               |
+| targetIndex    | Pullspec to push the image to                                                             | No       |               |
+| retries        | Number of skopeo retries                                                                  | Yes      | 0             |
+| requestTimeout | Max seconds waiting for the status update                                                 | Yes      | 360           |
+| buildTimestamp | Build timestamp for the publishing image                                                  | No       |               |
+| pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |               |
 
 ## Changelog
+
+### Changes in 3.0.0
+- The internalrequest CR is created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter
+  - This change comes with a bump in the image used for the task
 
 ### Changes in 2.0.0
 - Add the parameter `buildTimestamp` to push also a timestamp-based tag

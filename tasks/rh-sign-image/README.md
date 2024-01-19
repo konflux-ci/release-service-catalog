@@ -4,14 +4,19 @@ Task to create internalrequests to sign snapshot components
 
 ## Parameters
 
-| Name            | Description                                                               | Optional | Default value        |
-|-----------------|---------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | snapshot_spec.json   |
-| dataPath        | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
-| requester       | Name of the user that requested the signing, for auditing purpose         | No       |                      |
-| commonTags      | Space separated list of common tags to be used when publishing            | No       |                      |
-| requestTimeout  | InternalRequest timeout                                                   | Yes      | 180                  |
-| concurrentLimit | The maximum number of images to be processed at once                      | Yes      | 4                    |
+| Name            | Description                                                                               | Optional | Default value        |
+|-----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
+| snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | Yes      | snapshot_spec.json   |
+| dataPath        | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json            |
+| requester       | Name of the user that requested the signing, for auditing purpose                         | No       |                      |
+| commonTags      | Space separated list of common tags to be used when publishing                            | No       |                      |
+| requestTimeout  | InternalRequest timeout                                                                   | Yes      | 180                  |
+| concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
+| pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
+
+## Changes in 2.0.0
+* The internalrequest CRs are created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter
+  * This change comes with a bump in the image used for the task
 
 ## Changes in 1.2.0
 * Optimize the task to process multiple images in parallel. This will improve the performance of the task.
