@@ -23,3 +23,7 @@ function kubectl() {
 
   echo -n "dummy-payload" | base64
 }
+
+function gpg() {
+  echo -n "dummy-payload" 	
+}

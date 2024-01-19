@@ -25,6 +25,8 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+## Changes in 1.0.2
+- Save the `.sig` file as a non-ASCII armored GPG binary instead of clear ASCII GPG signature
 
 ## Changes in 1.0.1
 - Now the task decodes the payload from base64 before creating the `.sig` file
