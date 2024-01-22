@@ -10,6 +10,17 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 4.0.0
+* floatingTag is replaced by floatingTags in the RPA's data.images field
+  * A list of floating tags is accepted instead of a single string. The logic remains unchanged, with each
+    provided floating tag treated as the single one was previously
+* Digest checking behavior was modified
+  * Previously, a push only happened if the containerImage did not exist at $repository:$tag. This is flawed
+    as we push to multiple tags (git, sha, timestamp...) yet we only checked against the default tag. Now,
+    every push_image call has a check to see if the image already exists at the destination digest
+* For source containers, an image is now pushed to $floatingTag-source as well as the existing
+  $floatingTag-$timestamp-source location
+
 ## Changes since 3.0.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
