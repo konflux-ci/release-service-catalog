@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "3.1.0"
+    app.kubernetes.io/version: "4.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -29,7 +29,7 @@ spec:
       type: string
       description: >
         Space separated list of common tags for downstream tasks.
-        Only set if floatingTag length in the data JSON is nonzero
+        Only set if floatingTags length in the data JSON is nonzero
   workspaces:
     - name: data
       description: The workspace where the snapshot spec and data json files reside
@@ -40,16 +40,28 @@ spec:
         #!/usr/bin/env bash
         set -eux
 
-        push_image () { # Expected arguments are [name, containerImage, repository, tag]
-          printf '* Pushing component: %s to %s:%s\n' "$1" "$3" "$4"
-          attempt=0
-          until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
-            cosign copy -f "$2" "$3:$4" && break
-            attempt=$((attempt+1))
-          done
-          if [ "$attempt" -gt "$(params.retries)" ] ; then
-            echo "Max retries exceeded."
-            exit 1
+        push_image () { # Expected arguments are [source_digest, name, containerImage, repository, tag]
+          # note: Inspection might fail on empty repos, hence `|| true`
+          destination_digest=$(
+            skopeo inspect \
+            --no-tags \
+            --format '{{.Digest}}' \
+            "docker://$4:$5" 2>/dev/null || true)
+
+          if [[ "$destination_digest" != "$1" || -z "$destination_digest" ]]; then
+            printf '* Pushing component: %s to %s:%s\n' "$2" "$4" "$5"
+            attempt=0
+            until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
+              cosign copy -f "$3" "$4:$5" && break
+              attempt=$((attempt+1))
+            done
+            if [ "$attempt" -gt "$(params.retries)" ] ; then
+              echo "Max retries exceeded."
+              exit 1
+            fi
+          else
+            printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
+              "$2" "$3"
           fi
         }
 
@@ -65,14 +77,17 @@ spec:
             exit 1
         fi
 
-        floatingTag=$(jq -r '.images.floatingTag // ""' $DATA_FILE)
+        floatingTagsCount=$(jq '.images.floatingTags | length' $DATA_FILE)
         timestampFormat=$(jq -r '.images.timestampFormat // "%s"' $DATA_FILE)
         timestamp="$(date "+$timestampFormat")"
-        if [ -n $floatingTag ]; then
-            echo -n "${floatingTag}-${timestamp} ${floatingTag}" > $(results.commonTags.path)
-        else
-            echo -n "" > $(results.commonTags.path)
+        commonTags=""
+        if [ $floatingTagsCount -gt 0 ]; then
+            for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
+                commonTags="${commonTags}${floatingTag}-${timestamp} ${floatingTag} "
+            done
+            commonTags=${commonTags% }
         fi
+        echo -n $commonTags > $(results.commonTags.path)
 
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
@@ -82,79 +97,70 @@ spec:
           repository=$(jq -r '.repository' <<< $component)
           name=$(jq -r '.name' <<< $component)
           git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
-          #
-          # The tag is determined as follows:
-          #
-          # If `floatingTag` is non-empty, we push to $floatingTag and $floatingTag-$timestamp.
-          #
-          # Otherwise the tag used is the one existent in the component or in case it is absent, it uses
-          # the value set for the task parameter `tag`.
-          #
-          if [ -n "${floatingTag}" ] ; then
-              tag="${floatingTag}-${timestamp}"
-          else
-              defaultTag=$(jq -r '.images.defaultTag // "latest"' "${DATA_FILE}")
-              tag=$(jq -r --arg defaultTag $defaultTag '.tag // $defaultTag' <<< $component)
-          fi
-
           source_digest=$(skopeo inspect \
             --no-tags \
             --format '{{.Digest}}' \
             "docker://${containerImage}" 2>/dev/null)
-          # note: Inspection might fail on empty repos, hence `|| true`
-          destination_digest=$(
-            skopeo inspect \
-            --no-tags \
-            --format '{{.Digest}}' \
-            "docker://${repository}:${tag}" 2>/dev/null || true)
 
-          if [[ "$destination_digest" != "$source_digest" || -z "$destination_digest" ]]; then
-            # Push the container image
-            push_image "${name}" "${containerImage}" "${repository}" "${tag}"
-            if [ -n "${floatingTag}" ] ; then
-              push_image "${name}" "${containerImage}" "${repository}" "${floatingTag}"
-            fi
-            if [[ $(jq -r ".images.addTimestampTag" "${DATA_FILE}") == "true" ]] ; then # Default to false
-              timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
-              push_image "${name}" "${containerImage}" "${repository}" "$timestamp"
-            fi
-            if [[ $(jq -r ".images.addGitShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
-              if [ "${git_sha}" != "null" ] ; then
-                push_image "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}"
-                push_image "${name}" "${containerImage}" "${repository}" "${git_sha}"
-              else
-                printf 'Asked to create git sha based tag, but no git sha found in %s\n' "${component}"
-                exit 1
-              fi
-            fi
-            if [[ $(jq -r ".images.addSourceShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
-              if [[ "${containerImage}" == *"@sha256"* && $(echo "${containerImage}" | tr -cd ':' | wc -c) -eq 1 ]]
-              then
-                sha=$(echo "${containerImage}" | cut -d ':' -f 2)
-                push_image "${name}" "${containerImage}" "${repository}" "${sha}"
-              else
-                printf 'Asked to create source sha based tag, but no sha found in %s\n' "${containerImage}"
-                exit 1
-              fi
-            fi
-            # Push the associated source container using the common tag
-            if [[ $(jq -r ".images.pushSourceContainer" "${DATA_FILE}") == "true" ]] ; then # Default to false
-              # Calculate the source container image based on the provided container image
-              sourceContainer="${containerImage%@sha256:*}:${git_sha}.src"
-              # Check if the source container exists
-              if ! skopeo inspect --no-tags "docker://${sourceContainer}" &>/dev/null; then
-                echo "Error: Source container ${sourceContainer} not found!"
-                exit 1
-              fi
-              if [ -z "$floatingTag" ]; then
-                echo "Error: floatingTag needs to be set when pushing source containers"
-                exit 1
-              fi
-              push_image "${name}" "${sourceContainer}" "${repository}" "${floatingTag}-${timestamp}-source"
-            fi
+          # If `floatingTags` is non-empty, for each of the `floatingTags` we push each image to
+          # $floatingTag and $floatingTag-$timestamp.
+          #
+          # Otherwise the tag used is the one existent in the component or in case it is absent, it uses
+          # the value set for the task parameter `tag`.
+          #
+          if [ $floatingTagsCount -gt 0 ]; then
+            for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
+              # Push the container image
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "{floatingTag}"
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "{floatingTag}-${timestamp}"
+            done
           else
-            printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
-              "${name}" "$source_digest"
+            defaultTag=$(jq -r '.images.defaultTag // "latest"' "${DATA_FILE}")
+            tag=$(jq -r --arg defaultTag $defaultTag '.tag // $defaultTag' <<< $component)
+            push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${tag}"
+          fi
+          if [[ $(jq -r ".images.addTimestampTag" "${DATA_FILE}") == "true" ]] ; then # Default to false
+            timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
+            push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "$timestamp"
+          fi
+          if [[ $(jq -r ".images.addGitShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
+            if [ "${git_sha}" != "null" ] ; then
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}"
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha}"
+            else
+              printf 'Asked to create git sha based tag, but no git sha found in %s\n' "${component}"
+              exit 1
+            fi
+          fi
+          if [[ $(jq -r ".images.addSourceShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
+            if [[ "${containerImage}" == *"@sha256"* && $(echo "${containerImage}" | tr -cd ':' | wc -c) -eq 1 ]]
+            then
+              sha=$(echo "${containerImage}" | cut -d ':' -f 2)
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${sha}"
+            else
+              printf 'Asked to create source sha based tag, but no sha found in %s\n' "${containerImage}"
+              exit 1
+            fi
+          fi
+          # Push the associated source container using the common tags
+          if [[ $(jq -r ".images.pushSourceContainer" "${DATA_FILE}") == "true" ]] ; then # Default to false
+            # Calculate the source container image based on the provided container image
+            sourceContainer="${containerImage%@sha256:*}:${git_sha}.src"
+            # Check if the source container exists
+            if ! skopeo inspect --no-tags "docker://${sourceContainer}" &>/dev/null; then
+              echo "Error: Source container ${sourceContainer} not found!"
+              exit 1
+            fi
+            if [ $floatingTagsCount -eq 0 ]; then
+              echo "Error: at least one tag must exist in floatingTags when pushing source containers"
+              exit 1
+            fi
+            for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
+              push_image "${source_digest}" "${name}" "${sourceContainer}" \
+                "${repository}" "${floatingTag}-${timestamp}-source"
+              push_image "${source_digest}" "${name}" "${sourceContainer}" \
+                "${repository}" "${floatingTag}-source"
+            done
           fi
         done
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
