@@ -14,6 +14,9 @@ a `release` dir.
 | release_version | The version string to use creating the release | No | - |
 | content_directory | The directory inside the workspace to find files for release | No | - |
 
+## Changes in 1.0.2
+- Added title to the GitHub release creation
+
 ## Changes since 1.0.0
 - Added the `.sig` files to the release
 - Updated test with a `.sig` file
