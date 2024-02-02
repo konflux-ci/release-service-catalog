@@ -4,13 +4,14 @@ kind: Task
 metadata:
   name: collect-data
   labels:
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task to collect data from release resources and optionally save CRs to a workspace
+    Tekton task to collect data from release resources and verify that they do not contain any
+    disallowed fields
   params:
     - name: release
       type: string
@@ -106,3 +107,41 @@ spec:
         DATA_PATH=$(params.subdirectory)/data.json
         echo -n $DATA_PATH > $(results.data.path)
         echo "$merged_output" > $(workspaces.data.path)/$DATA_PATH
+    - name: check-data-key-sources
+      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      script: |
+        #!/usr/bin/env sh
+        set -ex
+
+        DISALLOWED_KEYS_JSON='{
+            "Release": [
+                "releaseNotes.product_id",
+                "releaseNotes.cpe",
+                "releaseNotes.type"
+            ],
+            "ReleasePlan": [
+                "releaseNotes.product_id",
+                "releaseNotes.cpe",
+                "releaseNotes.type"
+            ],
+            "ReleasePlanAdmission": [
+            ]
+        }'
+
+        RC=0
+
+        check_source () { # Expected arguments are [CRD from DISALLOWED_KEYS_JSON, file]
+            for KEY in $(jq -r ".$1[]" <<< $DISALLOWED_KEYS_JSON) ; do
+                if [[ $(jq ".spec.data.$KEY" "$2") != "null" ]] ; then
+                    echo "Found disallowed key: $KEY in resource $1"
+                    RC=1
+                fi
+            done
+        }
+
+        check_source "Release" "$(workspaces.data.path)/$(params.subdirectory)/release.json"
+        check_source "ReleasePlan" "$(workspaces.data.path)/$(params.subdirectory)/release_plan.json"
+        check_source "ReleasePlanAdmission" \
+            "$(workspaces.data.path)/$(params.subdirectory)/release_plan_admission.json"
+
+        exit $RC

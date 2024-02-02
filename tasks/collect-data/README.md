@@ -13,6 +13,9 @@ operator passes them as lowercase.
 A task result is returned for each resource with the relative path to the stored JSON for it in the workspace. There is
 also a task result for the fbcFragment extracted from the snapshot's first component.
 
+Finally, the task checks that the keys from the correct resource (a key that should come from the ReleasePlanAdmission
+should not be present in the Release data section).
+
 ## Parameters
 
 | Name                 | Description                                        | Optional | Default value |
@@ -22,6 +25,11 @@ also a task result for the fbcFragment extracted from the snapshot's first compo
 | releaseplanadmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes in 2.0.0
+  * A second step was added to the task
+    * The step lists keys that are disallowed for each of the three release resources
+    * If any of the disallowed keys are found in the corresponding resource, the check will fail the task
 
 ## Changes since 1.0.1
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

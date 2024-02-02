@@ -2,17 +2,24 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-collect-data-with-data
+  name: test-collect-data-fail-disallowed-release
+  annotations:
+    test/assert-task-failure: "run-task"
 spec:
   description: |
-    Run the collect-data task and verify that data task result is accurate.
+    Run the collect-data task with the disallowed key product_id in the Release data.
   workspaces:
     - name: tests-workspace
   tasks:
     - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
+        workspaces:
+          - name: data
         steps:
-          - name: create-crs
+          - name: setup
             image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
             script: |
               #!/usr/bin/env sh
@@ -22,14 +29,19 @@ spec:
               apiVersion: appstudio.redhat.com/v1alpha1
               kind: Release
               metadata:
-                name: release-with-data-sample
+                name: release-disallowed-release-sample
                 namespace: default
               spec:
                 snapshot: foo
                 releasePlan: foo
                 data:
-                  rkey: rvalue
-                  foo: shouldGetOverwritten
+                  releaseNotes:
+                    issues:
+                      - id: issue1
+                        source: github.com
+                      - id: issue2
+                        source: github.com
+                    product_id: 123
               EOF
               kubectl apply -f release
 
@@ -37,14 +49,14 @@ spec:
               apiVersion: appstudio.redhat.com/v1alpha1
               kind: ReleasePlan
               metadata:
-                name: releaseplan-with-data-sample
+                name: releaseplan-disallowed-release-sample
                 namespace: default
               spec:
                 application: foo
                 target: foo
                 data:
-                  foo: bar
-                  one: one
+                  releaseNotes:
+                    synopsis: some text field
               EOF
               kubectl apply -f releaseplan
 
@@ -52,18 +64,12 @@ spec:
               apiVersion: appstudio.redhat.com/v1alpha1
               kind: ReleasePlanAdmission
               metadata:
-                name: releaseplanadmission-with-data-sample
+                name: releaseplanadmission-disallowed-release-sample
                 namespace: default
               spec:
                 applications:
                   - foo
                 origin: foo
-                data:
-                  one:
-                    two: three
-                    four:
-                      - five
-                      - six
                 policy: foo
                 pipeline:
                   pipelineRef:
@@ -75,6 +81,9 @@ spec:
                         value: default
                       - name: kind
                         value: pipeline
+                data:
+                  releaseNotes:
+                    product_id: 123
               EOF
               kubectl apply -f releaseplanadmission
 
@@ -82,10 +91,13 @@ spec:
               apiVersion: appstudio.redhat.com/v1alpha1
               kind: Snapshot
               metadata:
-                name: snapshot-with-data-sample
+                name: snapshot-disallowed-release-sample
                 namespace: default
               spec:
                 application: foo
+                components:
+                  - name: name
+                    containerImage: newimage
               EOF
               kubectl apply -f snapshot
     - name: run-task
@@ -93,54 +105,17 @@ spec:
         name: collect-data
       params:
         - name: release
-          value: default/release-with-data-sample
+          value: default/release-disallowed-release-sample
         - name: releaseplan
-          value: default/releaseplan-with-data-sample
+          value: default/releaseplan-disallowed-release-sample
         - name: releaseplanadmission
-          value: default/releaseplanadmission-with-data-sample
+          value: default/releaseplanadmission-disallowed-release-sample
         - name: snapshot
-          value: default/snapshot-with-data-sample
+          value: default/snapshot-disallowed-release-sample
         - name: subdirectory
           value: $(context.pipelineRun.uid)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       runAfter:
         - setup
-      workspaces:
-        - name: data
-          workspace: tests-workspace
-    - name: check-result
-      params:
-        - name: data
-          value: $(tasks.run-task.results.data)
-      workspaces:
-        - name: data
-          workspace: tests-workspace
-      runAfter:
-        - run-task
-      taskSpec:
-        params:
-          - name: data
-            type: string
-        steps:
-          - name: check-result
-            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
-            script: |
-              #!/usr/bin/env sh
-              set -eux
-
-              echo Test that data result was set properly
-              test $(cat "$(workspaces.data.path)/$(params.data)") \
-                == '{"foo":"bar","rkey":"rvalue","one":{"four":["five","six"],"two":"three"}}'
-  finally:
-    - name: cleanup
-      taskSpec:
-        steps:
-          - name: delete-crs
-            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
-            script: |
-              #!/usr/bin/env sh
-              set -eux
-
-              kubectl delete release release-with-data-sample
-              kubectl delete releaseplan releaseplan-with-data-sample
-              kubectl delete releaseplanadmission releaseplanadmission-with-data-sample
-              kubectl delete snapshot snapshot-with-data-sample
