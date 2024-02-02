@@ -27,6 +27,10 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 2.1.0
+- Use the translate-delivery-repo util for translating the reference_image variable
+  - This change comes with a bump in the image used for the task
+
 ## Changes in 2.0.0
 - The internalrequest CR is created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter
   - This change comes with a bump in the image used for the task
