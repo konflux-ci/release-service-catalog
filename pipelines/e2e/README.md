@@ -18,6 +18,10 @@ affected by RHTAP services or which results could affect the RHTAP workflow.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 0.5.0
+* Modified the pipeline to dynamically source the `snapshot_spec.json`
+  file from the results of the `collect-data` task.
+
 ## Changes in 0.4.1
 * The cleanup-workspace task now receives a pipelineRunUid parameter to cleanup InternalRequests
 

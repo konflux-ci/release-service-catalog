@@ -17,6 +17,10 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
 
+### Changes in 1.9.0
+- modified the pipeline to dynamically source the `data.json` and `snapshot_spec.json`
+  files from the results of the `collect-data` task.
+
 ### Changes in 1.8.0
 - the task `add-fbc-contribution` now requires the `targetIndex` parameter set with the `updated-targetIndex`
   result from the task `update-ocp-tag`

@@ -17,6 +17,10 @@ Tekton pipeline to release Snapshots to an external registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 2.2.0
+- Modified the pipeline to dynamically source the `data.json`, `snapshot_spec.json` and
+  `release_plan_admission.json` files from the results of the `collect-data` task.
+
 ## Changes in 2.1.1
 - The cleanup-workspace task now receives a pipelineRunUid parameter to cleanup InternalRequests
 
