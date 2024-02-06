@@ -269,3 +269,43 @@ Another option is to run one or more tests directly:
 
 This will still install the task and run `pre-apply-task-hook.sh` if present, but it will then
 run only the specified test pipeline.
+
+### Openshift CI Prow Tests
+
+Each PR runs the [release-pipelines e2e test suite](https://github.com/redhat-appstudio/e2e-tests/tree/main/tests/release/pipelines).
+This is to ensure that a change does not break any pipeline functionality, as the tekton unit tests only test the tasks.
+This shows up as the `ci/prow/release-pipelines-e2e-suite` check on the PR.
+
+#### Pairing with E2E Change
+
+Sometimes, a change to a pipeline definition will require a change to the e2e test in order to pass. To do this, the changes should be paired.
+
+Process:
+  This is described in depth [here](https://github.com/redhat-appstudio/e2e-tests/blob/main/docs/Installation.md#rhtap-in-openshift-ci-and-branch-pairing).
+  The short explanation for it is that you should open a PR that makes the necessary changes to the test suite in
+  [the e2e repo](https://github.com/redhat-appstudio/e2e-tests) using the same branch name as your PR to this repository. This will pair them. Once the
+  PR to this repo is merged, the e2e-tests PR should also be merged so that future PRs to this repo will pass (as they will now be dependent on the e2e change).
+
+#### Pairing with release-service Change
+
+Another possible pairing scenario is a change to a pipeline definition that requires changes to the operator itself, stored in
+[the release-service repo](https://github.com/redhat-appstudio/release-service). For example, maybe a parameter is passed by the operator
+to the pipeline, and the name of the parameter is changing. This will require the release-service PR and release-service-catalog PR to be paired
+in order for the e2e suite to pass.
+Note: This can be used in conjunction with the e2e pairing described in the previous section. That is to say, you can also pair an e2e-tests
+PR with these two PRs.
+
+Process:
+* Open a PR to the [release-service](https://github.com/redhat-appstudio/release-service). This PR should usually be opened as a draft. In order to run the
+required check that builds the image for your catalog PR CI run, comment `/test images` on the PR. This will trigger the `ci/prow/images` check on the
+release-service PR. So, it is important to open the release-service PR first and wait for that check to succeed.
+* Open a PR to this repo. Use the same branch name as you did in the release-service PR (just like you do to pair with e2e-tests PRs). The e2e test suite
+for your catalog PR will deploy a cluster using your release-service image built as part of your release-service PR checks. It will then run the test suite
+with the `RELEASE_SERVICE_CATALOG_URL` and `RELEASE_SERVICE_CATALOG_REVISION` environment variables set to point all ReleasePlanAdmissions in the e2e suite
+to your catalog PR. As a result, the test suite will run with your changes.
+* Once the catalog CI run completes and the code review process is complete, the catalog PR should be merged. This should happen before the release-service
+PR is merged. At that point, you will be working with an unpaired release-service PR, or if this change also included an e2e change, a release-service
+PR paired with an e2e change (documented [here](https://github.com/redhat-appstudio/e2e-tests/blob/main/docs/Installation.md#rhtap-in-openshift-ci-and-branch-pairing)),
+but the catalog PR pairing process will be complete.
+* Pairing is typically only required for breaking changes, so once the catalog PR is merged, things are now in a broken state. This should be resolved ASAP by
+marking the release-service PR as ready, merging it, and promoting its results to the infra-deployments overlays.
