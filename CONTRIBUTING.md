@@ -94,15 +94,15 @@ Floating tags like `latest` or `8.8` in the case of the ubi image should be avoi
 
 ### Tekton Task Testing
 
-When a pull request is opened, Tekton Task tests are run for all the task version
-directories that are modified.
+When a pull request is opened, Tekton Task tests are run for all the task directories
+that are being modified.
 
 The Github workflow is defined in
 [.github/workflows/tekton_task_tests.yaml](.github/workflows/tekton_task_tests.yaml)
 
 #### Adding new Tekton Task tests
 
-Tests are defined as Tekton Pipelines inside the `tests` subdirectory of the task version
+Tests are defined as Tekton Pipelines inside the `tests` subdirectory of the task
 directory. Their filenames must match `test*.yaml` and the Pipeline name must be
 the same as the filename (sans `.yaml`).
 
