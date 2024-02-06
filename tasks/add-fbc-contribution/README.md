@@ -8,11 +8,14 @@ Task to create a internalrequest to add fbc contributions to index images
 |----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
 | snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | Yes      | snapshot_spec.json   |
 | dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json            |
-| requestTimeout | InternalRequest timeout                                                                   | Yes      | 180                  |
 | binaryImage    | binaryImage value updated by update-ocp-tag task                                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                                            | No       |                      |
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
+
+## changes in 2.2.0
+- remove requestTimeout parameter and use values defined in RP/RPA
+- default build and request timeouts are now 1500 seconds
 
 ## changes in 2.1.0
 - add the parameter `targetIndex` to receive the `updated-targetIndex` result from
