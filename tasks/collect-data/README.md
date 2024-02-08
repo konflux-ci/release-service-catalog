@@ -26,6 +26,9 @@ should not be present in the Release data section).
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes in 2.1.0
+  * product_name and product_version were added as disallowed keys in Release and ReleasePlan CRs
+
 ## Changes in 2.0.0
   * A second step was added to the task
     * The step lists keys that are disallowed for each of the three release resources

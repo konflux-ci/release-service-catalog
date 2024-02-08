@@ -15,6 +15,9 @@ Currently, `releaseNotes` is the only supported system.
 | dataPath | Path to the JSON string of the merged data to use       | Yes      | data.json     |
 | systems  | The systems to check that all data keys are present for | Yes      | []            |
 
+## Changes in 0.4.0
+- Add releaseNotes.product_name and releaseNotes.product_version to required keys
+
 ## Changes in 0.3.0
 - Replace advisory.spec references with releaseNotes key
 
