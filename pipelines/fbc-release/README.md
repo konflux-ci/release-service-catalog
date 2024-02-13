@@ -7,8 +7,8 @@ Tekton release pipeline to interact with FBC Pipeline
 | Name                            | Description                                                                                              | Optional  | Default value                                                   |
 |---------------------------------|----------------------------------------------------------------------------------------------------------|-----------|-----------------------------------------------------------------|
 | release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution   | No        | -                                                               |
-| releaseplan                     | The namespaced name (namespace/name) of the releasePlan                                                  | No        | -                                                               |
-| releaseplanadmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                         | No        | -                                                               |
+| releasePlan                     | The namespaced name (namespace/name) of the releasePlan                                                  | No        | -                                                               |
+| releasePlanAdmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                         | No        | -                                                               |
 | snapshot                        | The namespaced name (namespace/name) of the snapshot                                                     | No        | -                                                               |
 | enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                      | No        | -                                                               |
 | enterpriseContractPublicKey     | Public key to use for validation by the enterprise contract                                              | Yes       | k8s://openshift-pipelines/public-key                            |
@@ -16,6 +16,9 @@ Tekton release pipeline to interact with FBC Pipeline
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                                            |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
+
+## Changes in 2.0.0
+- Parameters supplied by the Release Service operator now use camelCase format
 
 ### Changes in 1.10.0
 - the task `sign-index-image` now requires the `manifestListDigests` parameter set with the `indexImageDigests`
