@@ -1,0 +1,82 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: extract-release-notes-images
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to populate the releaseNotes.content.images key in the data.json file
+  params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use
+      type: string
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: commonTags
+      type: string
+      description: Space separated list of common tags to be used when publishing
+  workspaces:
+    - name: data
+      description: The workspace where the data JSON file resides
+  steps:
+    - name: extract-release-notes-images
+      image: quay.io/redhat-appstudio/release-service-utils:eb694b1a87f5129838929e0f79697eb40251a754
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        SNAPSHOT_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        # Common vars
+        # Convert space separated list of common tags into an array
+        tags=$(jq -cn --arg tags "$(params.commonTags)" '$tags|split(" ")')
+
+        for component in $(jq -c '.components[]' "${SNAPSHOT_FILE}")
+        do
+            repo=$(jq -r '.repository' <<< $component)
+            deliveryRepo=$(translate-delivery-repo $repo)
+            image=$(jq -r '.containerImage' <<< $component)
+            if ! [[ "$image" =~ ^[^:]+@sha256:[0-9a-f]+$ ]] ; then
+                echo "Failed to extract sha256 tag from ${image}. Exiting with failure"
+                exit 1
+            fi
+            sha=$(echo "${image}" | cut -d ':' -f 2)
+            # containerImage should be of the form registry.redhat.io/foo/bar@sha256:abcde
+            # This value will be used as the basis for the example values that follow
+            containerImage="${deliveryRepo}@sha256:${sha}"
+            # repository should be foo/bar
+            repository=$(echo ${containerImage} | cut -d '/' -f 2- | cut -d '@' -f 1)
+            # purl should be pkg:oci/foo@sha256:abcde?repository_url=registry.redhat.io/foo/bar
+            purl="pkg:oci/$(echo $repository | cut -d '/' -f 1)@sha256:${sha}?repository_url=${deliveryRepo}"
+            # Add one entry per arch (amd64 for example)
+            for arch in $(get-image-architectures ${image})
+            do
+                jsonString=$(jq -cn \
+                    --arg arch "$arch" \
+                    --arg containerImage "$containerImage" \
+                    --arg purl "$purl" \
+                    --arg repository "$repository" \
+                    --argjson tags "$tags" \
+                    '{"architecture": $arch, "containerImage":$containerImage,
+                    "purl": $purl, "repository": $repository, "tags": $tags}')
+                # Inject JSON into data.json
+                jq --argjson image "$jsonString" '.releaseNotes.content.images += [$image]' ${DATA_FILE} > data.tmp \
+                    && mv data.tmp ${DATA_FILE}
+            done
+        done
