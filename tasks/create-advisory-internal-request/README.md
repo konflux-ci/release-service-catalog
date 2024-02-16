@@ -15,6 +15,9 @@ the ReleasePlanAdmission and Application from the Snapshot are also used. The ad
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
 
+## Changes in 1.2.0
+- The sign.configMapName is passed to the internal request so the signing key can be added to the advisory yaml
+
 ## Changes in 1.1.0
 - The default value of jsonKey changed from .advisory to .releaseNotes
 
