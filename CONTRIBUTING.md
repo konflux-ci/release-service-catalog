@@ -206,6 +206,13 @@ For reference implementation, check [push-sbom-to-pyxis/tests/](/tasks/push-sbom
       check mock calls after task execution in our test pipeline.
     - In this case the function touches a file that would otherwise be created by the actual `cosign`
       call. This is specific to the task and will depend on your use case.
+    - Note: In the example above, the function being mocked is `cosign`. If that function was actually something
+      that had a hyphen in its name (e.g. `my-cool-function`), the tests would fail with
+      `my-cool-function: not a valid identifier` messages. This is because when you use `#!/usr/bin/env sh`, Bash
+      runs in POSIX mode in which case hyphens are not permitted in function names. The solution to this is to use
+      `#!/bin/bash` or `#!/usr/bin/env bash` in place of `#!/usr/bin/env sh` at the top of the file. Keep in mind
+      that the same shell declaration should be used in both the mock and the tekton task step script you are
+      mocking to ensure the behavior during test is the same as during runtime.
 
 1. In your `pre-apply-task-hook.sh` file (see the Test Setup section above for explanation), include
     `yq` commands to inject the `mocks.sh` file to the top of your task step scripts, e.g.:
