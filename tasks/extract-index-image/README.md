@@ -11,6 +11,11 @@ the workspace name for this task *must* be input.
 |------|-------------|----------|---------------|
 | inputDataFile | File to read json data from | No | - |
 
+
+## Changes in 0.4.0
+- This version now produces a result that contains the list of digests found in the manifest list for each arch
+- This result is called `indexImageDigests`
+
 ## Changes since 0.2.0
 - Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 

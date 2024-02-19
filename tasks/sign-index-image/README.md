@@ -9,7 +9,7 @@ Creates an InternalRequest to sign an index image
 | dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json              |
 | request              | Signing pipeline name to handle this request                                              | Yes      | hacbs-signing-pipeline |
 | referenceImage       | The image to be signed                                                                    | No       |                        |
-| manifestDigestImage  | Manifest Digest Image used to extract the SHA                                             | Yes      | ""                     |
+| manifestListDigests  | The manifest digests for each arch in manifest list                                       | No       |                        |
 | requester            | Name of the user that requested the signing, for auditing purposes                        | No       |                        |
 | requestTimeout       | InternalRequest timeout                                                                   | Yes      | 180                    |
 | pipelineRunUid       | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                        |
@@ -26,6 +26,9 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 3.0.0
+- This task now requires a list of digests to use in the signing request via the parameter `manifestListDigests`
 
 ## Changes in 2.1.0
 - Use the translate-delivery-repo util for translating the reference_image variable
