@@ -13,6 +13,9 @@ Task to create a internalrequest to add fbc contributions to index images
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
 
+## changes in 2.3.0
+- add new result called `indexImageDigests`
+
 ## changes in 2.2.0
 - remove requestTimeout parameter and use values defined in RP/RPA
 - default build and request timeouts are now 1500 seconds

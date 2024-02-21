@@ -17,6 +17,11 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
 
+### Changes in 1.10.0
+- the task `sign-index-image` now requires the `manifestListDigests` parameter set with the `indexImageDigests`
+  result from the task `add-fbc-contribution-to-index-image`.
+- the `manifestDigestImage` parameter was removed from `sign-index-image` task
+
 ### Changes in 1.9.0
 - modified the pipeline to dynamically source the `data.json` and `snapshot_spec.json`
   files from the results of the `collect-data` task.
