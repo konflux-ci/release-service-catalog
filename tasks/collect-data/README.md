@@ -21,10 +21,14 @@ should not be present in the Release data section).
 | Name                 | Description                                        | Optional | Default value |
 |----------------------|----------------------------------------------------|----------|---------------|
 | release              | Namespaced name of the Release                     | No       | -             |
-| releaseplan          | Namespaced name of the ReleasePlan                 | No       | -             |
-| releaseplanadmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
+| releasePlan          | Namespaced name of the ReleasePlan                 | No       | -             |
+| releasePlanAdmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes in 3.0.0
+  * Parameters supplied by the Release Service operator now use camelCase format. For consistency, the `collect-data`
+    task also switched to use the same format.
 
 ## Changes in 2.1.0
   * product_name and product_version were added as disallowed keys in Release and ReleasePlan CRs
