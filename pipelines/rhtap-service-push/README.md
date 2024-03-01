@@ -11,6 +11,7 @@
 | release | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No | - |
 | releasePlan | The namespaced name (namespace/name) of the releasePlan | No | - |
 | releasePlanAdmission | The namespaced name (namespace/name) of the releasePlanAdmission | No | - |
+| releaseServiceConfig | The namespaced name (namespace/name) of the releaseServiceConfig | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
@@ -18,6 +19,9 @@
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
+
+## Changes in 3.0.0
+- releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
 
 ## Changes in 2.0.0
 - Parameters supplied by the Release Service operator now use camelCase format
