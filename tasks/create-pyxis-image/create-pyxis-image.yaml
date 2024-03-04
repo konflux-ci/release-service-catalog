@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "2.1.0"
+    app.kubernetes.io/version: "2.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -62,7 +62,7 @@ spec:
       description: IDs of the created entries in Pyxis, each on its own line
   steps:
     - name: create-pyxis-image
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:591e4ed114947fdb5dc48c7fe8646e647f680431
       env:
         - name: pyxisCert
           valueFrom:
@@ -75,7 +75,7 @@ spec:
               name: $(params.pyxisSecret)
               key: key
       script: |
-        #!/usr/bin/env sh
+        #!/usr/bin/env bash
         set -o pipefail
 
         if [[ "$(params.server)" == "production" ]]
@@ -110,24 +110,39 @@ spec:
         echo "${pyxisKey}" > /tmp/key
 
         COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        JSON_OUTPUT='{}'
         for (( i=0; i < $COMPONENTS; i++ )); do
             CONTAINER_IMAGE=$(jq -r ".components[${i}].containerImage" "${SNAPSHOT_SPEC_FILE}")
+            JSON_OUTPUT=$(jq --argjson id $i --arg image "${CONTAINER_IMAGE}" \
+              '.components[$id] += { "containerImage": $image, "pyxisImages": []}' <<< "$JSON_OUTPUT")
             REPOSITORY=$(jq -r ".components[${i}].repository" "${SNAPSHOT_SPEC_FILE}")
             REPOSITORY=${REPOSITORY%:*} # strip tag just in case - it should not be there
             DIGEST="${CONTAINER_IMAGE##*@}"
-            PULLSPEC="docker://${REPOSITORY}@${DIGEST}"
-            MEDIA_TYPE=$(skopeo inspect --raw "$PULLSPEC" | jq -r .mediaType)
-            skopeo inspect --no-tags "$PULLSPEC" > /tmp/skopeo-inspect.json
+            PULLSPEC="${REPOSITORY}@${DIGEST}"
+            MEDIA_TYPE=$(skopeo inspect --raw "docker://${PULLSPEC}" | jq -r .mediaType)
+            ARCHS=($(get-image-architectures "${PULLSPEC}"))
+            for (( a=0; a < ${#ARCHS[@]}; a++)); do
+                ARCH=${ARCHS[$a]}
+                skopeo inspect --no-tags --override-os linux --override-arch "$ARCH" "docker://${PULLSPEC}" \
+                    | tee /tmp/skopeo-inspect.json
+                PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
+                  --pyxis-url $PYXIS_URL \
+                  --certified $(params.certified) \
+                  --tags "$TAGS" \
+                  --is-latest $(params.isLatest) \
+                  --verbose \
+                  --skopeo-result "/tmp/skopeo-inspect.json" \
+                  --media-type "$MEDIA_TYPE" \
+                  --rh-push $(params.rhPush) | tee "/tmp/output"
+                IMAGEID=$(awk '/The image id is/{print $NF}' /tmp/output)
+                JSON_OUTPUT=$(jq --argjson component_index $i --argjson arch_index $a \
+                  --arg arch "${ARCH}" --arg imageId "${IMAGEID}" --arg digest "${DIGEST}" \
+                    '.components[$component_index].pyxisImages[$arch_index] += {
+                      "arch": $arch,
+                      "imageId": $imageId,
+                      "digest": $digest}' <<< "$JSON_OUTPUT")
 
-            PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
-              --pyxis-url $PYXIS_URL \
-              --certified $(params.certified) \
-              --tags "$TAGS" \
-              --is-latest $(params.isLatest) \
-              --verbose \
-              --skopeo-result /tmp/skopeo-inspect.json \
-              --media-type "$MEDIA_TYPE" \
-              --rh-push $(params.rhPush) | tee /tmp/output
-
-            grep 'The image id is' /tmp/output | awk '{print $NF}' >> $(results.containerImageIDs.path)
+                echo $IMAGEID >> $(results.containerImageIDs.path)
+            done
         done
+        echo "$JSON_OUTPUT" | tee $(workspaces.data.path)/pyxis.json
