@@ -16,6 +16,10 @@ the ReleasePlanAdmission and Application from the Snapshot are also used. The ad
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
 
+## Changes in 2.1.0
+- The advisory_url is reported as task result
+  - If the advisory was not created, the result will instead be the empty string
+
 ## Changes in 2.0.0
 - The path to the ReleaseServiceConfig in the data workspace is now passed as a parameter
   - The advisory repo will be fetched from the ReleaseServiceConfig json
