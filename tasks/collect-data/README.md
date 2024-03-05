@@ -26,6 +26,9 @@ should not be present in the Release data section).
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes in 3.1.0
+  * product_stream was added as a disallowed key in Release and ReleasePlan CRs
+
 ## Changes in 3.0.0
   * Parameters supplied by the Release Service operator now use camelCase format. For consistency, the `collect-data`
     task also switched to use the same format.
