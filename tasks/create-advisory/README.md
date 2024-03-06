@@ -1,4 +1,4 @@
-# create-advisory-internal-request
+# create-advisory
 
 Tekton task to create an advisory via an InternalRequest. The advisory data is pulled from the data JSON. The origin workspace from
 the ReleasePlanAdmission and Application from the Snapshot are also used. The advisory is created in a GitLab repository.
@@ -15,6 +15,9 @@ the ReleasePlanAdmission and Application from the Snapshot are also used. The ad
 | request                  | Type of request to be created                                                             | Yes      | create-advisory             |
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
+
+## Changes in 3.0.0
+- Task renamed from create-advisory-internal-request to create-advisory
 
 ## Changes in 2.1.0
 - The advisory_url is reported as task result
