@@ -23,8 +23,12 @@ should not be present in the Release data section).
 | release              | Namespaced name of the Release                     | No       | -             |
 | releasePlan          | Namespaced name of the ReleasePlan                 | No       | -             |
 | releasePlanAdmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
+| releaseServiceConfig | Namespaced name of the ReleaseServiceConfig        | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes in 4.0.0
+  * releaseServiceConfig parameter added and the task now stores that CR in the data workspace as well
 
 ## Changes in 3.1.0
   * product_stream was added as a disallowed key in Release and ReleasePlan CRs
