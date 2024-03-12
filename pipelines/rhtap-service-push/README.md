@@ -20,6 +20,9 @@
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.2.0
+- snapshotPath and containerImageIDs parameters removed from the task *push-sbom-to-pyxis*
+
 ## Changes in 3.0.1
 - releaseServiceConfig was not passed to the collect-data task - now it is
 

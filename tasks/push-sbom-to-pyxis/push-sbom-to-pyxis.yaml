@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-sbom-to-pyxis
   labels:
-    app.kubernetes.io/version: "0.5.0"
+    app.kubernetes.io/version: "0.6.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -12,13 +12,6 @@ spec:
   description: >-
     Tekton task that extracts sboms from pull specs and pushes them to Pyxis.
   params:
-    - name: snapshotPath
-      description: Path to the JSON string of the mapped Snapshot spec in hte data workspace
-      type: string
-      default: mapped_snapshot.json
-    - name: containerImageIDs
-      description: Space separated list of Pyxis image IDs
-      type: string
     - name: pyxisSecret
       type: string
       description: |
@@ -48,31 +41,28 @@ spec:
         #!/usr/bin/env sh
         set -eux
 
-        SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
-        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
-            echo "No valid snapshot file was provided."
-            exit 1
-        fi
-
-        IMAGEURLS=($(cat "${SNAPSHOT_SPEC_FILE}" | jq -r '.components[].containerImage'))
-        IMAGEIDS=($(params.containerImageIDs))
-
-        if [ ${#IMAGEURLS[@]} != ${#IMAGEIDS[@]} ]; then
-          echo "ERROR: Lengths of imageURLs and containerImageIDs do not match"
-          exit 1
-        fi
+        PYXIS_JSON_PATH=$(workspaces.data.path)/pyxis.json
 
         mkdir /workdir/sboms
         cd /workdir/sboms
 
-        for i in ${!IMAGEURLS[@]}; do
-          echo "Fetching sbom for image: ${IMAGEURLS[$i]}"
-          cosign download sbom --output-file "${IMAGEIDS[$i]}.json" "${IMAGEURLS[$i]}"
+        IMAGEURL_LENGTH=($(jq -r '.components | length' $PYXIS_JSON_PATH))
+        for(( i=0; i<${IMAGEURL_LENGTH}; i++ )); do
+          IMAGEURL=$(jq -r ".components[$i].containerImage" $PYXIS_JSON_PATH)
+          PYXIS_IMAGES=$(jq ".components[$i].pyxisImages" $PYXIS_JSON_PATH)
+          PYXIS_IMAGES_LENGTH=$(jq 'length' <<< "${PYXIS_IMAGES}")
+          for(( a=0; a<${PYXIS_IMAGES_LENGTH}; a++ )); do
+            ARCH=$(jq -r ".[$a].arch" <<< "${PYXIS_IMAGES}")
+            IMAGEID=$(jq -r ".[$a].imageId" <<< "${PYXIS_IMAGES}")
+            echo "Fetching sbom for ${ARCH} architecture image: ${IMAGEURL}"
+            cosign download sbom --output-file "${IMAGEID}.json" "${IMAGEURL}"
+          done
         done
 
         SBOM_COUNT=$(ls *.json | wc -l )
-        if [ $SBOM_COUNT != ${#IMAGEURLS[@]} ]; then
-          echo "ERROR: Expected to fetch sbom for ${#IMAGEURLS[@]} images, but only $SBOM_COUNT were saved"
+        IMAGEIDS_COUNT=$(jq "[.components[].pyxisImages[].imageId] | length" $PYXIS_JSON_PATH)
+        if [ $SBOM_COUNT != $IMAGEIDS_COUNT ]; then
+          echo "ERROR: Expected to fetch sbom for ${IMAGEIDS_COUNT} images, but only $SBOM_COUNT were saved"
           exit 1
         fi
 

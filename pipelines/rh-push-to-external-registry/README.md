@@ -18,6 +18,9 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 4.1.0
+- snapshotPath and containerImageIDs parameters removed from the task *push-sbom-to-pyxis*
+
 ## Changes in 4.0.0
 - releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
 
