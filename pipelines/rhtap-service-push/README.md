@@ -20,6 +20,9 @@
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.0.1
+- releaseServiceConfig was not passed to the collect-data task - now it is
+
 ## Changes in 3.0.0
 - releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
 
