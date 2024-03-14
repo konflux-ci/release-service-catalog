@@ -18,6 +18,10 @@ Tekton pipeline to release Snapshots to an external registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 4.0.1
+- Added `when` clause to `push-snapshot` task in the pipeline to ensure it only executes when
+  the `apply-mapping` task indicates that mapping was successful.
+
 ## Changes in 4.0.0
 - releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
 

@@ -19,6 +19,11 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 | releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | Yes | release_plan_admission.json |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
 
+## Changes in 0.9.1
+  * Replaced `echo` with `printf` for storing results.
+    Using `echo` resulted in appending `true\n` to the output,
+    which caused discrepancies with the `when` expression in the pipeline.
+
 ## Changes since 0.8.0
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
