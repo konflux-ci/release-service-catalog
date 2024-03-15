@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-pyxis-repository
   labels:
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -18,6 +18,8 @@ spec:
     to identify the right Container Registry object in Pyxis. The task also optionally
     marks the repositories as source_container_image_enabled true if pushSourceContainer
     is true in the data JSON.
+    Additionally, this task respects the `publish-on-push` flag. If `false`, then the task
+    does not publish the repository.
   params:
     - name: server
       type: string
@@ -95,6 +97,7 @@ spec:
             PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
             PYXIS_REPOSITORY_JSON=$(curl --retry 5 --key /tmp/key --cert /tmp/crt \
                 "${PYXIS_URL}/v1/repositories/registry/${PYXIS_REGISTRY}/repository/${PYXIS_REPOSITORY}" -X GET)
+        
             PYXIS_REPOSITORY_ID=$(jq -r '._id // ""' <<< $PYXIS_REPOSITORY_JSON)
             if [ -z "$PYXIS_REPOSITORY_ID" ]; then
                 echo Error: Unable to get Container Repository object id from Pyxis
@@ -102,6 +105,16 @@ spec:
                 echo $PYXIS_REPOSITORY_JSON
                 exit 1
             fi
+
+            # verify that publish_on_push is set to true.
+            # otherwise, do not publish the image.
+            PYXIS_REPOSITORY_PUBLISH_ON_PUSH=$(jq -r '.publish_on_push // "false"' <<< $PYXIS_REPOSITORY_JSON)
+            if [ "${PYXIS_REPOSITORY_PUBLISH_ON_PUSH}" != "true" ] ; then
+              echo "WARNING: repository ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY} is marked as publish_on_push = false"
+              echo "Skipping the setting of the published flag."
+              continue
+            fi
+        
             curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
                 -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
         done
