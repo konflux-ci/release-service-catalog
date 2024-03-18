@@ -1,0 +1,112 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-image-single-component-multi-arch
+spec:
+  description: Test creating a internal request to sign a multi-arch image
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:4713b58df57b06e5ca248f1c8227a8493ceb5b01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "registry.io/multi-arch-image0@sha256:0000",
+                    "repository": "quay.io/redhat-prod/myproduct----myrepo"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "sign": {
+                  "request": "hacbs-signing-pipeline",
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: rh-sign-image
+      params:
+        - name: requester
+          value: testuser-single
+        - name: commonTags
+          value: "some-prefix-12345 some-prefix"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:4713b58df57b06e5ca248f1c8227a8493ceb5b01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              counter=0
+              # first 2 are for the 1st arch
+              # last 2 are for  the 2nd arch
+              testValues=('sha256:6f9a420f660e73a' \
+                          'sha256:6f9a420f660e73a' \
+                          'sha256:6f9a420f660e73b' \
+                          'sha256:6f9a420f660e73b')
+
+              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
+              internalRequestsCount=$(echo $internalRequests | wc -w)
+
+              if [ $internalRequestsCount != "4" ] ; then
+                echo "incorrect number of internalRequests created. Expected 4"
+                exit 1
+              fi
+
+              for internalRequest in ${internalRequests};
+              do
+                params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+                if [ $(jq -r '.manifest_digest' <<< "${params}") != "${testValues[$counter]}" ]; then
+                  echo "manifest_digest does not match"
+                  exit 1
+                fi
+                counter=$((counter+1))
+
+              done
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:4713b58df57b06e5ca248f1c8227a8493ceb5b01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all

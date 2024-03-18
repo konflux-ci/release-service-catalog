@@ -14,6 +14,9 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 2.2.0
+* Support was added to handle the signing of multi-arch images 
+
 ## Changes in 2.1.0
 * Use the translate-delivery-repo util for translating the reference variable
   * This change comes with a bump in the image used for the task
