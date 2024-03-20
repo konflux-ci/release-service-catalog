@@ -10,6 +10,10 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 4.1.0
+* Add `--override-arch` to `skopeo` calls to avoid breaking the task when the component's container image
+  architecture is different from the pod the task runs on.
+
 ## Changes in 4.0.1
 * Incorrect floatingTag replaced with $floatingTag
 
