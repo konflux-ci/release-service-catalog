@@ -27,6 +27,9 @@ should not be present in the Release data section).
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes in 4.1.0
+  * releaseNotes.type is allowed in both Release and ReleasePlan CRs
+
 ## Changes in 4.0.0
   * releaseServiceConfig parameter added and the task now stores that CR in the data workspace as well
 
