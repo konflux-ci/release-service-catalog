@@ -18,6 +18,9 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.1.0
+- Remove push-sbom-to-pyxis. It has been replaced by manifest-box.
+
 ## Changes in 3.0.0
 * releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
 

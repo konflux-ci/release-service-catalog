@@ -170,15 +170,15 @@ tekton catalog repository. For more details and examples, look
 ##### Mocking commands executed in task scripts
 
 Mocks are needed when we want to test tasks which call external services (e.g. `scopeo copy`,
-`cosign download`, or even a python script from our release-utils image such as `upload_sbom` that would
+`cosign download`, or even a python script from our release-utils image such as `create_container_image` that would
 call Pyxis API). The way to do this is to create a file with mock shell functions (with the same names
 as the commands you want to mock) and inject this file to the beginning of each `script` field in
 the task step that needs mocking.
 
-For reference implementation, check [push-sbom-to-pyxis/tests/](/tasks/push-sbom-to-pyxis/tests/). Here's a break down of how it's done:
+For reference implementation, check [create-pyxis-image/tests/](tasks/create-pyxis-image/tests/). Here's a breakdown of how it's done:
 
 1. Create a `mocks.sh` file in the tests directory of your task, e.g.
-    `tasks/push-sbom-to-pyxis/tests/mocks.sh`. This file will contain the mock function
+    `tasks/create-pyxis-image/tests/mocks.sh`. This file will contain the mock function
     definitions. It also needs to contain a shebang at the top as it will get injected to the top
     of the original script. For example:
 
