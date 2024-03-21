@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -eux
 
 # mocks to be injected into task step scripts
@@ -28,11 +28,11 @@ function skopeo() {
   echo Mock skopeo called with: $*
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
 
-  if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://"* ]]; then
+  if [[ "$*" == "inspect --override-arch "*" --no-tags --format {{.Digest}} docker://"* ]]; then
     echo $5
     return
   fi
-  if [[ "$*" == "inspect --no-tags docker://"* ]]; then
+  if [[ "$*" == "inspect --override-arch "*" --no-tags docker://"* ]]; then
     return
   fi
 
@@ -56,4 +56,9 @@ function date() {
           exit 1
           ;;
   esac
+}
+
+function get-image-architectures() {
+    echo "amd64"
+    echo "ppc64le"
 }
