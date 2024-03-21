@@ -22,8 +22,11 @@ does not publish the repository.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | Yes      | snapshot_spec.json |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | Yes      | data.json          |
 
+## Changes in 0.2.2
+* Add support for server types of production-internal and stage-internal
+
 ## Changes in 0.2.1
-The task now respects the `publish-on-push` flag. If `false`, then the task
+* The task now respects the `publish-on-push` flag. If `false`, then the task
 does not publish the repository.
 
 ## Changes in 0.2.0
