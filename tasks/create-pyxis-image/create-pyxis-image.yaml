@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "2.2.1"
+    app.kubernetes.io/version: "2.2.2"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -62,7 +62,7 @@ spec:
       description: IDs of the created entries in Pyxis, each on its own line
   steps:
     - name: create-pyxis-image
-      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+      image: quay.io/redhat-appstudio/release-service-utils:b3059c67d4bdb6c9cf1739fdfb2c0cb595fe0f86
       env:
         - name: pyxisCert
           valueFrom:
@@ -126,11 +126,17 @@ spec:
             DIGEST="${CONTAINER_IMAGE##*@}"
             PULLSPEC="${REPOSITORY}@${DIGEST}"
             MEDIA_TYPE=$(skopeo inspect --raw "docker://${PULLSPEC}" | jq -r .mediaType)
-            ARCHS=($(get-image-architectures "${PULLSPEC}"))
-            for (( a=0; a < ${#ARCHS[@]}; a++)); do
-                ARCH=${ARCHS[$a]}
-                skopeo inspect --no-tags --override-os linux --override-arch "$ARCH" "docker://${PULLSPEC}" \
+
+            index=0
+            while IFS= read -r ARCH_DETAIL;
+            do
+                OS=$(jq -r '.platform.os' <<< "$ARCH_DETAIL")
+                ARCH=$(jq -r '.platform.architecture' <<< "$ARCH_DETAIL")
+                ARCH_DIGEST=$(jq -r '.digest' <<< "$ARCH_DETAIL")
+
+                skopeo inspect --no-tags --override-os "$OS" --override-arch "$ARCH" "docker://${PULLSPEC}" \
                     | tee /tmp/skopeo-inspect.json
+
                 PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
                   --pyxis-url $PYXIS_URL \
                   --certified $(params.certified) \
@@ -139,16 +145,20 @@ spec:
                   --verbose \
                   --skopeo-result "/tmp/skopeo-inspect.json" \
                   --media-type "$MEDIA_TYPE" \
+                  --architecture-digest "$ARCH_DIGEST" \
                   --rh-push $(params.rhPush) | tee "/tmp/output"
                 IMAGEID=$(awk '/The image id is/{print $NF}' /tmp/output)
-                JSON_OUTPUT=$(jq --argjson component_index $i --argjson arch_index $a \
+                JSON_OUTPUT=$(jq --argjson component_index $i --argjson arch_index $index \
                   --arg arch "${ARCH}" --arg imageId "${IMAGEID}" --arg digest "${DIGEST}" \
+                  --arg arch_digest "${ARCH_DIGEST}" \
                     '.components[$component_index].pyxisImages[$arch_index] += {
                       "arch": $arch,
                       "imageId": $imageId,
-                      "digest": $digest}' <<< "$JSON_OUTPUT")
+                      "digest": $digest,
+                      "arch_digest": $arch_digest}' <<< "$JSON_OUTPUT")
 
                 echo $IMAGEID >> $(results.containerImageIDs.path)
-            done
+                index=$((index + 1))
+            done <<< $(get-image-architectures "${PULLSPEC}")
         done
         echo "$JSON_OUTPUT" | tee $(workspaces.data.path)/pyxis.json

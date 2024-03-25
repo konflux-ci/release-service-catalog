@@ -59,6 +59,6 @@ function date() {
 }
 
 function get-image-architectures() {
-    echo "amd64"
-    echo "ppc64le"
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
+    echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
 }

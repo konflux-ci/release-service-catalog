@@ -7,7 +7,7 @@ function create_container_image() {
   echo $* >> $(workspaces.data.path)/mock_create_container_image.txt
   echo The image id is $(awk 'END{printf("%04i", NR)}' $(workspaces.data.path)/mock_create_container_image.txt)
 
-  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --rh-push "* ]]
+  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --architecture-digest "*" --rh-push "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
@@ -32,9 +32,9 @@ function skopeo() {
 
 function get-image-architectures() {
   if [[ "$*" =~ registry.io/multi-arch-image.?@mydigest.? ]]; then
-    echo "amd64"
-    echo "ppc64le"
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
+    echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
   else
-    echo "amd64"
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
   fi
 }

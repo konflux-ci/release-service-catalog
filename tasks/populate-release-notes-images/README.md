@@ -11,6 +11,9 @@ in place so that downstream tasks relying on the releaseNotes data can use it.
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 | commonTags   | Space separated list of common tags to be used when publishing       | No       | -             |
 
+## Changes in 1.0.2
+* Absorb change in refactored get-image-architectures script
+
 ## Changes in 1.0.1
 * Update task image and make changes to accomodate for new `translate-delivery-repo` funtionality
 
