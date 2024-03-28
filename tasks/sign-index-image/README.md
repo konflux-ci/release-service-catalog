@@ -27,6 +27,9 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 3.0.1
+- Update task image and make changes to accomodate for new `translate-delivery-repo` funtionality
+
 ## Changes in 3.0.0
 - This task now requires a list of digests to use in the signing request via the parameter `manifestListDigests`
 - The `manifestDigestImage` parameter has been removed.
