@@ -21,5 +21,15 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 0.2.1
+- Added a `when` clause to the following tasks
+  `rh-sign-image`,
+  `populate-release-notes-images`,
+  `create-pyxis-image`,
+  `collect-pyxis-params` and
+  `run-file-updates`
+  to ensure they only execute when the `push-snapshot`
+  task result indicates that `commonTags` is not an empty string
+
 ## Changes in 0.2.0
 - Remove push-sbom-to-pyxis. It has been replaced by manifest-box.
