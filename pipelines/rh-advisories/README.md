@@ -21,6 +21,9 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 0.3.0
+- Add task `embargo-check` to end execution early if any passed issues or CVEs are embargoed.
+
 ## Changes in 0.2.2
 - Added a `when` clause to the following tasks
   `create-advisory`, and `check-data-keys`
