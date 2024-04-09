@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: rh-sign-image
   labels:
-    app.kubernetes.io/version: "2.2.1"
+    app.kubernetes.io/version: "2.2.2"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -76,6 +76,8 @@ spec:
 
             reference=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
 
+            git_sha=$(jq -r ".components[${COMPONENTS_INDEX}].source.git.revision" ${SNAPSHOT_PATH})
+
             # Translate direct quay.io reference to public facing registry json
             # quay.io/redhat-prod/product----repo ->
             #   [{"repo":"redhat.io","url":registry.redhat.io/product/repo"},
@@ -91,6 +93,16 @@ spec:
               manifest_digests="${referenceContainerImage#*@}"
             else
               manifest_digests=$(jq -r '.manifests[].digest' <<< $RAW_OUTPUT)
+            fi
+
+            sourceContainerDigest=
+            if [[ $(jq -r ".images.pushSourceContainer" "${DATA_FILE}") == "true" ]] ; then # Default to false
+              # Calculate the source container image based on the provided container image
+              sourceContainer="${referenceContainerImage%@sha256:*}:${git_sha}.src"
+              sourceContainerDigest=$(skopeo inspect \
+                --no-tags \
+                --format '{{.Digest}}' \
+                "docker://${sourceContainer}" 2>/dev/null)
             fi
 
             for manifest_digest in $manifest_digests; do
@@ -119,6 +131,35 @@ spec:
                 done
               done        
             done
+
+            if [ "${sourceContainerDigest}" != "" ] ; then
+              for tag in $(params.commonTags); do
+                sourceTag=${tag}-source
+
+                for registry_reference in $(jq -r '.[] | .url' <<< $referenceJson); do
+                  echo "Creating InternalRequest to sign image with tag ${sourceTag}:"
+                  echo "- reference=${registry_reference}:${sourceTag}"
+                  echo "- manifest_digest=${sourceContainerDigest}"
+                  echo "- requester=$(params.requester)"
+
+                  internal-request -r "${request}" \
+                      -p pipeline_image=${pipeline_image} \
+                      -p reference=${registry_reference}:${sourceTag} \
+                      -p manifest_digest=${sourceContainerDigest} \
+                      -p requester=$(params.requester) \
+                      -p config_map_name=${config_map_name} \
+                      -l ${TASK_LABEL}=${TASK_ID} \
+                      -l ${PIPELINERUN_LABEL}=$(params.pipelineRunUid) \
+                      -s false
+                  ((++count))
+
+                  if [ "$count" -eq "$N" ]; then
+                      wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
+                      count=0
+                  fi
+                done
+              done
+            fi
         done
         wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
         echo "done"
