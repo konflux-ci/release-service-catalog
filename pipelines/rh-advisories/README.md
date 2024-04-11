@@ -21,6 +21,12 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 0.2.2
+- Added a `when` clause to the following tasks
+  `create-advisory`, and `check-data-keys`
+  to ensure they only execute when the `push-snapshot`
+  task result indicates that `commonTags` is not an empty string
+
 ## Changes in 0.2.1
 - Added a `when` clause to the following tasks
   `rh-sign-image`,
