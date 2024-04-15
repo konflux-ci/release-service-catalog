@@ -6,7 +6,7 @@ Creates an InternalRequest to sign a base64 encoded blob
 
 | Name                 | Description                                                                               | Optional | Default value          |
 |----------------------|-------------------------------------------------------------------------------------------|----------|------------------------|
-| dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json              |
+| dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | No       |                        |
 | request              | Signing pipeline name to handle this request                                              | Yes      | hacbs-signing-pipeline |
 | referenceImage       | The image to be signed                                                                    | No       |                        |
 | manifestDigestImage  | Manifest Digest Image used to extract the SHA                                             | Yes      | ""                     |
@@ -26,6 +26,10 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 2.1.0
+- remove `dataPath` default value
+
 ## Changes in 2.0.0
 - The internalrequest CR is created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter
   - This change comes with a bump in the image used for the task

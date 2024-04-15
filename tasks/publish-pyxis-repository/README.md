@@ -19,8 +19,11 @@ does not publish the repository.
 |--------------|---------------------------------------------------------------------------------------------------|----------|--------------------|
 | server       | The server type to use. Options are 'production' and 'stage'                                      | Yes      | production         |
 | pyxisSecret  | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No       | -                  |
-| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | Yes      | snapshot_spec.json |
-| dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | Yes      | data.json          |
+| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       |                    |
+| dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       |                    |
+
+## Changes in 0.3.0
+* remove `dataPath` and `snapshotPath` default values
 
 ## Changes in 0.2.2
 * Add support for server types of production-internal and stage-internal

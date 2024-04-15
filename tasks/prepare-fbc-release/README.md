@@ -11,5 +11,8 @@ to each component, so other task can use them.
 
 | Name         | Description                                                             | Optional | Default value      |
 |--------------|-------------------------------------------------------------------------|----------|--------------------|
-| snapshotPath | Path to the JSON string of the Snapshot spec in the data workspace      | Yes      | snapshot_spec.json |
-| dataPath     | Path to the JSON string of the merged data to use in the data workspace | Yes      | data.json          |
+| snapshotPath | Path to the JSON string of the Snapshot spec in the data workspace      | No       |                    |
+| dataPath     | Path to the JSON string of the merged data to use in the data workspace | No       |                    |
+
+## Changes in 1.1.0
+- remove `dataPath` and `snapshotPath` default values

@@ -6,7 +6,7 @@ Publish a built FBC index image using skopeo
 
 | Name           | Description                                                                               | Optional | Default value |
 |----------------|-------------------------------------------------------------------------------------------|----------|---------------|
-| dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json     |
+| dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | No       |               |
 | sourceIndex    | Pullspec to pull the image from                                                           | No       |               |
 | targetIndex    | Pullspec to push the image to                                                             | No       |               |
 | retries        | Number of skopeo retries                                                                  | Yes      | 0             |
@@ -15,6 +15,9 @@ Publish a built FBC index image using skopeo
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |               |
 
 ## Changelog
+
+### Changes in 3.1.0
+- remove `dataPath` default value
 
 ### Changes in 3.0.0
 - The internalrequest CR is created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter

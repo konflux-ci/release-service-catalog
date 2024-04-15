@@ -6,9 +6,12 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 
 | Name               | Description                                                               | Optional | Default value        |
 |--------------------|---------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | mapped_snapshot.json |
-| dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
+| snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       |                      |
+| dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
+
+## Changes in 4.2.0
+* remove `dataPath` and `snapshotPath` default values
 
 ## Changes in 4.1.2
 * Fixed bug that causes `arch_json` to be empty after setting it

@@ -7,6 +7,9 @@ by server using curl and checks the CVEs via an InternalRequest. If any issue or
 
 | Name                     | Description                                                                               | Optional | Default value               |
 |--------------------------|-------------------------------------------------------------------------------------------|----------|-----------------------------|
-| dataPath                 | Path to data JSON in the data workspace                                                   | Yes      | data.json                   |
+| dataPath                 | Path to data JSON in the data workspace                                                   | No       |                             |
 | requestTimeout           | InternalRequest timeout                                                                   | Yes      | 180                         |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
+
+## Changes in 0.2.0
+- remove `dataPath` default value
