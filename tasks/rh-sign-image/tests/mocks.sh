@@ -122,8 +122,13 @@ function skopeo() {
                 }
             '
         else
-          echo Error: Unexpected call
-          exit 1
+          if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image0:deadbeef.src"* ]]
+          then
+            echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
+          else
+            echo Error: Unexpected call
+            exit 1
+          fi
         fi
       fi
     fi

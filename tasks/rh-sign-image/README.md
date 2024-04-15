@@ -14,6 +14,9 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 2.2.2
+* An InternalRequest is now created to sign source containers
+
 ## Changes in 2.2.1
 * An InternalRequest is now created to sign the both the registry.redhat.io and registry.access.redhat.com references
   * This change comes with a bump in the image used for the task
