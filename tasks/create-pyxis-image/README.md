@@ -20,6 +20,9 @@ by a new line.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | Yes | data.json |
 
+## Changes in 2.2.2
+* Support populating multiarch image entities correctly
+
 ## Changes in 2.2.1
 * Add support for server types of production-internal and stage-internal
 

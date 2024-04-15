@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "4.1.0"
+    app.kubernetes.io/version: "4.1.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -35,7 +35,7 @@ spec:
       description: The workspace where the snapshot spec and data json files reside
   steps:
     - name: push-snapshot
-      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+      image: quay.io/redhat-appstudio/release-service-utils:b3059c67d4bdb6c9cf1739fdfb2c0cb595fe0f86
       script: |
         #!/usr/bin/env bash
         set -eux
@@ -96,11 +96,15 @@ spec:
         do
           containerImage=$(jq -r '.containerImage' <<< $component)
           repository=$(jq -r '.repository' <<< $component)
-          archs=($(get-image-architectures $containerImage))
+
+          # Just read the first from the list of architectures
+          get-image-architectures "${containerImage}" | read -r arch_json
+          arch=$(echo "${arch_json}" | jq -r .platform.architecture)
+
           name=$(jq -r '.name' <<< $component)
           git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
           source_digest=$(skopeo inspect \
-            --override-arch "${archs[0]}" \
+            --override-arch "${arch}" \
             --no-tags \
             --format '{{.Digest}}' \
             "docker://${containerImage}" 2>/dev/null)
@@ -115,23 +119,23 @@ spec:
             for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
               # Push the container image
               push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${floatingTag}" \
-              "${archs[0]}"
+              "${arch}"
               push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" \
-              "${floatingTag}-${timestamp}" "${archs[0]}"
+              "${floatingTag}-${timestamp}" "${arch}"
             done
           else
             defaultTag=$(jq -r '.images.defaultTag // "latest"' "${DATA_FILE}")
             tag=$(jq -r --arg defaultTag $defaultTag '.tag // $defaultTag' <<< $component)
-            push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" "${archs[0]}"
+            push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" "${arch}"
           fi
           if [[ $(jq -r ".images.addTimestampTag" "${DATA_FILE}") == "true" ]] ; then # Default to false
             timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
-            push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "$timestamp" "${archs[0]}"
+            push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "$timestamp" "${arch}"
           fi
           if [[ $(jq -r ".images.addGitShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
             if [ "${git_sha}" != "null" ] ; then
-              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}" "${archs[0]}"
-              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha}" "${archs[0]}"
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}" "${arch}"
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha}" "${arch}"
             else
               printf 'Asked to create git sha based tag, but no git sha found in %s\n' "${component}"
               exit 1
@@ -141,7 +145,7 @@ spec:
             if [[ "${containerImage}" == *"@sha256"* && $(echo "${containerImage}" | tr -cd ':' | wc -c) -eq 1 ]]
             then
               sha=$(echo "${containerImage}" | cut -d ':' -f 2)
-              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${sha}" "${archs[0]}"
+              push_image "${source_digest}" "${name}" "${containerImage}" "${repository}" "${sha}" "${arch}"
             else
               printf 'Asked to create source sha based tag, but no sha found in %s\n' "${containerImage}"
               exit 1
@@ -152,7 +156,7 @@ spec:
             # Calculate the source container image based on the provided container image
             sourceContainer="${containerImage%@sha256:*}:${git_sha}.src"
             # Check if the source container exists
-            skopeo inspect --override-arch "${archs[0]}" --no-tags "docker://${sourceContainer}" >/dev/null
+            skopeo inspect --override-arch "${arch}" --no-tags "docker://${sourceContainer}" >/dev/null
             if [ $? != 0 ] ; then
               echo "Error: Source container ${sourceContainer} not found!"
               exit 1
@@ -163,9 +167,9 @@ spec:
             fi
             for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
               push_image "${source_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${floatingTag}-${timestamp}-source" "${archs[0]}"
+                "${repository}" "${floatingTag}-${timestamp}-source" "${arch}"
               push_image "${source_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${floatingTag}-source" "${archs[0]}"
+                "${repository}" "${floatingTag}-source" "${arch}"
             done
           fi
         done
