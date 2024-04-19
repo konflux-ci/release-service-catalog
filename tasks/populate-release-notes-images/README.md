@@ -11,6 +11,11 @@ in place so that downstream tasks relying on the releaseNotes data can use it.
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 | commonTags   | Space separated list of common tags to be used when publishing       | No       | -             |
 
+## Changes in 1.1.0
+* Existing CVE data is present in the resulting releaseNotes key instead of overwritten
+* Update task image for fix in get-image-architectures script
+  * util now outputs compact json
+
 ## Changes in 1.0.2
 * Absorb change in refactored get-image-architectures script
 
