@@ -14,6 +14,10 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 2.2.3
+* Add `set -e` to the task script, so it can fail if the `wait-for-ir` script exits with a non-zero status code, when at
+  least one of the InternalRequests has not succeeded
+
 ## Changes in 2.2.2
 * An InternalRequest is now created to sign source containers
 
