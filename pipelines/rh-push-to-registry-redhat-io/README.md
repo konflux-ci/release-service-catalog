@@ -18,6 +18,11 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.1.2
+* Added `when` clause to `push-snapshot` task in the pipeline
+  to ensure it only executes when the `apply-mapping` task
+  indicates that mapping was successful.
+
 ## Changes in 3.1.1
 * Added a `when` clause to the following tasks
   `rh-sign-image`,
