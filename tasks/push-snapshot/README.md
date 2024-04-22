@@ -10,6 +10,10 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 4.1.2
+* Fixed bug that causes `arch_json` to be empty after setting it
+* Update release-service-utils image
+
 ## Changes in 4.1.1
 * Absorb change in refactored get-image-architectures script
 
