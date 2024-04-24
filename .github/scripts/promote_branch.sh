@@ -16,13 +16,13 @@
 #
 # Prerequisities:
 #   - An environment variable GITHUB_TOKEN is defined that provides access to the user's account. See
-#     https://github.com/redhat-appstudio/release-service-utils/blob/main/ci/promote-overlay/README.md#setup for help.
+#     https://github.com/konflux-ci/release-service-utils/blob/main/ci/promote-overlay/README.md#setup for help.
 #   - curl, git and jq installed.
 
 set -e
 
 # GitHub repository details
-ORG="redhat-appstudio"
+ORG="konflux-ci"
 REPO="release-service-catalog"
 
 OPTIONS=$(getopt --long "target-branch:,force-to-staging:,override:,dry-run:,help" -o "tgt:,h" -- "$@")
