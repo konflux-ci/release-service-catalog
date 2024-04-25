@@ -13,6 +13,10 @@ Task to create a internalrequest to add fbc contributions to index images
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
 
+## changes in 2.3.2
+- add check to fail the task if `fbc.preGA` and `fbc.hotfix` were both set in the `ReleasePlanAdmission` data and
+  test for the failing scenario
+
 ## changes in 2.3.1
 - fix the error message for the empty value of `issueId`, `productName` and `productVersion`
   with the old format, the backticks caused the string inside (e.g. fbc.issueId) to be executed as a command
