@@ -15,8 +15,12 @@ Tekton pipeline to release Snapshots to an external registry.
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
-| taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
+| taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
+
+## Changes in 4.2.0
+- update the taskGitUrl default value due to migration
+  to konflux-ci GitHub org
 
 ## Changes in 4.0.1
 - Added `when` clause to `push-snapshot` task in the pipeline to ensure it only executes when
