@@ -1,0 +1,164 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-rpm-manifests-to-pyxis
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task that extracts all rpms from the sboms and pushes them to Pyxis as an RPM Manifest.
+  params:
+    - name: pyxisJsonPath
+      description: Path to the JSON string of the saved Pyxis data in the data workspace
+      type: string
+    - name: pyxisSecret
+      type: string
+      description: |
+        The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert
+    - name: server
+      type: string
+      description: The server type to use. Options are 'production' and 'stage'
+      default: production
+    - name: concurrentLimit
+      type: string
+      description: The maximum number of images to be processed at once
+      default: 4
+  workspaces:
+    - name: data
+      description: The workspace where the pyxis data json file resides
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  steps:
+    - name: download-sbom-files
+      image:
+        quay.io/redhat-appstudio/release-service-utils:8bf56a04aaeb371f4a822d2b76520e9bdcacfb26
+      volumeMounts:
+        - mountPath: /workdir
+          name: workdir
+      script: |
+        #!/usr/bin/env sh
+        set -eux
+
+        PYXIS_FILE="$(workspaces.data.path)/$(params.pyxisJsonPath)"
+        if [ ! -f "${PYXIS_FILE}" ] ; then
+            echo "No valid pyxis file was provided."
+            exit 1
+        fi
+
+        IMAGEURLS=($(cat "${PYXIS_FILE}" | jq -r '.components[].pyxisImages[].containerImage' | sort | uniq))
+
+        mkdir /workdir/sboms
+        cd /workdir/sboms
+
+        for i in ${!IMAGEURLS[@]}; do
+          echo "Fetching sbom for image: ${IMAGEURLS[$i]}"
+          FILE="$(echo ${IMAGEURLS[$i]} | tr "/@:" ---).json"
+          cosign download sbom --output-file "${FILE}" "${IMAGEURLS[$i]}"
+        done
+
+        SBOM_COUNT=$(ls *.json | wc -l )
+        if [ $SBOM_COUNT != ${#IMAGEURLS[@]} ]; then
+          echo "ERROR: Expected to fetch sbom for ${#IMAGEURLS[@]} images, but only $SBOM_COUNT were saved"
+          exit 1
+        fi
+
+    - name: push-rpm-manifests-to-pyxis
+      image:
+        quay.io/redhat-appstudio/release-service-utils:8bf56a04aaeb371f4a822d2b76520e9bdcacfb26
+      env:
+        - name: pyxisCert
+          valueFrom:
+            secretKeyRef:
+              name: $(params.pyxisSecret)
+              key: cert
+        - name: pyxisKey
+          valueFrom:
+            secretKeyRef:
+              name: $(params.pyxisSecret)
+              key: key
+      volumeMounts:
+        - mountPath: /workdir
+          name: workdir
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+
+        if [[ "$(params.server)" == "production" ]]
+        then
+          export PYXIS_GRAPHQL_API="https://graphql-pyxis.api.redhat.com/graphql/"
+        elif [[ "$(params.server)" == "stage" ]]
+        then
+          export PYXIS_GRAPHQL_API="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
+        else
+          echo "Invalid server parameter. Only 'production' and 'stage' are allowed."
+          exit 1
+        fi
+
+        export PYXIS_CERT_PATH=/tmp/crt
+        export PYXIS_KEY_PATH=/tmp/key
+        echo "${pyxisCert}" > $PYXIS_CERT_PATH
+        echo "${pyxisKey}" > $PYXIS_KEY_PATH
+
+        PYXIS_FILE="$(workspaces.data.path)/$(params.pyxisJsonPath)"
+
+        cd /workdir/sboms
+
+        N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
+        declare -a jobs=()
+        declare -a files=()
+        total=$(jq '[.components[].pyxisImages | length] | add' "${PYXIS_FILE}")
+        count=0
+        success=true
+        echo "Starting RPM Manifest upload for $total files in total. " \
+          "Up to $N files will be uploaded at once..."
+
+        # Loop through all components then all images in case there is a space
+        # in one of the keys or values, which would break jq looping
+        NUM_COMPONENTS=$(jq '.components | length' "${PYXIS_FILE}")
+        for ((i = 0; i < $NUM_COMPONENTS; i++)); do
+          COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${PYXIS_FILE}")
+          NUM_IMAGES=$(jq '.pyxisImages | length' <<< $COMPONENT)
+          for ((j = 0; j < $NUM_IMAGES; j++)); do
+            IMAGE=$(jq -c --argjson j "$j" '.pyxisImages[$j]' <<< $COMPONENT)
+            IMAGEID=$(jq -r '.imageId' <<< $IMAGE)
+            SBOM="$(jq -r '.containerImage' <<< $IMAGE | tr "/@:" ---).json"
+            echo Uploading RPM Manifest to Pyxis for IMAGE: $IMAGEID with SBOM: $SBOM
+            upload_rpm_manifest --retry --image-id $IMAGEID --sbom-path $SBOM > ${IMAGEID}.out 2>&1 &
+
+            jobs+=($!)  # Save the background process ID
+            images+=($IMAGEID)
+            ((++count))
+
+            if [ $((count%N)) -eq 0 -o $((count)) -eq $total ]; then
+              echo Waiting for the current batch of background processes to finish
+              for job_id in "${!jobs[@]}"; do
+                if ! wait ${jobs[job_id]}; then
+                  echo "Error: upload of ${IMAGE} failed"
+                  success=false
+                fi
+              done
+
+              echo
+              echo Printing outputs for current upload_rpm_manifest script runs
+              for img in ${images[@]}; do
+                echo "=== $img ==="
+                cat "${img}.out"
+                echo
+              done
+
+              if [ $success != "true" ]; then
+                echo ERROR: At least one upload in the last batch failed
+                exit 1
+              fi
+
+              # Reset job and files arrays for the next batch
+              jobs=()
+              images=()
+            fi
+          done
+        done

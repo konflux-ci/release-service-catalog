@@ -20,6 +20,9 @@
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.3.0
+- Add new task `push-rpm-manifests-to-pyxis` to run after `create-pyxis-image`
+
 ## Changes in 3.2.0
 - update the taskGitUrl default value due to migration
   to konflux-ci GitHub org
