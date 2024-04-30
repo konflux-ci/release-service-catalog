@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-advisory
   labels:
-    app.kubernetes.io/version: "3.0.0"
+    app.kubernetes.io/version: "3.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -53,8 +53,6 @@ spec:
       image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
       script: |
         #!/bin/sh
-        #
-        #
         set -e
 
         # Obtain application from snapshot
@@ -72,6 +70,65 @@ spec:
 
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
+        # only 2 gitlab instances are permitted...prod and staging
+        # these are their secret names
+        #
+        prodSecretName="create-advisory-prod-secret"
+        stagingSecretName="create-advisory-stage-secret"
+        #
+        # detect which one to use based on repositories specified
+        #
+        pending_repositories=$(jq -r '.mapping.components[] | select(.repository | 
+          contains("quay.io/redhat-pending/")) | 
+          .repository' $(workspaces.data.path)/$(params.dataPath))
+        prod_repositories=$(jq -r '.mapping.components[] | select(.repository | contains("quay.io/redhat-prod/")) | 
+          .repository' $(workspaces.data.path)/$(params.dataPath))
+        orphan_repositories=$(jq -r '.mapping.components[] | select(.repository | contains("quay.io/redhat-prod/") | 
+          not) | select(.repository | contains("quay.io/redhat-pending/") | not) | 
+          .repository' $(workspaces.data.path)/$(params.dataPath))
+
+        foundPendingRepositories=false
+        if [ -n "${pending_repositories}" ]; then
+          foundPendingRepositories=true
+        fi
+
+        foundProdRepositories=false
+        if [ -n "${prod_repositories}" ]; then
+          foundProdRepositories=true
+        fi
+
+        foundOrphanRepositories=false
+        if [ -n "${orphan_repositories}" ]; then
+          foundOrphanRepositories=true
+        fi
+
+        echo "foundPendingRepositories: ${foundPendingRepositories}"
+        echo "foundProdRepositories ${foundProdRepositories}"
+        echo "foundOrphanRepositories ${foundOrphanRepositories}"
+
+        if [ "${foundPendingRepositories}" == "true" ] && [ "${foundProdRepositories}" == "true" ]; then
+          echo "Error: cannot publish to both redhat-pending and redhat-prod repositories"
+          exit 1
+        fi
+
+        if [ "${foundPendingRepositories}" == "false" ] && [ "${foundProdRepositories}" == "false" ]; then
+          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+          exit 1
+        fi
+
+        if [ "${foundOrphanRepositories}" == "true" ]; then
+          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+          exit 1
+        fi
+
+        # at this point, one of foundPendingRepositories or foundProdRepositories
+        # is true.
+        #
+        advisorySecretName="${prodSecretName}"
+        if [ "${foundPendingRepositories}" == "true" ]; then
+          advisorySecretName="${stagingSecretName}"
+        fi
+
         echo "Creating InternalRequest to create advisory..."
         internal-request -r "$(params.request)" \
                          -p application="${application}" \
@@ -79,11 +136,12 @@ spec:
                          -p repo="${repo}" \
                          -p advisory_json="${advisoryData}" \
                          -p config_map_name="${configMapName}" \
+                         -p advisory_secret_name="${advisorySecretName}" \
                          -s "$(params.synchronously)" \
                          -l ${pipelinerun_label}=$(params.pipelineRunUid) \
                          > $(workspaces.data.path)/ir-result.txt || \
                          (grep "^\[" $(workspaces.data.path)/ir-result.txt | jq . && exit 1)
-        
+
         internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-result.txt | xargs)
         echo "done (${internalRequest})"
 
