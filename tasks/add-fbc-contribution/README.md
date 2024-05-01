@@ -6,12 +6,15 @@ Task to create a internalrequest to add fbc contributions to index images
 
 | Name           | Description                                                                               | Optional | Default value        |
 |----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | Yes      | snapshot_spec.json   |
-| dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json            |
+| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | No       |                      |
+| dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | No       |                      |
 | binaryImage    | binaryImage value updated by update-ocp-tag task                                          | No       |                      |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                                            | No       |                      |
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
+
+## changes in 2.4.0
+- remove default values of `dataPath` and `snapshotPath` parameters
 
 ## changes in 2.3.2
 - add check to fail the task if `fbc.preGA` and `fbc.hotfix` were both set in the `ReleasePlanAdmission` data and

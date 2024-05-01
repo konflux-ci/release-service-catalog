@@ -12,8 +12,11 @@ Currently, `releaseNotes` is the only supported system.
 
 | Name     | Description                                             | Optional | Default value |
 |----------|---------------------------------------------------------|----------|---------------|
-| dataPath | Path to the JSON string of the merged data to use       | Yes      | data.json     |
+| dataPath | Path to the JSON string of the merged data to use       | No       |               |
 | systems  | The systems to check that all data keys are present for | Yes      | []            |
+
+## Changes in 0.6.0
+- Remove `dataPath` default value
 
 ## Changes in 0.5.0
 - Add releaseNotes.product_stream to required keys

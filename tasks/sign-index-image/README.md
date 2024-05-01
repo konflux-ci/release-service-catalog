@@ -6,7 +6,7 @@ Creates an InternalRequest to sign an index image
 
 | Name                 | Description                                                                               | Optional | Default value          |
 |----------------------|-------------------------------------------------------------------------------------------|----------|------------------------|
-| dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | Yes      | data.json              |
+| dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | No       |                        |
 | request              | Signing pipeline name to handle this request                                              | Yes      | hacbs-signing-pipeline |
 | referenceImage       | The image to be signed                                                                    | No       |                        |
 | manifestListDigests  | The manifest digests for each arch in manifest list                                       | No       |                        |
@@ -26,6 +26,9 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 3.1.0
+- Remove `dataPath` default value
 
 ## Changes in 3.0.1
 - Update task image and make changes to accomodate for new `translate-delivery-repo` funtionality

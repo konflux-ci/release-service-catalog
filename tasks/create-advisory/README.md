@@ -10,13 +10,16 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | Name                     | Description                                                                               | Optional | Default value               |
 |--------------------------|-------------------------------------------------------------------------------------------|----------|-----------------------------|
 | jsonKey                  | The json key containing the advisory data                                                 | Yes      | .releaseNotes               |
-| releasePlanAdmissionPath | Path to the JSON file of the ReleasePlanAdmission in the data workspace                   | Yes      | release_plan_admission.json |
+| releasePlanAdmissionPath | Path to the JSON file of the ReleasePlanAdmission in the data workspace                   | No       |                             |
 | releaseServiceConfigPath | Path to the JSON file of the ReleaseServiceConfig in the data workspace                   | No       |                             |
-| snapshotPath             | Path to the JSON file of the Snapshot spec in the data workspace                          | Yes      | snapshot_spec.json          |
-| dataPath                 | Path to data JSON in the data workspace                                                   | Yes      | data.json                   |
+| snapshotPath             | Path to the JSON file of the Snapshot spec in the data workspace                          | No       |                             |
+| dataPath                 | Path to data JSON in the data workspace                                                   | No       |                             |
 | request                  | Type of request to be created                                                             | Yes      | create-advisory             |
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
+
+## Changes in 3.2.0
+- remove `dataPath`, `snapshotPath` and `releasePlanAdmissionPath` default values
 
 ## Changes in 3.1.0
 - This task now detects which secret to use for creating advisories based on the targeted quay repository.

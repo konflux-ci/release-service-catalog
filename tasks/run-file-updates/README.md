@@ -9,12 +9,15 @@ the field `spec.data.fileUpdates` in the ReleasePlanAdmission resource.
 |-----------------|-------------------------------------------------------------------------------------------|----------|--------------------------|
 | jsonKey         | JSON key where the information is defined                                                 | Yes      | .spec.data.fileUpdates[] |
 | fileUpdatesPath | Path to the JSON file containing the key                                                  | No       |                          |
-| snapshotPath    | Path to the JSON string of the Snapshot spec in the data workspace                        | No       | snapshot_spec.json       |
+| snapshotPath    | Path to the JSON string of the Snapshot spec in the data workspace                        | No       |                          |
 | request         | Type of request to be created                                                             | Yes      | file-updates             |
 | synchronously   | Whether the task should wait for InternalRequests to complete                             | Yes      | true                     |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                          |
 
 ## Changelog
+
+## Changes in 1.1.0
+- remove `snapshotPath` default value
 
 ## Changes in 1.0.0
 - The internalrequest CRs are created with a label specifying the pipelinerun uid with the new pipelineRunUid parameter

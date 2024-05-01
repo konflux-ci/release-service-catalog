@@ -15,9 +15,12 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | Yes | snapshot_spec.json |
-| releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | Yes | release_plan_admission.json |
+| snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No | |
+| releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+
+## Changes in 0.10.0
+ * Removed default values for `snapshotPath` and `releasePlanAdmissionPath`
 
 ## Changes in 0.9.1
   * Replaced `echo` with `printf` for storing results.
