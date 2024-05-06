@@ -21,8 +21,11 @@ function internal-request() {
 
   if [[ "$*" == *"requester=testuser-failure"* ]]; then
       set_ir_status $NAME Failure 3 &
-  else
+  elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
+      # The interval in wait-for-ir is 5 sec, so increase the ir delay to timeout for sure
       set_ir_status $NAME Succeeded 10 &
+  else
+      set_ir_status $NAME Succeeded 5 &
   fi
 }
 
@@ -122,7 +125,7 @@ function skopeo() {
                 }
             '
         else
-          if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image0:deadbeef.src"* ]]
+          if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image0:sha256-0000.src"* ]]
           then
             echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
           else
