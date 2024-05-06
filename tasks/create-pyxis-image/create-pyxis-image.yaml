@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "2.3.0"
+    app.kubernetes.io/version: "2.4.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -55,9 +55,8 @@ spec:
     - name: data
       description: The workspace where the snapshot spec and data json files reside
   results:
-    - name: containerImageIDs
-      type: string
-      description: IDs of the created entries in Pyxis, each on its own line
+    - name: pyxisDataPath
+      description: The relative path in the workspace to the stored pyxis data json
   steps:
     - name: create-pyxis-image
       image: quay.io/redhat-appstudio/release-service-utils:b3059c67d4bdb6c9cf1739fdfb2c0cb595fe0f86
@@ -98,6 +97,9 @@ spec:
             echo "No valid snapshot file was provided."
             exit 1
         fi
+
+        PYXIS_DATA_PATH="$(dirname $(params.snapshotPath))/pyxis.json"
+        echo -n "${PYXIS_DATA_PATH}" > $(results.pyxisDataPath.path)
 
         if [ -n "$(params.commonTags)" ]; then
           TAGS="$(params.commonTags)"
@@ -145,18 +147,19 @@ spec:
                   --media-type "$MEDIA_TYPE" \
                   --architecture-digest "$ARCH_DIGEST" \
                   --rh-push $(params.rhPush) | tee "/tmp/output"
+                # The rh-push-to-external-registry e2e test depends on this line being in the task log
                 IMAGEID=$(awk '/The image id is/{print $NF}' /tmp/output)
                 JSON_OUTPUT=$(jq --argjson component_index $i --argjson arch_index $index \
                   --arg arch "${ARCH}" --arg imageId "${IMAGEID}" --arg digest "${DIGEST}" \
-                  --arg arch_digest "${ARCH_DIGEST}" \
+                  --arg arch_digest "${ARCH_DIGEST}" --arg containerImage "${CONTAINER_IMAGE}" \
                     '.components[$component_index].pyxisImages[$arch_index] += {
                       "arch": $arch,
                       "imageId": $imageId,
                       "digest": $digest,
-                      "arch_digest": $arch_digest}' <<< "$JSON_OUTPUT")
+                      "arch_digest": $arch_digest,
+                      "containerImage": $containerImage}' <<< "$JSON_OUTPUT")
 
-                echo $IMAGEID >> $(results.containerImageIDs.path)
                 index=$((index + 1))
             done <<< $(get-image-architectures "${PULLSPEC}" | jq -c)
         done
-        echo "$JSON_OUTPUT" | tee $(workspaces.data.path)/pyxis.json
+        echo "$JSON_OUTPUT" | tee "$(workspaces.data.path)/${PYXIS_DATA_PATH}"

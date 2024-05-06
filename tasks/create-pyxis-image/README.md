@@ -4,8 +4,8 @@ Tekton task that pushes metadata to Pyxis for all container images contained in 
 result of the `apply-mapping` task. It first extracts the containerImages from the snapshot, then runs
 `skopeo inspect` on each, before finally pushing metadata to Pyxis.
 
-The IDs of the created `containerImage` Pyxis objects are stored as a task result with each ID separated
-by a new line.
+The relative path of the pyxis.json file in the data workspace is output as a task result named
+`pyxisDataPath`.
 
 ## Parameters
 
@@ -19,6 +19,11 @@ by a new line.
 | commonTags | Space separated list of common tags to be used when publishing. If set, these tags will be added to the Pyxis Container Image object. | Yes | "" |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | No | |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | No | |
+
+## Changes in 2.4.0
+* containerImageIDs result is removed as the data is present in pyxis.json that is written to the workspace
+* the containerImage is now saved in the pyxis.json entries
+* the pyxis.json file is saved in the same subdirectory as the passed snapshot file
 
 ## Changes in 2.3.0
 * remove `dataPath` and `snapshotPath` default values
