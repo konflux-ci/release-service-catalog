@@ -25,11 +25,20 @@ function cosign() {
 }
 
 function skopeo() {
-  echo Mock skopeo called with: $*
+  echo Mock skopeo called with: $* >&2
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
 
   if [[ "$*" == "inspect --override-arch "*" --no-tags --format {{.Digest}} docker://"* ]]; then
-    echo $5
+    # test scenarios where we want to skip the push because the image already exists
+    if [[ "$7" == *skip-image*.src || "$7" == *skip-image*-source ]]; then
+      echo "sha256:000000"
+    elif [[ "$7" == *skip-image* ]]; then
+      echo "sha256:111111"
+    else
+      # echo the shasum computed from the pull spec so the task knows if two images are the same
+      echo -n "sha256:"
+      echo $7 | sha256sum | cut -d ' ' -f 1
+    fi
     return
   fi
   if [[ "$*" == "inspect --override-arch "*" --no-tags docker://"* ]]; then

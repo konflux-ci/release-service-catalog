@@ -1,0 +1,95 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-snapshot-pushsourcecontainer-skip-existing
+spec:
+  description: |
+    Run the push-snapshot task including source container push.
+    Test the scenario where the destination image already exists (both binary and source).
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "registry.io/skip-image:tag",
+                    "repository": "prod-registry.io/skip-image"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "images": {
+                  "defaultTag": "latest",
+                  "addGitShaTag": false,
+                  "addTimestampTag": false,
+                  "addSourceShaTag": false,
+                  "pushSourceContainer": true,
+                  "floatingTags": [
+                    "testtag"
+                  ]
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: push-snapshot
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: retries
+          value: 0
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ -f $(workspaces.data.path)/mock_cosign.txt ]; then
+                echo Error: cosign was not expected to be called. Actual calls:
+                cat $(workspaces.data.path)/mock_cosign.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_skopeo.txt | wc -l) != 7 ]; then
+                echo Error: skopeo was expected to be called 7 times. Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+      runAfter:
+        - run-task
