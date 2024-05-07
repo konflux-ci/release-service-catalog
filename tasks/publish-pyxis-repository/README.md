@@ -22,6 +22,9 @@ does not publish the repository.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       |                    |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       |                    |
 
+## Changes in 0.4.0
+* Add option to skip publishing via `skipRepoPublishing` flag in the data file
+
 ## Changes in 0.3.0
 * remove `dataPath` and `snapshotPath` default values
 
