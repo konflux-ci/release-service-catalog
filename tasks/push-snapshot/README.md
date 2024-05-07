@@ -10,6 +10,13 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 4.3.0
+* When pushing source containers, the origin is now determined using `$repo:${digest}.src` instead of `$repo:${git_sha}.src`
+  that was used previously. This follows a change in the build service.
+  * We also added a new push of the source container to `$repo:${digest}.src`.
+* Fixed a bug when pushing source containers where previously we would never skip a push even if the destination container
+  already existed, because we were comparing the binary image digest instead of the source container one.
+
 ## Changes in 4.2.0
 * remove `dataPath` and `snapshotPath` default values
 
