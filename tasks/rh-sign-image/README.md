@@ -14,8 +14,14 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 2.4.0
+* When pushing source containers, the origin is now determined using `$repo:${digest}.src` instead of `$repo:${git_sha}.src`
+  that was used previously. This follows a change in the build service.
+  * We now also push this new tag, so sign it as well.
+
+
 ## Changes in 2.3.0
-- remove `dataPath` and `snapshotPath` default values
+* remove `dataPath` and `snapshotPath` default values
 
 ## Changes in 2.2.3
 * Add `set -e` to the task script, so it can fail if the `wait-for-ir` script exits with a non-zero status code, when at
@@ -29,7 +35,7 @@ Task to create internalrequests to sign snapshot components
   * This change comes with a bump in the image used for the task
 
 ## Changes in 2.2.0
-* Support was added to handle the signing of multi-arch images 
+* Support was added to handle the signing of multi-arch images
 
 ## Changes in 2.1.0
 * Use the translate-delivery-repo util for translating the reference variable
