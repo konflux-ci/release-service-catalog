@@ -22,6 +22,11 @@ does not publish the repository.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       |                    |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       |                    |
 
+## Changes in 0.5.0
+* Add support for checking the `mapping` key for `pushSourceContainer`
+  * Can be per component or in the `mapping.defaults` section
+  * The legacy location of `images.pushSourceContainer` will be removed in a future version
+
 ## Changes in 0.4.0
 * Add option to skip publishing via `skipRepoPublishing` flag in the data file
 
