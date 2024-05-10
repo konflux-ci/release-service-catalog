@@ -14,11 +14,15 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 2.5.0
+* Add support for checking the `mapping` key for `pushSourceContainer`
+  * Can be per component or in the `mapping.defaults` section
+  * The legacy location of `images.pushSourceContainer` will be removed in a future version
+
 ## Changes in 2.4.0
 * When pushing source containers, the origin is now determined using `$repo:${digest}.src` instead of `$repo:${git_sha}.src`
   that was used previously. This follows a change in the build service.
   * We now also push this new tag, so sign it as well.
-
 
 ## Changes in 2.3.0
 * remove `dataPath` and `snapshotPath` default values

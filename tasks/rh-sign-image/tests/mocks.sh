@@ -125,7 +125,7 @@ function skopeo() {
                 }
             '
         else
-          if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image0:sha256-0000.src"* ]]
+          if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
           then
             echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
           else
