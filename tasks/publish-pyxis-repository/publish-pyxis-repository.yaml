@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-pyxis-repository
   labels:
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.5.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -94,15 +94,21 @@ spec:
 
         PAYLOAD='{"published":true}'
 
-        if [[ -f "${DATA_FILE}" && $(jq -r '.images.pushSourceContainer' ${DATA_FILE}) == "true" ]] ; then
+        legacyPushOption=$(jq -r '.images.pushSourceContainer' ${DATA_FILE} || echo "null")
+        if [[ -f "${DATA_FILE}" && ${legacyPushOption} == "true" ]] ; then
             PAYLOAD=$(jq -c '. += {"source_container_image_enabled":true}' <<< $PAYLOAD)
         fi
+        defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' ${DATA_FILE} || echo false)
 
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
 
-        for REPOSITORY in $(jq -r '.components[].repository' "${SNAPSHOT_SPEC_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        for ((i = 0; i < $NUM_COMPONENTS; i++))
         do
+            COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            COMPONENT_PAYLOAD=$PAYLOAD
+            REPOSITORY=$(jq -r '.repository' <<< $COMPONENT)
             PYXIS_REPOSITORY=${REPOSITORY##*/}
             # Replace "----" with "/"
             PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
@@ -117,6 +123,17 @@ spec:
                 exit 1
             fi
 
+            # Wrap in if statement so legacy functionality is used if set and payload not changed twice
+            if [[ -f "${DATA_FILE}" && ${legacyPushOption} != "true" && ${legacyPushOption} != "false" ]] ; then
+              # Set source_container_image_enabled based on pushSourceContainer value in components or use default if
+              # it is not set in the component
+              if [[ $(jq -r '.pushSourceContainer' <<< $COMPONENT) == "true" ]] ||
+                [[ $(jq 'has("pushSourceContainer")' <<< $COMPONENT) == "false" && \
+                ${defaultPushSourceContainer} == "true" ]] ; then
+                  COMPONENT_PAYLOAD=$(jq -c '. += {"source_container_image_enabled":true}' <<< $COMPONENT_PAYLOAD)
+              fi
+            fi
+
             # verify that publish_on_push is set to true.
             # otherwise, do not publish the image.
             PYXIS_REPOSITORY_PUBLISH_ON_PUSH=$(jq -r '.publish_on_push // "false"' <<< $PYXIS_REPOSITORY_JSON)
@@ -127,7 +144,7 @@ spec:
             fi
 
             curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
-                -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
+                -X PATCH -H 'Content-Type: application/json' --data-binary "${COMPONENT_PAYLOAD}"
         done
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
