@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: populate-release-notes-images
   labels:
-    app.kubernetes.io/version: "1.2.0"
+    app.kubernetes.io/version: "1.2.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -47,8 +47,10 @@ spec:
         # Convert space separated list of common tags into an array
         commonTags=$(jq -cn --arg tags "$(params.commonTags)" '$tags|split(" ")')
 
-        for component in $(jq -c '.components[]' "${SNAPSHOT_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        for ((i = 0; i < $NUM_COMPONENTS; i++))
         do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
             name=$(jq -r '.name' <<< $component)
             repo=$(jq -r '.repository' <<< $component)
             deliveryRepo=$(translate-delivery-repo $repo | jq -r '.[] | select(.repo=="redhat.io") | .url')
@@ -65,10 +67,6 @@ spec:
             # containerImage should be of the form registry.redhat.io/foo/bar@sha256:abcde
             # This value will be used as the basis for the example values that follow
             containerImage="${deliveryRepo}@sha256:${sha}"
-            # repository should be foo/bar
-            repository=$(echo ${containerImage} | cut -d '/' -f 2- | cut -d '@' -f 1)
-            # purl should be pkg:oci/foo@sha256:abcde?repository_url=registry.redhat.io/foo/bar
-            purl="pkg:oci/$(echo $repository | cut -d '/' -f 1)@sha256:${sha}?repository_url=${deliveryRepo}"
             # Construct CVE json
             CVEsJson='{"cves":{"fixed":{}}}'
             for cve in $(jq -c '.releaseNotes.cves[] | select(.component=="'$name'")' ${DATA_FILE}) ; do
@@ -81,12 +79,16 @@ spec:
             # Add one entry per arch (amd64 for example)
             get-image-architectures "${image}" | while IFS= read -r arch_json;
             do
-                arch=$(echo "${arch_json}" | jq -r .platform.architecture)
+                arch=$(jq -r .platform.architecture <<< "${arch_json}")
+                digest=$(jq -r .digest <<< "${arch_json}")
+                containerImage="${deliveryRepo}@${digest}"
+                # purl should be pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo
+                purl="pkg:oci/${deliveryRepo##*/}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
                 jsonString=$(jq -cn \
                     --arg arch "$arch" \
                     --arg containerImage "$containerImage" \
                     --arg purl "$purl" \
-                    --arg repository "$repository" \
+                    --arg repository "$deliveryRepo" \
                     --argjson tags "$tags" \
                     '{"architecture": $arch, "containerImage":$containerImage,
                     "purl": $purl, "repository": $repository, "tags": $tags}')
