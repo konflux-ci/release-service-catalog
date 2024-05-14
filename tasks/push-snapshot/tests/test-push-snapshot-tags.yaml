@@ -1,0 +1,129 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-snapshot-tags
+spec:
+  description: |
+    Run the push-snapshot task with various components and tags.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1:tag1",
+                    "repository": "prod-registry.io/prod-location1",
+                    "tags": [
+                      "tag1-{{timestamp}}",
+                      "tag2-{{ timestamp }}",
+                      "{{git_sha}}",
+                      "{{ git_sha }}-abc",
+                      "{{git_short_sha}}",
+                      "{{ git_short_sha }}-bar",
+                      "foo-{{digest_sha}}",
+                      "{{ digest_sha }}"
+                    ],
+                    "pushSourceContainer": false,
+                    "source": {
+                      "git": {
+                        "revision": "testrevision"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2:tag2",
+                    "repository": "prod-registry.io/prod-location2",
+                    "tags": [
+                      "{{timestamp}}"
+                    ],
+                    "timestampFormat": "%Y-%m"
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "registry.io/image3:tag3",
+                    "repository": "prod-registry.io/prod-location3"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": true,
+                    "timestampFormat": "%Y-%m-%d",
+                    "tags": [
+                      "defaultTag"
+                    ]
+                  }
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: push-snapshot
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: retries
+          value: 0
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              # 9 for comp1 (the 8 provided tags + default)
+              # 5 for comp2 (provided tag + default, once for image, once for source container, + once for source tag)
+              # 3 for comp3 (default tag, once for the image, once for the source container + once for source tag)
+              if [ $(cat $(workspaces.data.path)/mock_cosign.txt | wc -l) != 17 ]; then
+                echo Error: cosign was expected to be called 17 times. Actual calls:
+                cat $(workspaces.data.path)/mock_cosign.txt
+                exit 1
+              fi
+
+              # 10 for comp1 (same 9 as cosign + 1 for origin digest
+              # 7 for comp2 (same 5 as cosign + 1 for origin digest + 1 for source container digest
+              # 5 for comp3 ( same 3 as cosign + 1 for origin digest + 1 for source container digest
+              if [ $(cat $(workspaces.data.path)/mock_skopeo.txt | wc -l) != 22 ]; then
+                echo Error: skopeo was expected to be called 22 times. Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+      runAfter:
+        - run-task
