@@ -22,8 +22,12 @@ This task supports variable expansion in tag values from the mapping. The curren
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
 | snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No | |
-| releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | No | |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+
+## Changes in 1.0.0
+ * Use the data json instead of the ReleasePlanAdmission json
+    * releasePlanAdmissionPath parameter removed in favor of dataPath parameter
 
 ## Changes in 0.11.0
  * The tags provided in `mapping.defaults.tags` are combined with each components `.tags` entry to form
