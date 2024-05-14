@@ -13,10 +13,15 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
+| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes | pipeline_intention=release |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
+
+## Changes in 4.4.0
+* - `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
+  then passed to EC. Allows for easier runtime changes to rule data.
 
 ## Changes in 4.3.0
 - Add new task `push-rpm-manifests-to-pyxis` to run after `create-pyxis-image`
@@ -26,7 +31,7 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
   to konflux-ci GitHub org
 
 ## Changes in 4.1.1
-- Added `when` clause to 
+- Added `when` clause to
   `push-snapshot`,
   `collect-pyxis-params`,
   `create-pyxis-image` and

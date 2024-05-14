@@ -13,10 +13,15 @@ Tekton release pipeline to interact with FBC Pipeline
 | snapshot                        | The namespaced name (namespace/name) of the snapshot                                                     | No        | -                                                               |
 | enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                      | No        | -                                                               |
 | enterpriseContractPublicKey     | Public key to use for validation by the enterprise contract                                              | Yes       | k8s://openshift-pipelines/public-key                            |
+| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..."                                              | Yes       | pipeline_intention=release                            |
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                | No        | -                                                               |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                                            |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
+
+### Changes in 3.3.0
+- `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
+  then passed to EC. Allows for easier runtime changes to rule data.
 
 ### Changes in 3.2.0
 - update the taskGitUrl default value due to migration
@@ -85,7 +90,7 @@ Tekton release pipeline to interact with FBC Pipeline
 - Remove releasestrategy parameter
 
 ### Changes since 0.23.0
-- adds new tasks `validate-single-component` to validate that the 
+- adds new tasks `validate-single-component` to validate that the
   snapshot only contains a single component. The pipeline should fail otherwise.
 
 ### Changes since 0.22.0

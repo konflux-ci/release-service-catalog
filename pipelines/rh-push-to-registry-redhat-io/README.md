@@ -13,10 +13,15 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
+| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes | pipeline_intention=release |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
+
+## Changes in 3.4.0
+* - `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
+  then passed to EC. Allows for easier runtime changes to rule data.
 
 ## Changes in 3.3.1
 * The RADAS timeout when it fails to receive a response is 5 mins.
@@ -69,7 +74,7 @@ Tekton pipeline to release content to registry.redhat.io registry.
 * taskGitRevision parameter is added. It is used to provide the revision to be used in the taskGitUrl repo
 
 ## Changes in 1.6.0
-* The publish-pyxis-repository task now has a dataPath parameter. It is used to set 
+* The publish-pyxis-repository task now has a dataPath parameter. It is used to set
   source_container_image_enabled if `pushSourceContainer` is present in the data `images` key
   and set to true
 
