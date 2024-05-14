@@ -27,6 +27,9 @@ should not be present in the Release data section).
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes in 4.2.0
+  * Replace redirects with `tee` so that more is output in the task log to make debugging easier
+
 ## Changes in 4.1.0
   * releaseNotes.type is allowed in both Release and ReleasePlan CRs
 
