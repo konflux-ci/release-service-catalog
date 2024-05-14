@@ -2,12 +2,6 @@
 
 Tekton task to push snapshot images to an image registry using `cosign copy`.
 
-This task supports variable expansion in tag values from the mapping. The currently supported variables are:
-* "{{ timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
-* "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
-* "{{ git_short_sha }}" -> The git sha reduced to 7 characters
-* "{{ digest_sha }}" -> The image digest of the respective component
-
 ## Parameters
 
 | Name               | Description                                                               | Optional | Default value        |
@@ -15,6 +9,9 @@ This task supports variable expansion in tag values from the mapping. The curren
 | snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       |                      |
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
+
+## Changes in 4.5.0
+* Tag expansion is removed in favor of doing it in the apply-mapping task
 
 ## Changes in 4.4.0
 * Added support for component specific tags

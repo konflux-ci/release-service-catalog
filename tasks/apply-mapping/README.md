@@ -11,6 +11,12 @@ Snapshot based on component name.
 A `mapped` result is also returned from this task containing a simple true/false value that is
 meant to inform whether a mapped Snapshot is being returned or the original one.
 
+This task supports variable expansion in tag values from the mapping. The currently supported variables are:
+* "{{ timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
+* "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
+* "{{ git_short_sha }}" -> The git sha reduced to 7 characters
+* "{{ digest_sha }}" -> The image digest of the respective component
+
 ## Parameters
 
 | Name | Description | Optional | Default value |
@@ -18,6 +24,12 @@ meant to inform whether a mapped Snapshot is being returned or the original one.
 | snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No | |
 | releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+
+## Changes in 0.11.0
+ * The tags provided in `mapping.defaults.tags` are combined with each components `.tags` entry to form
+   one set of tags
+   * The resulting tags are stored in the snapshot spec file under each component
+   * The supported variables will be replaced in the tags
 
 ## Changes in 0.10.0
  * Removed default values for `snapshotPath` and `releasePlanAdmissionPath`

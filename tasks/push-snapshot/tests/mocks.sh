@@ -60,12 +60,6 @@ function date() {
       "+%s")
           echo "1696946200" | tee $(workspaces.data.path)/mock_date_epoch.txt
           ;;
-      "+%Y-%m-%d")
-          echo "1980-01-01"
-          ;;
-      "+%Y-%m")
-          echo "1980-01"
-          ;;
       "*")
           echo Error: Unexpected call
           exit 1
