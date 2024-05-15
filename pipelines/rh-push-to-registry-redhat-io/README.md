@@ -18,6 +18,11 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.3.1
+* The RADAS timeout when it fails to receive a response is 5 mins.
+  We double the requestTimeout in the rh-sign-image task to allow
+  RADAS to retry its request.
+
 ## Changes in 3.3.0
 * Add new task `push-rpm-manifests-to-pyxis` to run after `create-pyxis-image`
 
