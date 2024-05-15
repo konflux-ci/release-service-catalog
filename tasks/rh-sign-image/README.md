@@ -4,15 +4,18 @@ Task to create internalrequests to sign snapshot components
 
 ## Parameters
 
-| Name            | Description                                                                               | Optional | Default value        |
-|-----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | No       |                      |
-| dataPath        | Path to the JSON string of the merged data to use in the data workspace                   | No       |                      |
-| requester       | Name of the user that requested the signing, for auditing purpose                         | No       |                      |
-| commonTags      | Space separated list of common tags to be used when publishing                            | No       |                      |
-| requestTimeout  | InternalRequest timeout                                                                   | Yes      | 180                  |
-| concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
-| pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
+| Name            | Description                                                                               | Optional | Default value |
+|-----------------|-------------------------------------------------------------------------------------------|----------|---------------|
+| snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | No       |               |
+| dataPath        | Path to the JSON string of the merged data to use in the data workspace                   | No       |               |
+| requester       | Name of the user that requested the signing, for auditing purpose                         | No       |               |
+| commonTags      | Space separated list of common tags to be used when publishing                            | No       |               |
+| requestTimeout  | InternalRequest timeout                                                                   | Yes      | 600           |
+| concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4             |
+| pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |               |
+
+## Changes in 2.5.1
+* Increase the requestTimeout to be double the RADAS timeout to allow RADAS to retry its request.
 
 ## Changes in 2.5.0
 * Add support for checking the `mapping` key for `pushSourceContainer`
