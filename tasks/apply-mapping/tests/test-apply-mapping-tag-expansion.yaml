@@ -1,0 +1,180 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-tag-expansion
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
+    the releasePlanAdmission with tags per component and verify that the resulting json
+    contains the expected values with tags expanded.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.config.path)/test_release_plan_admission.json << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlanAdmission",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "managed"
+                },
+                "spec": {
+                  "applications": [
+                    "app"
+                  ],
+                  "policy": "policy",
+                  "pipelineRef": {
+                    "resolver": "git",
+                    "params": [
+                      {
+                        "name": "url",
+                        "value": "github.com"
+                      },
+                      {
+                        "name": "revision",
+                        "value": "main"
+                      },
+                      {
+                        "name": "pathInRepo",
+                        "value": "pipeline.yaml"
+                      }
+                    ]
+                  },
+                  "serviceAccount": "sa",
+                  "origin": "dev",
+                  "data": {
+                    "mapping": {
+                      "components": [
+                        {
+                          "name": "comp1",
+                          "repository": "repo1",
+                          "tags": [
+                            "tag1-{{timestamp}}",
+                            "tag2-{{ timestamp }}",
+                            "{{git_sha}}",
+                            "{{ git_sha }}-abc",
+                            "{{git_short_sha}}",
+                            "{{ git_short_sha }}-bar",
+                            "foo-{{digest_sha}}",
+                            "{{ digest_sha }}"
+                          ]
+                        },
+                        {
+                          "name": "comp2",
+                          "repository": "repo2",
+                          "tags": [
+                            "tag1-{{timestamp}}"
+                          ],
+                          "timestampFormat": "%Y-%m"
+                        },
+                        {
+                          "name": "comp3",
+                          "repository": "repo3a"
+                        }
+                      ],
+                      "defaults": {
+                        "timestampFormat": "%Y-%m-%d",
+                        "tags": [
+                          "defaultTag"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+              EOF
+
+              cat > $(workspaces.config.path)/test_snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1:tag1",
+                    "source": {
+                      "git": {
+                        "revision": "testrevision",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2",
+                    "repository": "repo2"
+                  },
+                  {
+                    "name": "comp3",
+                    "repository": "repo3"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: test_snapshot_spec.json
+        - name: releasePlanAdmissionPath
+          value: test_release_plan_admission.json
+      runAfter:
+        - setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that SNAPSHOT contains component comp1
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '[ .components[] | select(.name=="comp1") ] | length') -eq 1
+
+              echo Test that comp1 has the proper tags
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -c '.components[] | select(.name=="comp1") | .tags') == \
+                '["defaultTag","foo-tag1","tag1-1980-01-01","tag2-1980-01-01","tag1","testrevision-abc","testrev-bar","testrevision","testrev"]'
+
+              echo Test that SNAPSHOT contains component comp2
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '[ .components[] | select(.name=="comp2") ] | length') -eq 1
+
+              echo Test that comp2 has the proper tags
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -c '.components[] | select(.name=="comp2") | .tags') == \
+                '["defaultTag","tag1-1980-01"]'
+
+              echo Test that repository of component comp3 was overriden by mapping file
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '.components[] | select(.name=="comp3") | .repository') == repo3a
+
+              echo Test that comp3 has the 1 default tag
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '.components[] | select(.name=="comp3") | .tags | length') -eq 1
+      runAfter:
+        - run-task
