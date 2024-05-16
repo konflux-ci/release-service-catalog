@@ -7,8 +7,8 @@ function cosign() {
   echo Mock cosign called with: $*
   echo $* >> $(workspaces.data.path)/mock_cosign.txt
 
-  if [[ "$*" != "download sbom --output-file imageurl"[1-5]*".json imageurl"[1-5] && \
-     "$*" != "download sbom --output-file quay.io-org-repo-sha256-0123456abcdef.json quay.io/org/repo@sha256:0123456abcdef" ]]
+  if [[ "$*" != "download sbom --output-file myImageID"[1-5]*".json imageurl"[1-5] && \
+     "$*" != "download sbom --output-file myImageID"[1-5]*".json --platform linux/"*" multiarch-"[1-5] ]]
   then
     echo Error: Unexpected call
     exit 1

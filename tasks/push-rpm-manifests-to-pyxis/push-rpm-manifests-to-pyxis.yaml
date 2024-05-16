@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-rpm-manifests-to-pyxis
   labels:
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.1.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -50,20 +50,36 @@ spec:
             exit 1
         fi
 
-        IMAGEURLS=($(cat "${PYXIS_FILE}" | jq -r '.components[].pyxisImages[].containerImage' | sort | uniq))
+        NUM_COMPONENTS=$(jq '.components | length' "${PYXIS_FILE}")
 
         mkdir /workdir/sboms
         cd /workdir/sboms
 
-        for i in ${!IMAGEURLS[@]}; do
-          echo "Fetching sbom for image: ${IMAGEURLS[$i]}"
-          FILE="$(echo ${IMAGEURLS[$i]} | tr "/@:" ---).json"
-          cosign download sbom --output-file "${FILE}" "${IMAGEURLS[$i]}"
+        for (( i=0; i < $NUM_COMPONENTS; i++ )); do
+          COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${PYXIS_FILE}")
+          IMAGEURL=$(jq -r '.containerImage' <<< "${COMPONENT}")
+          NUM_PYXIS_IMAGES=$(jq '.pyxisImages | length' <<< "${COMPONENT}")
+          for (( j=0; j < $NUM_PYXIS_IMAGES; j++ )); do
+            PYXIS_IMAGE=$(jq -c --argjson j "$j" '.pyxisImages[$j]' <<< "${COMPONENT}")
+            FILE="$(jq -r '.imageId' <<< "$PYXIS_IMAGE").json"
+            # You can't pass --platform to a single arch image or cosign errors
+            if [ "${NUM_PYXIS_IMAGES}" -eq 1 ] ; then
+              echo "Fetching sbom for single arch image: $IMAGEURL to: $FILE"
+              cosign download sbom --output-file "${FILE}" "${IMAGEURL}"
+            else
+              OS=$(jq -r '.os' <<< "$PYXIS_IMAGE")
+              ARCH=$(jq -r '.arch' <<< "$PYXIS_IMAGE")
+              PLATFORM="${OS}/${ARCH}"
+              echo "Fetching sbom for image: $IMAGEURL with platform: $PLATFORM to: $FILE"
+              cosign download sbom --output-file "${FILE}" --platform "${PLATFORM}" "${IMAGEURL}"
+            fi
+          done
         done
 
         SBOM_COUNT=$(ls *.json | wc -l )
-        if [ $SBOM_COUNT != ${#IMAGEURLS[@]} ]; then
-          echo "ERROR: Expected to fetch sbom for ${#IMAGEURLS[@]} images, but only $SBOM_COUNT were saved"
+        PYXIS_IMAGES=$(jq '[.components[].pyxisImages | length] | add' "${PYXIS_FILE}")
+        if [ $SBOM_COUNT != $PYXIS_IMAGES ]; then
+          echo "ERROR: Expected to fetch sbom for $PYXIS_IMAGES images, but only $SBOM_COUNT were saved"
           exit 1
         fi
 
@@ -111,54 +127,45 @@ spec:
         N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
         declare -a jobs=()
         declare -a files=()
-        total=$(jq '[.components[].pyxisImages | length] | add' "${PYXIS_FILE}")
+        total=$(ls *.json | wc -l )
         count=0
         success=true
         echo "Starting RPM Manifest upload for $total files in total. " \
           "Up to $N files will be uploaded at once..."
 
-        # Loop through all components then all images in case there is a space
-        # in one of the keys or values, which would break jq looping
-        NUM_COMPONENTS=$(jq '.components | length' "${PYXIS_FILE}")
-        for ((i = 0; i < $NUM_COMPONENTS; i++)); do
-          COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${PYXIS_FILE}")
-          NUM_IMAGES=$(jq '.pyxisImages | length' <<< $COMPONENT)
-          for ((j = 0; j < $NUM_IMAGES; j++)); do
-            IMAGE=$(jq -c --argjson j "$j" '.pyxisImages[$j]' <<< $COMPONENT)
-            IMAGEID=$(jq -r '.imageId' <<< $IMAGE)
-            SBOM="$(jq -r '.containerImage' <<< $IMAGE | tr "/@:" ---).json"
-            echo Uploading RPM Manifest to Pyxis for IMAGE: $IMAGEID with SBOM: $SBOM
-            upload_rpm_manifest --retry --image-id $IMAGEID --sbom-path $SBOM > ${IMAGEID}.out 2>&1 &
+        for FILE in *.json; do
+          IMAGEID=$(echo $FILE | cut -d '.' -f 1)
+          echo Uploading RPM Manifest to Pyxis for IMAGE: $IMAGEID with SBOM: $FILE
+          upload_rpm_manifest --retry --image-id $IMAGEID --sbom-path $FILE > ${IMAGEID}.out 2>&1 &
 
-            jobs+=($!)  # Save the background process ID
-            images+=($IMAGEID)
-            ((++count))
+          jobs+=($!)  # Save the background process ID
+          images+=($IMAGEID)
+          ((++count))
 
-            if [ $((count%N)) -eq 0 -o $((count)) -eq $total ]; then
-              echo Waiting for the current batch of background processes to finish
-              for job_id in "${!jobs[@]}"; do
-                if ! wait ${jobs[job_id]}; then
-                  echo "Error: upload of ${IMAGE} failed"
-                  success=false
-                fi
-              done
-
-              echo
-              echo Printing outputs for current upload_rpm_manifest script runs
-              for img in ${images[@]}; do
-                echo "=== $img ==="
-                cat "${img}.out"
-                echo
-              done
-
-              if [ $success != "true" ]; then
-                echo ERROR: At least one upload in the last batch failed
-                exit 1
+          if [ $((count%N)) -eq 0 -o $((count)) -eq $total ]; then
+            echo Waiting for the current batch of background processes to finish
+            for job_id in "${!jobs[@]}"; do
+              if ! wait ${jobs[job_id]}; then
+                echo "Error: upload of ${IMAGE} failed"
+                success=false
               fi
+            done
 
-              # Reset job and files arrays for the next batch
-              jobs=()
-              images=()
+            echo
+            echo Printing outputs for current upload_rpm_manifest script runs
+            for img in ${images[@]}; do
+              echo "=== $img ==="
+              cat "${img}.out"
+              echo
+            done
+
+            if [ $success != "true" ]; then
+              echo ERROR: At least one upload in the last batch failed
+              exit 1
             fi
-          done
+
+            # Reset job and files arrays for the next batch
+            jobs=()
+            images=()
+          fi
         done
