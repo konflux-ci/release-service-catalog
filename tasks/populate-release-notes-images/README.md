@@ -11,6 +11,9 @@ in place so that downstream tasks relying on the releaseNotes data can use it.
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 | commonTags   | Space separated list of common tags to be used when publishing       | No       | -             |
 
+## Changes in 1.2.1
+* Fix the format and values of the images inside the resulting advisory data
+
 ## Changes in 1.2.0
 * The task now looks for tags in each component of the snapshot spec file and uses them instead of the commonTags if
   any exist
