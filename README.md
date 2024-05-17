@@ -1,7 +1,7 @@
 # Release Service Catalog
 
 This repository contains a collection of Tekton resources to be used with the
-[Release Service](https://github.com/redhat-appstudio/release-service). The main purpose of these
+[Release Service](https://github.com/konflux-ci/release-service). The main purpose of these
 resources is to facilitate and streamline the release process.
 
 # Resources

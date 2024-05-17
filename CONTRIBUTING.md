@@ -85,7 +85,7 @@ Before a pull request can be merged:
 
 ### Image References
 
-Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/redhat-appstudio/release-service-utils).
+Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/konflux-ci/release-service-utils).
 When referencing this image, the url should be `quay.io/redhat-appstudio/release-service-utils:$tag` where `$tag` is the Git SHA based tag.
 
 For other images, the reference should always either specify an image by a non-moving tag (e.g. `registry.access.redhat.com/ubi8/ubi:8.8-1067.1698056881`)
@@ -296,14 +296,14 @@ Process:
 #### Pairing with release-service Change
 
 Another possible pairing scenario is a change to a pipeline definition that requires changes to the operator itself, stored in
-[the release-service repo](https://github.com/redhat-appstudio/release-service). For example, maybe a parameter is passed by the operator
+[the release-service repo](https://github.com/konflux-ci/release-service). For example, maybe a parameter is passed by the operator
 to the pipeline, and the name of the parameter is changing. This will require the release-service PR and release-service-catalog PR to be paired
 in order for the e2e suite to pass.
 Note: This can be used in conjunction with the e2e pairing described in the previous section. That is to say, you can also pair an e2e-tests
 PR with these two PRs.
 
 Process:
-* Open a PR to the [release-service](https://github.com/redhat-appstudio/release-service). This PR should usually be opened as a draft. In order to run the
+* Open a PR to the [release-service](https://github.com/konflux-ci/release-service). This PR should usually be opened as a draft. In order to run the
 required check that builds the image for your catalog PR CI run, comment `/test images` on the PR. This will trigger the `ci/prow/images` check on the
 release-service PR. So, it is important to open the release-service PR first and wait for that check to succeed.
 * Open a PR to this repo. Use the same branch name as you did in the release-service PR (just like you do to pair with e2e-tests PRs). The e2e test suite
