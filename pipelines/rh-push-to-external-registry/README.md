@@ -19,8 +19,11 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 4.5.0
+- The apply-mapping task now gets the dataPath parameter instead of releasePlanAdmissionPath
+
 ## Changes in 4.4.0
-* - `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
+- `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
   then passed to EC. Allows for easier runtime changes to rule data.
 
 ## Changes in 4.3.0

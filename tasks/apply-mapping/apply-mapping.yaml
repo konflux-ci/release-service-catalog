@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: apply-mapping
   labels:
-    app.kubernetes.io/version: "0.11.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -15,11 +15,9 @@ spec:
     - name: snapshotPath
       type: string
       description: Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to
-    - name: releasePlanAdmissionPath
+    - name: dataPath
       type: string
-      description: |
-        Path to the JSON string of the ReleasePlanAdmission in the
-        config workspace which contains the mapping to apply
+      description: Path to the JSON string of the merged data to use in the data workspace
     - name: failOnEmptyResult
       type: string
       description: Fail the task if the resulting snapshot contains 0 components
@@ -40,7 +38,7 @@ spec:
         set -eux
 
         SNAPSHOT_SPEC_FILE="$(workspaces.config.path)/$(params.snapshotPath)"
-        RPA_FILE="$(workspaces.config.path)/$(params.releasePlanAdmissionPath)"
+        DATA_FILE="$(workspaces.config.path)/$(params.dataPath)"
         SNAPSHOT_SPEC_FILE_ORIG="${SNAPSHOT_SPEC_FILE}.orig"
 
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
@@ -51,16 +49,16 @@ spec:
         # Copy the original Snapshot spec file before overriding
         cp "${SNAPSHOT_SPEC_FILE}" "${SNAPSHOT_SPEC_FILE_ORIG}"
 
-        if [ ! -f "${RPA_FILE}" ] ; then
-            echo "No ReleasePlanAdmission file was found."
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON file was found."
             printf "false" | tee $(results.mapped.path)
             exit 0
         fi
 
-        MAPPING=$(jq '.spec.data.mapping' "${RPA_FILE}")
+        MAPPING=$(jq '.mapping' "${DATA_FILE}")
 
         if [[ $MAPPING == "null" ]] ; then
-            echo "ReleasePlanAdmission Data struct contains no mapping key."
+            echo "Data file contains no mapping key."
             printf "false" | tee $(results.mapped.path)
             exit 0
         fi
@@ -95,7 +93,7 @@ spec:
             echo -n $tags | jq -c
         }
 
-        # Merge the mapping key contents in the ReleasePlanAdmission data with the components key in the snapshot based
+        # Merge the mapping key contents in the data json file with the components key in the snapshot based
         # on component name. Save the output as a compact json in mapped_snapshot.json file in the workspace
         { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${MAPPING}"; } | jq -c -s '.[0] as $snapshot
           | .[0].components + .[1].components | group_by(.name) | [.[] | select(length > 1)]
@@ -111,7 +109,7 @@ spec:
           exit 1
         fi
 
-        # Expand the tags in the ReleasePlanAdmission
+        # Expand the tags in the data file
         defaultTags=$(jq '.defaults.tags' <<< $MAPPING)
         defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< $MAPPING)
         currentTimestamp="$(date "+%Y%m%d %T")"
