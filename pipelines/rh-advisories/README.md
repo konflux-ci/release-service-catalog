@@ -24,6 +24,8 @@ the rh-push-to-registry-redhat-io pipeline.
 
 ## Changes in 0.11.0
 - The `rh-sign-image` task no longer receives the `commonTags` parameter
+- The `populate-release-notes-images` task no longer receives the `commonTags` parameter
+- The `create-pyxis-image` task no longer receives the `commonTags` nor `dataPath` parameter
 
 ## Changes in 0.10.0
 - The `push-snapshot` task now gets the `resultsDirPath` parameter from the `collect-data` results

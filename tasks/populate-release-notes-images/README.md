@@ -9,7 +9,9 @@ in place so that downstream tasks relying on the releaseNotes data can use it.
 |--------------|----------------------------------------------------------------------|----------|---------------|
 | dataPath     | Path to the JSON string of the merged data to update                 | No       | -             |
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
-| commonTags   | Space separated list of common tags to be used when publishing       | No       | -             |
+
+## Changes in 2.0.0
+* The `commonTags` parameter was removed in favor of the component tags in the snapshot spec file
 
 ## Changes in 1.4.0
 * Updated the base image used in this task

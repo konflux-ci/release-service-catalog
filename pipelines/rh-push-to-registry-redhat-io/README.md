@@ -21,6 +21,7 @@ Tekton pipeline to release content to registry.redhat.io registry.
 
 ## Changes in 3.8.0
 * The `rh-sign-image` task no longer receives the `commonTags` parameter
+* The `create-pyxis-image` task no longer receives the `commonTags` nor `dataPath` parameter
 
 ## Changes in 3.7.0
 * The `push-snapshot` task now gets the `resultsDirPath` parameter from `collect-data` results
