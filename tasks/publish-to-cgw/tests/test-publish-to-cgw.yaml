@@ -1,0 +1,119 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-to-cgw
+spec:
+  description: |
+    Run the publish-to-cgw task and verify the results
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              CONTENT_DIR="$(workspaces.data.path)/contentDir"
+              mkdir -p "$CONTENT_DIR"
+
+              cosign_binaries="\
+              cosign \
+              cosign-darwin-amd64.gz \
+              cosign-darwin-arm64.gz \
+              cosign-linux-amd64.gz \
+              cosign-linux-arm64.gz \
+              fake-name-linux-amd64.gz \ # should be ignored
+              checksum.txt" # should be ignored
+
+              gitsign_binaries="\
+              gitsign-darwin-amd64.gz \
+              gitsign-darwin-arm64.gz \
+              gitsign-linux-amd64.gz \
+              gitsign-linux-arm64.gz \
+              checksum.txt" # should be ignored
+
+              all_binaries="$cosign_binaries $gitsign_binaries"
+
+              for binary in $all_binaries; do
+                echo "$binary content" > "$CONTENT_DIR/$binary"
+              done
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "contentGateway": {
+                  "productName": "product_name_1",
+                  "productCode": "product_code_1",
+                  "productVersionName": "1.1",
+                  "components": [
+                    {
+                      "name": "cosign",
+                      "description": "Red Hat OpenShift Local Sandbox Test",
+                      "shortURL": "/cgw/product_code_1/1.1",
+                      "hidden": false
+                    },
+                    {
+                      "name": "gitsign",
+                      "description": "Red Hat OpenShift Local Sandbox Test",
+                      "shortURL": "/cgw/product_code_1/1.1",
+                      "hidden": false
+                    }
+                  ]
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: publish-to-cgw
+      params:
+        - name: dataPath
+          value: "data.json"
+        - name: contentDir
+          value: "contentDir"
+        - name: cgwSecret
+          value: "test-publish-to-cgw-secret"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: resultDataPath
+          value: $(tasks.run-task.results.resultDataPath)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: resultDataPath
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env bash
+              python3 <<EOF
+              import json
+
+              with open('$(params.resultDataPath)', 'r') as file:
+                  data = json.load(file)
+
+              no_of_files_processed = data.get('no_of_files_processed')
+              cmd_output = data.get('command_output')
+              metadata_file_path = data.get('metadata_file_path')
+
+              assert no_of_files_processed == 9, f'Expected 9 files to be processed, got {no_of_files_processed}'
+              assert cmd_output.startswith('push-cgw-metadata mock called with')
+              assert metadata_file_path.endswith('/cgw_metadata.yaml')
+
+              print('All checks passed')
+              EOF
