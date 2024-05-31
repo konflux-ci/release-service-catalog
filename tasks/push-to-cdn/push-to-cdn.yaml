@@ -1,0 +1,120 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-to-cdn
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to push content to Red Hat's CDN using exodus-rsync
+  params:
+    - name: exodusGwUrl
+      type: string
+      description: URL of the Exodus Gateway
+    - name: exodusGwEnv
+      type: string
+      description: Environment to use in the Exodus Gateway
+    - name: exodusGwSecret
+      type: string
+      description: Secret containing the Exodus Gateway certificate
+    - name: binariesDir
+      type: string
+      description: Path where the binaries are stored in the workspace
+    - name: subdirectory
+      description: Subdirectory inside the workspace to be used
+      type: string
+      default: ""
+  workspaces:
+    - name: data
+      description: Workspace to save the results to
+  results:
+    - name: srcDestPaths
+      type: string
+      description: |
+        The relative path in the workspace to the stored json of source:destination paths
+  steps:
+    - name: execute-exodus-rsync
+      image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+      env:
+        - name: exodusGwCert
+          valueFrom:
+            secretKeyRef:
+              name: $(params.exodusGwSecret)
+              key: cert
+        - name: exodusGwKey
+          valueFrom:
+            secretKeyRef:
+              name: $(params.exodusGwSecret)
+              key: key
+      script: |
+        #!/bin/bash
+        set -x
+
+        WORKSPACE_DIR="$(workspaces.data.path)/$(params.subdirectory)"
+        BINARIES_DIR="$(workspaces.data.path)/$(params.binariesDir)"
+        EXODUS_CONF_PATH="$WORKSPACE_DIR/exodus-rsync.conf"
+        EXODUS_CERT_PATH="$WORKSPACE_DIR/exodus.crt"
+        EXODUS_KEY_PATH="$WORKSPACE_DIR/exodus.key"
+        SRC_DEST_JSON_PATH="$WORKSPACE_DIR/src_dest_combination.json"
+        PREFIX="exodus:/content/origin/files/sha256"
+
+        create_exodus_conf() {
+          echo "Creating Exodus configuration file..."
+          mkdir -p "$WORKSPACE_DIR"
+
+          { set +x; } 2>/dev/null
+          echo "$exodusGwCert" > "$EXODUS_CERT_PATH"
+          echo "$exodusGwKey" > "$EXODUS_KEY_PATH"
+
+          cat << EOF > "$EXODUS_CONF_PATH"
+        gwcert: $EXODUS_CERT_PATH
+        gwkey: $EXODUS_KEY_PATH
+        gwurl: $(params.exodusGwUrl)
+        gwenv: $(params.exodusGwEnv)
+
+        logger: file:/proc/1/fd/1
+        loglevel: INFO
+
+        environments:
+        - prefix: exodus
+        EOF
+        { set -x; } 2>/dev/null
+        }
+
+        process_binaries_and_run_exodus() {
+          echo "Processing binaries and running exodus-rsync command..."
+
+          # Check if the binaries directory exists
+          if [ ! -d "$BINARIES_DIR" ]; then
+            echo "Directory $BINARIES_DIR does not exist."
+            exit 1
+          fi
+
+          json_output="{}"
+
+          # Loop through each file in the binaries directory
+          for BINARY_PATH in "$BINARIES_DIR"/*; do
+            if [ -f "$BINARY_PATH" ]; then
+              binary_name=$(basename "$BINARY_PATH")
+              echo "Processing binary: $binary_name"
+              checksum=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
+              destination_path="$PREFIX/${checksum:0:2}/$checksum/$binary_name"
+              echo "Destination dir: $destination_path"
+              json_output=$(echo "$json_output" | jq --arg key "$BINARY_PATH" \
+                            --arg value "$destination_path" '.[$key]=$value')
+              rsync --exodus-conf "$EXODUS_CONF_PATH" -s "$BINARY_PATH" -d "$destination_path"
+            fi
+          done
+
+          echo "$json_output" | tee "$SRC_DEST_JSON_PATH"
+          echo -n "$SRC_DEST_JSON_PATH" > "$(results.srcDestPaths.path)"
+        }
+
+        create_exodus_conf
+        process_binaries_and_run_exodus
+        echo "All steps completed successfully."
+        

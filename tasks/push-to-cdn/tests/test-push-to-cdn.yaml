@@ -1,0 +1,84 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-to-cdn
+spec:
+  description: |
+    Run the push-to-cdn task and verify the results
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p $(workspaces.data.path)/binaries
+              echo "Konflux" > $(workspaces.data.path)/binaries/sample.txt
+              echo "Konflux 1" > $(workspaces.data.path)/binaries/sample-1.txt
+    - name: run-task
+      taskRef:
+        name: push-to-cdn
+      params:
+        - name: exodusGwUrl
+          value: "https://example.com/exodus"
+        - name: exodusGwEnv
+          value: "live"
+        - name: exodusGwSecret
+          value: "test-push-to-cdn-secret"
+        - name: binariesDir
+          value: "binaries"
+        - name: subdirectory
+          value: "subdirectory"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: srcDestPaths
+          value: $(tasks.run-task.results.srcDestPaths)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: srcDestPaths
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            env:
+              - name: "srcDestPaths"
+                value: '$(params.srcDestPaths)'
+            script: |
+              #!/usr/bin/env sh
+              set -x
+
+              PREFIX="exodus:/content/origin/files/sha256"
+              destination_paths=()
+              for file in $(workspaces.data.path)/binaries/*; do
+                checksum=$(sha256sum "$file" | awk '{print $1}')
+                path="$PREFIX/${checksum:0:2}/$checksum/$(basename "$file")"
+                destination_paths+=("$path")
+              done
+
+              values=($(cat "$srcDestPaths" | jq -r '.[]'))
+              for path in "${destination_paths[@]}"; do
+                if printf '%s\n' "${values[@]}" | grep -q -x "$path"; then
+                  echo "Match found: $path"
+                else
+                  echo "No match for: $path"
+                  exit 1
+                fi
+              done
