@@ -1,0 +1,107 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-cr-status-multiple-result-files
+spec:
+  description: |
+    Run the update-cr-status task with rbac present and multiple result
+    files in the results directory. The pipeline should succeed.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: setup
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir "$(workspaces.data.path)/results/"
+              cat > "$(workspaces.data.path)/results/one.json" << EOF
+              {
+                  "one": {
+                      "foo": "bar"
+                  },
+                  "two": {
+                      "a": "b"
+                  }
+              }
+              EOF
+
+              cat > "$(workspaces.data.path)/results/two.json" << EOF
+              {
+                  "one": {
+                      "union": "value"
+                  },
+                  "z": {
+                      "cat": "dog"
+                  }
+              }
+              EOF
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-cr-status-multiple
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: update-cr-status
+      params:
+        - name: resource
+          value: default/release-cr-status-multiple
+        - name: resultsDirPath
+          value: results
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that the Release.Status contains the union data
+              test $(kubectl get release release-cr-status-multiple -n default \
+                -o jsonpath={.status.artifacts.one.foo}) == bar
+
+              test $(kubectl get release release-cr-status-multiple -n default \
+                -o jsonpath={.status.artifacts.one.union}) == value
+
+              echo Test that the Release.Status contains the unique data from first file
+              test $(kubectl get release release-cr-status-multiple -n default \
+                -o jsonpath={.status.artifacts.two.a}) == b
+
+              echo Test that the Release.Status contains the unique data from second file
+              test $(kubectl get release release-cr-status-multiple -n default \
+                -o jsonpath={.status.artifacts.z.cat}) == dog
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-cr-status-multiple

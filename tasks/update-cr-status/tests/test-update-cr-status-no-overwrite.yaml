@@ -1,0 +1,90 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-cr-status-no-overwrite
+spec:
+  description: |
+    Run the update-cr-status task with rbac present and a proper results
+    file, but with information already in the resource status. The pipeline
+    should succeed and existing status should not be overwritten.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: setup
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir "$(workspaces.data.path)/results/"
+              cat > "$(workspaces.data.path)/results/test.json" << EOF
+              {
+                 "author": "user",
+                 "standingAuthorization": false
+              }
+              EOF
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-cr-status-overwrite
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+              kubectl patch release release-cr-status-overwrite -n default \
+                --type=merge --subresource status --patch "status: {automated: false}"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: update-cr-status
+      params:
+        - name: resource
+          value: default/release-cr-status-overwrite
+        - name: resultsDirPath
+          value: results
+        - name: statusKey
+          value: attribution
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that the Release.Status contains the old data
+              test $(kubectl get release release-cr-status-overwrite -n default \
+                -o jsonpath={.status.automated}) == false
+
+              echo Test that the Release.Status contains the new data
+              test $(kubectl get release release-cr-status-overwrite -n default \
+                -o jsonpath={.status.attribution.author}) == user
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-cr-status-overwrite
