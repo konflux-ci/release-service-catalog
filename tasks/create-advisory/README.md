@@ -18,6 +18,9 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
 
+## Changes in 4.2.0
+- The task now validates that the advisory type is one of RHSA, RHBA or RHEA.
+
 ## Changes in 4.1.0
 - Updated the base image used in this task
 
