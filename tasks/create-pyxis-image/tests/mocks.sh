@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -exo pipefail
 
 # mocks to be injected into task step scripts
 
