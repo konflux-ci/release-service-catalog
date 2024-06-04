@@ -5,12 +5,25 @@ set -eux
 
 function create_container_image() {
   echo $* >> $(workspaces.data.path)/mock_create_container_image.txt
+  # The image id is a 4 digit number with leading zeros calculated from the call number,
+  # e.g. 0001, 0002, 0003...
   echo The image id is $(awk 'END{printf("%04i", NR)}' $(workspaces.data.path)/mock_create_container_image.txt)
 
   if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --architecture-digest "*" --rh-push "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
+    exit 1
+  fi
+}
+
+function cleanup_tags() {
+  echo $* >> $(workspaces.data.path)/mock_cleanup_tags.txt
+
+  if [[ "$*" != "--verbose --retry --pyxis-graphql-api https://graphql-pyxis.preprod.api.redhat.com/graphql/ "00?? ]]
+  then
+    echo Error: Unexpected call
+    echo Mock cleanup_tags called with: $*
     exit 1
   fi
 }

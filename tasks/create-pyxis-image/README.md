@@ -20,6 +20,11 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | No | |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | No | |
 
+## Changes in 2.6.1
+* For each image that is created in Pyxis, the task will now also remove
+  all its tags from all previous images
+  * This is done via a new script called cleanup_tags from the utils image
+
 ## Changes in 2.6.0
 * containerImage is no longer saved in the pyxis.json entries
   * This was already saved in pyxis.json per component, it doesn't need to be duplicated in the pyxisImages keys
