@@ -19,6 +19,10 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.5.1
+* The when conditions that skipped tasks if the `push-snapshot` result `commonTags` was empty was removed
+  * This is due to the migration to the new tag format. A similar when will be readded with RELEASE-932
+
 ## Changes in 3.5.0
 * The apply-mapping task now gets the dataPath parameter instead of releasePlanAdmissionPath
 
