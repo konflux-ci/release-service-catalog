@@ -27,6 +27,10 @@ should not be present in the Release data section).
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes in 4.3.0
+  * Task creates a results dir in the workspace (inside the subdirectory if it exists). The path to this
+    inside the workspace is emitted as a task result
+
 ## Changes in 4.2.0
   * Replace redirects with `tee` so that more is output in the task log to make debugging easier
 
