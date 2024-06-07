@@ -9,13 +9,16 @@ Creates an InternalRequest resource to call IIB service
 | pipelineRunName | The name of the Parent PipelineRun for this task | No | `ir-$(context.pipelineRun.name)` |
 | request | Internal pipeline request name | No | |
 | internalRequestParams | Internal Request parameters | No | |
-| dataPath | Path to the JSON file of the merged data to use in the data workspace | Yes | "data.json" |
+| dataPath | Path to the JSON file of the merged data to use in the data workspace | No | |
 | inputDataFile | Optional file to read data from | Yes | "" |
 | updateGenericResult | Should the task update the genericResult result  | Yes | "false" |
 | requestUpdateTimeout | Max seconds to wait until the status is updated | Yes | 360 |
 | subdirectory | Subdirectory inside the workspace to be used | Yes | "" |
 
 ## Changelog
+
+## Changes in 0.11.0
+- remove `dataPath` default value
 
 ## Changes since 0.9.0
 - Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

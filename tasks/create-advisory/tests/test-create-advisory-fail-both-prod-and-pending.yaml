@@ -1,0 +1,137 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-fail-both-prod-and-pending
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Run the create-advisory task with a ReleasePlanAdmission that contains a mapping which contains
+    both prod and pending repos and verify the task fails as expected
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              cat > $(workspaces.data.path)/test_release_plan_admission.json << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlanAdmission",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "applications": [
+                    "app"
+                  ],
+                  "policy": "policy",
+                  "pipelineRef": {
+                    "resolver": "git",
+                    "params": [
+                      {
+                        "name": "url",
+                        "value": "github.com"
+                      },
+                      {
+                        "name": "revision",
+                        "value": "main"
+                      },
+                      {
+                        "name": "pathInRepo",
+                        "value": "pipeline.yaml"
+                      }
+                    ]
+                  },
+                  "serviceAccount": "sa",
+                  "origin": "dev"
+                }
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/test_snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "repository": "repo"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/test_release_service_config.json << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleaseServiceConfig",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "advisoryRepo": "github.com/repo"
+                }
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "releaseNotes": {
+                  "foo": "bar"
+                },
+                "sign": {
+                  "configMapName": "cm"
+                },
+                "advisory": {
+                  "repo": "myrepo.com",
+                  "spec": {
+                    "foo": "bar"
+                  }
+                },
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp",
+                      "repository": "quay.io/redhat-prod/repo"
+                    },
+                    {
+                      "name": "comp",
+                      "repository": "quay.io/redhat-pending/repo"
+                    }
+                  ]
+                }
+              }
+              EOF
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: create-advisory
+      params:
+        - name: releasePlanAdmissionPath
+          value: "test_release_plan_admission.json"
+        - name: releaseServiceConfigPath
+          value: "test_release_service_config.json"
+        - name: snapshotPath
+          value: "test_snapshot_spec.json"
+        - name: dataPath
+          value: "data.json"
+        - name: synchronously
+          value: "false"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace

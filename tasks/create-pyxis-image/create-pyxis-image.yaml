@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "2.1.0"
+    app.kubernetes.io/version: "2.6.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -14,7 +14,7 @@ spec:
   params:
     - name: server
       type: string
-      description: The server type to use. Options are 'production' and 'stage'
+      description: The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'.
       default: production
     - name: pyxisSecret
       type: string
@@ -46,23 +46,20 @@ spec:
     - name: snapshotPath
       type: string
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
-      default: mapped_snapshot.json
     - name: dataPath
       type: string
       description: >
         Path to the JSON string of the merged data to use in the data workspace.
         Only required if commonTags is not set or empty.
-      default: data.json
   workspaces:
     - name: data
       description: The workspace where the snapshot spec and data json files reside
   results:
-    - name: containerImageIDs
-      type: string
-      description: IDs of the created entries in Pyxis, each on its own line
+    - name: pyxisDataPath
+      description: The relative path in the workspace to the stored pyxis data json
   steps:
     - name: create-pyxis-image
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:bcc8bcfb3bdc32498c5d3327abf01975df7495bd
       env:
         - name: pyxisCert
           valueFrom:
@@ -75,17 +72,27 @@ spec:
               name: $(params.pyxisSecret)
               key: key
       script: |
-        #!/usr/bin/env sh
+        #!/usr/bin/env bash
         set -o pipefail
 
         if [[ "$(params.server)" == "production" ]]
         then
           PYXIS_URL="https://pyxis.api.redhat.com/"
+          PYXIS_GRAPHQL_URL="https://graphql-pyxis.api.redhat.com/graphql/"
         elif [[ "$(params.server)" == "stage" ]]
         then
           PYXIS_URL="https://pyxis.preprod.api.redhat.com/"
+          PYXIS_GRAPHQL_URL="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
+        elif [[ "$(params.server)" == "production-internal" ]]
+        then
+          PYXIS_URL="https://pyxis.engineering.redhat.com/"
+          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
+        elif [[ "$(params.server)" == "stage-internal" ]]
+        then
+          PYXIS_URL="https://pyxis.stage.engineering.redhat.com/"
+          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
         else
-          echo "Invalid server parameter. Only 'production' and 'stage' are allowed."
+          echo "Invalid server parameter. Only 'production','production-internal,'stage-internal' and 'stage' allowed."
           exit 1
         fi
 
@@ -95,39 +102,80 @@ spec:
             exit 1
         fi
 
+        PYXIS_DATA_PATH="$(dirname $(params.snapshotPath))/pyxis.json"
+        echo -n "${PYXIS_DATA_PATH}" > $(results.pyxisDataPath.path)
+
         if [ -n "$(params.commonTags)" ]; then
-          TAGS="$(params.commonTags)"
+          COMMON_TAGS="$(params.commonTags)"
         else
           DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
           if [ ! -f "${DATA_FILE}" ] ; then
               echo "No data JSON was provided."
               exit 1
           fi
-          TAGS=$(jq -r '.images.defaultTag' "${DATA_FILE}")
+          COMMON_TAGS=$(jq -r '.images.defaultTag' "${DATA_FILE}")
         fi
 
         echo "${pyxisCert}" > /tmp/crt
         echo "${pyxisKey}" > /tmp/key
 
         COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        JSON_OUTPUT='{}'
         for (( i=0; i < $COMPONENTS; i++ )); do
             CONTAINER_IMAGE=$(jq -r ".components[${i}].containerImage" "${SNAPSHOT_SPEC_FILE}")
+            JSON_OUTPUT=$(jq --argjson id $i --arg image "${CONTAINER_IMAGE}" \
+              '.components[$id] += { "containerImage": $image, "pyxisImages": []}' <<< "$JSON_OUTPUT")
             REPOSITORY=$(jq -r ".components[${i}].repository" "${SNAPSHOT_SPEC_FILE}")
             REPOSITORY=${REPOSITORY%:*} # strip tag just in case - it should not be there
             DIGEST="${CONTAINER_IMAGE##*@}"
-            PULLSPEC="docker://${REPOSITORY}@${DIGEST}"
-            MEDIA_TYPE=$(skopeo inspect --raw "$PULLSPEC" | jq -r .mediaType)
-            skopeo inspect --no-tags "$PULLSPEC" > /tmp/skopeo-inspect.json
+            PULLSPEC="${REPOSITORY}@${DIGEST}"
+            MEDIA_TYPE=$(skopeo inspect --raw "docker://${PULLSPEC}" | jq -r .mediaType)
+            TAGS=$COMMON_TAGS
+            if [ $(jq ".components[${i}].tags | length" "${SNAPSHOT_SPEC_FILE}") -gt 0 ] ; then
+                TAGS=$(jq -r ".components[${i}].tags | join(\" \")" "${SNAPSHOT_SPEC_FILE}")
+            fi
 
-            PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
-              --pyxis-url $PYXIS_URL \
-              --certified $(params.certified) \
-              --tags "$TAGS" \
-              --is-latest $(params.isLatest) \
-              --verbose \
-              --skopeo-result /tmp/skopeo-inspect.json \
-              --media-type "$MEDIA_TYPE" \
-              --rh-push $(params.rhPush) | tee /tmp/output
+            index=0
+            while IFS= read -r ARCH_DETAIL;
+            do
+                OS=$(jq -r '.platform.os' <<< "$ARCH_DETAIL")
+                ARCH=$(jq -r '.platform.architecture' <<< "$ARCH_DETAIL")
+                ARCH_DIGEST=$(jq -r '.digest' <<< "$ARCH_DETAIL")
 
-            grep 'The image id is' /tmp/output | awk '{print $NF}' >> $(results.containerImageIDs.path)
+                skopeo inspect --no-tags --override-os "$OS" --override-arch "$ARCH" "docker://${PULLSPEC}" \
+                    | tee /tmp/skopeo-inspect.json
+
+                PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
+                  --pyxis-url $PYXIS_URL \
+                  --certified $(params.certified) \
+                  --tags "$TAGS" \
+                  --is-latest $(params.isLatest) \
+                  --verbose \
+                  --skopeo-result "/tmp/skopeo-inspect.json" \
+                  --media-type "$MEDIA_TYPE" \
+                  --architecture-digest "$ARCH_DIGEST" \
+                  --rh-push $(params.rhPush) | tee "/tmp/output"
+                # The rh-push-to-external-registry e2e test depends on this line being in the task log
+                IMAGEID=$(awk '/The image id is/{print $NF}' /tmp/output)
+
+                # Remove the new image tags from all previous images
+                PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key cleanup_tags \
+                  --verbose \
+                  --retry \
+                  --pyxis-graphql-api $PYXIS_GRAPHQL_URL \
+                  $IMAGEID
+
+                JSON_OUTPUT=$(jq --argjson component_index $i --argjson arch_index $index \
+                  --arg arch "${ARCH}" --arg imageId "${IMAGEID}" --arg digest "${DIGEST}" \
+                  --arg arch_digest "${ARCH_DIGEST}" --arg os "${OS}" \
+                    '.components[$component_index].pyxisImages[$arch_index] += {
+                      "arch": $arch,
+                      "imageId": $imageId,
+                      "digest": $digest,
+                      "arch_digest": $arch_digest,
+                      "os": $os}' <<< "$JSON_OUTPUT")
+
+                index=$((index + 1))
+            done <<< $(get-image-architectures "${PULLSPEC}" | jq -c)
         done
+        echo "$JSON_OUTPUT" | tee "$(workspaces.data.path)/${PYXIS_DATA_PATH}"

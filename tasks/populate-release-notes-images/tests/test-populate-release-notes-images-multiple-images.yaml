@@ -1,0 +1,142 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-images-multiple-images
+spec:
+  description: |
+    Run the populate-release-notes-images task with multiple images in the snapshot JSON and verify
+    the data JSON has the proper content
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup
+            image: quay.io/redhat-appstudio/release-service-utils:6835e64a1811b30c8a48816ab6e2076cc4963759
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "releaseNotes": {
+                  "product_id": 123,
+                  "product_name": "Red Hat Openstack Product",
+                  "product_version": "123",
+                  "cpe": "cpe:/a:example:openstack:el8",
+                  "type": "RHSA",
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "RHOSP-12345",
+                        "source": "issues.example.com"
+                      },
+                      {
+                        "id": 1234567,
+                        "source": "bugzilla.example.com"
+                      }
+                    ]
+                  },
+                  "synopsis": "test synopsis",
+                  "topic": "test topic",
+                  "description": "test description",
+                  "solution": "test solution",
+                  "references": [
+                    "https://docs.example.com/some/example/release-notes"
+                  ]
+                }
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "repository": "quay.io/redhat-prod/product----repo"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2@sha256:abcde",
+                    "repository": "quay.io/redhat-pending/product2----repo2"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: populate-release-notes-images
+      params:
+        - name: dataPath
+          value: "data.json"
+        - name: snapshotPath
+          value: "snapshot.json"
+        - name: commonTags
+          value: "foo bar"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:6835e64a1811b30c8a48816ab6e2076cc4963759
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Checking image1arch1...
+              image1arch1=$(jq '.releaseNotes.content.images[0]' "$(workspaces.data.path)/data.json")
+              test $(jq -r '.architecture' <<< $image1arch1) == "amd64"
+              test $(jq -r '.containerImage' <<< $image1arch1) == "registry.redhat.io/product/repo@sha256:abcdefg"
+              test $(jq -r '.purl' <<< $image1arch1) == \
+                "pkg:oci/repo@sha256%3Aabcdefg?arch=amd64&repository_url=registry.redhat.io/product"
+              test $(jq -r '.repository' <<< $image1arch1) == "registry.redhat.io/product/repo"
+              test $(jq -rc '.tags' <<< $image1arch1) == '["foo","bar"]'
+
+              echo Checking image1arch2...
+              image1arch2=$(jq '.releaseNotes.content.images[1]' "$(workspaces.data.path)/data.json")
+              test $(jq -r '.architecture' <<< $image1arch2) == "s390x"
+              test $(jq -r '.containerImage' <<< $image1arch2) == "registry.redhat.io/product/repo@sha256:deadbeef"
+              test $(jq -r '.purl' <<< $image1arch2) == \
+                "pkg:oci/repo@sha256%3Adeadbeef?arch=s390x&repository_url=registry.redhat.io/product"
+              test $(jq -r '.repository' <<< $image1arch2) == "registry.redhat.io/product/repo"
+              test $(jq -rc '.tags' <<< $image1arch2) == '["foo","bar"]'
+
+              echo Checking image2arch1...
+              image2arch1=$(jq '.releaseNotes.content.images[2]' "$(workspaces.data.path)/data.json")
+              test $(jq -r '.architecture' <<< $image2arch1) == "amd64"
+              test $(jq -r '.containerImage' <<< $image2arch1) == \
+                "registry.stage.redhat.io/product2/repo2@sha256:abcdefg"
+              test $(jq -r '.purl' <<< $image2arch1) == \
+                "pkg:oci/repo2@sha256%3Aabcdefg?arch=amd64&repository_url=registry.stage.redhat.io/product2"
+              test $(jq -r '.repository' <<< $image2arch1) == "registry.stage.redhat.io/product2/repo2"
+              test $(jq -rc '.tags' <<< $image2arch1) == '["foo","bar"]'
+
+              echo Checking image2arch2...
+              image2arch2=$(jq '.releaseNotes.content.images[3]' "$(workspaces.data.path)/data.json")
+              test $(jq -r '.architecture' <<< $image2arch2) == "s390x"
+              test $(jq -r '.containerImage' <<< $image2arch2) == \
+                "registry.stage.redhat.io/product2/repo2@sha256:deadbeef"
+              test $(jq -r '.purl' <<< $image2arch2) == \
+                "pkg:oci/repo2@sha256%3Adeadbeef?arch=s390x&repository_url=registry.stage.redhat.io/product2"
+              test $(jq -r '.repository' <<< $image2arch2) == "registry.stage.redhat.io/product2/repo2"
+              test $(jq -rc '.tags' <<< $image2arch2) == '["foo","bar"]'
+      runAfter:
+        - run-task

@@ -1,0 +1,126 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-pyxis-image-one-containerimage-one-arch
+spec:
+  description: |
+    Run the create-pyxis-image task with a single containerImage in the snapshot.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/mapped_snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "source@mydigest",
+                    "repository": "registry.io/image"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/mydata.json << EOF
+              {
+                "images": {
+                  "defaultTag": "testtag"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: create-pyxis-image
+      params:
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: server
+          value: stage
+        - name: snapshotPath
+          value: mapped_snapshot.json
+        - name: dataPath
+          value: mydata.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: pyxisDataPath
+          value: $(tasks.run-task.results.pyxisDataPath)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: pyxisDataPath
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_create_container_image.txt | wc -l) != 1 ]; then
+                echo Error: create_container_image was expected to be called 1 time. Actual calls:
+                cat $(workspaces.data.path)/mock_create_container_image.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_cleanup_tags.txt | wc -l) != 1 ]; then
+                echo Error: cleanup_tags was expected to be called 1 time. Actual calls:
+                cat $(workspaces.data.path)/mock_cleanup_tags.txt
+                exit 1
+              fi
+
+              if ! grep -- "--tags testtag" < $(workspaces.data.path)/mock_create_container_image.txt 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include "--tags testtag". Actual call:
+                cat $(workspaces.data.path)/mock_create_container_image.txt
+                exit 1
+              fi
+
+              if ! grep -- "--rh-push false" < $(workspaces.data.path)/mock_create_container_image.txt 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include "--rh-push false". Actual call:
+                cat $(workspaces.data.path)/mock_create_container_image.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_skopeo.txt | wc -l) != 2 ]; then
+                echo Error: skopeo was expected to be called 2 times. Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+
+              [ "$(cat $(workspaces.data.path)/mock_skopeo.txt | head -n 1)" \
+                = "inspect --raw docker://registry.io/image@mydigest" ]
+
+              [ "$(cat $(workspaces.data.path)/mock_skopeo.txt | head -n 2 | tail -n 1)" \
+                = "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/image@mydigest" ]
+
+              # check if the correct arch and image id are set in the json file
+              jq -e '.components[0].pyxisImages[0] | ( .arch == "amd64" ) and ( .imageId == "0001" )
+                and ( .os == "linux" )' $(workspaces.data.path)/$(params.pyxisDataPath)
+
+      runAfter:
+        - run-task

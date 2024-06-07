@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-pyxis-repository
   labels:
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.5.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -18,10 +18,12 @@ spec:
     to identify the right Container Registry object in Pyxis. The task also optionally
     marks the repositories as source_container_image_enabled true if pushSourceContainer
     is true in the data JSON.
+    Additionally, this task respects the `publish-on-push` flag. If `false`, then the task
+    does not publish the repository.
   params:
     - name: server
       type: string
-      description: The server type to use. Options are 'production' and 'stage'
+      description: The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'.
       default: production
     - name: pyxisSecret
       type: string
@@ -30,17 +32,15 @@ spec:
     - name: snapshotPath
       description: Path to the JSON file containing the mapped Snapshot spec in the data workspace
       type: string
-      default: "snapshot_spec.json"
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-      default: "data.json"
   workspaces:
     - name: data
       description: The workspace where the snapshot spec json file resides
   steps:
     - name: publish-pyxis-repository
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
       env:
         - name: pyxisCert
           valueFrom:
@@ -60,13 +60,19 @@ spec:
 
         if [[ "$(params.server)" == "production" ]]
         then
-            PYXIS_URL="https://pyxis.api.redhat.com"
+          PYXIS_URL="https://pyxis.api.redhat.com"
         elif [[ "$(params.server)" == "stage" ]]
         then
-            PYXIS_URL="https://pyxis.preprod.api.redhat.com"
+          PYXIS_URL="https://pyxis.preprod.api.redhat.com"
+        elif [[ "$(params.server)" == "production-internal" ]]
+        then
+          PYXIS_URL="https://pyxis.engineering.redhat.com"
+        elif [[ "$(params.server)" == "stage-internal" ]]
+        then
+          PYXIS_URL="https://pyxis.stage.engineering.redhat.com"
         else
-            echo "Invalid server parameter. Only 'production' and 'stage' are allowed."
-            exit 1
+          echo "Invalid server parameter. Only 'production','production-internal,'stage-internal' and 'stage' allowed."
+          exit 1
         fi
 
         echo "${pyxisCert}" > /tmp/crt
@@ -78,23 +84,37 @@ spec:
             exit 1
         fi
 
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+
+        # Default to false
+        if [[ -f "${DATA_FILE}" && $(jq -r ".pyxis.skipRepoPublishing" "${DATA_FILE}") == "true" ]] ; then
+            echo "skipRepoPublishing is set to true, exiting..."
+            exit
+        fi
+
         PAYLOAD='{"published":true}'
 
-        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
-        if [[ -f "${DATA_FILE}" && $(jq -r '.images.pushSourceContainer' ${DATA_FILE}) == "true" ]] ; then
+        legacyPushOption=$(jq -r '.images.pushSourceContainer' ${DATA_FILE} || echo "null")
+        if [[ -f "${DATA_FILE}" && ${legacyPushOption} == "true" ]] ; then
             PAYLOAD=$(jq -c '. += {"source_container_image_enabled":true}' <<< $PAYLOAD)
         fi
+        defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' ${DATA_FILE} || echo false)
 
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
 
-        for REPOSITORY in $(jq -r '.components[].repository' "${SNAPSHOT_SPEC_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        for ((i = 0; i < $NUM_COMPONENTS; i++))
         do
+            COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            COMPONENT_PAYLOAD=$PAYLOAD
+            REPOSITORY=$(jq -r '.repository' <<< $COMPONENT)
             PYXIS_REPOSITORY=${REPOSITORY##*/}
             # Replace "----" with "/"
             PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
             PYXIS_REPOSITORY_JSON=$(curl --retry 5 --key /tmp/key --cert /tmp/crt \
                 "${PYXIS_URL}/v1/repositories/registry/${PYXIS_REGISTRY}/repository/${PYXIS_REPOSITORY}" -X GET)
+
             PYXIS_REPOSITORY_ID=$(jq -r '._id // ""' <<< $PYXIS_REPOSITORY_JSON)
             if [ -z "$PYXIS_REPOSITORY_ID" ]; then
                 echo Error: Unable to get Container Repository object id from Pyxis
@@ -102,8 +122,29 @@ spec:
                 echo $PYXIS_REPOSITORY_JSON
                 exit 1
             fi
+
+            # Wrap in if statement so legacy functionality is used if set and payload not changed twice
+            if [[ -f "${DATA_FILE}" && ${legacyPushOption} != "true" && ${legacyPushOption} != "false" ]] ; then
+              # Set source_container_image_enabled based on pushSourceContainer value in components or use default if
+              # it is not set in the component
+              if [[ $(jq -r '.pushSourceContainer' <<< $COMPONENT) == "true" ]] ||
+                [[ $(jq 'has("pushSourceContainer")' <<< $COMPONENT) == "false" && \
+                ${defaultPushSourceContainer} == "true" ]] ; then
+                  COMPONENT_PAYLOAD=$(jq -c '. += {"source_container_image_enabled":true}' <<< $COMPONENT_PAYLOAD)
+              fi
+            fi
+
+            # verify that publish_on_push is set to true.
+            # otherwise, do not publish the image.
+            PYXIS_REPOSITORY_PUBLISH_ON_PUSH=$(jq -r '.publish_on_push // "false"' <<< $PYXIS_REPOSITORY_JSON)
+            if [ "${PYXIS_REPOSITORY_PUBLISH_ON_PUSH}" != "true" ] ; then
+              echo "WARNING: repository ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY} is marked as publish_on_push = false"
+              echo "Skipping the setting of the published flag."
+              continue
+            fi
+
             curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
-                -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
+                -X PATCH -H 'Content-Type: application/json' --data-binary "${COMPONENT_PAYLOAD}"
         done
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"

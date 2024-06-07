@@ -1,0 +1,191 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-image-single-component-image-tag-in-component
+spec:
+  description: |
+    Test creating a internal request to sign an image with the image tags
+    coming from the snapshot file instead of the commonTags parameter
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+
+                    "source": {
+                      "git": {
+                        "revision": "deadbeef"
+                      }
+                    },
+
+                    "containerImage": "registry.io/image0@sha256:0000",
+                    "repository": "quay.io/redhat-prod/myproduct----myrepo",
+                    "tags": [
+                      "some-prefix-12345",
+                      "some-prefix"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": "true"
+                  }
+                },
+
+                "sign": {
+                  "request": "hacbs-signing-pipeline",
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: rh-sign-image
+      params:
+        - name: requester
+          value: testuser-single
+        - name: commonTags
+          value: "notused"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: snapshot_spec.json
+        - name: dataPath
+          value: data.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              # First internal request with fixed tag and registry.redhat.io
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                head -1 | tail -1)"
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.reference' <<< "${params}") \
+                != "registry.redhat.io/myproduct/myrepo:some-prefix-12345" ]; then
+                echo "fixed tag reference does not match for first IR"
+                exit 1
+              fi
+
+              # Second internal request with fixed tag and registry.access.redhat.com
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                head -2 | tail -1)"
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.reference' <<< "${params}") \
+                != "registry.access.redhat.com/myproduct/myrepo:some-prefix-12345" ]; then
+                echo "fixed tag reference does not match for second IR"
+                exit 1
+              fi
+
+              # Third internal request with floating tag and registry.redhat.io
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                head -3 | tail -1)"
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.reference' <<< "${params}") != "registry.redhat.io/myproduct/myrepo:some-prefix" ]; then
+                echo "floating tag reference does not match for third IR"
+                exit 1
+              fi
+
+              # Fourth internal request with floating tag and registry.access.redhat.com
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                head -4 | tail -1)"
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.reference' <<< "${params}") \
+                != "registry.access.redhat.com/myproduct/myrepo:some-prefix" ]; then
+                echo "floating tag reference does not match for fourth IR"
+                exit 1
+              fi
+
+              if [ $(jq -r '.manifest_digest' <<< "${params}") != "sha256:0000" ]; then
+                echo "manifest_digest does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.config_map_name' <<< "${params}") != "signing-config-map" ]
+              then
+                echo "config_map_name does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.requester' <<< "${params}") != "testuser-single" ]
+              then
+                echo "requester does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.pipeline_image' <<< "${params}") != \
+                 "quay.io/redhat-isv/operator-pipelines-images:released" ]
+              then
+                echo "pipeline_image does not match"
+                exit 1
+              fi
+
+              # last internal request for source container check
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                tail -1)"
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ $(jq -r '.reference' <<< "${params}") \
+                != "registry.access.redhat.com/myproduct/myrepo:some-prefix-source" ]; then
+                echo "floating tag reference does not match for source container IR"
+                exit 1
+              fi
+
+              if [ $(jq -r '.manifest_digest' <<< "${params}") != \
+                  "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1" ]; then
+                echo "manifest_digest does not match for source container IR"
+                exit 1
+              fi
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all

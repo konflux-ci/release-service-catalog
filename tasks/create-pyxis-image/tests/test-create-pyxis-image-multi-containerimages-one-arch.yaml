@@ -1,0 +1,138 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-pyxis-image-multi-containerimages-one-arch
+spec:
+  description: |
+    Run the create-pyxis-image task with multiple containerImages in the snapshot
+    and a single arch.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/mapped_snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "source1@mydigest1",
+                    "repository": "registry.io/image1"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "source2@mydigest2",
+                    "repository": "registry.io/image2"
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "source3@mydigest3",
+                    "repository": "registry.io/image3"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "images": {
+                  "defaultTag": "testtag"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: create-pyxis-image
+      params:
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: server
+          value: stage
+        - name: snapshotPath
+          value: mapped_snapshot.json
+        - name: dataPath
+          value: data.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: pyxisDataPath
+          value: $(tasks.run-task.results.pyxisDataPath)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: pyxisDataPath
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ $(cat $(workspaces.data.path)/mock_create_container_image.txt | wc -l) != 3 ]; then
+                echo Error: create_container_image was expected to be called 3 times. Actual calls:
+                cat $(workspaces.data.path)/mock_create_container_image.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_cleanup_tags.txt | wc -l) != 3 ]; then
+                echo Error: cleanup_tags was expected to be called 3 times. Actual calls:
+                cat $(workspaces.data.path)/mock_cleanup_tags.txt
+                exit 1
+              fi
+
+              cat > $(workspaces.data.path)/skopeo_expected_calls.txt << EOF
+              inspect --raw docker://registry.io/image1@mydigest1
+              inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/image1@mydigest1
+              inspect --raw docker://registry.io/image2@mydigest2
+              inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/image2@mydigest2
+              inspect --raw docker://registry.io/image3@mydigest3
+              inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/image3@mydigest3
+              EOF
+
+              # check that the actual calls match the expected calls
+              if [ "$(cat $(workspaces.data.path)/skopeo_expected_calls.txt | md5sum)" \
+                != "$(cat $(workspaces.data.path)/mock_skopeo.txt | md5sum)" ]
+              then
+                echo Error: Actual skopeo calls do not match expected calls.
+                echo Expected calls:
+                cat $(workspaces.data.path)/skopeo_expected_calls.txt
+                echo Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+
+              # check if the correct arch and image id are set in the json file
+              jq -e '.components[0].pyxisImages[0] | ( .arch == "amd64" ) and ( .imageId == "0001" )
+                and ( .os == "linux" )' $(workspaces.data.path)/$(params.pyxisDataPath)
+
+              jq -e '.components[1].pyxisImages[0] | ( .arch == "amd64" ) and ( .imageId == "0002" )
+                and ( .os == "linux" )' $(workspaces.data.path)/$(params.pyxisDataPath)
+
+              jq -e '.components[2].pyxisImages[0] | ( .arch == "amd64" ) and ( .imageId == "0003" )
+                and ( .os == "linux" )' $(workspaces.data.path)/$(params.pyxisDataPath)
+
+      runAfter:
+        - run-task

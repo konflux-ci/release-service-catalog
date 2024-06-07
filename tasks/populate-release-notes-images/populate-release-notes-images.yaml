@@ -1,0 +1,102 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: populate-release-notes-images
+  labels:
+    app.kubernetes.io/version: "1.2.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to populate the releaseNotes.content.images key in the data.json file
+  params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use
+      type: string
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: commonTags
+      type: string
+      description: Space separated list of common tags to be used when publishing
+  workspaces:
+    - name: data
+      description: The workspace where the data JSON file resides
+  steps:
+    - name: populate-release-notes-images
+      image: quay.io/redhat-appstudio/release-service-utils:6835e64a1811b30c8a48816ab6e2076cc4963759
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        SNAPSHOT_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        # Common vars
+        # Convert space separated list of common tags into an array
+        commonTags=$(jq -cn --arg tags "$(params.commonTags)" '$tags|split(" ")')
+
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        for ((i = 0; i < $NUM_COMPONENTS; i++))
+        do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
+            name=$(jq -r '.name' <<< $component)
+            repo=$(jq -r '.repository' <<< $component)
+            deliveryRepo=$(translate-delivery-repo $repo | jq -r '.[] | select(.repo=="redhat.io") | .url')
+            tags=$commonTags
+            if [ $(jq '.tags | length' <<< $component) -gt 0 ] ; then
+                tags=$(jq -c '.tags' <<< $component)
+            fi
+            image=$(jq -r '.containerImage' <<< $component)
+            if ! [[ "$image" =~ ^[^:]+@sha256:[0-9a-f]+$ ]] ; then
+                echo "Failed to extract sha256 tag from ${image}. Exiting with failure"
+                exit 1
+            fi
+            sha=$(echo "${image}" | cut -d ':' -f 2)
+            # containerImage should be of the form registry.redhat.io/foo/bar@sha256:abcde
+            # This value will be used as the basis for the example values that follow
+            containerImage="${deliveryRepo}@sha256:${sha}"
+            # Construct CVE json
+            CVEsJson='{"cves":{"fixed":{}}}'
+            for cve in $(jq -c '.releaseNotes.cves[] | select(.component=="'$name'")' ${DATA_FILE}) ; do
+                cveJson=$(jq -n \
+                    --arg id $(jq -r '.key' <<< $cve) \
+                    --argjson packages $(jq -c '.packages' <<< $cve) \
+                    '{($id): {"components": $packages}}')
+                CVEsJson=$(jq --argjson cve "$cveJson" '.cves.fixed += $cve' <<< $CVEsJson)
+            done
+            # Add one entry per arch (amd64 for example)
+            get-image-architectures "${image}" | while IFS= read -r arch_json;
+            do
+                arch=$(jq -r .platform.architecture <<< "${arch_json}")
+                digest=$(jq -r .digest <<< "${arch_json}")
+                containerImage="${deliveryRepo}@${digest}"
+                # purl should be pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo
+                purl="pkg:oci/${deliveryRepo##*/}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
+                jsonString=$(jq -cn \
+                    --arg arch "$arch" \
+                    --arg containerImage "$containerImage" \
+                    --arg purl "$purl" \
+                    --arg repository "$deliveryRepo" \
+                    --argjson tags "$tags" \
+                    '{"architecture": $arch, "containerImage":$containerImage,
+                    "purl": $purl, "repository": $repository, "tags": $tags}')
+                if [ $(jq '.cves.fixed | length' <<< $CVEsJson) -gt 0 ]; then
+                    jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< $jsonString)
+                fi
+                # Inject JSON into data.json
+                jq --argjson image "$jsonString" '.releaseNotes.content.images += [$image]' ${DATA_FILE} > \
+                    /tmp/data.tmp && mv /tmp/data.tmp ${DATA_FILE}
+            done
+        done

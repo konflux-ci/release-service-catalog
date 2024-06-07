@@ -17,7 +17,7 @@ spec:
           - name: data
         steps:
           - name: setup-values
-            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
             script: |
               #!/usr/bin/env sh
               set -eux
@@ -37,8 +37,14 @@ spec:
           value: "quay.io/test/sourceIndex:tag"
         - name: targetIndex
           value: "quay.io/test/targetIndex:tag"
+        - name: buildTimestamp
+          value: 11111111111
         - name: retries
           value: 2
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: data.json
       workspaces:
         - name: data
           workspace: tests-workspace
@@ -51,34 +57,52 @@ spec:
       taskSpec:
         steps:
           - name: check-result
-            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
             script: |
               #!/usr/bin/env sh
               set -eux
 
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
-              request=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.request}")
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+              internalRequests=$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
+              -o json | jq '.items')
 
-              if [ "$request" != "publish-index-image-pipeline" ]; then
-                echo "request pipeline does not match"
-                exit 1
+              irIndex=$(jq '. | length' <<< "${internalRequests}")
+              if [ ${irIndex} -ne 2 ]; then
+                  echo "Too many internalrequests found. Should be 2"
+                  exit 1
               fi
+              for((i=0; i<${irIndex}; i++)); do
 
-              if [ $(jq -r '.retries' <<< "${params}") != "2" ]; then
-                echo "number of retries does not match"
-                exit 1
-              fi
+                  request=$(jq -r ".[$i] | .spec.request" <<< "${internalRequests}")
+                  params=$(jq -r ".[$i] | .spec.params" <<< "${internalRequests}")
 
-              if [ $(jq -r '.sourceIndex' <<< "${params}") != "quay.io/test/sourceIndex:tag" ]; then
-                echo "sourceIndex image does not match"
-                exit 1
-              fi
+                  if [ "$request" != "publish-index-image-pipeline" ]; then
+                    echo "request pipeline does not match"
+                    exit 1
+                  fi
 
-              if [ $(jq -r '.targetIndex' <<< "${params}") != "quay.io/test/targetIndex:tag" ]; then
-                echo "targetIndex image does not match"
-                exit 1
-              fi
+                  if [ $(jq -r '.retries' <<< "${params}") != "2" ]; then
+                    echo "number of retries does not match"
+                    exit 1
+                  fi
+
+                  if [ $(jq -r '.sourceIndex' <<< "${params}") != "quay.io/test/sourceIndex:tag" ]; then
+                    echo "sourceIndex image does not match"
+                    exit 1
+                  fi
+
+                  targetIndex=$(jq -r '.targetIndex' <<< "${params}")
+                  if [ $i = 0 ]; then
+                      if [ $targetIndex != "quay.io/test/targetIndex:tag" ]; then
+                        echo "targetIndex image does not match"
+                        exit 1
+                      fi
+                  else
+                      if [ $targetIndex != "quay.io/test/targetIndex:tag-11111111111" ]; then
+                        echo "targetIndex image does not match"
+                        exit 1
+                      fi
+                  fi
+              done
       runAfter:
         - run-task
   finally:
@@ -86,7 +110,7 @@ spec:
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
             script: |
               #!/usr/bin/env sh
               set -eux

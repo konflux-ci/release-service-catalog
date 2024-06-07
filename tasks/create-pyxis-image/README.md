@@ -4,8 +4,8 @@ Tekton task that pushes metadata to Pyxis for all container images contained in 
 result of the `apply-mapping` task. It first extracts the containerImages from the snapshot, then runs
 `skopeo inspect` on each, before finally pushing metadata to Pyxis.
 
-The IDs of the created `containerImage` Pyxis objects are stored as a task result with each ID separated
-by a new line.
+The relative path of the pyxis.json file in the data workspace is output as a task result named
+`pyxisDataPath`.
 
 ## Parameters
 
@@ -17,8 +17,39 @@ by a new line.
 | isLatest | If set to true, the images will have a latest tag added with their Pyxis entries | Yes | false |
 | rhPush | If set to true, an additional entry will be created in ContainerImage.repositories with the registry and repository fields converted to use Red Hat's official registry. E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted to use registry "registry.access.redhat.com" and repository "product/my-image". Also, this repository entry will be marked as published. | Yes | false |
 | commonTags | Space separated list of common tags to be used when publishing. If set, these tags will be added to the Pyxis Container Image object. | Yes | "" |
-| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes | mapped_snapshot.json |
-| dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | Yes | data.json |
+| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | No | |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | No | |
+
+## Changes in 2.6.1
+* For each image that is created in Pyxis, the task will now also remove
+  all its tags from all previous images
+  * This is done via a new script called cleanup_tags from the utils image
+
+## Changes in 2.6.0
+* containerImage is no longer saved in the pyxis.json entries
+  * This was already saved in pyxis.json per component, it doesn't need to be duplicated in the pyxisImages keys
+* os is now saved to the pyxis.json pyxisImages entries
+
+## Changes in 2.5.0
+* The task now looks for tags in each component of the snapshot spec file and uses them instead of commonTags if any
+  exist
+
+## Changes in 2.4.0
+* containerImageIDs result is removed as the data is present in pyxis.json that is written to the workspace
+* the containerImage is now saved in the pyxis.json entries
+* the pyxis.json file is saved in the same subdirectory as the passed snapshot file
+
+## Changes in 2.3.0
+* remove `dataPath` and `snapshotPath` default values
+
+## Changes in 2.2.2
+* Support populating multiarch image entities correctly
+
+## Changes in 2.2.1
+* Add support for server types of production-internal and stage-internal
+
+## Changes in 2.2.0
+* Add feature of pushing multi architecture images metadata to Pyxis
 
 ## Changes since 2.0.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

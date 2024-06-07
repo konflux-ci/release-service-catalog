@@ -7,22 +7,81 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
 | release | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No | - |
-| releaseplan | The namespaced name (namespace/name) of the releasePlan | No | - |
-| releaseplanadmission | The namespaced name (namespace/name) of the releasePlanAdmission | No | - |
+| releasePlan | The namespaced name (namespace/name) of the releasePlan | No | - |
+| releasePlanAdmission | The namespaced name (namespace/name) of the releasePlanAdmission | No | - |
+| releaseServiceConfig | The namespaced name (namespace/name) of the releaseServiceConfig | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
 | enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
+| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes | pipeline_intention=release |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
 | verify_ec_task_bundle | The location of the bundle containing the verify-enterprise-contract task | No | - |
-| taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/redhat-appstudio/release-service-catalog.git |
-| taskGitRevision | The revision in the taskGitUrl repo to be used | Yes | main |
+| taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
+| taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
+
+## Changes in 3.5.1
+* The when conditions that skipped tasks if the `push-snapshot` result `commonTags` was empty was removed
+  * This is due to the migration to the new tag format. A similar when will be readded with RELEASE-932
+
+## Changes in 3.5.0
+* The apply-mapping task now gets the dataPath parameter instead of releasePlanAdmissionPath
+
+## Changes in 3.4.0
+* `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
+  then passed to EC. Allows for easier runtime changes to rule data.
+
+## Changes in 3.3.1
+* The RADAS timeout when it fails to receive a response is 5 mins.
+  We double the requestTimeout in the rh-sign-image task to allow
+  RADAS to retry its request.
+
+## Changes in 3.3.0
+* Add new task `push-rpm-manifests-to-pyxis` to run after `create-pyxis-image`
+
+## Changes in 3.2.0
+* Update the taskGitUrl default value due to migration
+  to konflux-ci GitHub org
+
+## Changes in 3.1.2
+* Added `when` clause to `push-snapshot` task in the pipeline
+  to ensure it only executes when the `apply-mapping` task
+  indicates that mapping was successful.
+
+## Changes in 3.1.1
+* Added a `when` clause to the following tasks
+  `rh-sign-image`,
+  `create-pyxis-image`
+  `collect-pyxis-params` and
+  `run-file-updates`
+  to ensure they only execute when the `push-snapshot`
+  task result indicates that `commonTags` is not an empty string
+
+## Changes in 3.1.0
+* Remove push-sbom-to-pyxis. It has been replaced by manifest-box.
+
+## Changes in 3.0.0
+* releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
+
+## Changes in 2.0.0
+* Parameters supplied by the Release Service operator now use camelCase format
+
+## Changes in 1.9.0
+* Modified the pipeline to dynamically source the `data.json`, `snapshot_spec.json` and
+  `release_plan_admission.json` files from the results of the `collect-data` task.
+
+## Changes in 1.8.1
+* Tasks that interact with InternalRequests now have a pipelineRunUid parameter added to them to help with cleanup
+
+## Changes in 1.8.0
+* taskGitRevision no longer has a default. It will be provided by the operator and will always have the same value as
+  the git revision in the PipelineRef definition of the PipelineRun if using a git resolver. See RHTAPREL-790 for details
 
 ## Changes in 1.7.0
 * taskGitUrl parameter is added. It is used to provide the git repo for the release-service-catalog tasks
 * taskGitRevision parameter is added. It is used to provide the revision to be used in the taskGitUrl repo
 
 ## Changes in 1.6.0
-* The publish-pyxis-repository task now has a dataPath parameter. It is used to set 
+* The publish-pyxis-repository task now has a dataPath parameter. It is used to set
   source_container_image_enabled if `pushSourceContainer` is present in the data `images` key
   and set to true
 

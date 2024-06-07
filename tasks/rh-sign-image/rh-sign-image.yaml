@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: rh-sign-image
   labels:
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "2.6.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -15,11 +15,9 @@ spec:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
-      default: "snapshot_spec.json"
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-      default: "data.json"
     - name: requester
       type: string
       description: Name of the user that requested the signing, for auditing purposes
@@ -30,17 +28,29 @@ spec:
       type: string
       default: "180"
       description: InternalRequest timeout
+    - name: concurrentLimit
+      type: string
+      description: The maximum number of images to be processed at once
+      default: 4
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
   workspaces:
     - name: data
       description: workspace to read and save files
   steps:
     - name: sign-image
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:c6989496ce3326ae2556bd5afb992da13e94d3ea
       script: |
         #!/usr/bin/env sh
         #
+        set -e
+
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
         RUNDIR="$(workspaces.data.path)/$(context.taskRun.uid)"
+        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
+        TASK_ID=$(context.taskRun.uid)
+        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
@@ -56,7 +66,10 @@ spec:
         pipeline_image=$(jq -r --arg default_pipeline_image ${default_pipeline_image} \
             '.sign.pipelineImage // $default_pipeline_image' ${DATA_FILE})
         config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' ${DATA_FILE})
+        defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' ${DATA_FILE})
 
+        N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
+        count=0
         COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
 
@@ -64,29 +77,104 @@ spec:
 
             reference=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
 
-            # Translate direct quay.io reference to public facing registry reference
-            # quay.io/redhat-prod/product----repo -> registry.redhat.io/product/repo
-            # quay.io/redhat-pending/product----repo -> registry.stage.redhat.io/product/repo
-            reference=${reference/quay.io\/redhat-prod/registry.redhat.io}
-            reference=${reference/quay.io\/redhat-pending/registry.stage.redhat.io}
-            reference=${reference//----//}
+            git_sha=$(jq -r ".components[${COMPONENTS_INDEX}].source.git.revision" ${SNAPSHOT_PATH})
 
-            manifest_digest="${referenceContainerImage#*@}"
+            TAGS="$(params.commonTags)"
+            if [ $(jq ".components[${COMPONENTS_INDEX}].tags | length" ${SNAPSHOT_PATH}) -gt 0 ] ; then
+              TAGS=$(jq -r ".components[${COMPONENTS_INDEX}].tags | join(\" \")" ${SNAPSHOT_PATH})
+            fi
 
-            for tag in $(params.commonTags); do
-              echo "Creating InternalRequest to sign image with tag ${tag}:"
-              echo "- reference=${reference}:${tag}"
-              echo "- manifest_digest=${manifest_digest}"
-              echo "- requester=$(params.requester)"
+            # Translate direct quay.io reference to public facing registry json
+            # quay.io/redhat-prod/product----repo ->
+            #   [{"repo":"redhat.io","url":registry.redhat.io/product/repo"},
+            #   {"repo":"access.redhat.com","url":"registry.access.redhat.com/product/repo"}]
+            # quay.io/redhat-pending/product----repo ->
+            #   [{"repo":"redhat.io","url":registry.stage.redhat.io/product/repo"},
+            #   {"repo":"access.redhat.com","url":"registry.access.stage.redhat.com/product/repo"}]
+            referenceJson=$(translate-delivery-repo $reference)
 
-              internal-request -r "${request}" \
-                  -p pipeline_image=${pipeline_image} \
-                  -p reference=${reference}:${tag} \
-                  -p manifest_digest=${manifest_digest} \
-                  -p requester=$(params.requester) \
-                  -p config_map_name=${config_map_name} \
-                  -t $(params.requestTimeout)
+            # check if multi-arch
+            RAW_OUTPUT=$(skopeo inspect --no-tags --raw docker://${referenceContainerImage})
+            if [ $(jq -r '.mediaType' <<< $RAW_OUTPUT) == "application/vnd.oci.image.manifest.v1+json" ] ; then
+              manifest_digests="${referenceContainerImage#*@}"
+            else
+              manifest_digests=$(jq -r '.manifests[].digest' <<< $RAW_OUTPUT)
+            fi
+
+            sourceContainerDigest=
+            if [[ $(jq -r ".images.pushSourceContainer" "${DATA_FILE}") == "true" ]] || \
+              # Push source container if the component has pushSourceContainer: true or if the
+              # pushSourceContainer key is missing from the component and the defaults has
+              # pushSourceContainer: true
+              [[ $(jq -r ".components[$COMPONENTS_INDEX].pushSourceContainer" ${SNAPSHOT_PATH}) == "true" ]] || \
+              [[ $(jq ".components[$COMPONENTS_INDEX] | has(\"pushSourceContainer\")" ${SNAPSHOT_PATH}) == "false" && \
+                ${defaultPushSourceContainer} == "true" ]] ; then
+              source_repo=${referenceContainerImage%%@sha256:*}
+              source_reference_tag=sha256-${referenceContainerImage#*@sha256:}.src
+              # Calculate the source container image based on the provided container image
+              sourceContainer="${source_repo}:${source_reference_tag}"
+
+              sourceContainerDigest=$(skopeo inspect \
+                --no-tags \
+                --format '{{.Digest}}' \
+                "docker://${sourceContainer}" 2>/dev/null)
+            fi
+
+            for manifest_digest in $manifest_digests; do
+              for tag in ${TAGS}; do
+                for registry_reference in $(jq -r '.[] | .url' <<< $referenceJson); do
+                  echo "Creating InternalRequest to sign image with tag ${tag}:"
+                  echo "- reference=${registry_reference}:${tag}"
+                  echo "- manifest_digest=${manifest_digest}"
+                  echo "- requester=$(params.requester)"
+
+                  internal-request -r "${request}" \
+                      -p pipeline_image=${pipeline_image} \
+                      -p reference=${registry_reference}:${tag} \
+                      -p manifest_digest=${manifest_digest} \
+                      -p requester=$(params.requester) \
+                      -p config_map_name=${config_map_name} \
+                      -l ${TASK_LABEL}=${TASK_ID} \
+                      -l ${PIPELINERUN_LABEL}=$(params.pipelineRunUid) \
+                      -s false
+                  ((++count))
+
+                  if [ "$count" -eq "$N" ]; then
+                      wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
+                      count=0
+                  fi
+                done
+              done
             done
 
-            echo "done"
+            if [ "${sourceContainerDigest}" != "" ] ; then
+              for tag in ${TAGS}; do
+                sourceTag=${tag}-source
+
+                for registry_reference in $(jq -r '.[] | .url' <<< $referenceJson); do
+                  echo "Creating InternalRequest to sign image with tag ${sourceTag}:"
+                  echo "- reference=${registry_reference}:${sourceTag}"
+                  echo "- manifest_digest=${sourceContainerDigest}"
+                  echo "- requester=$(params.requester)"
+
+                  internal-request -r "${request}" \
+                      -p pipeline_image=${pipeline_image} \
+                      -p reference=${registry_reference}:${sourceTag} \
+                      -p manifest_digest=${sourceContainerDigest} \
+                      -p requester=$(params.requester) \
+                      -p config_map_name=${config_map_name} \
+                      -l ${TASK_LABEL}=${TASK_ID} \
+                      -l ${PIPELINERUN_LABEL}=$(params.pipelineRunUid) \
+                      -s false
+                  ((++count))
+
+                  if [ "$count" -eq "$N" ]; then
+                      wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
+                      count=0
+                  fi
+                done
+              done
+            fi
         done
+        wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
+        echo "done"

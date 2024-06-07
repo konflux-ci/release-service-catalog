@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: add-fbc-contribution
   labels:
-    app.kubernetes.io/version: "1.4.0"
+    app.kubernetes.io/version: "2.4.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -15,22 +15,24 @@ spec:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
-      default: "snapshot_spec.json"
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-      default: "data.json"
     - name: binaryImage
       type: string
       description: binaryImage value updated by update-ocp-tag task
     - name: fromIndex
       type: string
       description: fromIndex value updated by update-ocp-tag task
-    - name: requestTimeout
+    - name: targetIndex
       type: string
-      default: "180"
-      description: InternalRequest timeout
+      description: targetIndex value updated by update-ocp-tag task
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
   results:
+    - name: buildTimestamp
+      description: Build timestamp used in the tag
     - name: mustSignIndexImage
       description: Whether the index image should be signed
     - name: mustPublishIndexImage
@@ -43,16 +45,18 @@ spec:
       description: Internal Request message
     - name: requestReason
       description: Internal Request reason
+    - name: indexImageDigests
+      description: list of manifest digests for each arch from manifest list in index image
   workspaces:
     - name: data
       description: workspace to read and save files
   steps:
     - name: add-contribution
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
       script: |
         #!/usr/bin/env sh
         #
-        set -e
+        set -eo pipefail
 
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
@@ -66,7 +70,9 @@ spec:
         # IIB is the default internal pipeline for fbc requests
         request=$(jq -r '.fbc.request // "iib"' ${DATA_FILE})
 
-        default_build_timeout_seconds="300"
+        default_build_timeout_seconds="1500"
+        default_request_timeout_seconds="1500"
+
         iib_overwrite_from_index_credential=$(jq -r \
           '.fbc.iibOverwriteFromIndexCredential // "iib-overwrite-fromimage-credentials"' ${DATA_FILE})
         iib_service_config_secret=$(jq -r '.fbc.iibServiceConfigSecret // "iib-services-config"' ${DATA_FILE})
@@ -74,24 +80,49 @@ spec:
         build_tags=$(jq '.fbc.buildTags // []' ${DATA_FILE})
         add_arches=$(jq '.fbc.addArches // []' ${DATA_FILE})
         hotfix=$(jq -r '.fbc.hotfix // "false"' ${DATA_FILE})
+        pre_ga=$(jq -r '.fbc.preGA // "false"' ${DATA_FILE})
         staged_index=$(jq -r '.fbc.stagedIndex // "false"' ${DATA_FILE})
+        product_name=$(jq -r '.fbc.productName // ""' ${DATA_FILE})
+        product_version=$(jq -r '.fbc.productVersion // ""' ${DATA_FILE})
         build_timeout_seconds=$(jq -r --arg build_timeout_seconds ${default_build_timeout_seconds} \
             '.fbc.buildTimeoutSeconds // $build_timeout_seconds' ${DATA_FILE})
-        target_index=$(jq -r '.fbc.targetIndex' ${DATA_FILE})
+        request_timeout_seconds=$(jq -r --arg request_timeout_seconds ${default_request_timeout_seconds} \
+            '.fbc.requestTimeoutSeconds // $request_timeout_seconds' ${DATA_FILE})
         fbc_fragment=$(jq -cr '.components[0].containerImage' ${SNAPSHOT_PATH})
 
+        timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' ${DATA_FILE})
+        timestamp=$(date "+${timestamp_format}")
+
+        # default target_index
+        target_index=$(params.targetIndex)
+
+        if [ "${hotfix}" == "true" ] && [ "${pre_ga}" == "true" ]; then
+          echo "fbc.preGA and fbc.hotfix are mutually exclusive. Please set just one in the ReleasePlanAdmission"
+          exit 1
+        fi
+
+        # the target_index is modified when the pipelinerun is a for `hotfix` or a `pre-GA` release
         if [ "${hotfix}" == "true" ]; then
-          timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' ${DATA_FILE})
-          timestamp=$(date "+${timestamp_format}")
           issue_id=$(jq -r '.fbc.issueId // empty' ${DATA_FILE})
           if [ -z "${issue_id}" ]; then
-            echo "Hotfix releases requires the issue id."
+            echo "Hotfix releases requires the issue id set in the 'fbc.issueId' key of the ReleasePlanAdmission " \
+                 "spec.data field"
             exit 1
           fi
-          tag="${issue_id}-${timestamp}"
-          target_index="${target_index}-${tag}"
+          target_index="${target_index}-${issue_id}-${timestamp}"
+        elif [ "${pre_ga}" == "true" ]; then
+          if [ -z "${product_name}" -o -z "${product_version}" ]; then
+            echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the ReleasePlanAdmission " \
+                 "spec.data field"
+            exit 1
+          fi
+          target_index="${target_index}-${product_name}-${product_version}-${timestamp}"
         fi
+
+        echo -n $timestamp > $(results.buildTimestamp.path)
         echo -n $target_index > $(results.requestTargetIndex.path)
+
+        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
         # The internal-request script will create the InternalRequest and wait until it finishes to get its status
         # If it fails (Failed, Rejected or Timed out) the script will exit and display the reason.
@@ -109,7 +140,8 @@ spec:
             -p addArches=${add_arches} \
             -p hotfix=${hotfix} \
             -p stagedIndex=${staged_index} \
-            -t $(params.requestTimeout) |tee $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log
+            -l ${pipelinerun_label}=$(params.pipelineRunUid) \
+            -t ${request_timeout_seconds} |tee $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log
 
         internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-$(context.taskRun.uid)-output.log | xargs)
         echo "done (${internalRequest})"
@@ -128,3 +160,5 @@ spec:
 
         jq '.reason // "Unset"'  <<< "${conditions}" | tee $(results.requestReason.path)
         jq '.message // "Unset"' <<< "${conditions}" | tee $(results.requestMessage.path)
+
+        jq -r '.indexImageDigests' <<< "${results}" |  tee $(results.indexImageDigests.path)

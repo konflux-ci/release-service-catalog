@@ -1,0 +1,155 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: create-advisory
+  labels:
+    app.kubernetes.io/version: "3.2.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to create an advisory via an InternalRequest
+  params:
+    - name: jsonKey
+      type: string
+      description: The json key containing the advisory data
+      default: ".releaseNotes"
+    - name: releasePlanAdmissionPath
+      type: string
+      description: Path to the JSON string of the ReleasePlanAdmission in the data workspace
+    - name: releaseServiceConfigPath
+      type: string
+      description: Path to the JSON string of the ReleaseServiceConfig in the data workspace
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: Path to the data JSON in the data workspace
+    - name: request
+      type: string
+      description: Type of request to be created
+      default: "create-advisory"
+    - name: synchronously
+      type: string
+      description: Whether the task should wait for InternalRequests to complete
+      default: "true"
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+  workspaces:
+    - name: data
+      description: Workspace where the json files are stored
+  results:
+    - name: advisory_url
+      description: The advisory url if one was created
+  steps:
+    - name: run-script
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+      script: |
+        #!/bin/sh
+        set -e
+
+        # Obtain application from snapshot
+        application=$(jq -rc .application $(workspaces.data.path)/$(params.snapshotPath))
+
+        # Obtain origin workspace from releasePlanAdmission
+        origin=$(jq -rc '.spec.origin' $(workspaces.data.path)/$(params.releasePlanAdmissionPath))
+
+        # Obtain the advisory repo from releaseServiceConfig
+        repo=$(jq -er '.spec.advisoryRepo' $(workspaces.data.path)/$(params.releaseServiceConfigPath))
+
+        # Extract the advisory key and signing configMap name from the data JSON file
+        advisoryData=$(jq -c "$(params.jsonKey)" $(workspaces.data.path)/$(params.dataPath))
+        configMapName=$(jq -er '.sign.configMapName' $(workspaces.data.path)/$(params.dataPath))
+
+        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+        # only 2 gitlab instances are permitted...prod and staging
+        # these are their secret names
+        #
+        prodSecretName="create-advisory-prod-secret"
+        stagingSecretName="create-advisory-stage-secret"
+        #
+        # detect which one to use based on repositories specified
+        #
+        pending_repositories=$(jq -r '.mapping.components[] | select(.repository | 
+          contains("quay.io/redhat-pending/")) | 
+          .repository' $(workspaces.data.path)/$(params.dataPath))
+        prod_repositories=$(jq -r '.mapping.components[] | select(.repository | contains("quay.io/redhat-prod/")) | 
+          .repository' $(workspaces.data.path)/$(params.dataPath))
+        orphan_repositories=$(jq -r '.mapping.components[] | select(.repository | contains("quay.io/redhat-prod/") | 
+          not) | select(.repository | contains("quay.io/redhat-pending/") | not) | 
+          .repository' $(workspaces.data.path)/$(params.dataPath))
+
+        foundPendingRepositories=false
+        if [ -n "${pending_repositories}" ]; then
+          foundPendingRepositories=true
+        fi
+
+        foundProdRepositories=false
+        if [ -n "${prod_repositories}" ]; then
+          foundProdRepositories=true
+        fi
+
+        foundOrphanRepositories=false
+        if [ -n "${orphan_repositories}" ]; then
+          foundOrphanRepositories=true
+        fi
+
+        echo "foundPendingRepositories: ${foundPendingRepositories}"
+        echo "foundProdRepositories ${foundProdRepositories}"
+        echo "foundOrphanRepositories ${foundOrphanRepositories}"
+
+        if [ "${foundPendingRepositories}" == "true" ] && [ "${foundProdRepositories}" == "true" ]; then
+          echo "Error: cannot publish to both redhat-pending and redhat-prod repositories"
+          exit 1
+        fi
+
+        if [ "${foundPendingRepositories}" == "false" ] && [ "${foundProdRepositories}" == "false" ]; then
+          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+          exit 1
+        fi
+
+        if [ "${foundOrphanRepositories}" == "true" ]; then
+          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+          exit 1
+        fi
+
+        # at this point, one of foundPendingRepositories or foundProdRepositories
+        # is true.
+        #
+        advisorySecretName="${prodSecretName}"
+        if [ "${foundPendingRepositories}" == "true" ]; then
+          advisorySecretName="${stagingSecretName}"
+        fi
+
+        echo "Creating InternalRequest to create advisory..."
+        internal-request -r "$(params.request)" \
+                         -p application="${application}" \
+                         -p origin="${origin}" \
+                         -p repo="${repo}" \
+                         -p advisory_json="${advisoryData}" \
+                         -p config_map_name="${configMapName}" \
+                         -p advisory_secret_name="${advisorySecretName}" \
+                         -s "$(params.synchronously)" \
+                         -l ${pipelinerun_label}=$(params.pipelineRunUid) \
+                         > $(workspaces.data.path)/ir-result.txt || \
+                         (grep "^\[" $(workspaces.data.path)/ir-result.txt | jq . && exit 1)
+
+        internalRequest=$(awk 'NR==1{ print $2 }' $(workspaces.data.path)/ir-result.txt | xargs)
+        echo "done (${internalRequest})"
+
+        echo -n "" > $(results.advisory_url.path)
+        results=$(kubectl get internalrequest $internalRequest -o=jsonpath='{.status.results}')
+        if [[ "$(echo ${results} | jq -r '.result')" == "Success" ]]; then
+          echo "Advisory created"
+        else
+          echo "Advisory creation failed"
+          echo "$results"
+          exit 1
+        fi
+
+        echo -n "$(echo ${results} | jq -r '.advisory_url // ""')" | tee $(results.advisory_url.path)

@@ -7,15 +7,58 @@ Tekton release pipeline to interact with FBC Pipeline
 | Name                            | Description                                                                                              | Optional  | Default value                                                   |
 |---------------------------------|----------------------------------------------------------------------------------------------------------|-----------|-----------------------------------------------------------------|
 | release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution   | No        | -                                                               |
-| releaseplan                     | The namespaced name (namespace/name) of the releasePlan                                                  | No        | -                                                               |
-| releaseplanadmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                         | No        | -                                                               |
+| releasePlan                     | The namespaced name (namespace/name) of the releasePlan                                                  | No        | -                                                               |
+| releasePlanAdmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                         | No        | -                                                               |
+| releaseServiceConfig            | The namespaced name (namespace/name) of the releaseServiceConfig                                         | No        | -                                                               |
 | snapshot                        | The namespaced name (namespace/name) of the snapshot                                                     | No        | -                                                               |
 | enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                      | No        | -                                                               |
 | enterpriseContractPublicKey     | Public key to use for validation by the enterprise contract                                              | Yes       | k8s://openshift-pipelines/public-key                            |
+| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..."                                              | Yes       | pipeline_intention=release                            |
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                | No        | -                                                               |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                                            |
-| taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/redhat-appstudio/release-service-catalog.git |
-| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | Yes       | main                                                            |
+| taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/konflux-ci/release-service-catalog.git |
+| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
+
+### Changes in 3.3.0
+- `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
+  then passed to EC. Allows for easier runtime changes to rule data.
+
+### Changes in 3.2.0
+- update the taskGitUrl default value due to migration
+  to konflux-ci GitHub org
+
+### Changes in 3.1.0
+- add a new `check-fbc-packages` task to support operator package name uniqueness constraints
+
+## Changes in 3.0.0
+- releaseServiceConfig added as a pipeline parameter that is passed to the collect-data task
+
+## Changes in 2.0.0
+- Parameters supplied by the Release Service operator now use camelCase format
+
+### Changes in 1.10.0
+- the task `sign-index-image` now requires the `manifestListDigests` parameter set with the `indexImageDigests`
+  result from the task `add-fbc-contribution-to-index-image`.
+- the `manifestDigestImage` parameter was removed from `sign-index-image` task
+
+### Changes in 1.9.0
+- modified the pipeline to dynamically source the `data.json` and `snapshot_spec.json`
+  files from the results of the `collect-data` task.
+
+### Changes in 1.8.0
+- the task `add-fbc-contribution` now requires the `targetIndex` parameter set with the `updated-targetIndex`
+  result from the task `update-ocp-tag`
+
+### Changes in 1.7.1
+- tasks that interact with InternalRequests now have a pipelineRunUid parameter added to them to help with cleanup
+
+### Changes in 1.7.0
+- taskGitRevision no longer has a default. It will be provided by the operator and will always have the same value as
+  the git revision in the PipelineRef definition of the PipelineRun if using a git resolver. See RHTAPREL-790 for details
+
+### Changes in 1.6.0
+- add new parameter `buildTimestamp` when calling the `publish-index-image` task
+  - this new parameter is used for adding a timestamped tag to the index image
 
 ### Changes in 1.5.0
 - modify the task `publish-index-image` to use a dedicated task instead of using the `create-internal-request` task
@@ -47,7 +90,7 @@ Tekton release pipeline to interact with FBC Pipeline
 - Remove releasestrategy parameter
 
 ### Changes since 0.23.0
-- adds new tasks `validate-single-component` to validate that the 
+- adds new tasks `validate-single-component` to validate that the
   snapshot only contains a single component. The pipeline should fail otherwise.
 
 ### Changes since 0.22.0

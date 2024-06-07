@@ -1,0 +1,89 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-no-data-mapping
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json but no mapping in the
+    data json file and verify that the returned json is the same as the one in
+    the input.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        results:
+          - name: snapshot
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              cat > $(workspaces.config.path)/data.json << EOF
+              {
+                "somekey": {
+                  "key": "value",
+                  "foo": "bar"
+                }
+              }
+              EOF
+
+              cat > "$(workspaces.config.path)/snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "imageurl1",
+                    "source": {
+                      "git": {
+                        "revision": "myrev",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: "snapshot_spec.json"
+        - name: dataPath
+          value: "data.json"
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              # the resulting json is exactly the same as the original one (since no mapping was used)
+              test "$(cat $(workspaces.config.path)/snapshot_spec.json|jq --sort-keys .)" \
+                == "$(cat $(workspaces.config.path)/snapshot_spec.json.orig|jq --sort-keys .)"
+      runAfter:
+        - run-task

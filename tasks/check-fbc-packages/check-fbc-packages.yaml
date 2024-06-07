@@ -1,0 +1,56 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-fbc-packages
+  labels:
+    app.kubernetes.io/version: "0.2.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Task to check that the packages being shipped in an fbc contribution are in the allow list provided in the dataPath.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+  workspaces:
+    - name: data
+      description: workspace to read and save files
+  steps:
+    - name: check-contribution
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+      script: |
+        #!/usr/bin/env sh
+        #
+        set -e
+
+        SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        fbc_fragment=$(jq -cr '.components[0].containerImage' ${SNAPSHOT_PATH})
+
+        allowed_packages=$(jq -r '.fbc.allowedPackages[]' ${DATA_FILE})
+
+        echo "Inspecting fbc fragment ${fbc_fragment} with opm render"
+        actual_packages=$(opm render ${fbc_fragment} | jq -r 'select(.schema=="olm.package") | .name')
+
+        RC=0
+        for package in ${actual_packages}; do
+          if jq -e --arg pkg $package '.fbc.allowedPackages | index($pkg)' ${DATA_FILE}
+          then
+            echo "${package} is one of the allowedPackages: ${allowed_packages}"
+          else
+            echo "${package} is not one of the allowedPackages: ${allowed_packages}"
+            RC=1
+          fi
+        done
+        exit $RC

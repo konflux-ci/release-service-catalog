@@ -1,0 +1,115 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-images-single-image
+spec:
+  description: |
+    Run the populate-release-notes-images task with a single image in the snapshot JSON and verify
+    the data JSON has the proper content
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup
+            image: quay.io/redhat-appstudio/release-service-utils:6835e64a1811b30c8a48816ab6e2076cc4963759
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "releaseNotes": {
+                  "product_id": 123,
+                  "product_name": "Red Hat Openstack Product",
+                  "product_version": "123",
+                  "cpe": "cpe:/a:example:openstack:el8",
+                  "type": "RHSA",
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "RHOSP-12345",
+                        "source": "issues.example.com"
+                      },
+                      {
+                        "id": 1234567,
+                        "source": "bugzilla.example.com"
+                      }
+                    ]
+                  },
+                  "synopsis": "test synopsis",
+                  "topic": "test topic",
+                  "description": "test description",
+                  "solution": "test solution",
+                  "references": [
+                    "https://docs.example.com/some/example/release-notes"
+                  ]
+                }
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "repository": "quay.io/redhat-prod/product----repo"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: populate-release-notes-images
+      params:
+        - name: dataPath
+          value: "data.json"
+        - name: snapshotPath
+          value: "snapshot.json"
+        - name: commonTags
+          value: "foo bar"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:6835e64a1811b30c8a48816ab6e2076cc4963759
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              imagearch1=$(jq '.releaseNotes.content.images[0]' "$(workspaces.data.path)/data.json")
+              test $(jq -r '.architecture' <<< $imagearch1) == "amd64"
+              test $(jq -r '.containerImage' <<< $imagearch1) == "registry.redhat.io/product/repo@sha256:abcdefg"
+              test $(jq -r '.purl' <<< $imagearch1) == \
+                "pkg:oci/repo@sha256%3Aabcdefg?arch=amd64&repository_url=registry.redhat.io/product"
+              test $(jq -r '.repository' <<< $imagearch1) == "registry.redhat.io/product/repo"
+              test $(jq -rc '.tags' <<< $imagearch1) == '["foo","bar"]'
+
+              imagearch2=$(jq '.releaseNotes.content.images[1]' "$(workspaces.data.path)/data.json")
+              test $(jq -r '.architecture' <<< $imagearch2) == "s390x"
+              test $(jq -r '.containerImage' <<< $imagearch2) == "registry.redhat.io/product/repo@sha256:deadbeef"
+              test $(jq -r '.purl' <<< $imagearch2) == \
+                "pkg:oci/repo@sha256%3Adeadbeef?arch=s390x&repository_url=registry.redhat.io/product"
+              test $(jq -r '.repository' <<< $imagearch2) == "registry.redhat.io/product/repo"
+              test $(jq -rc '.tags' <<< $imagearch2) == '["foo","bar"]'
+      runAfter:
+        - run-task

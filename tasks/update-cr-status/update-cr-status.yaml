@@ -1,0 +1,57 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-cr-status
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    A tekton task that updates the passed CR status with the
+    contents stored in the resultsFile.
+  params:
+    - name: resourceType
+      description: The type of resource that is being patched
+      type: string
+      default: release
+    - name: statusKey
+      description: The top level key to overwrite in the resource status
+      type: string
+      default: artifacts
+    - name: resource
+      description: The namespaced name of the resource to be patched
+      type: string
+    - name: resultsDirPath
+      description: |
+        Path to the directory containing the result files in the data workspace which will be added to the
+        resource's status
+      type: string
+  workspaces:
+    - name: data
+      description: Workspace where the results directory is stored
+  steps:
+    - name: update-cr-status
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        RESULTS_JSON="{}"
+        RESULTS_DIR="$(workspaces.data.path)/$(params.resultsDirPath)"
+        for resultsFile in $([ -d "$RESULTS_DIR" ] && find "$RESULTS_DIR" -type f); do
+            if ! jq . >/dev/null 2>&1 "${resultsFile}" ; then
+                echo "Passed results JSON file ${resultsFile} in results directory was not proper JSON."
+                exit 1
+            fi
+            # If two files have arrays with the same key, it will be overwritten. Otherwise, the jsons
+            # are merged (only arrays are not merged properly with this notation).
+            RESULTS_JSON=$(jq -c "${RESULTS_JSON} * ." "${resultsFile}")
+        done
+
+        IFS='/' read -r namespace name <<< "$(params.resource)"
+
+        kubectl --warnings-as-errors=true patch $(params.resourceType) -n $namespace $name \
+          --type=merge --subresource status --patch "status: {'$(params.statusKey)':${RESULTS_JSON}}"

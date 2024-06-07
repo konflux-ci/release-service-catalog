@@ -8,8 +8,11 @@ Tekton task to update version tag of FBC pull-spec
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| dataPath | Path to the JSON string of the merged data to use in the data workspace | Yes | data.json |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | ocpVersion |  OCP version fetched from fbcFragment | No | - |
+
+## Changes in 1.2.0
+* Remove `dataPath` default value
 
 ## Changes since 1.0.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

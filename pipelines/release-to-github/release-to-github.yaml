@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: release-to-github
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "3.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -17,12 +17,15 @@ spec:
       type: string
       description:
         The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
-    - name: releaseplan
+    - name: releasePlan
       type: string
       description: The namespaced name (namespace/name) of the releasePlan
-    - name: releaseplanadmission
+    - name: releasePlanAdmission
       type: string
       description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the releaseServiceConfig
     - name: snapshot
       type: string
       description: The namespaced name (namespace/name) of the snapshot
@@ -33,6 +36,12 @@ spec:
       type: string
       description: Public key to use for validation by the enterprise contract
       default: k8s://openshift-pipelines/public-key
+    - name: enterpriseContractExtraRuleData
+      type: string
+      description: |
+        Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax
+        "key1=value1,key2=value2..."
+      default: "pipeline_intention=release"
     - name: postCleanUp
       type: string
       description: Cleans up workspace after finishing executing the pipeline
@@ -43,11 +52,10 @@ spec:
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
-      default: https://github.com/redhat-appstudio/release-service-catalog.git
+      default: https://github.com/konflux-ci/release-service-catalog.git
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-      default: main
   workspaces:
     - name: release-workspace
   tasks:
@@ -68,17 +76,21 @@ spec:
         - name: script
           value: |
             ORIGIN_NAMESPACE=$(echo $(params.release) | cut -f1 -d/)
-            TARGET_NAMESPACE=$(echo $(params.releaseplanadmission) | cut -f1 -d/)
+            TARGET_NAMESPACE=$(echo $(params.releasePlanAdmission) | cut -f1 -d/)
+            RSC_NAMESPACE=$(echo $(params.releaseServiceConfig) | cut -f1 -d/)
 
             RELEASE_NAME=$(echo $(params.release) | cut -f2 -d/)
-            RELEASEPLAN_NAME=$(echo $(params.releaseplan) | cut -f2 -d/)
-            RELEASEPLANADMISSION_NAME=$(echo $(params.releaseplanadmission) | cut -f2 -d/)
+            RELEASEPLAN_NAME=$(echo $(params.releasePlan) | cut -f2 -d/)
+            RELEASEPLANADMISSION_NAME=$(echo $(params.releasePlanAdmission) | cut -f2 -d/)
+            RELEASESERVICECONFIG_NAME=$(echo $(params.releaseServiceConfig) | cut -f2 -d/)
             SNAPSHOT_NAME=$(echo $(params.snapshot) | cut -f2 -d/)
 
             CAN_I_READ_RELEASES=$(kubectl auth can-i get release/${RELEASE_NAME} -n ${ORIGIN_NAMESPACE})
             CAN_I_READ_RELEASEPLANS=$(kubectl auth can-i get releaseplan/${RELEASEPLAN_NAME} -n ${ORIGIN_NAMESPACE})
             CAN_I_READ_RELEASEPLANADMISSIONS=$(kubectl auth can-i get releaseplanadmission/${RELEASEPLANADMISSION_NAME}\
                 -n ${TARGET_NAMESPACE})
+            CAN_I_READ_RELEASESERVICECONFIG=$(kubectl auth can-i get releaseserviceconfig/${RELEASESERVICECONFIG_NAME}\
+                -n ${RSC_NAMESPACE})
             CAN_I_READ_SNAPSHOTS=$(kubectl auth can-i get snapshot/${SNAPSHOT_NAME} -n ${ORIGIN_NAMESPACE})
             CAN_I_CREATE_INTERNALREQUESTS=$(kubectl auth can-i create internalrequest -n ${TARGET_NAMESPACE})
 
@@ -86,6 +98,7 @@ spec:
             echo "CAN_I_READ_RELEASES? ${CAN_I_READ_RELEASES}"
             echo "CAN_I_READ_RELEASEPLANS? ${CAN_I_READ_RELEASEPLANS}"
             echo "CAN_I_READ_RELEASEPLANADMISSIONS? ${CAN_I_READ_RELEASEPLANADMISSIONS}"
+            echo "CAN_I_READ_RELEASESERVICECONFIG? ${CAN_I_READ_RELEASESERVICECONFIG}"
             echo "CAN_I_READ_SNAPSHOTS? ${CAN_I_READ_SNAPSHOTS}"
             echo ""
             echo "CAN_I_CREATE_INTERNALREQUESTS? ${CAN_I_CREATE_INTERNALREQUESTS}"
@@ -94,6 +107,7 @@ spec:
             if [ "${CAN_I_READ_RELEASES}" == "no" ] ||\
                 [ "${CAN_I_READ_RELEASEPLANS}" == "no" ] ||\
                 [ "${CAN_I_READ_RELEASEPLANADMISSIONS}" == "no" ] ||\
+                [ "${CAN_I_READ_RELEASESERVICECONFIG}" == "no" ] ||\
                 [ "${CAN_I_READ_SNAPSHOTS}" == "no" ] ||\
                 [ "${CAN_I_CREATE_INTERNALREQUESTS}" == "no" ] ; then
               echo "Error: Cannot read or create required Release resources!"
@@ -117,10 +131,12 @@ spec:
       params:
         - name: release
           value: $(params.release)
-        - name: releaseplan
-          value: $(params.releaseplan)
-        - name: releaseplanadmission
-          value: $(params.releaseplanadmission)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
         - name: snapshot
           value: $(params.snapshot)
         - name: subdirectory
@@ -142,7 +158,7 @@ spec:
             value: tasks/validate-single-component/validate-single-component.yaml
       params:
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: "$(tasks.collect-data.results.snapshotSpec)"
       workspaces:
         - name: data
           workspace: release-workspace
@@ -160,7 +176,7 @@ spec:
             value: verify-enterprise-contract
       params:
         - name: IMAGES
-          value: "$(workspaces.data.path)/$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: "$(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)"
         - name: SSL_CERT_DIR
           value: /var/run/secrets/kubernetes.io/serviceaccount
         - name: POLICY_CONFIGURATION
@@ -171,6 +187,8 @@ spec:
           value: "true"
         - name: PUBLIC_KEY
           value: $(params.enterpriseContractPublicKey)
+        - name: EXTRA_RULE_DATA
+          value: $(params.enterpriseContractExtraRuleData)
       workspaces:
         - name: data
           workspace: release-workspace
@@ -203,6 +221,7 @@ spec:
             if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
       runAfter:
         - verify-access-to-resources
+        - verify-enterprise-contract
     - name: extract-binaries-from-image
       workspaces:
         - name: data
@@ -220,7 +239,7 @@ spec:
         - name: subdirectory
           value: $(context.pipelineRun.uid)
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: "$(tasks.collect-data.results.snapshotSpec)"
       runAfter:
         - validate-single-component
     - name: base64-encode-checksum
@@ -239,8 +258,35 @@ spec:
       params:
         - name: binaries_dir
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
-      runAfter: 
+      runAfter:
         - extract-binaries-from-image
+    - name: sign-base64-blob
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/sign-base64-blob/sign-base64-blob.yaml
+      params:
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+        - name: blob
+          value: $(tasks.base64-encode-checksum.results.blob)
+        - name: requester
+          value: $(tasks.extract-requester-from-release.results.output-result)
+        - name: binariesPath
+          value: $(tasks.extract-binaries-from-image.results.binaries_path)
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - base64-encode-checksum
+        - extract-requester-from-release
     - name: collect-gh-params
       workspaces:
         - name: data
@@ -261,7 +307,7 @@ spec:
           value: $(tasks.collect-data.results.snapshotSpec)
         - name: binariesPath
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
-      runAfter: 
+      runAfter:
         - extract-binaries-from-image
     - name: create-github-release
       workspaces:
@@ -285,8 +331,9 @@ spec:
           value: $(tasks.collect-gh-params.results.githubSecret)
         - name: content_directory
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
-      runAfter: 
+      runAfter:
         - collect-gh-params
+        - sign-base64-blob
   finally:
     - name: cleanup
       taskRef:
@@ -305,6 +352,8 @@ spec:
       params:
         - name: subdirectory
           value: "$(context.pipelineRun.uid)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
       workspaces:
         - name: input
           workspace: release-workspace

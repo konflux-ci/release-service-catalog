@@ -1,0 +1,101 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-index-image
+spec:
+  description: Test creating a internal request to publish an image
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "fbc": {
+                  "publishingCredentials": "test-credentials"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: publish-index-image
+      params:
+        - name: sourceIndex
+          value: "quay.io/test/sourceIndex:tag"
+        - name: targetIndex
+          value: "quay.io/test/targetIndex:tag-abc-11111111111"
+        - name: buildTimestamp
+          value: 11111111111
+        - name: retries
+          value: 2
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: data.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
+              request=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.request}")
+              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+
+              if [ "$request" != "publish-index-image-pipeline" ]; then
+                echo "request pipeline does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.retries' <<< "${params}") != "2" ]; then
+                echo "number of retries does not match"
+                exit 1
+              fi
+
+              if [ $(jq -r '.sourceIndex' <<< "${params}") != "quay.io/test/sourceIndex:tag" ]; then
+                echo "sourceIndex image does not match"
+                exit 1
+              fi
+
+              targetIndex=$(jq -r '.targetIndex' <<< "${params}")
+              if [ $targetIndex != "quay.io/test/targetIndex:tag-abc-11111111111" ]; then
+                echo "targetIndex image does not match"
+                exit 1
+              fi
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all

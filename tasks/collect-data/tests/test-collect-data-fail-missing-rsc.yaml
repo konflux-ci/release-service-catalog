@@ -1,0 +1,97 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-data-fail-missing-rsc
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Run the collect-data task without a ReleaseServiceConfig cr and verify that the task fails as expected.
+    This test cannot rely on the snapshot not existing as the snapshot is retrieved with a jsonpath added
+    (.spec). The `get-resource` command doesn't fail when a jsonpath is provided, it just returns {} if
+    the key is not found per the new implementation.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-missing-rsc-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+
+              cat > releaseplan << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlan
+              metadata:
+                name: releaseplan-missing-rsc-sample
+                namespace: default
+              spec:
+                application: foo
+                target: foo
+              EOF
+              kubectl apply -f releaseplan
+
+              cat > snapshot << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Snapshot
+              metadata:
+                name: snapshot-missing-rsc-sample
+                namespace: default
+              spec:
+                application: foo
+                components:
+                  - name: name
+                    containerImage: newimage
+              EOF
+              kubectl apply -f snapshot
+    - name: run-task
+      taskRef:
+        name: collect-data
+      params:
+        - name: release
+          value: default/release-missing-rsc-sample
+        - name: releasePlan
+          value: default/releaseplan-missing-rsc-sample
+        - name: releasePlanAdmission
+          value: default/releaseplanadmission-missing-rsc-sample
+        - name: releaseServiceConfig
+          value: default/releaseserviceconfig-missing-rsc-sample
+        - name: snapshot
+          value: default/snapshot-missing-rsc-sample
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-missing-rsc-sample
+              kubectl delete releaseplan releaseplan-missing-rsc-sample
+              kubectl delete releaseplanadmission releaseplanadmission-missing-rsc-sample
+              kubectl delete snapshot snapshot-missing-rsc-sample

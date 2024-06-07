@@ -11,13 +11,37 @@ Snapshot based on component name.
 A `mapped` result is also returned from this task containing a simple true/false value that is
 meant to inform whether a mapped Snapshot is being returned or the original one.
 
+This task supports variable expansion in tag values from the mapping. The currently supported variables are:
+* "{{ timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
+* "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
+* "{{ git_short_sha }}" -> The git sha reduced to 7 characters
+* "{{ digest_sha }}" -> The image digest of the respective component
+
 ## Parameters
 
 | Name | Description | Optional | Default value |
 |------|-------------|----------|---------------|
-| snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | Yes | snapshot_spec.json |
-| releasePlanAdmissionPath | Path to the JSON string of the ReleasePlanAdmission in the config workspace which contains the mapping to apply | Yes | release_plan_admission.json |
+| snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No | |
+| dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+
+## Changes in 1.0.0
+ * Use the data json instead of the ReleasePlanAdmission json
+    * releasePlanAdmissionPath parameter removed in favor of dataPath parameter
+
+## Changes in 0.11.0
+ * The tags provided in `mapping.defaults.tags` are combined with each components `.tags` entry to form
+   one set of tags
+   * The resulting tags are stored in the snapshot spec file under each component
+   * The supported variables will be replaced in the tags
+
+## Changes in 0.10.0
+ * Removed default values for `snapshotPath` and `releasePlanAdmissionPath`
+
+## Changes in 0.9.1
+  * Replaced `echo` with `printf` for storing results.
+    Using `echo` resulted in appending `true\n` to the output,
+    which caused discrepancies with the `when` expression in the pipeline.
 
 ## Changes since 0.8.0
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

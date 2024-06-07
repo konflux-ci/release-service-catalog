@@ -6,9 +6,55 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 
 | Name               | Description                                                               | Optional | Default value        |
 |--------------------|---------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | Yes      | mapped_snapshot.json |
-| dataPath           | Path to the JSON string of the merged data to use in the data workspace   | Yes      | data.json            |
+| snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       |                      |
+| dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
+
+## Changes in 4.5.0
+* Tag expansion is removed in favor of doing it in the apply-mapping task
+
+## Changes in 4.4.0
+* Added support for component specific tags
+  * Each component in the mapping can specify a tags array
+  * A defaults section can also be provided in the mapping
+  * The supported variables will be replaced in the passed tags
+  * The old functionality remains. The new tag functionality is only used if provided. In version 5.0.0, the old
+    functionality will be removed. The new tag functionality has priority over the old style.
+
+## Changes in 4.3.0
+* When pushing source containers, the origin is now determined using `$repo:${digest}.src` instead of `$repo:${git_sha}.src`
+  that was used previously. This follows a change in the build service.
+  * We also added a new push of the source container to `$repo:${digest}.src`.
+* Fixed a bug when pushing source containers where previously we would never skip a push even if the destination container
+  already existed, because we were comparing the binary image digest instead of the source container one.
+
+## Changes in 4.2.0
+* remove `dataPath` and `snapshotPath` default values
+
+## Changes in 4.1.2
+* Fixed bug that causes `arch_json` to be empty after setting it
+* Update release-service-utils image
+
+## Changes in 4.1.1
+* Absorb change in refactored get-image-architectures script
+
+## Changes in 4.1.0
+* Add `--override-arch` to `skopeo` calls to avoid breaking the task when the component's container image
+  architecture is different from the pod the task runs on.
+
+## Changes in 4.0.1
+* Incorrect floatingTag replaced with $floatingTag
+
+## Changes in 4.0.0
+* floatingTag is replaced by floatingTags in the RPA's data.images field
+  * A list of floating tags is accepted instead of a single string. The logic remains unchanged, with each
+    provided floating tag treated as the single one was previously
+* Digest checking behavior was modified
+  * Previously, a push only happened if the containerImage did not exist at $repository:$tag. This is flawed
+    as we push to multiple tags (git, sha, timestamp...) yet we only checked against the default tag. Now,
+    every push_image call has a check to see if the image already exists at the destination digest
+* For source containers, an image is now pushed to $floatingTag-source as well as the existing
+  $floatingTag-$timestamp-source location
 
 ## Changes since 3.0.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

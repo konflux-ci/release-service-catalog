@@ -4,23 +4,27 @@ kind: Task
 metadata:
   name: collect-data
   labels:
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "4.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task to collect data from release resources and optionally save CRs to a workspace
+    Tekton task to collect data from release resources and verify that they do not contain any
+    disallowed fields
   params:
     - name: release
       type: string
       description: The namespaced name of the Release
-    - name: releaseplan
+    - name: releasePlan
       type: string
       description: The namespaced name of the ReleasePlan
-    - name: releaseplanadmission
+    - name: releasePlanAdmission
       type: string
       description: The namespaced name of the ReleasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name of the ReleaseServiceConfig
     - name: snapshot
       type: string
       description: The namespaced name of the Snapshot
@@ -41,6 +45,9 @@ spec:
     - name: releasePlanAdmission
       type: string
       description: The relative path in the workspace to the stored releasePlanAdmission json
+    - name: releaseServiceConfig
+      type: string
+      description: The relative path in the workspace to the stored releaseServiceConfig json
     - name: snapshotSpec
       type: string
       description: The relative path in the workspace to the stored snapshotSpec json
@@ -52,19 +59,21 @@ spec:
       description: The relative path in the workspace to the stored data json
   steps:
     - name: collect-data
-      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
       env:
         - name: "RELEASE"
           value: '$(params.release)'
         - name: "RELEASE_PLAN"
-          value: '$(params.releaseplan)'
+          value: '$(params.releasePlan)'
         - name: "RELEASE_PLAN_ADMISSION"
-          value: '$(params.releaseplanadmission)'
+          value: '$(params.releasePlanAdmission)'
+        - name: "RELEASE_SERVICE_CONFIG"
+          value: '$(params.releaseServiceConfig)'
         - name: "SNAPSHOT"
           value: '$(params.snapshot)'
       script: |
         #!/usr/bin/env sh
-        set -e
+        set -eo pipefail
 
         if [ -n "$(params.subdirectory)" ]; then
           mkdir -p $(workspaces.data.path)/$(params.subdirectory)
@@ -72,24 +81,32 @@ spec:
 
         RELEASE_PATH=$(params.subdirectory)/release.json
         echo -n $RELEASE_PATH > $(results.release.path)
-        get-resource "release" "${RELEASE}" > $(workspaces.data.path)/$RELEASE_PATH
+        get-resource "release" "${RELEASE}" | tee $(workspaces.data.path)/$RELEASE_PATH
 
         RELEASEPLAN_PATH=$(params.subdirectory)/release_plan.json
         echo -n $RELEASEPLAN_PATH > $(results.releasePlan.path)
-        get-resource "releaseplan" "${RELEASE_PLAN}" > $(workspaces.data.path)/$RELEASEPLAN_PATH
+        get-resource "releaseplan" "${RELEASE_PLAN}" | tee $(workspaces.data.path)/$RELEASEPLAN_PATH
 
         RELEASEPLANADMISSION_PATH=$(params.subdirectory)/release_plan_admission.json
         echo -n $RELEASEPLANADMISSION_PATH > $(results.releasePlanAdmission.path)
         get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
-          > $(workspaces.data.path)/$RELEASEPLANADMISSION_PATH
+          | tee $(workspaces.data.path)/$RELEASEPLANADMISSION_PATH
 
+        RELEASESERVICECONFIG_PATH=$(params.subdirectory)/release_service_config.json
+        echo -n $RELEASESERVICECONFIG_PATH > $(results.releaseServiceConfig.path)
+        get-resource "releaseserviceconfig" "${RELEASE_SERVICE_CONFIG}" \
+          | tee $(workspaces.data.path)/$RELEASESERVICECONFIG_PATH
+
+        echo -e "\nFetching Snapshot Spec"
         SNAPSHOTSPEC_PATH=$(params.subdirectory)/snapshot_spec.json
         echo -n $SNAPSHOTSPEC_PATH > $(results.snapshotSpec.path)
-        get-resource "snapshot" "${SNAPSHOT}" "{.spec}" > $(workspaces.data.path)/$SNAPSHOTSPEC_PATH
+        get-resource "snapshot" "${SNAPSHOT}" "{.spec}" | tee $(workspaces.data.path)/$SNAPSHOTSPEC_PATH
 
+        echo -e "\nFetching fbcFragment"
         cat $(workspaces.data.path)/$SNAPSHOTSPEC_PATH | jq -cr '.components[0].containerImage' | tr -d "\n" \
           | tee $(results.fbcFragment.path)
 
+        echo -e "\nFetching merged data json"
         release_result=$(get-resource "release" "${RELEASE}" "{.spec.data}")
 
         release_plan_result=$(get-resource "releaseplan" "${RELEASE_PLAN}" "{.spec.data}")
@@ -105,4 +122,46 @@ spec:
 
         DATA_PATH=$(params.subdirectory)/data.json
         echo -n $DATA_PATH > $(results.data.path)
-        echo "$merged_output" > $(workspaces.data.path)/$DATA_PATH
+        echo "$merged_output" | tee $(workspaces.data.path)/$DATA_PATH
+    - name: check-data-key-sources
+      image: quay.io/redhat-appstudio/release-service-utils:bc81bfed6062a386e48a76b252c6f33b52c411b0
+      script: |
+        #!/usr/bin/env sh
+        set -ex
+
+        DISALLOWED_KEYS_JSON='{
+            "Release": [
+                "releaseNotes.product_id",
+                "releaseNotes.product_name",
+                "releaseNotes.product_version",
+                "releaseNotes.product_stream",
+                "releaseNotes.cpe"
+            ],
+            "ReleasePlan": [
+                "releaseNotes.product_id",
+                "releaseNotes.product_name",
+                "releaseNotes.product_version",
+                "releaseNotes.product_stream",
+                "releaseNotes.cpe"
+            ],
+            "ReleasePlanAdmission": [
+            ]
+        }'
+
+        RC=0
+
+        check_source () { # Expected arguments are [CRD from DISALLOWED_KEYS_JSON, file]
+            for KEY in $(jq -r ".$1[]" <<< $DISALLOWED_KEYS_JSON) ; do
+                if [[ $(jq ".spec.data.$KEY" "$2") != "null" ]] ; then
+                    echo "Found disallowed key: $KEY in resource $1"
+                    RC=1
+                fi
+            done
+        }
+
+        check_source "Release" "$(workspaces.data.path)/$(params.subdirectory)/release.json"
+        check_source "ReleasePlan" "$(workspaces.data.path)/$(params.subdirectory)/release_plan.json"
+        check_source "ReleasePlanAdmission" \
+            "$(workspaces.data.path)/$(params.subdirectory)/release_plan_admission.json"
+
+        exit $RC

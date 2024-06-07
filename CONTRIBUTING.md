@@ -85,7 +85,7 @@ Before a pull request can be merged:
 
 ### Image References
 
-Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/redhat-appstudio/release-service-utils).
+Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/konflux-ci/release-service-utils).
 When referencing this image, the url should be `quay.io/redhat-appstudio/release-service-utils:$tag` where `$tag` is the Git SHA based tag.
 
 For other images, the reference should always either specify an image by a non-moving tag (e.g. `registry.access.redhat.com/ubi8/ubi:8.8-1067.1698056881`)
@@ -94,15 +94,15 @@ Floating tags like `latest` or `8.8` in the case of the ubi image should be avoi
 
 ### Tekton Task Testing
 
-When a pull request is opened, Tekton Task tests are run for all the task version
-directories that are modified.
+When a pull request is opened, Tekton Task tests are run for all the task directories
+that are being modified.
 
 The Github workflow is defined in
 [.github/workflows/tekton_task_tests.yaml](.github/workflows/tekton_task_tests.yaml)
 
 #### Adding new Tekton Task tests
 
-Tests are defined as Tekton Pipelines inside the `tests` subdirectory of the task version
+Tests are defined as Tekton Pipelines inside the `tests` subdirectory of the task
 directory. Their filenames must match `test*.yaml` and the Pipeline name must be
 the same as the filename (sans `.yaml`).
 
@@ -170,15 +170,15 @@ tekton catalog repository. For more details and examples, look
 ##### Mocking commands executed in task scripts
 
 Mocks are needed when we want to test tasks which call external services (e.g. `scopeo copy`,
-`cosign download`, or even a python script from our release-utils image such as `upload_sbom` that would
+`cosign download`, or even a python script from our release-utils image such as `create_container_image` that would
 call Pyxis API). The way to do this is to create a file with mock shell functions (with the same names
 as the commands you want to mock) and inject this file to the beginning of each `script` field in
 the task step that needs mocking.
 
-For reference implementation, check [push-sbom-to-pyxis/tests/](/tasks/push-sbom-to-pyxis/tests/). Here's a break down of how it's done:
+For reference implementation, check [create-pyxis-image/tests/](tasks/create-pyxis-image/tests/). Here's a breakdown of how it's done:
 
 1. Create a `mocks.sh` file in the tests directory of your task, e.g.
-    `tasks/push-sbom-to-pyxis/tests/mocks.sh`. This file will contain the mock function
+    `tasks/create-pyxis-image/tests/mocks.sh`. This file will contain the mock function
     definitions. It also needs to contain a shebang at the top as it will get injected to the top
     of the original script. For example:
 
@@ -206,6 +206,13 @@ For reference implementation, check [push-sbom-to-pyxis/tests/](/tasks/push-sbom
       check mock calls after task execution in our test pipeline.
     - In this case the function touches a file that would otherwise be created by the actual `cosign`
       call. This is specific to the task and will depend on your use case.
+    - Note: In the example above, the function being mocked is `cosign`. If that function was actually something
+      that had a hyphen in its name (e.g. `my-cool-function`), the tests would fail with
+      `my-cool-function: not a valid identifier` messages. This is because when you use `#!/usr/bin/env sh`, Bash
+      runs in POSIX mode in which case hyphens are not permitted in function names. The solution to this is to use
+      `#!/bin/bash` or `#!/usr/bin/env bash` in place of `#!/usr/bin/env sh` at the top of the file. Keep in mind
+      that the same shell declaration should be used in both the mock and the tekton task step script you are
+      mocking to ensure the behavior during test is the same as during runtime.
 
 1. In your `pre-apply-task-hook.sh` file (see the Test Setup section above for explanation), include
     `yq` commands to inject the `mocks.sh` file to the top of your task step scripts, e.g.:
@@ -213,10 +220,11 @@ For reference implementation, check [push-sbom-to-pyxis/tests/](/tasks/push-sbom
     ```sh
     #!/usr/bin/env sh
 
+    TASK_PATH=$1
     SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' $SCRIPT_DIR/../push-sbom-to-pyxis.yaml
-    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' $SCRIPT_DIR/../push-sbom-to-pyxis.yaml
+    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' $TASK_PATH
+    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' $TASK_PATH
     ```
 
     In this case we inject the file to both steps in the task under test. This will depend on
@@ -259,3 +267,52 @@ as arguments, e.g.
 ```
 
 This will install the task and run all test pipelines matching `tests/test*.yaml`.
+
+Another option is to run one or more tests directly:
+
+```
+./.github/scripts/test_tekton_tasks.sh tasks/apply-mapping/tests/test-apply-mapping.yaml
+```
+
+This will still install the task and run `pre-apply-task-hook.sh` if present, but it will then
+run only the specified test pipeline.
+
+### Openshift CI Prow Tests
+
+Each PR runs the [release-pipelines e2e test suite](https://github.com/redhat-appstudio/e2e-tests/tree/main/tests/release/pipelines).
+This is to ensure that a change does not break any pipeline functionality, as the tekton unit tests only test the tasks.
+This shows up as the `ci/prow/release-pipelines-e2e-suite` check on the PR.
+
+#### Pairing with E2E Change
+
+Sometimes, a change to a pipeline definition will require a change to the e2e test in order to pass. To do this, the changes should be paired.
+
+Process:
+  This is described in depth [here](https://github.com/redhat-appstudio/e2e-tests/blob/main/docs/Installation.md#rhtap-in-openshift-ci-and-branch-pairing).
+  The short explanation for it is that you should open a PR that makes the necessary changes to the test suite in
+  [the e2e repo](https://github.com/redhat-appstudio/e2e-tests) using the same branch name as your PR to this repository. This will pair them. Once the
+  PR to this repo is merged, the e2e-tests PR should also be merged so that future PRs to this repo will pass (as they will now be dependent on the e2e change).
+
+#### Pairing with release-service Change
+
+Another possible pairing scenario is a change to a pipeline definition that requires changes to the operator itself, stored in
+[the release-service repo](https://github.com/konflux-ci/release-service). For example, maybe a parameter is passed by the operator
+to the pipeline, and the name of the parameter is changing. This will require the release-service PR and release-service-catalog PR to be paired
+in order for the e2e suite to pass.
+Note: This can be used in conjunction with the e2e pairing described in the previous section. That is to say, you can also pair an e2e-tests
+PR with these two PRs.
+
+Process:
+* Open a PR to the [release-service](https://github.com/konflux-ci/release-service). This PR should usually be opened as a draft. In order to run the
+required check that builds the image for your catalog PR CI run, comment `/test images` on the PR. This will trigger the `ci/prow/images` check on the
+release-service PR. So, it is important to open the release-service PR first and wait for that check to succeed.
+* Open a PR to this repo. Use the same branch name as you did in the release-service PR (just like you do to pair with e2e-tests PRs). The e2e test suite
+for your catalog PR will deploy a cluster using your release-service image built as part of your release-service PR checks. It will then run the test suite
+with the `RELEASE_SERVICE_CATALOG_URL` and `RELEASE_SERVICE_CATALOG_REVISION` environment variables set to point all ReleasePlanAdmissions in the e2e suite
+to your catalog PR. As a result, the test suite will run with your changes.
+* Once the catalog CI run completes and the code review process is complete, the catalog PR should be merged. This should happen before the release-service
+PR is merged. At that point, you will be working with an unpaired release-service PR, or if this change also included an e2e change, a release-service
+PR paired with an e2e change (documented [here](https://github.com/redhat-appstudio/e2e-tests/blob/main/docs/Installation.md#rhtap-in-openshift-ci-and-branch-pairing)),
+but the catalog PR pairing process will be complete.
+* Pairing is typically only required for breaking changes, so once the catalog PR is merged, things are now in a broken state. This should be resolved ASAP by
+marking the release-service PR as ready, merging it, and promoting its results to the infra-deployments overlays.

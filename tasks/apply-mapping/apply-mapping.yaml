@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: apply-mapping
   labels:
-    app.kubernetes.io/version: "0.9.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -15,13 +15,9 @@ spec:
     - name: snapshotPath
       type: string
       description: Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to
-      default: "snapshot_spec.json"
-    - name: releasePlanAdmissionPath
+    - name: dataPath
       type: string
-      description: |
-        Path to the JSON string of the ReleasePlanAdmission in the
-        config workspace which contains the mapping to apply
-      default: "release_plan_admission.json"
+      description: Path to the JSON string of the merged data to use in the data workspace
     - name: failOnEmptyResult
       type: string
       description: Fail the task if the resulting snapshot contains 0 components
@@ -42,7 +38,7 @@ spec:
         set -eux
 
         SNAPSHOT_SPEC_FILE="$(workspaces.config.path)/$(params.snapshotPath)"
-        RPA_FILE="$(workspaces.config.path)/$(params.releasePlanAdmissionPath)"
+        DATA_FILE="$(workspaces.config.path)/$(params.dataPath)"
         SNAPSHOT_SPEC_FILE_ORIG="${SNAPSHOT_SPEC_FILE}.orig"
 
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
@@ -53,28 +49,58 @@ spec:
         # Copy the original Snapshot spec file before overriding
         cp "${SNAPSHOT_SPEC_FILE}" "${SNAPSHOT_SPEC_FILE_ORIG}"
 
-        if [ ! -f "${RPA_FILE}" ] ; then
-            echo "No ReleasePlanAdmission file was found."
-            echo "false" | tee $(results.mapped.path)
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON file was found."
+            printf "false" | tee $(results.mapped.path)
             exit 0
         fi
 
-        MAPPING=$(jq '.spec.data.mapping' "${RPA_FILE}")
+        MAPPING=$(jq '.mapping' "${DATA_FILE}")
 
         if [[ $MAPPING == "null" ]] ; then
-            echo "ReleasePlanAdmission Data struct contains no mapping key."
-            echo "false" | tee $(results.mapped.path)
+            echo "Data file contains no mapping key."
+            printf "false" | tee $(results.mapped.path)
             exit 0
         fi
 
-        # Merge the mapping key contents in the ReleasePlanAdmission data with the components key in the snapshot based
+        translate_tags () { # Expected arguments are [tags, timestamp, git sha, 7 character git sha, source sha]
+        # The tags argument is a json array
+            if [[ $1 == '' ]] ; then
+                echo ''
+                return
+            fi
+
+            SUPPORTED_VARIABLES='[
+                {"{{timestamp}}": "'$2'"},
+                {"{{ timestamp }}": "'$2'"},
+                {"{{git_sha}}": "'$3'"},
+                {"{{ git_sha }}": "'$3'"},
+                {"{{git_short_sha}}": "'$4'"},
+                {"{{ git_short_sha }}": "'$4'"},
+                {"{{digest_sha}}": "'$5'"},
+                {"{{ digest_sha }}": "'$5'"}
+            ]'
+            tags=$1
+
+            NUM_VARIABLES=$(jq 'length' <<< "${SUPPORTED_VARIABLES}")
+            for ((i = 0; i < $NUM_VARIABLES; i++)); do
+                variable=$(jq -c --argjson i "$i" '.[$i]' <<< "${SUPPORTED_VARIABLES}")
+                KEY=$(jq -r 'to_entries[] | .key' <<< $variable)
+                VALUE=$(jq -r 'to_entries[] | .value' <<< $variable)
+                tags=$(echo -n $tags | sed "s/$KEY/$VALUE/g")
+            done
+
+            echo -n $tags | jq -c
+        }
+
+        # Merge the mapping key contents in the data json file with the components key in the snapshot based
         # on component name. Save the output as a compact json in mapped_snapshot.json file in the workspace
         { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${MAPPING}"; } | jq -c -s '.[0] as $snapshot
           | .[0].components + .[1].components | group_by(.name) | [.[] | select(length > 1)]
           | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents | $snapshot | .components = $mergedComponents' \
           > "${SNAPSHOT_SPEC_FILE}"
 
-        echo "true" | tee $(results.mapped.path)
+        printf "true" | tee $(results.mapped.path)
 
         if [ "$(params.failOnEmptyResult)" = "true" ] && \
           [ $(cat "${SNAPSHOT_SPEC_FILE}" | jq '.components | length') -eq 0 ]
@@ -82,3 +108,27 @@ spec:
           echo "ERROR: Resulting snapshot contains 0 components"
           exit 1
         fi
+
+        # Expand the tags in the data file
+        defaultTags=$(jq '.defaults.tags' <<< $MAPPING)
+        defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< $MAPPING)
+        currentTimestamp="$(date "+%Y%m%d %T")"
+        NUM_MAPPED_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        for ((i = 0; i < $NUM_MAPPED_COMPONENTS; i++)) ; do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            imageTags=$(jq '.tags' <<< $component)
+            git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
+            build_sha=$(jq -r '.containerImage' <<< $component | cut -d ':' -f 2)
+            passedTimestampFormat=$(jq -r --arg default $defaultTimestampFormat \
+              '.timestampFormat // $default' <<< $component)
+            timestamp="$(date -d "$currentTimestamp" "+$passedTimestampFormat")"
+
+            allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultTags" --argjson imageTags \
+              "$imageTags" '$defaults? + $imageTags? | unique')
+            tags=$(translate_tags "${allTagsPreSubstitution}" "${timestamp}" "${git_sha}" \
+              "${git_sha:0:7}" "${build_sha}")
+            if [ $(jq 'length' <<< $tags) -gt 0 ] ; then
+              jq --argjson i "$i" --argjson updatedTags $tags '.components[$i].tags = $updatedTags' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+        done

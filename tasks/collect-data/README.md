@@ -13,15 +13,43 @@ operator passes them as lowercase.
 A task result is returned for each resource with the relative path to the stored JSON for it in the workspace. There is
 also a task result for the fbcFragment extracted from the snapshot's first component.
 
+Finally, the task checks that the keys from the correct resource (a key that should come from the ReleasePlanAdmission
+should not be present in the Release data section).
+
 ## Parameters
 
 | Name                 | Description                                        | Optional | Default value |
 |----------------------|----------------------------------------------------|----------|---------------|
 | release              | Namespaced name of the Release                     | No       | -             |
-| releaseplan          | Namespaced name of the ReleasePlan                 | No       | -             |
-| releaseplanadmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
+| releasePlan          | Namespaced name of the ReleasePlan                 | No       | -             |
+| releasePlanAdmission | Namespaced name of the ReleasePlanAdmission        | No       | -             |
+| releaseServiceConfig | Namespaced name of the ReleaseServiceConfig        | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes in 4.2.0
+  * Replace redirects with `tee` so that more is output in the task log to make debugging easier
+
+## Changes in 4.1.0
+  * releaseNotes.type is allowed in both Release and ReleasePlan CRs
+
+## Changes in 4.0.0
+  * releaseServiceConfig parameter added and the task now stores that CR in the data workspace as well
+
+## Changes in 3.1.0
+  * product_stream was added as a disallowed key in Release and ReleasePlan CRs
+
+## Changes in 3.0.0
+  * Parameters supplied by the Release Service operator now use camelCase format. For consistency, the `collect-data`
+    task also switched to use the same format.
+
+## Changes in 2.1.0
+  * product_name and product_version were added as disallowed keys in Release and ReleasePlan CRs
+
+## Changes in 2.0.0
+  * A second step was added to the task
+    * The step lists keys that are disallowed for each of the three release resources
+    * If any of the disallowed keys are found in the corresponding resource, the check will fail the task
 
 ## Changes since 1.0.1
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

@@ -4,24 +4,27 @@ kind: Pipeline
 metadata:
   name: push-to-external-registry
   labels:
-    app.kubernetes.io/version: "1.2.0"
+    app.kubernetes.io/version: "4.4.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton pipeline to release HACBS Snapshot to Quay
+    Tekton pipeline to release Snapshots to an external registry.
   params:
     - name: release
       type: string
       description:
         The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
-    - name: releaseplan
+    - name: releasePlan
       type: string
       description: The namespaced name (namespace/name) of the releasePlan
-    - name: releaseplanadmission
+    - name: releasePlanAdmission
       type: string
       description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the releaseServiceConfig
     - name: snapshot
       type: string
       description: The namespaced name (namespace/name) of the snapshot
@@ -32,6 +35,12 @@ spec:
       type: string
       description: Public key to use for validation by the enterprise contract
       default: k8s://openshift-pipelines/public-key
+    - name: enterpriseContractExtraRuleData
+      type: string
+      description: |
+        Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax
+        "key1=value1,key2=value2..."
+      default: "pipeline_intention=release"
     - name: postCleanUp
       type: string
       description: Cleans up workspace after finishing executing the pipeline
@@ -42,11 +51,10 @@ spec:
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
-      default: https://github.com/redhat-appstudio/release-service-catalog.git
+      default: https://github.com/konflux-ci/release-service-catalog.git
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-      default: main
   workspaces:
     - name: release-workspace
   tasks:
@@ -67,17 +75,21 @@ spec:
         - name: script
           value: |
             ORIGIN_NAMESPACE=$(echo $(params.release) | cut -f1 -d/)
-            TARGET_NAMESPACE=$(echo $(params.releaseplanadmission) | cut -f1 -d/)
+            TARGET_NAMESPACE=$(echo $(params.releasePlanAdmission) | cut -f1 -d/)
+            RSC_NAMESPACE=$(echo $(params.releaseServiceConfig) | cut -f1 -d/)
 
             RELEASE_NAME=$(echo $(params.release) | cut -f2 -d/)
-            RELEASEPLAN_NAME=$(echo $(params.releaseplan) | cut -f2 -d/)
-            RELEASEPLANADMISSION_NAME=$(echo $(params.releaseplanadmission) | cut -f2 -d/)
+            RELEASEPLAN_NAME=$(echo $(params.releasePlan) | cut -f2 -d/)
+            RELEASEPLANADMISSION_NAME=$(echo $(params.releasePlanAdmission) | cut -f2 -d/)
+            RELEASESERVICECONFIG_NAME=$(echo $(params.releaseServiceConfig) | cut -f2 -d/)
             SNAPSHOT_NAME=$(echo $(params.snapshot) | cut -f2 -d/)
 
             CAN_I_READ_RELEASES=$(kubectl auth can-i get release/${RELEASE_NAME} -n ${ORIGIN_NAMESPACE})
             CAN_I_READ_RELEASEPLANS=$(kubectl auth can-i get releaseplan/${RELEASEPLAN_NAME} -n ${ORIGIN_NAMESPACE})
             CAN_I_READ_RELEASEPLANADMISSIONS=$(kubectl auth can-i get releaseplanadmission/${RELEASEPLANADMISSION_NAME}\
                 -n ${TARGET_NAMESPACE})
+            CAN_I_READ_RELEASESERVICECONFIG=$(kubectl auth can-i get releaseserviceconfig/${RELEASESERVICECONFIG_NAME}\
+                -n ${RSC_NAMESPACE})
             CAN_I_READ_SNAPSHOTS=$(kubectl auth can-i get snapshot/${SNAPSHOT_NAME} -n ${ORIGIN_NAMESPACE})
             CAN_I_CREATE_INTERNALREQUESTS=$(kubectl auth can-i create internalrequest -n ${TARGET_NAMESPACE})
 
@@ -85,6 +97,7 @@ spec:
             echo "CAN_I_READ_RELEASES? ${CAN_I_READ_RELEASES}"
             echo "CAN_I_READ_RELEASEPLANS? ${CAN_I_READ_RELEASEPLANS}"
             echo "CAN_I_READ_RELEASEPLANADMISSIONS? ${CAN_I_READ_RELEASEPLANADMISSIONS}"
+            echo "CAN_I_READ_RELEASESERVICECONFIG? ${CAN_I_READ_RELEASESERVICECONFIG}"
             echo "CAN_I_READ_SNAPSHOTS? ${CAN_I_READ_SNAPSHOTS}"
             echo ""
             echo "CAN_I_CREATE_INTERNALREQUESTS? ${CAN_I_CREATE_INTERNALREQUESTS}"
@@ -93,6 +106,7 @@ spec:
             if [ "${CAN_I_READ_RELEASES}" == "no" ] ||\
                 [ "${CAN_I_READ_RELEASEPLANS}" == "no" ] ||\
                 [ "${CAN_I_READ_RELEASEPLANADMISSIONS}" == "no" ] ||\
+                [ "${CAN_I_READ_RELEASESERVICECONFIG}" == "no" ] ||\
                 [ "${CAN_I_READ_SNAPSHOTS}" == "no" ] ||\
                 [ "${CAN_I_CREATE_INTERNALREQUESTS}" == "no" ] ; then
               echo "Error: Cannot read or create required Release resources!"
@@ -116,10 +130,12 @@ spec:
       params:
         - name: release
           value: $(params.release)
-        - name: releaseplan
-          value: $(params.releaseplan)
-        - name: releaseplanadmission
-          value: $(params.releaseplanadmission)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
         - name: snapshot
           value: $(params.snapshot)
         - name: subdirectory
@@ -142,10 +158,10 @@ spec:
       params:
         - name: failOnEmptyResult
           value: "true"
-        - name: releasePlanAdmissionPath
-          value: "$(context.pipelineRun.uid)/release_plan_admission.json"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: "$(tasks.collect-data.results.snapshotSpec)"
       workspaces:
         - name: config
           workspace: release-workspace
@@ -163,7 +179,7 @@ spec:
             value: verify-enterprise-contract
       params:
         - name: IMAGES
-          value: "$(workspaces.data.path)/$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: "$(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)"
         - name: SSL_CERT_DIR
           value: /var/run/secrets/kubernetes.io/serviceaccount
         - name: POLICY_CONFIGURATION
@@ -174,12 +190,18 @@ spec:
           value: "true"
         - name: PUBLIC_KEY
           value: $(params.enterpriseContractPublicKey)
+        - name: EXTRA_RULE_DATA
+          value: $(params.enterpriseContractExtraRuleData)
       workspaces:
         - name: data
           workspace: release-workspace
       runAfter:
         - apply-mapping
     - name: push-snapshot
+      when:
+        - input: "$(tasks.apply-mapping.results.mapped)"
+          operator: in
+          values: ["true"]
       taskRef:
         resolver: "git"
         params:
@@ -191,101 +213,14 @@ spec:
             value: tasks/push-snapshot/push-snapshot.yaml
       params:
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: "$(tasks.collect-data.results.snapshotSpec)"
         - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
+          value: "$(tasks.collect-data.results.data)"
       workspaces:
         - name: data
           workspace: release-workspace
       runAfter:
         - verify-enterprise-contract
-    - name: collect-pyxis-params
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/collect-pyxis-params/collect-pyxis-params.yaml
-      params:
-        - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      runAfter:
-        - collect-data
-    - name: create-pyxis-image
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/create-pyxis-image/create-pyxis-image.yaml
-      params:
-        - name: server
-          value: $(tasks.collect-pyxis-params.results.server)
-        - name: pyxisSecret
-          value: $(tasks.collect-pyxis-params.results.secret)
-        - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
-        - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      runAfter:
-        - push-snapshot
-    - name: push-sbom-to-pyxis
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/push-sbom-to-pyxis/push-sbom-to-pyxis.yaml
-      params:
-        - name: containerImageIDs
-          value: $(tasks.create-pyxis-image.results.containerImageIDs)
-        - name: server
-          value: $(tasks.collect-pyxis-params.results.server)
-        - name: pyxisSecret
-          value: $(tasks.collect-pyxis-params.results.secret)
-        - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
-      workspaces:
-        - name: data
-          workspace: release-workspace
-    - name: run-file-updates
-      params:
-        - name: fileUpdatesPath
-          value: $(context.pipelineRun.uid)/data.json
-        - name: jsonKey
-          value: ".fileUpdates"
-        - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
-      runAfter:
-        - push-sbom-to-pyxis
-      taskRef:
-        kind: Task
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/run-file-updates/run-file-updates.yaml
-        resolver: git
-      workspaces:
-        - name: data
-          workspace: release-workspace
   finally:
     - name: cleanup
       taskRef:
@@ -304,6 +239,8 @@ spec:
       params:
         - name: subdirectory
           value: "$(context.pipelineRun.uid)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
       workspaces:
         - name: input
           workspace: release-workspace

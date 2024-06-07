@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-index-image
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "3.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -15,7 +15,6 @@ spec:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-      default: "data.json"
     - name: sourceIndex
       type: string
       description: Pullspec to pull the image from
@@ -30,6 +29,12 @@ spec:
       type: string
       default: "360"
       description: Max seconds waiting for the status update
+    - name: buildTimestamp
+      type: string
+      description: Build timestamp for the publishing image
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
   workspaces:
     - name: data
       description: Workspace to store the params and responses for the internalRequest
@@ -39,7 +44,7 @@ spec:
   steps:
     - name: publish-index-image
       image: >-
-        quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+        quay.io/redhat-appstudio/release-service-utils:305541d8b8c2670dea4b50bd8c56858c365ca11e
       script: |
         #!/usr/bin/env sh
         set -e
@@ -52,15 +57,28 @@ spec:
 
         request="publish-index-image-pipeline"
         credentials=$(jq -r '.fbc.publishingCredentials' $DATA_FILE)
+        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        echo "Creating internal request to publish image:"
-        echo "- from: $(params.sourceIndex)"
-        echo "- to: $(params.targetIndex)"
+        publishingImages=($(params.targetIndex))
+        # only publish the extra timestamp-based tag if the targetIndex does not have it already
+        if [[ ! "$(params.targetIndex)" =~ .*$(params.buildTimestamp)$ ]]; then
+          publishingImages+=("$(params.targetIndex)-$(params.buildTimestamp)")
+        fi
 
-        internal-request -r "${request}" \
-            -p sourceIndex=$(params.sourceIndex) \
-            -p targetIndex=$(params.targetIndex) \
-            -p publishingCredentials=${credentials} \
-            -p retries=$(params.retries) \
-            -t $(params.requestTimeout)
-        echo "done"
+        for((i=0; i<${#publishingImages[@]}; i++ )); do
+            echo "=== Creating internal request to publish image:"
+            echo ""
+            echo "- from: $(params.sourceIndex)"
+            echo "- to: ${publishingImages[$i]}"
+
+            internal-request -r "${request}" \
+                -p sourceIndex=$(params.sourceIndex) \
+                -p targetIndex=${publishingImages[$i]} \
+                -p publishingCredentials=${credentials} \
+                -p retries=$(params.retries) \
+                -t $(params.requestTimeout) \
+                -l ${pipelinerun_label}=$(params.pipelineRunUid)
+            echo "=== done"
+            echo ""
+            echo ""
+        done
