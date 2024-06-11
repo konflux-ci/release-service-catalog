@@ -25,6 +25,9 @@ This task supports variable expansion in tag values from the mapping. The curren
 | dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
 
+## Changes in 1.0.1
+ * Don't fail if a tag has a `/` in it
+
 ## Changes in 1.0.0
  * Use the data json instead of the ReleasePlanAdmission json
     * releasePlanAdmissionPath parameter removed in favor of dataPath parameter
