@@ -18,6 +18,9 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
 
+## Changes in 4.0.1
+- Use set -x in the task's script. That way we get more information in the log for debugging in case of failure
+
 ## Changes in 4.0.0
 - The task now writes created artifacts to a results json file in the workspace
 

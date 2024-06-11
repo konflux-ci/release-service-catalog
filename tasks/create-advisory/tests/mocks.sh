@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -eux
+set -ex
 
 # mocks to be injected into task step scripts
 
