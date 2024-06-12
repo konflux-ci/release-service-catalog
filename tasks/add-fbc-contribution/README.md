@@ -13,6 +13,9 @@ Task to create a internalrequest to add fbc contributions to index images
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
 
+## changes in 2.5.0
+- updated the base image used in this task
+
 ## changes in 2.4.0
 - remove default values of `dataPath` and `snapshotPath` parameters
 

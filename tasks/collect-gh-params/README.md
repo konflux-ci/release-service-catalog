@@ -10,5 +10,8 @@ Tekton task that collects the three parameters to pass to the `create-github-rel
 | snapshotPath | Path to the Snapshot file | No | |
 | binariesPath | Path to the binaries directory to release | Yes | binaries |
 
+## Changes in 1.2.0
+- Updated the base image used in this task
+
 ## Changes in 1.1.0
 - Removes `dataPath` and `snapshotPath` default values

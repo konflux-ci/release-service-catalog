@@ -10,6 +10,9 @@ Tekton task to delete a given directory in a passed workspace and cleanup Intern
 | delay          | Time in seconds to delay execution. Needed to allow other finally tasks to access workspace before being deleted | Yes      | 60            |
 | pipelineRunUid | The uid of the current pipelineRun. It is only available at the pipeline level                                   | Yes      | ""            |
 
+## Changes in 0.7.0
+* Updated the base image used in this task
+
 ## Changes in 0.6.0
 * The task now removes all internalrequest CRs for the current pipelinerun via the pipelineRunUid parameter
 

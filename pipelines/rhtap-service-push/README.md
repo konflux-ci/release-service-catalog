@@ -21,6 +21,10 @@
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.6.0
+- Updated the image passed to the infra-deployments-pr task to reflect release-service-utils migrating to
+  the konflux-ci quay organization
+
 ## Changes in 3.5.0
 - The apply-mapping task now gets the dataPath parameter instead of releasePlanAdmissionPath
 

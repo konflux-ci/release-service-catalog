@@ -11,6 +11,9 @@ the workspace name for this task *must* be input.
 |------|-------------|----------|---------------|
 | inputDataFile | File to read json data from | No | - |
 
+## Changes in 0.4.0
+- Updated the base image used in this task
+
 ## Changes since 0.2.0
 - Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 

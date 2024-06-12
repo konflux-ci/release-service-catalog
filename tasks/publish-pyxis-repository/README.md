@@ -22,6 +22,9 @@ does not publish the repository.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       |                    |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       |                    |
 
+## Changes in 0.6.0
+* Updated the base image used in this task
+
 ## Changes in 0.5.0
 * Add support for checking the `mapping` key for `pushSourceContainer`
   * Can be per component or in the `mapping.defaults` section

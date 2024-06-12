@@ -14,6 +14,9 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 2.7.0
+* Updated the base image used in this task
+
 ## Changes in 2.6.0
 * The task now looks for tags in each component of the snapshot spec file and uses them instead of commonTags if any exist
 

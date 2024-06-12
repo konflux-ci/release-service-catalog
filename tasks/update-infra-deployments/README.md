@@ -20,6 +20,9 @@
 | defaultGithubAppID             | ID of Github app used for updating PR                                                        | true     | 305606                                                                                                                                           |
 | defaultGithubAppInstallationID | Installation ID of Github app in the organization                                            | true     | 35269675                                                                                                                                         |
 
+## Changes in 1.1.0
+- Updated the base image used in this task
+
 ## Changes in 1.0.0
 - Modified `update-infra-deployments` task to dynamically fetch
   `targetGHRepo`, `githubAppID`, and `githubAppInstallationID` from the dataJsonPath JSON file.
