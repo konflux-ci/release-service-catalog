@@ -19,6 +19,9 @@ Tekton release pipeline to release binaries extracted from the image built with 
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.3.0
+- The create-github-release task now gets the `resultsDir` parameter from the collect-data results
+
 ## Changes in 3.2.0
 - `enterpriseContractExtraRuleData` added as a pipeline parameter, which is
   then passed to EC. Allows for easier runtime changes to rule data.
