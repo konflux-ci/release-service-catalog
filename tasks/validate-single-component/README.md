@@ -9,6 +9,9 @@ single component. The task will fail otherwise.
 |------|-------------|----------|---------------|
 | snapshotPath | Path to the JSON string of the Snapshot spec in the data workspace | No | |
 
+## Changes in 0.4.0
+- Updated the base image used in this task
+
 ## Changes in 0.3.0
 - remove `snapshotPath` default value
 

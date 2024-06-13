@@ -9,6 +9,9 @@ This task sends a message to Slack using incoming webhook
 | secretName   | Name of secret which contains key/value pairs of `<team>/<webhook url>`. e.g. team1=https://hooks.slack.com/services/XXX/XXXXXX | true     | slack-webhook-notification-secret |
 | dataJsonPath | Path to data json file. It should contain a key called 'slack-webhook-notification-secret-keyname'                              | false    |                                   |
 
+## Changes in 0.6.0
+- Updated the base image used in this task
+
 ## Changes in 0.5.0
 - remove `dataJsonPath` default value
 

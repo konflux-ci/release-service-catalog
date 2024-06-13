@@ -27,6 +27,9 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 2.2.0
+- Updated the base image used in this task
+
 ## Changes in 2.1.0
 - remove `dataPath` default value
 

@@ -25,6 +25,10 @@ tasks:
         value: '{"components":[{"name":"component1","containerImage":"quay.io/repo/component1:digest"}}]}'
 ```
 
+## Changes in 0.6.0
+
+  * Updated the base image used in this task
+
 ## Changes since 0.4.0
   
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

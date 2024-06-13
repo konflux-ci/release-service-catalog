@@ -13,5 +13,8 @@ saved is provided as a result.
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | No | |
 | subdirectory | Subdirectory inside the workspace to be used for storing the binaries | Yes | "" |
 
+## Changes in 1.2.0
+- updated the base image used in this task
+
 ## Changes in 1.1.0
 - remove `snapshotPath` default value

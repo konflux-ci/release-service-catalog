@@ -11,6 +11,9 @@ Tekton task that extracts all rpms from the sboms and pushes them to Pyxis as an
 | server | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'. | Yes | production |
 | concurrentLimit | The maximum number of images to be processed at once | Yes | 4 |
 
+## Changes in 0.2.0
+* updated the base image used in this task
+
 ## Changes in 0.1.2
 * add support for production-internal and stage-internal
 

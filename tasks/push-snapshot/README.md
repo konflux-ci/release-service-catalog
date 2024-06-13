@@ -10,6 +10,9 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 4.6.0
+* Updated the base image used in this task
+
 ## Changes in 4.5.0
 * Tag expansion is removed in favor of doing it in the apply-mapping task
 
