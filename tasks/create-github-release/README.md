@@ -13,6 +13,10 @@ a `release` dir.
 | repository | The github repository to release to | No | - |
 | release_version | The version string to use creating the release | No | - |
 | content_directory | The directory inside the workspace to find files for release | No | - |
+| resultsDirPath | Path to results directory in the data workspace | No | - |
+
+## Changes in 2.0.0
+- The task now writes created artifacts to a results json file in the workspace
 
 ## Changes in 1.1.0
 - Updated the base image used in this task
