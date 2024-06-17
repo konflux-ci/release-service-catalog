@@ -22,6 +22,9 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 0.9.0
+- Add the task `update-cr-status` at the end of the pipeline to save all pipeline results
+
 ## Changes in 0.8.0
 - The create-advisory task now gets the `resultsDir` parameter from the collect-data results
 
