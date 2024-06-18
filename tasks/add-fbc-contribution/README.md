@@ -12,6 +12,10 @@ Task to create a internalrequest to add fbc contributions to index images
 | fromIndex      | fromIndex value updated by update-ocp-tag task                                            | No       |                      |
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
+| resultsDirPath | Path to results directory in the data workspace                                           | No       |                      |
+
+## changes in 3.0.0
+- the task now writes the updated targetIndex to a results json file in the workspace
 
 ## changes in 2.5.0
 - updated the base image used in this task
