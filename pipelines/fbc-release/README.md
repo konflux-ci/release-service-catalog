@@ -19,6 +19,9 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
 
+### Changes in 3.5.0
+- add the task `update-cr-status` at the end of the pipeline to save all pipeline results
+
 ### Changes in 3.4.0
 - The `add-fbc-contribution-to-index-image` and `extract-index-image` tasks now gets the `resultsDir` parameter from `collect-data` results
 
