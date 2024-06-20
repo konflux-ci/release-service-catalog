@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "4.7.0"
+    app.kubernetes.io/version: "5.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -17,6 +17,9 @@ spec:
       type: string
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: resultsDirPath
+      description: Path to the results directory in the data workspace
       type: string
     - name: retries
       description: Retry copy N times.
@@ -62,6 +65,8 @@ spec:
             printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
               "$2" "$3"
           fi
+          RESULTS_JSON=$(jq --arg name "$2" --arg url "$4:$5" '.images |= map(select(.name==$name).urls +=
+            [$url])' <<< "$RESULTS_JSON")
         }
 
         SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
@@ -75,6 +80,9 @@ spec:
             echo "No data JSON was provided."
             exit 1
         fi
+
+        RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/push-snapshot-results.json"
+        RESULTS_JSON='{"images":[]}'
 
         defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' $DATA_FILE)
         floatingTagsCount=$(jq '.images.floatingTags | length' $DATA_FILE)
@@ -99,9 +107,9 @@ spec:
           repository=$(jq -r '.repository' <<< $component)
           imageTags=$(jq '.tags' <<< $component)
 
+          arches=$(get-image-architectures "${containerImage}" | jq -s 'map(.platform.architecture)')
           # Just read the first from the list of architectures
-          read -r arch_json <<< $(get-image-architectures "${containerImage}")
-          arch=$(echo "${arch_json}" | jq -r .platform.architecture)
+          arch=$(jq -r '.[0]' <<< $arches)
           name=$(jq -r '.name' <<< $component)
           git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
 
@@ -110,6 +118,9 @@ spec:
             --no-tags \
             --format '{{.Digest}}' \
             "docker://${containerImage}" 2>/dev/null)
+
+          RESULTS_JSON=$(jq --arg i "$i" --argjson arches "$arches" --arg name "$name" --arg sha "$origin_digest" \
+            '.images[$i|tonumber] += {"arches": $arches, "name": $name, "shasum": $sha, "urls": []}' <<< $RESULTS_JSON)
 
           # Push source container if the component has pushSourceContainer: true or if the
           # pushSourceContainer key is missing from the component and the defaults has
@@ -229,4 +240,5 @@ spec:
             done
           fi
         done
+        echo -n "${RESULTS_JSON}" | tee $RESULTS_FILE
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"

@@ -8,7 +8,11 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 |--------------------|---------------------------------------------------------------------------|----------|----------------------|
 | snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       |                      |
 | dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       |                      |
+| resultsDirPath     | Path to results directory in the data workspace                           | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
+
+## Changes in 5.0.0
+* The task now writes pushed image details to a results json file in the workspace
 
 ## Changes in 4.7.0
 * Updated the base image used in this task
