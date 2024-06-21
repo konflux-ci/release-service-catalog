@@ -1,0 +1,132 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-cosign-image-multiple-components
+spec:
+  description: Test signing a single image with cosign 
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              # empty mock calls files
+              _TEST_MANIFEST_LIST_DIGEST="sha256:1111"
+              _TEST_MANIFEST_LIST_MDIGEST1="sha256:1111-1"
+              _TEST_MANIFEST_LIST_MDIGEST2="sha256:1111-2"
+              _TEST_MANIFEST_LIST_MDIGEST3="sha256:1111-3"
+              _TEST_MANIFEST_LIST_REFERENCE="registry.io/test-product/test-image0@${_TEST_MANIFEST_LIST_DIGEST}"
+              _TEST_MANIFEST_LIST_REPO="quay.io/test-product----test-image0"
+
+              _TEST_MANIFEST_LIST_OCI_DIGEST="sha256:0000"
+              _TEST_MANIFEST_LIST_OCI_MDIGEST1="sha256:0000-1"
+              _TEST_MANIFEST_LIST_OCI_MDIGEST2="sha256:0000-2"
+              _TEST_MANIFEST_LIST_OCI_MDIGEST3="sha256:0000-3"
+              _TEST_MANIFEST_LIST_OCI_REFERENCE="registry.io/test-product/test-image0@${_TEST_MANIFEST_LIST_OCI_DIGEST}"
+              _TEST_MANIFEST_LIST_OCI_REPO="quay.io/test-product----test-image0"
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "$_TEST_MANIFEST_LIST_REFERENCE",
+                    "repository": "$_TEST_MANIFEST_LIST_REPO"
+                  },
+                  {
+                    "name": "comp0",
+                    "containerImage": "$_TEST_MANIFEST_LIST_OCI_REFERENCE",
+                    "repository": "$_TEST_MANIFEST_LIST_OCI_REPO"
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "sign": {
+                  "request": "hacbs-signing-pipeline",
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: rh-sign-cosign-image
+      params:
+        - name: snapshotPath
+          value: snapshot_spec.json
+        - name: dataPath
+          value: data.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              echo "check results"
+              _TEST_PUB_REPO="registry.io/test-product/test-image0"
+              _TEST_REPO="quay.io/test-product----test-image0"
+
+              EXPECTED=$(cat <<EOF
+              docker://${_TEST_REPO}@sha256:1111
+              docker://${_TEST_REPO}@sha256:0000
+              EOF
+              )
+              CALLS=$(cat "$(workspaces.data.path)/mock_run_inspect_calls")
+              [ "$CALLS" = "$EXPECTED" ] || exit 1
+              CALLS=$(cat "$(workspaces.data.path)/mock_run_cosign_calls")
+              PRE_ARGS="AWS_REGION=us-test-1 AWS_ACCESS_KEY_ID=test-access-key AWS_SECRET_ACCESS_KEY=test-secret-access-key"
+              COMMON_ARGS="-t 3m0s sign --key aws://arn:mykey --registry-username test-registry-user --registry-password test-registry-user-password"
+              EXPECTED=$(cat <<EOF
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:1111-1 ${_TEST_REPO}@sha256:1111-1
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:1111-2 ${_TEST_REPO}@sha256:1111-2
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:1111-3 ${_TEST_REPO}@sha256:1111-3
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:1111 ${_TEST_REPO}@sha256:1111
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:0000-1 ${_TEST_REPO}@sha256:0000-1
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:0000-2 ${_TEST_REPO}@sha256:0000-2
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:0000-3 ${_TEST_REPO}@sha256:0000-3
+              $PRE_ARGS cosign $COMMON_ARGS --sign-container-identity ${_TEST_PUB_REPO}@sha256:0000 ${_TEST_REPO}@sha256:0000
+              EOF
+              )
+              [ "$CALLS" = "$EXPECTED" ] || exit 1
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: delete-crs
+            image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+            script: |
+              #!/usr/bin/env sh
+              set -eux 
+              rm $(workspaces.data.path)/mock_run_inspect_calls || true
+              rm $(workspaces.data.path)/mock_run_cosign_calls || true

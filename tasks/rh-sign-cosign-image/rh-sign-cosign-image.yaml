@@ -1,0 +1,119 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rh-sign-cosign-image
+  labels:
+    app.kubernetes.io/version: "1.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Task to sign container images in a Snapshot spec using the cosign.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+      default: "snapshot_spec.json"
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+      default: "data.json"
+  workspaces:
+    - name: data
+      description: workspace to read and save files
+  steps:
+    - name: sign-image
+      image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      script: |
+        #!/usr/bin/env bash
+        if [ "$TEST" != "1" ]; then
+          function kubectl_get_arg_from_config_map() {
+            kubectl get configmap $1 -o jsonpath='{.data.$2}'
+          }
+          function run_inspect() {
+            skopeo inspect --raw $1
+          }
+          function run_cosign () {
+            cosign $@
+          }
+        fi
+        function fetch_cosign_key() {
+          echo $(kubectl_get_arg_from_config_map $1 SIG_KEY)
+        } 
+        function fetch_aws_region() {
+          echo $(kubectl_get_arg_from_config_map $1 AWS_REGION)
+        } 
+        function fetch_aws_access_key() {
+          echo $(kubectl_get_arg_from_config_map $1 AWS_ACCESS_KEY)
+        } 
+        function fetch_aws_secret_access_key() {
+          echo $(kubectl_get_arg_from_config_map $1 AWS_SECRET_ACCESS_KEY)
+        } 
+        function fetch_registry_user() {
+          echo $(kubectl_get_arg_from_config_map $1 REGISTRY_USER)
+        } 
+        function fetch_registry_password() {
+          echo $(kubectl_get_arg_from_config_map $1 REGISTRY_PASSWORD)
+        }
+
+        SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        request=$(jq -r '.sign.request // "hacbs-signing-pipeline"' ${DATA_FILE})
+        CONFIG_MAP_NAME=$(jq -rc '.sign.configMapName // "signing-config-map"' ${DATA_FILE})
+
+        COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
+
+        COSIGN_SIG_KEY=$(fetch_cosign_key $CONFIG_MAP_NAME)
+        AWS_REGION=$(fetch_aws_region $CONFIG_MAP_NAME)
+        AWS_ACCESS_KEY=$(fetch_aws_access_key $CONFIG_MAP_NAME)
+        AWS_SECRET_ACCESS_KEY=$(fetch_aws_secret_access_key $CONFIG_MAP_NAME)
+        COSIGN_REGISTRY_USER=$(fetch_registry_user $CONFIG_MAP_NAME)
+        COSIGN_REGISTRY_PASSWORD=$(fetch_registry_password $CONFIG_MAP_NAME)
+
+        for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
+            PUB_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" ${SNAPSHOT_PATH})
+            PUB_CONTAINER_REF="${PUB_CONTAINER_IMAGE/@*}"
+            DIGEST="${PUB_CONTAINER_IMAGE/*@}"
+            INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
+            COSIGN_PRE_ARGS="AWS_REGION=${AWS_REGION} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            COSIGN_COMMON_ARGS="--key ${COSIGN_SIG_KEY} --registry-username ${COSIGN_REGISTRY_USER} --registry-password ${COSIGN_REGISTRY_PASSWORD}"
+
+            IMAGE=$(run_inspect "docker://${INTERNAL_CONTAINER_REF}@${DIGEST}")
+            MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
+            LIST=0
+            if [ "$MEDIA_TYPE" = "application/vnd.docker.distribution.manifest.list.v2+json" ]; then LIST=1; fi
+            if [ "$MEDIA_TYPE" = "application/vnd.oci.image.index.v1+json" ]; then LIST=1; fi
+
+            # if manifest list, sign each manifest + ml itself
+            if [ $LIST -eq 1 ]; then
+              PUB_REPO_REF="${PUB_CONTAINER_REF}@${DIGEST}"
+              for MANIFEST in $(echo "$IMAGE" | jq -rc '.manifests[]'); do
+                MDIGEST=$(echo "$MANIFEST" | jq '.digest' | tr -d \" )
+                run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
+                  ${COSIGN_COMMON_ARGS}\
+                  --sign-container-identity "${PUB_CONTAINER_REF}@${MDIGEST}"\
+                  "${INTERNAL_CONTAINER_REF}@${MDIGEST}"
+              done
+              # if sign ml itself
+              run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
+                ${COSIGN_COMMON_ARGS}\
+                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
+                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
+            # no list, sign only manifest
+            else
+              run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
+                ${COSIGN_COMMON_ARGS}\
+                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
+                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
+            fi
+            echo "done"
+        done
+
