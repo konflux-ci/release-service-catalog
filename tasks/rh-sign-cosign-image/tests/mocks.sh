@@ -159,22 +159,31 @@ EOF
 )
 
 
-
 function kubectl_get_arg_from_config_map() {
   echo "$@" >> $(workspaces.data.path)/mock_kubectl_get_arg_from_config_map_calls
   echo "$_CONFIG_MAP" | jq -r ".data.$2" | tr -d \"
 }
-function run_inspect() {
-  echo "$@" >> $(workspaces.data.path)/mock_run_inspect_calls
-  if [ "$1" = "docker://${_TEST_MANIFEST_LIST_OCI_REFERENCE}" ]; then
-    echo "$_DOCKER_MANIFEST_LIST_OCI" | jq -rc
-  elif [ "$1" = "docker://${_TEST_MANIFEST_LIST_REFERENCE}" ]; then
-    echo "$_DOCKER_MANIFEST_LIST" | jq -rc
-  elif [ "$1" = "docker://${_TEST_MANIFEST_REFERENCE}" ]; then
-    echo "$_DOCKER_MANIFEST" | jq -rc
+function kubectl() {
+  echo "$@" >> $(workspaces.data.path)/mock_kubectl_calls
+  if [ "$1" = "get" ]; then
+    if [ "$2" = "configmap" ]; then
+        echo "$_CONFIG_MAP" | jq -r ".data.$4" | tr -d \"
+    fi
   fi
 }
-function run_cosign () {
-  echo "$@" >> $(workspaces.data.path)/mock_run_cosign_calls
+function skopeo() {
+  echo "$@" >> $(workspaces.data.path)/mock_skopeo_calls
+  if [ "$1" = "inspect" ]; then
+    if [ "$3" = "docker://${_TEST_MANIFEST_LIST_OCI_REFERENCE}" ]; then
+      echo "$_DOCKER_MANIFEST_LIST_OCI" | jq -rc
+    elif [ "$3" = "docker://${_TEST_MANIFEST_LIST_REFERENCE}" ]; then
+      echo "$_DOCKER_MANIFEST_LIST" | jq -rc
+    elif [ "$3" = "docker://${_TEST_MANIFEST_REFERENCE}" ]; then
+      echo "$_DOCKER_MANIFEST" | jq -rc
+    fi
+  fi
+}
+function cosign () {
+  echo "$@" >> $(workspaces.data.path)/mock_cosign_calls
   echo "running cosign: $@"
 }
