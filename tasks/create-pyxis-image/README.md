@@ -20,6 +20,9 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | No | |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace. Only required if commonTags is not set or empty. | No | |
 
+## Changes in 2.8.0
+* Updated the base image used in this task
+
 ## Changes in 2.7.1
 * Only run the cleanup_tags script to clean up tags from previous images if rhPush=true
   * The script expects to find a registry.access.redhat.com repository entry for the image
