@@ -10,22 +10,19 @@ _TEST_MANIFEST_LIST_OCI_DIGEST="sha256:0000"
 _TEST_MANIFEST_LIST_OCI_MDIGEST1="sha256:0000-1"
 _TEST_MANIFEST_LIST_OCI_MDIGEST2="sha256:0000-2"
 _TEST_MANIFEST_LIST_OCI_MDIGEST3="sha256:0000-3"
-_TEST_MANIFEST_LIST_OCI_REFERENCE="registry.io/test-product/test-image0@${_TEST_MANIFEST_LIST_OCI_DIGEST}"
-_TEST_MANIFEST_LIST_OCI_PUB_REPO="registry.io/test-product/test-image0"
-
-_TEST_MANIFEST_LIST_OCI_REPO="quay.io/test-product----test-image0"
+_TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/test-product----test-image0@${_TEST_MANIFEST_LIST_OCI_DIGEST}"
+_TEST_MANIFEST_LIST_OCI_REPO="registry.redhat.io/test-product/test-image0"
 
 _TEST_MANIFEST_LIST_DIGEST="sha256:1111"
 _TEST_MANIFEST_LIST_MDIGEST1="sha256:1111-1"
 _TEST_MANIFEST_LIST_MDIGEST2="sha256:1111-2"
 _TEST_MANIFEST_LIST_MDIGEST3="sha256:1111-3"
-_TEST_MANIFEST_LIST_REFERENCE="registry.io/test-product/test-image0@${_TEST_MANIFEST_LIST_DIGEST}"
-_TEST_MANIFEST_LIST_PUB_REPO="registry.io/test-product/test-image0"
-_TEST_MANIFEST_LIST_REPO="quay.io/test-product----test-image0"
+_TEST_MANIFEST_LIST_REFERENCE="quay.io/test-product----test-image0@${_TEST_MANIFEST_LIST_DIGEST}"
+_TEST_MANIFEST_LIST_REPO="registry.redhat.io/test-product/test-image0"
 
 _TEST_MANIFEST_DIGEST="sha256:2222"
-_TEST_MANIFEST_REFERENCE="registry.io/test-product/test-image0@${_TEST_MANIFEST_DIGEST}"
-_TEST_MANIFEST_REPO="quay.io/test-product----test-image0"
+_TEST_MANIFEST_REFERENCE="quay.io/test-product----test-image0@${_TEST_MANIFEST_DIGEST}"
+_TEST_MANIFEST_REPO="registry.redhat.io/test-product/test-image0"
 
 _CONFIG_MAP=$(cat << EOF
 {
@@ -38,12 +35,7 @@ _CONFIG_MAP=$(cat << EOF
     }
   },
   "data": {
-    "SIG_KEY": "aws://arn:mykey",
-    "AWS_REGION": "us-test-1",
-    "AWS_ACCESS_KEY": "test-access-key",
-    "AWS_SECRET_ACCESS_KEY": "test-secret-access-key",
-    "REGISTRY_USER": "test-registry-user",
-    "REGISTRY_PASSWORD": "test-registry-user-password"
+    "SIG_KEY": "aws://arn:mykey"
   }
 }
 EOF
@@ -174,11 +166,11 @@ function kubectl_get_arg_from_config_map() {
 }
 function run_inspect() {
   echo "$@" >> $(workspaces.data.path)/mock_run_inspect_calls
-  if [ "$1" = "docker://${_TEST_MANIFEST_LIST_OCI_REPO}@${_TEST_MANIFEST_LIST_OCI_DIGEST}" ]; then
+  if [ "$1" = "docker://${_TEST_MANIFEST_LIST_OCI_REFERENCE}" ]; then
     echo "$_DOCKER_MANIFEST_LIST_OCI" | jq -rc
-  elif [ "$1" = "docker://${_TEST_MANIFEST_LIST_REPO}@${_TEST_MANIFEST_LIST_DIGEST}" ]; then
+  elif [ "$1" = "docker://${_TEST_MANIFEST_LIST_REFERENCE}" ]; then
     echo "$_DOCKER_MANIFEST_LIST" | jq -rc
-  elif [ "$1" = "docker://${_TEST_MANIFEST_REPO}@${_TEST_MANIFEST_DIGEST}" ]; then
+  elif [ "$1" = "docker://${_TEST_MANIFEST_REFERENCE}" ]; then
     echo "$_DOCKER_MANIFEST" | jq -rc
   fi
 }
