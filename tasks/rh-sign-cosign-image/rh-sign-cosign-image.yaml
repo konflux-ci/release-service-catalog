@@ -20,14 +20,34 @@ spec:
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
       default: "data.json"
+    - name: secretName
+      description: Name of secret containing needed credentials 
+      type: string
   workspaces:
     - name: data
       description: workspace to read and save files
   steps:
     - name: sign-image
       image: quay.io/redhat-appstudio/release-service-utils:447ea0580a2cdd48b4091e1df86fab5c3f86d01c
+      env:
+        - name: AWS_REGION
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: AWS_REGION
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: AWS_SECRET_ACCESS_KEY
       script: |
         #!/usr/bin/env bash
+        set -eu
         if [ "$TEST" != "1" ]; then
           function kubectl_get_arg_from_config_map() {
             kubectl get configmap $1 -o jsonpath='{.data.$2}'
@@ -42,21 +62,6 @@ spec:
         function fetch_cosign_key() {
           echo $(kubectl_get_arg_from_config_map $1 SIG_KEY)
         } 
-        function fetch_aws_region() {
-          echo $(kubectl_get_arg_from_config_map $1 AWS_REGION)
-        } 
-        function fetch_aws_access_key() {
-          echo $(kubectl_get_arg_from_config_map $1 AWS_ACCESS_KEY)
-        } 
-        function fetch_aws_secret_access_key() {
-          echo $(kubectl_get_arg_from_config_map $1 AWS_SECRET_ACCESS_KEY)
-        } 
-        function fetch_registry_user() {
-          echo $(kubectl_get_arg_from_config_map $1 REGISTRY_USER)
-        } 
-        function fetch_registry_password() {
-          echo $(kubectl_get_arg_from_config_map $1 REGISTRY_PASSWORD)
-        }
 
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
 
@@ -72,19 +77,14 @@ spec:
         COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
 
         COSIGN_SIG_KEY=$(fetch_cosign_key $CONFIG_MAP_NAME)
-        AWS_REGION=$(fetch_aws_region $CONFIG_MAP_NAME)
-        AWS_ACCESS_KEY=$(fetch_aws_access_key $CONFIG_MAP_NAME)
-        AWS_SECRET_ACCESS_KEY=$(fetch_aws_secret_access_key $CONFIG_MAP_NAME)
-        COSIGN_REGISTRY_USER=$(fetch_registry_user $CONFIG_MAP_NAME)
-        COSIGN_REGISTRY_PASSWORD=$(fetch_registry_password $CONFIG_MAP_NAME)
 
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
             PUB_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" ${SNAPSHOT_PATH})
             PUB_CONTAINER_REF="${PUB_CONTAINER_IMAGE/@*}"
             DIGEST="${PUB_CONTAINER_IMAGE/*@}"
             INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
-            COSIGN_PRE_ARGS="AWS_REGION=${AWS_REGION} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
-            COSIGN_COMMON_ARGS="--key ${COSIGN_SIG_KEY} --registry-username ${COSIGN_REGISTRY_USER} --registry-password ${COSIGN_REGISTRY_PASSWORD}"
+            COSIGN_PRE_ARGS="AWS_REGION=${AWS_REGION} AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+            COSIGN_COMMON_ARGS="--key ${COSIGN_SIG_KEY}"
 
             IMAGE=$(run_inspect "docker://${INTERNAL_CONTAINER_REF}@${DIGEST}")
             MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
@@ -95,25 +95,18 @@ spec:
             # if manifest list, sign each manifest + ml itself
             if [ $LIST -eq 1 ]; then
               PUB_REPO_REF="${PUB_CONTAINER_REF}@${DIGEST}"
-              for MANIFEST in $(echo "$IMAGE" | jq -rc '.manifests[]'); do
-                MDIGEST=$(echo "$MANIFEST" | jq '.digest' | tr -d \" )
+              for MDIGEST in $(echo "$IMAGE" | jq -rc '.manifests[]|.digest'); do
                 run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
                   ${COSIGN_COMMON_ARGS}\
                   --sign-container-identity "${PUB_CONTAINER_REF}@${MDIGEST}"\
                   "${INTERNAL_CONTAINER_REF}@${MDIGEST}"
               done
-              # if sign ml itself
-              run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
-                ${COSIGN_COMMON_ARGS}\
-                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
-                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
-            # no list, sign only manifest
-            else
-              run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
-                ${COSIGN_COMMON_ARGS}\
-                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
-                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
             fi
+              # if sign ml itself or just manifest (if it's not list)
+              run_cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
+                ${COSIGN_COMMON_ARGS}\
+                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
+                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
             echo "done"
         done
 
