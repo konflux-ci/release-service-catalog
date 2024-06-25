@@ -1,0 +1,70 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-exodus-params
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task that prepares exodus configuration options from the data file
+  params:
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data containing the exodus configuration options to use
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot spec json file resides
+  results:
+    - name: exodusGwUrl
+      type: string
+      description: |
+        The URL of the Exodus Gateway to use
+    - name: exodusGwEnv
+      type: string
+      description: |
+        The environment of the Exodus Gateway to use
+    - name: exodusGwSecret
+      type: string
+      description: |
+        The kubernetes secret to use to authenticate to exodus-gateway. It needs to contain two keys: key and cert
+  steps:
+    - name: collect-exodus-params
+      image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+      script: |
+        #!/usr/bin/env sh
+        set -x
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        if [ $(jq '.exodus | has("env")' $DATA_FILE) == false ] ; then
+            echo "Exodus env missing in data JSON file"
+            exit 1
+        fi
+
+        EXODUS_ENV=$(jq -r '.exodus.env' $DATA_FILE)
+        EXODUS_GW_URL="https://exodus-gw.corp.redhat.com"
+        EXODUS_GW_ENV="live"
+        EXODUS_GW_SECRET="exodus-prod-secret"
+
+        # Check if EXODUS_ENV contains "cdn-qa"
+        if [[ "$EXODUS_ENV" == *"cdn-qa"* ]]; then
+          EXODUS_GW_SECRET="exodus-stage-secret"
+          EXODUS_GW_URL="https://exodus-gw.corp.stage.redhat.com"
+        fi
+
+        # Check if EXODUS_ENV contains "cdn-stage"
+        if [[ "$EXODUS_ENV" == *"cdn-stage"* ]]; then
+          EXODUS_GW_ENV="pre"
+        fi
+
+        echo $EXODUS_GW_SECRET > $(results.exodusGwSecret.path)
+        echo $EXODUS_GW_URL > $(results.exodusGwUrl.path)
+        echo $EXODUS_GW_ENV > $(results.exodusGwEnv.path)
