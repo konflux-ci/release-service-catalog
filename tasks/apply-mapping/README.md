@@ -25,6 +25,9 @@ This task supports variable expansion in tag values from the mapping. The curren
 | dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
 
+## Changes in 1.2.0
+ * The `mapped` result is false if any component has no tags defined
+
 ## Changes in 1.1.0
  * Updated the base image used in this task
 
