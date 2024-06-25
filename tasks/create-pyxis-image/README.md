@@ -18,6 +18,9 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | rhPush | If set to true, an additional entry will be created in ContainerImage.repositories with the registry and repository fields converted to use Red Hat's official registry. E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted to use registry "registry.access.redhat.com" and repository "product/my-image". Also, this repository entry will be marked as published. | Yes | false |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace | No | |
 
+## Changes in 3.1.0
+* added support for OCI artifacts.
+
 ## Changes in 3.0.0
 * `dataPath` and `commonTags` parameters removed
   * These were only used for determining the tags to create the pyxis image with. These now come from the individual

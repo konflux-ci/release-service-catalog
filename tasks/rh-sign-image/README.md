@@ -13,6 +13,9 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 3.1.0
+* added support for OCI artifacts.
+
 ## Changes in 3.0.0
 * `images.pushSourceContainer` is no longer supported
 * `commonTags` parameter removed in favor of component tags in the snapshot spec file
