@@ -41,14 +41,9 @@ spec:
         #!/usr/bin/env bash
         set -eux
 
-        push_image () { # Expected arguments are [origin_digest, name, containerImage, repository, tag, arch]
+        push_image () { # Expected arguments are [origin_digest, name, containerImage, repository, tag, oras_args]
           # note: Inspection might fail on empty repos, hence `|| true`
-          destination_digest=$(
-            skopeo inspect \
-            --override-arch "$6" \
-            --no-tags \
-            --format '{{.Digest}}' \
-            "docker://$4:$5" 2>/dev/null || true)
+          destination_digest=$(oras resolve --registry-config "$AUTH_FILE" "${6:-}" "$4:$5" 2>/dev/null || true)
 
           if [[ "$destination_digest" != "$1" || -z "$destination_digest" ]]; then
             printf '* Pushing component: %s to %s:%s\n' "$2" "$4" "$5"
@@ -107,17 +102,22 @@ spec:
           repository=$(jq -r '.repository' <<< $component)
           imageTags=$(jq '.tags' <<< $component)
 
-          arches=$(get-image-architectures "${containerImage}" | jq -s 'map(.platform.architecture)')
+          AUTH_FILE=$(mktemp)
+          select-oci-auth "${containerImage}" > "$AUTH_FILE"
+
           # Just read the first from the list of architectures
-          arch=$(jq -r '.[0]' <<< $arches)
+          read -r arch_json <<< $(get-image-architectures "${containerImage}")
+          os=$(echo "${arch_json}" | jq -r .platform.os)
+          arch=$(echo "${arch_json}" | jq -r .platform.architecture)
           name=$(jq -r '.name' <<< $component)
           git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
+          media_type=$(skopeo inspect --raw "docker://${containerImage}" | jq -r .mediaType)
+          oras_args=()
+          if [ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]; then
+            oras_args+=("--platform $os/$arch")
+          fi
 
-          origin_digest=$(skopeo inspect \
-            --override-arch "${arch}" \
-            --no-tags \
-            --format '{{.Digest}}' \
-            "docker://${containerImage}" 2>/dev/null)
+          origin_digest=$(oras resolve --registry-config "$AUTH_FILE" "${oras_args[@]}" "${containerImage}" 2>/dev/null)
 
           RESULTS_JSON=$(jq --arg i "$i" --argjson arches "$arches" --arg name "$name" --arg sha "$origin_digest" \
             '.images[$i|tonumber] += {"arches": $arches, "name": $name, "shasum": $sha, "urls": []}' <<< $RESULTS_JSON)
@@ -134,11 +134,7 @@ spec:
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
             # Check if the source container exists
-            source_container_digest=$(skopeo inspect \
-              --override-arch "${arch}" \
-              --no-tags \
-              --format '{{.Digest}}' \
-              "docker://${sourceContainer}" 2>/dev/null)
+            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" ${oras_args[@]} "${sourceContainer}" 2>/dev/null)
 
             if [ -z "$source_container_digest" ] ; then
               echo "Error: Source container ${sourceContainer} not found!"
@@ -147,20 +143,20 @@ spec:
             # Push the source image with the source tag here. The source image will be
             # pushed with the provided tags below in the loop
             push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-              "${repository}" "${source_tag}" "${arch}"
+              "${repository}" "${source_tag}" "${oras_args[@]}"
           fi
 
           if [[ $(jq 'length' <<< $imageTags) -ne 0 ]] ; then
             for tag in $(jq -r '.[]' <<< $imageTags) ; do
               # Push the container image
               push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" \
-              "${arch}"
+              "${oras_args[@]}"
 
               # This variable will only exist if the above logic determined the source container should
               # be pushed for this component
               if [ -n "${source_container_digest-}" ] ; then
                 push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-                  "${repository}" "${tag}-source" "${arch}"
+                  "${repository}" "${tag}-source" "${oras_args[@]}"
               fi
             done
             continue
@@ -177,23 +173,23 @@ spec:
             for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
               # Push the container image
               push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${floatingTag}" \
-              "${arch}"
+              "${oras_args[@]}"
               push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" \
-              "${floatingTag}-${timestamp}" "${arch}"
+              "${floatingTag}-${timestamp}" "${oras_args[@]}"
             done
           else
             defaultTag=$(jq -r '.images.defaultTag // "latest"' "${DATA_FILE}")
             tag=$(jq -r --arg defaultTag $defaultTag '.tag // $defaultTag' <<< $component)
-            push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" "${arch}"
+            push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" "${oras_args[@]}"
           fi
           if [[ $(jq -r ".images.addTimestampTag" "${DATA_FILE}") == "true" ]] ; then # Default to false
             timestamp=$(date +"%Y-%m-%dT%H:%M:%SZ" | sed 's/:/-/g')
-            push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "$timestamp" "${arch}"
+            push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "$timestamp" "${oras_args[@]}"
           fi
           if [[ $(jq -r ".images.addGitShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
             if [ "${git_sha}" != "null" ] ; then
-              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}" "${arch}"
-              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha}" "${arch}"
+              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}" "${oras_args[@]}"
+              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha}" "${oras_args[@]}"
             else
               printf 'Asked to create git sha based tag, but no git sha found in %s\n' "${component}"
               exit 1
@@ -203,7 +199,7 @@ spec:
             if [[ "${containerImage}" == *"@sha256"* && $(echo "${containerImage}" | tr -cd ':' | wc -c) -eq 1 ]]
             then
               sha=$(echo "${containerImage}" | cut -d ':' -f 2)
-              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${sha}" "${arch}"
+              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${sha}" "${oras_args[@]}"
             else
               printf 'Asked to create source sha based tag, but no sha found in %s\n' "${containerImage}"
               exit 1
@@ -216,11 +212,7 @@ spec:
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
             # Check if the source container exists
-            source_container_digest=$(skopeo inspect \
-              --override-arch "${arch}" \
-              --no-tags \
-              --format '{{.Digest}}' \
-              "docker://${sourceContainer}" 2>/dev/null)
+            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" "${oras_args[@]}" "${sourceContainer}" 2>/dev/null)
 
             if [ -z "$source_container_digest" ] ; then
               echo "Error: Source container ${sourceContainer} not found!"
@@ -231,12 +223,12 @@ spec:
               exit 1
             fi
             push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-              "${repository}" "${source_tag}" "${arch}"
+              "${repository}" "${source_tag}" "${oras_args[@]}"
             for floatingTag in $(jq -r '.images.floatingTags[]' $DATA_FILE) ; do
               push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${floatingTag}-source" "${arch}"
+                "${repository}" "${floatingTag}-source" "${oras_args[@]}"
               push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${floatingTag}-${timestamp}-source" "${arch}"
+                "${repository}" "${floatingTag}-${timestamp}-source" "${oras_args[@]}"
             done
           fi
         done
