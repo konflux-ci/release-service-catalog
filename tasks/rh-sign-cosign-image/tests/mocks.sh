@@ -8,19 +8,19 @@ _TEST_MANIFEST_LIST_OCI_DIGEST="sha256:0000"
 _TEST_MANIFEST_LIST_OCI_MDIGEST1="sha256:0000-1"
 _TEST_MANIFEST_LIST_OCI_MDIGEST2="sha256:0000-2"
 _TEST_MANIFEST_LIST_OCI_MDIGEST3="sha256:0000-3"
-_TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/test-product----test-image0@${_TEST_MANIFEST_LIST_OCI_DIGEST}"
-_TEST_MANIFEST_LIST_OCI_REPO="registry.redhat.io/test-product/test-image0"
+_TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/redhat-pending/test-product----test-image0@${_TEST_MANIFEST_LIST_OCI_DIGEST}"
+#_TEST_MANIFEST_LIST_OCI_REPO="registry.redhat.io/test-product/test-image0"
 
 _TEST_MANIFEST_LIST_DIGEST="sha256:1111"
 _TEST_MANIFEST_LIST_MDIGEST1="sha256:1111-1"
 _TEST_MANIFEST_LIST_MDIGEST2="sha256:1111-2"
 _TEST_MANIFEST_LIST_MDIGEST3="sha256:1111-3"
-_TEST_MANIFEST_LIST_REFERENCE="quay.io/test-product----test-image0@${_TEST_MANIFEST_LIST_DIGEST}"
-_TEST_MANIFEST_LIST_REPO="registry.redhat.io/test-product/test-image0"
+_TEST_MANIFEST_LIST_REFERENCE="quay.io/redhat-pending/test-product----test-image0@${_TEST_MANIFEST_LIST_DIGEST}"
+#_TEST_MANIFEST_LIST_REPO="registry.redhat.io/test-product/test-image0"
 
 _TEST_MANIFEST_DIGEST="sha256:2222"
-_TEST_MANIFEST_REFERENCE="quay.io/test-product----test-image0@${_TEST_MANIFEST_DIGEST}"
-_TEST_MANIFEST_REPO="registry.redhat.io/test-product/test-image0"
+_TEST_MANIFEST_REFERENCE="quay.io/redhat-pending/test-product----test-image0@${_TEST_MANIFEST_DIGEST}"
+#_TEST_MANIFEST_REPO="registry.redhat.io/test-product/test-image0"
 
 _CONFIG_MAP=$(cat << EOF
 {
@@ -165,7 +165,7 @@ function kubectl() {
   echo "$@" >> $(workspaces.data.path)/mock_kubectl_calls
   if [ "$1" = "get" ]; then
     if [ "$2" = "configmap" ]; then
-        echo "$_CONFIG_MAP" | jq -r ".data.$4" | tr -d \"
+        echo "$_CONFIG_MAP"
     fi
   fi
 }

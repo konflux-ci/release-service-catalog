@@ -47,7 +47,7 @@ spec:
         #!/usr/bin/env bash
         set -eu
         function fetch_cosign_key() {
-          echo $(kubectl_get_arg_from_config_map $1 SIG_KEY)
+          kubectl get configmap --output json | jq -r ".data.SIG_KEY" | tr -d \"
         } 
 
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
@@ -66,16 +66,15 @@ spec:
         COSIGN_SIG_KEY=$(fetch_cosign_key $CONFIG_MAP_NAME)
 
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
-            INTERNAL_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" ${SNAPSHOT_PATH})
-            INTERNAL_CONTAINER_REF="${INTERNAL_CONTAINER_IMAGE/@*}"
-            DIGEST="${INTERNAL_CONTAINER_IMAGE/*@}"
+            BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" ${SNAPSHOT_PATH})
+            DIGEST="${BUILD_CONTAINER_IMAGE/*@}"
 
-            PUB_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
+            COMPONENT_NAME=$(jq -r ".components[${COMPONENTS_INDEX}].name" ${SNAPSHOT_PATH})
+            echo "Processing component ${COMPONENT_NAME}"
+            INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
+            INTERNAL_CONTAINER_IMAGE="${INTERNAL_CONTAINER_REF}@${DIGEST}"
+            PUB_CONTAINER_REF=$(translate-delivery-repo $INTERNAL_CONTAINER_REF | jq -rc ".[0]|.url" | tr -d \")
             PUB_CONTAINER_IMAGE="${PUB_CONTAINER_REF}@${DIGEST}"
-
-            COSIGN_PRE_ARGS="AWS_REGION=${AWS_REGION}"
-            COSIGN_PRE_ARGS="$COSIGN_PRE_ARGS AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
-            COSIGN_PRE_ARGS="$COSIGN_PRE_ARGS AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
             COSIGN_COMMON_ARGS="--key ${COSIGN_SIG_KEY}"
 
             IMAGE=$(skopeo inspect --raw "docker://${INTERNAL_CONTAINER_IMAGE}")
@@ -88,16 +87,18 @@ spec:
             if [ $LIST -eq 1 ]; then
               PUB_REPO_REF="${PUB_CONTAINER_REF}@${DIGEST}"
               for MDIGEST in $(echo "$IMAGE" | jq -rc '.manifests[]|.digest'); do
-                cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
-                  ${COSIGN_COMMON_ARGS}\
-                  --sign-container-identity "${PUB_CONTAINER_REF}@${MDIGEST}"\
-                  "${INTERNAL_CONTAINER_REF}@${MDIGEST}"
+                echo "Signing manifest ${INTERNAL_CONTAINER_REF}@${MDIGEST}"
+                cosign -t 3m0s sign\
+                ${COSIGN_COMMON_ARGS}\
+                --sign-container-identity "${PUB_CONTAINER_REF}@${MDIGEST}"\
+                "${INTERNAL_CONTAINER_REF}@${MDIGEST}"
               done
             fi
               # if sign ml itself or just manifest (if it's not list)
-              cosign ${COSIGN_PRE_ARGS} cosign -t 3m0s sign\
-                ${COSIGN_COMMON_ARGS}\
-                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
-                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
+              echo "Signing manifest ${INTERNAL_CONTAINER_REF}@${DIGEST}"
+              cosign -t 3m0s sign\
+              ${COSIGN_COMMON_ARGS}\
+              --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
+              "${INTERNAL_CONTAINER_REF}@${DIGEST}"
             echo "done"
         done
