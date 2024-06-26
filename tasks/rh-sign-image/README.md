@@ -9,10 +9,13 @@ Task to create internalrequests to sign snapshot components
 | snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | No       |                      |
 | dataPath        | Path to the JSON string of the merged data to use in the data workspace                   | No       |                      |
 | requester       | Name of the user that requested the signing, for auditing purpose                         | No       |                      |
-| commonTags      | Space separated list of common tags to be used when publishing                            | No       |                      |
 | requestTimeout  | InternalRequest timeout                                                                   | Yes      | 180                  |
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
+
+## Changes in 3.0.0
+* `images.pushSourceContainer` is no longer supported
+* `commonTags` parameter removed in favor of component tags in the snapshot spec file
 
 ## Changes in 2.7.0
 * Updated the base image used in this task
