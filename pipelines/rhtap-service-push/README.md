@@ -21,6 +21,9 @@
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.9.0
+- The `create-pyxis-image` task no longer receives the `dataPath` parameter
+
 ## Changes in 3.8.0
 - The `push-snapshot` task now gets the `resultsDirPath` parameter from `collect-data` results
 
