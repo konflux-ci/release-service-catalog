@@ -21,7 +21,7 @@ function upload_rpm_manifest() {
   echo Mock upload_rpm_manifest called with: $*
   echo $* >> $(workspaces.data.path)/mock_upload_rpm_manifest.txt
 
-  if [[ "$*" != "--retry --image-id "*" --sbom-path "*".json" ]]
+  if [[ "$*" != "--retry --image-id "*" --sbom-path "*".json --verbose" ]]
   then
     echo Error: Unexpected call
     exit 1
