@@ -18,6 +18,8 @@ Tekton release pipeline to interact with FBC Pipeline
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                               | Yes       | true                                                            |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                    | Yes       | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                           | No        | -                                                               |
+### Changes in 3.6.0
+- Removed `verify-access-to-resources` script and replaced it with a task.
 
 ### Changes in 3.5.0
 - add the task `update-cr-status` at the end of the pipeline to save all pipeline results

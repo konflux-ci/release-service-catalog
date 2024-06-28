@@ -19,6 +19,9 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 4.9.0
+- Removed `verify-access-to-resources` script and replaced it with a task
+
 ## Changes in 4.8.0
 - The `create-pyxis-image` task no longer receives the `dataPath` parameter
 
