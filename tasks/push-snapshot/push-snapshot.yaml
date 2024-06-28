@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "5.0.0"
+    app.kubernetes.io/version: "5.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -36,14 +36,14 @@ spec:
       description: The workspace where the snapshot spec and data json files reside
   steps:
     - name: push-snapshot
-      image: quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service/release-service-utils:on-pr-2357f8549eb9fe04b0b60f9b9f0bd894fb4a9a8f
+      image: quay.io/konflux-ci/release-service-utils:12841cd2a35711b24a6749a93569d4118b173d
       script: |
         #!/usr/bin/env bash
         set -eux
 
         push_image () { # Expected arguments are [origin_digest, name, containerImage, repository, tag, oras_args]
           # note: Inspection might fail on empty repos, hence `|| true`
-          destination_digest=$(oras resolve --registry-config "$AUTH_FILE" "${6:-}" "$4:$5" 2>/dev/null || true)
+          destination_digest=$(oras resolve --registry-config "$AUTH_FILE" "$6" "$4:$5" 2>/dev/null || true)
 
           if [[ "$destination_digest" != "$1" || -z "$destination_digest" ]]; then
             printf '* Pushing component: %s to %s:%s\n' "$2" "$4" "$5"
@@ -102,6 +102,8 @@ spec:
           repository=$(jq -r '.repository' <<< $component)
           imageTags=$(jq '.tags' <<< $component)
 
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry.
           AUTH_FILE=$(mktemp)
           select-oci-auth "${containerImage}" > "$AUTH_FILE"
 
@@ -134,7 +136,8 @@ spec:
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
             # Check if the source container exists
-            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" ${oras_args[@]} "${sourceContainer}" 2>/dev/null)
+            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" ${oras_args[@]} \
+              "${sourceContainer}" 2>/dev/null)
 
             if [ -z "$source_container_digest" ] ; then
               echo "Error: Source container ${sourceContainer} not found!"
@@ -188,7 +191,8 @@ spec:
           fi
           if [[ $(jq -r ".images.addGitShaTag" "${DATA_FILE}") != "false" ]] ; then # Default to true
             if [ "${git_sha}" != "null" ] ; then
-              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}" "${oras_args[@]}"
+              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha:0:7}"\
+                "${oras_args[@]}"
               push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${git_sha}" "${oras_args[@]}"
             else
               printf 'Asked to create git sha based tag, but no git sha found in %s\n' "${component}"
@@ -212,7 +216,8 @@ spec:
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
             # Check if the source container exists
-            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" "${oras_args[@]}" "${sourceContainer}" 2>/dev/null)
+            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" "${oras_args[@]}"\
+              "${sourceContainer}" 2>/dev/null)
 
             if [ -z "$source_container_digest" ] ; then
               echo "Error: Source container ${sourceContainer} not found!"
