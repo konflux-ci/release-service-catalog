@@ -11,6 +11,12 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | resultsDirPath     | Path to results directory in the data workspace                           | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 6.0.0
+* The `images` section of the data key is no longer supported. Tags, timestamp format, and push source container
+  options are now specified in each component or in `mapping.defaults`
+* The `commonTags` result is removed
+* The task fails if any component has no tags associated with it
+
 ## Changes in 5.0.0
 * The task now writes pushed image details to a results json file in the workspace
 

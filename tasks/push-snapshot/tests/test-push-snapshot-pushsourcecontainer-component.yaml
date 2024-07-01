@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-snapshot-floatingtags
+  name: test-push-snapshot-pushsourcecontainer-component
 spec:
   description: |
-    Run the push-snapshot task with floatingTags set
+    Run the push-snapshot task with pushSourceContainer enabled via the component
   workspaces:
     - name: tests-workspace
   tasks:
@@ -30,8 +30,18 @@ spec:
                 "components": [
                   {
                     "name": "comp",
-                    "containerImage": "registry.io/image:tag",
-                    "repository": "prod-registry.io/prod-location"
+                    "containerImage": "registry.io/image@sha256:abcdefg",
+                    "repository": "prod-registry.io/prod-location",
+                    "source": {
+                      "git": {
+                        "revision": "a51005b614c359b17a24317fdb264d76b2706a5a",
+                        "url": "https://github.com/abc/python-basic"
+                      }
+                    },
+                    "tags": [
+                      "testtag"
+                    ],
+                    "pushSourceContainer": true
                   }
                 ]
               }
@@ -39,15 +49,7 @@ spec:
 
               cat > $(workspaces.data.path)/data.json << EOF
               {
-                "images": {
-                  "defaultTag": "latest",
-                  "addGitShaTag": false,
-                  "addTimestampTag": false,
-                  "addSourceShaTag": false,
-                  "floatingTags": [
-                    "testtag",
-                    "testtag2"
-                  ]
+                "mapping": {
                 }
               }
               EOF
@@ -69,15 +71,10 @@ spec:
       runAfter:
         - setup
     - name: check-result
-      params:
-        - name: commonTags
-          value: $(tasks.run-task.results.commonTags)
       workspaces:
         - name: data
           workspace: tests-workspace
       taskSpec:
-        params:
-          - name: commonTags
         workspaces:
           - name: data
         steps:
@@ -87,9 +84,23 @@ spec:
               #!/usr/bin/env sh
               set -eux
 
-              if [ $(cat $(workspaces.data.path)/mock_cosign.txt | wc -l) != 4 ]; then
-                echo Error: cosign was expected to be called 4 times. Actual calls:
+              # The sha 570fd5a1e41b5545a24828be5a3df2e85e4a5a67703385f39594837e77e2478e is calculated
+              # from the origin image pull spec - see mocks.sh
+              cat > $(workspaces.data.path)/cosign_expected_calls.txt << EOF
+              copy -f registry.io/image:sha256-570fd5a1e41b5545a24828be5a3df2e85e4a5a67703385f39594837e77e2478e.src\
+               prod-registry.io/prod-location:sha256-570fd5a1e41b5545a24828be5a3df2e85e4a5a67703385f39594837e77e2478e.src
+              copy -f registry.io/image@sha256:abcdefg prod-registry.io/prod-location:testtag
+              copy -f registry.io/image:sha256-570fd5a1e41b5545a24828be5a3df2e85e4a5a67703385f39594837e77e2478e.src\
+               prod-registry.io/prod-location:testtag-source
+              EOF
+
+              if [ "$(cat $(workspaces.data.path)/cosign_expected_calls.txt | md5sum)" \
+                != "$(cat $(workspaces.data.path)/mock_cosign.txt | md5sum)" ]; then
+                echo Error: Expected cosign calls do not match actual calls
+                echo Actual calls:
                 cat $(workspaces.data.path)/mock_cosign.txt
+                echo Expected calls:
+                cat $(workspaces.data.path)/cosign_expected_calls.txt
                 exit 1
               fi
 
@@ -98,9 +109,5 @@ spec:
                 cat $(workspaces.data.path)/mock_skopeo.txt
                 exit 1
               fi
-
-              timestamp=$(cat $(workspaces.data.path)/mock_date_epoch.txt)
-              [[ "$(params.commonTags)" \
-                ==  "testtag-$timestamp testtag testtag2-$timestamp testtag2" ]]
       runAfter:
         - run-task
