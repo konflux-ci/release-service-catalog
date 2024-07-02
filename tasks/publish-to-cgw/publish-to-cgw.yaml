@@ -1,0 +1,172 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: publish-to-cgw
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to publish content to CGW (Content-Gateway)
+  params:
+    - name: cgwHostname
+      type: string
+      description: >
+        The hostname of the content-gateway to publish the metadata to
+      default: https://developers.redhat.com/content-gateway/rest/admin
+    - name: cgwSecret
+      type: string
+      description: >
+        The kubernetes secret to use to authenticate to content-gateway.
+        It needs to contain two keys: username and token
+      default: publish-to-cgw-secret
+    - name: dataPath
+      type: string
+      description: >
+        Path to the JSON string of the merged data to use in the data workspace.
+    - name: contentDir
+      type: string
+      description: Path where the content to push is stored in the workspace
+  results:
+    - name: resultDataPath
+      type: string
+      description: |
+        The relative path in the workspace to the stored json of result data of the task
+  workspaces:
+    - name: data
+      description: Workspace to save the CR jsons to
+  steps:
+    - name: run-push-cgw-metadata
+      image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+      env:
+        - name: CGW_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: $(params.cgwSecret)
+              key: username
+        - name: CGW_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: $(params.cgwSecret)
+              key: token
+      script: |
+        #!/usr/bin/env bash
+        python3 <<EOF
+        """
+        Run `push-cgw-metadata` command to push metadata to CGW:
+        1. Extract all components under contentGateway key from dataPath
+        2. Find all the files in contentDir that starts with the component name
+        4. Generate necessary metadata for each file
+        5. Dump the metadata to a YAML file
+        6. Run `push-cgw-metadata` to push the metadata
+        """
+        import os
+        import json
+        import yaml
+        import hashlib
+        import subprocess
+
+        DATA_FILE = "$(workspaces.data.path)/$(params.dataPath)"
+        # Grab the path of datafile and use that as workspace directory
+        WORKSPACE_DIR = os.path.dirname(DATA_FILE)
+        CONTENT_DIR = f"{WORKSPACE_DIR}/$(params.contentDir)"
+        METADATA_FILE_PATH = f"{WORKSPACE_DIR}/cgw_metadata.yaml"
+        RESULT_FILE_JSON_PATH=f"{WORKSPACE_DIR}/results.json"
+
+        with open(DATA_FILE, 'r') as file:
+            data = json.load(file)
+
+        os.makedirs(WORKSPACE_DIR, exist_ok=True)
+
+        productName = data['contentGateway']['productName']
+        productCode = data['contentGateway']['productCode']
+        productVersionName = data['contentGateway']['productVersionName']
+        components = data['contentGateway']['components']
+        content_list = os.listdir(CONTENT_DIR)
+
+        # Default values for each component, 
+        # values from DATA_FILE takes presedence over these
+        default_values_per_component = {
+            'type': "FILE",
+            'shortURL': f"cgw/{productCode}",
+            "hidden": False,
+            "invisible": False
+        }
+
+        def generate_download_url(file_name):
+            """
+            Generate a download URL in this format: 
+            exodus:/content/origin/files/sha256/{checksum[:2]}{checksum}/{file_name}
+            """
+            prefix = "exodus:/content/origin/files/sha256"
+            sha256_hash = hashlib.sha256()
+            with open(CONTENT_DIR + "/" + file_name, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            checksum = sha256_hash.hexdigest()
+            return f"{prefix}/{checksum[:2]}/{checksum}/{file_name}"
+
+        def generate_metadata(content_list, components):
+            """
+            Generate metadata for each file in
+            content_list that starts with the component name
+            """
+            metadata = []
+            for file in content_list:
+                matching_component = [
+                    data
+                    for data in components
+                    if file.startswith(data['name'])]
+
+                if matching_component:
+                    print("Processing file: ", file)
+                    for data in matching_component:
+                        component = data.copy()
+                        component.update({
+                            'productName': productName,
+                            'productCode': productCode,
+                            'productVersionName': productVersionName,
+                            'downloadURL': generate_download_url(file),
+                            'label': file,
+                        })
+                        metadata.append({
+                            'type': 'file',
+                            'action': 'create',
+                            'metadata': {**default_values_per_component, **component}
+                        })
+                else:
+                    print(f"Skipping file: {file} as it does not start with any component name")
+
+            return metadata
+
+        metadata = generate_metadata(content_list, components)
+        print(len(metadata), "Files will be publised to CGW")
+
+        with open(METADATA_FILE_PATH, 'w') as file:
+            yaml.dump(metadata, file, default_flow_style=False, sort_keys=False)
+
+        print(f"YAML content dumped to {METADATA_FILE_PATH}")
+        command = [
+            'push-cgw-metadata',
+            '--CGW_hostname', "$(params.cgwHostname)",
+            '--CGW_username', "${CGW_USERNAME}",
+            '--CGW_password', "${CGW_TOKEN}",
+            '--CGW_filepath', "${METADATA_FILE_PATH}"
+        ]
+        result = subprocess.run(command, 
+                                stdout=subprocess.PIPE, 
+                                stderr=subprocess.PIPE, 
+                                text=True)
+
+        result_data = {"no_of_files_processed": len(metadata), 
+                      "metadata_file_path": METADATA_FILE_PATH, 
+                      "command_output": result.stdout}
+
+        with open(RESULT_FILE_JSON_PATH, 'w') as f:
+            json.dump(result_data, f)
+        with open('$(results.resultDataPath.path)', 'w') as f:
+            f.write(RESULT_FILE_JSON_PATH)
+        EOF
