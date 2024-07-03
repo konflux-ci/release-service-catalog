@@ -1,0 +1,105 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-image-cosign-multiple-components
+spec:
+  description: Test signing multiple images by cosign
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              _TEST_MANIFEST_LIST_REFERENCE="quay.io/redhat-pending/test-product----test-image0@sha256:1111"
+              _TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/redhat-pending/test-product----test-image0@sha256:0000"
+              _TEST_REPO="quay.io/redhat-pending/test-product----test-image0"
+
+              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "$_TEST_MANIFEST_LIST_REFERENCE",
+                    "repository": "$_TEST_REPO"
+                  },
+                  {
+                    "name": "comp1",
+                    "containerImage": "$_TEST_MANIFEST_LIST_OCI_REFERENCE",
+                    "repository": "$_TEST_REPO"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: rh-sign-image-cosign
+      params:
+        - name: snapshotPath
+          value: snapshot_spec.json
+        - name: secretName
+          value: 'test-cosign-secret'
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              echo "check results"
+              _TEST_PUB_REPO1="registry.stage.redhat.io/test-product/test-image0"
+              _TEST_PUB_REPO2="registry.access.stage.redhat.com/test-product/test-image0"
+              _TEST_REPO="quay.io/redhat-pending/test-product----test-image0"
+
+              EXPECTED=$(cat <<EOF
+              inspect --raw docker://${_TEST_REPO}@sha256:1111
+              inspect --raw docker://${_TEST_REPO}@sha256:0000
+              EOF
+              )
+              CALLS=$(cat "$(workspaces.data.path)/mock_skopeo_calls")
+              test "$CALLS" = "$EXPECTED"
+
+              CALLS=$(cat "$(workspaces.data.path)/mock_cosign_calls")
+              COSIGN_COMMON="-t 3m0s sign -y --tlog-upload=false --key aws://arn:mykey --sign-container-identity"
+              EXPECTED=$(cat <<EOF
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:1111-1 ${_TEST_REPO}@sha256:1111-1
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:1111-2 ${_TEST_REPO}@sha256:1111-2
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:1111-3 ${_TEST_REPO}@sha256:1111-3
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:1111-1 ${_TEST_REPO}@sha256:1111-1
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:1111-2 ${_TEST_REPO}@sha256:1111-2
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:1111-3 ${_TEST_REPO}@sha256:1111-3
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:1111 ${_TEST_REPO}@sha256:1111
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:1111 ${_TEST_REPO}@sha256:1111
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:0000-1 ${_TEST_REPO}@sha256:0000-1
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:0000-2 ${_TEST_REPO}@sha256:0000-2
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:0000-3 ${_TEST_REPO}@sha256:0000-3
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:0000-1 ${_TEST_REPO}@sha256:0000-1
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:0000-2 ${_TEST_REPO}@sha256:0000-2
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:0000-3 ${_TEST_REPO}@sha256:0000-3
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}@sha256:0000 ${_TEST_REPO}@sha256:0000
+              $COSIGN_COMMON ${_TEST_PUB_REPO2}@sha256:0000 ${_TEST_REPO}@sha256:0000
+              EOF
+              )
+              test "$CALLS" = "$EXPECTED"
+      runAfter:
+        - run-task
