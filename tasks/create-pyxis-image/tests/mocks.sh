@@ -9,7 +9,7 @@ function create_container_image() {
   # e.g. 0001, 0002, 0003...
   echo The image id is $(awk 'END{printf("%04i", NR)}' $(workspaces.data.path)/mock_create_container_image.txt)
 
-  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --skopeo-result /tmp/skopeo-inspect.json --media-type my_media_type --architecture-digest "*" --rh-push "* ]]
+  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --oras-manifest-fetch /tmp/oras-manifest-fetch.json --name "*" --media-type my_media_type --digest "*" --architecture-digest "*" --architecture "*" --rh-push "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
@@ -49,5 +49,21 @@ function get-image-architectures() {
     echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
   else
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
+  fi
+}
+
+function select-oci-auth() {
+  echo $* >> $(workspaces.data.path)/mock_select-oci-auth.txt
+}
+
+function oras() {
+  echo $* >> $(workspaces.data.path)/mock_oras.txt
+  if [[ "$*" == "manifest fetch --registry-config"* ]]
+  then
+    echo '{"mediaType": "my_media_type"}'
+  else
+    echo Mock oras called with: $*
+    echo Error: Unexpected call
+    exit 1
   fi
 }

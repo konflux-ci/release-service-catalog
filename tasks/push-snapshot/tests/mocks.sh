@@ -28,20 +28,9 @@ function skopeo() {
   echo Mock skopeo called with: $* >&2
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
 
-  if [[ "$*" == "inspect --override-arch "*" --no-tags --format {{.Digest}} docker://"* ]]; then
-    # test scenarios where we want to skip the push because the image already exists
-    if [[ "$7" == *skip-image*.src || "$7" == *skip-image*-source ]]; then
-      echo "sha256:000000"
-    elif [[ "$7" == *skip-image* ]]; then
-      echo "sha256:111111"
-    else
-      # echo the shasum computed from the pull spec so the task knows if two images are the same
-      echo -n "sha256:"
-      echo $7 | sha256sum | cut -d ' ' -f 1
-    fi
-    return
-  fi
-  if [[ "$*" == "inspect --override-arch "*" --no-tags docker://"* ]]; then
+  if [[ "$*" == "inspect --raw docker://"* ]]
+  then
+    echo '{"mediaType": "my_media_type"}'
     return
   fi
 
@@ -53,4 +42,29 @@ function skopeo() {
 function get-image-architectures() {
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
     echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+}
+
+function select-oci-auth() {
+  echo $* >> $(workspaces.data.path)/mock_select-oci-auth.txt
+}
+
+function oras() {
+  echo $* >> $(workspaces.data.path)/mock_oras.txt
+  if [[ "$*" == "resolve --registry-config "*" "* ]]
+  then
+    if [[ "$4" == *skip-image*.src || "$4" == *skip-image*-source ]]; then
+      echo "sha256:000000"
+    elif [[ "$4" == *skip-image* ]]; then
+      echo "sha256:111111"
+    else
+      # echo the shasum computed from the pull spec so the task knows if two images are the same
+      echo -n "sha256:"
+      echo $4 | sha256sum | cut -d ' ' -f 1
+    fi
+    return
+  else
+    echo Mock oras called with: $*
+    echo Error: Unexpected call
+    exit 1
+  fi
 }

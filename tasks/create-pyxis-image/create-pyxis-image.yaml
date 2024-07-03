@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "3.0.0"
+    app.kubernetes.io/version: "3.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -48,7 +48,7 @@ spec:
       description: The relative path in the workspace to the stored pyxis data json
   steps:
     - name: create-pyxis-image
-      image: quay.io/konflux-ci/release-service-utils:26f77b0933b19e7318bacf5dee297a6c113bb57e
+      image: quay.io/konflux-ci/release-service-utils:12841cd2a35711b24a6749a93569d4118b173dcb
       env:
         - name: pyxisCert
           valueFrom:
@@ -110,6 +110,11 @@ spec:
             MEDIA_TYPE=$(skopeo inspect --raw "docker://${PULLSPEC}" | jq -r .mediaType)
             TAGS=$(jq -r ".components[${i}].tags | join(\" \")" "${SNAPSHOT_SPEC_FILE}")
 
+            # oras has very limited support for selecting the right auth entry,
+            # so create a custom auth file with just one entry
+            AUTH_FILE=$(mktemp)
+            select-oci-auth "${REPOSITORY}" > "$AUTH_FILE"
+
             index=0
             while IFS= read -r ARCH_DETAIL;
             do
@@ -117,8 +122,17 @@ spec:
                 ARCH=$(jq -r '.platform.architecture' <<< "$ARCH_DETAIL")
                 ARCH_DIGEST=$(jq -r '.digest' <<< "$ARCH_DETAIL")
 
-                skopeo inspect --no-tags --override-os "$OS" --override-arch "$ARCH" "docker://${PULLSPEC}" \
-                    | tee /tmp/skopeo-inspect.json
+                ORAS_ARGS=()
+                if [[ "MEDIA_TYPE" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]\
+                  || [[ "MEDIA_TYPE" == "application/vnd.oci.image.index.v1+json" ]]; then
+                  ORAS_ARGS+=("--platform $os/$arch")
+                fi
+
+                oras manifest fetch \
+                  --registry-config "$AUTH_FILE" \
+                  "${ORAS_ARGS[@]}" \
+                  "${PULLSPEC}" \
+                      | tee /tmp/oras-manifest-fetch.json
 
                 PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
                   --pyxis-url $PYXIS_URL \
@@ -126,9 +140,12 @@ spec:
                   --tags "$TAGS" \
                   --is-latest $(params.isLatest) \
                   --verbose \
-                  --skopeo-result "/tmp/skopeo-inspect.json" \
+                  --oras-manifest-fetch "/tmp/oras-manifest-fetch.json" \
+                  --name "$REPOSITORY" \
                   --media-type "$MEDIA_TYPE" \
+                  --digest "$DIGEST" \
                   --architecture-digest "$ARCH_DIGEST" \
+                  --architecture "$ARCH" \
                   --rh-push $(params.rhPush) | tee "/tmp/output"
                 # The rh-push-to-external-registry e2e test depends on this line being in the task log
                 IMAGEID=$(awk '/The image id is/{print $NF}' /tmp/output)

@@ -56,11 +56,11 @@ EOF
 
 function skopeo() {
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
+  echo Mock skopeo called with: $*  >> /dev/stderr
   if [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
   then
     echo '{"mediaType": "my_media_type"}'
   else
-    echo Mock skopeo called with: $*  >> /dev/stderr
     if [[ "$*" != "inspect --no-tags docker://"* ]]
     then
       if [[ "$*" == "inspect --no-tags --raw docker://registry.io/multi-arch-image0"* ]]
@@ -135,5 +135,28 @@ function skopeo() {
         fi
       fi
     fi
+  fi
+}
+
+function select-oci-auth() {
+  echo $* >> $(workspaces.data.path)/mock_select-oci-auth.txt
+}
+
+function oras() {
+  echo $* >> $(workspaces.data.path)/mock_oras.txt
+  echo Mock oras called with: $*  >> /dev/stderr
+  if [[ "$*" == "resolve --registry-config "*" registry.io/multi-arch-image0"* ]]
+  then
+    echo 'sha256:6f9a420f660e73a'
+    return
+  else
+      if [[ "$*" == "resolve --registry-config "*" registry.io/image"*":sha256-"*".src"* ]]
+      then
+        echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
+      else
+        echo Mock oras called with: $*
+        echo Error: Unexpected call
+        exit 1
+      fi
   fi
 }

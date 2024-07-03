@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "6.0.0"
+    app.kubernetes.io/version: "6.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -30,19 +30,21 @@ spec:
       description: The workspace where the snapshot spec and data json files reside
   steps:
     - name: push-snapshot
-      image: quay.io/konflux-ci/release-service-utils:26f77b0933b19e7318bacf5dee297a6c113bb57e
+      image: quay.io/konflux-ci/release-service-utils:12841cd2a35711b24a6749a93569d4118b173dcb
       script: |
         #!/usr/bin/env bash
         set -eux
 
-        push_image () { # Expected arguments are [origin_digest, name, containerImage, repository, tag, arch]
+        push_image () { # Expected arguments are [origin_digest, name, containerImage, repository, tag, arch, oras_args]
           # note: Inspection might fail on empty repos, hence `|| true`
-          destination_digest=$(
-            skopeo inspect \
-            --override-arch "$6" \
-            --no-tags \
-            --format '{{.Digest}}' \
-            "docker://$4:$5" 2>/dev/null || true)
+
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry.
+          DEST_AUTH_FILE=$(mktemp)
+          select-oci-auth "$4:$5" > "$DEST_AUTH_FILE"
+
+          # We need this default value for $7 when oras_args is equal to ()
+          destination_digest=$(oras resolve --registry-config "$DEST_AUTH_FILE" ${7:-} "$4:$5" 2>/dev/null || true)
 
           if [[ "$destination_digest" != "$1" || -z "$destination_digest" ]]; then
             printf '* Pushing component: %s to %s:%s\n' "$2" "$4" "$5"
@@ -97,20 +99,33 @@ spec:
           repository=$(jq -r '.repository' <<< $component)
           imageTags=$(jq '.tags' <<< $component)
 
-          arches=$(get-image-architectures "${containerImage}" | jq -s 'map(.platform.architecture)')
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry.
+          AUTH_FILE=$(mktemp)
+          select-oci-auth "${containerImage}" > "$AUTH_FILE"
+
+          arch_json=$(get-image-architectures "${containerImage}")
+          arches=$(jq -s 'map(.platform.architecture)' <<< $arch_json)
+          oses=$(jq -s 'map(.platform.os)' <<< $arch_json)
+        
           # Just read the first from the list of architectures
+          os=$(jq -r '.[0]' <<< $oses)
           arch=$(jq -r '.[0]' <<< $arches)
           name=$(jq -r '.name' <<< $component)
           git_sha=$(jq -r '.source.git.revision' <<< $component) # this sets the value to "null" if it doesn't exist
+          media_type=$(skopeo inspect --raw "docker://${containerImage}" | jq -r .mediaType)
+          oras_args=()
+          if [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]\
+            || [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]]; then
+            oras_args+=("--platform $os/$arch")
+          fi
 
-          origin_digest=$(skopeo inspect \
-            --override-arch "${arch}" \
-            --no-tags \
-            --format '{{.Digest}}' \
-            "docker://${containerImage}" 2>/dev/null)
+          origin_digest=$(oras resolve --registry-config "$AUTH_FILE" "${oras_args[@]}" "${containerImage}" 2>/dev/null)
 
-          RESULTS_JSON=$(jq --arg i "$i" --argjson arches "$arches" --arg name "$name" --arg sha "$origin_digest" \
-            '.images[$i|tonumber] += {"arches": $arches, "name": $name, "shasum": $sha, "urls": []}' <<< $RESULTS_JSON)
+          RESULTS_JSON=$(jq --arg i "$i" --argjson arches "$arches" --argjson oses "$oses" --arg name "$name" \
+            --arg sha "$origin_digest" \
+            '.images[$i|tonumber] += {"arches": $arches, "oses": $oses, "name": $name, "shasum": $sha, "urls": []}' \
+              <<< $RESULTS_JSON)
 
           # Push source container if the component has pushSourceContainer: true or if the
           # pushSourceContainer key is missing from the component and the defaults has
@@ -124,11 +139,8 @@ spec:
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
             # Check if the source container exists
-            source_container_digest=$(skopeo inspect \
-              --override-arch "${arch}" \
-              --no-tags \
-              --format '{{.Digest}}' \
-              "docker://${sourceContainer}" 2>/dev/null)
+            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" ${oras_args[@]} \
+              "${sourceContainer}" 2>/dev/null)
 
             if [ -z "$source_container_digest" ] ; then
               echo "Error: Source container ${sourceContainer} not found!"
@@ -137,19 +149,19 @@ spec:
             # Push the source image with the source tag here. The source image will be
             # pushed with the provided tags below in the loop
             push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-              "${repository}" "${source_tag}" "${arch}"
+              "${repository}" "${source_tag}" "${oras_args[@]}"
           fi
 
           for tag in $(jq -r '.[]' <<< $imageTags) ; do
             # Push the container image
             push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" \
-            "${arch}"
+            "${arch}" "${oras_args[@]}"
 
             # This variable will only exist if the above logic determined the source container should
             # be pushed for this component
             if [ -n "${source_container_digest-}" ] ; then
               push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${tag}-source" "${arch}"
+                "${repository}" "${tag}-source" "${arch}" "${oras_args[@]}"
             fi
           done
         done
