@@ -1,0 +1,129 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-staged-files-expansion
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
+    the data file with tags per component and verify that the resulting json
+    contains the expected values with tags expanded.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.config.path)/test_data.json << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "staged": {
+                        "destination": "ai-1-for-isos",
+                        "files": [
+                          {
+                            "source": "one.qcow2",
+                            "filename": "ai-{{git_sha}}"
+                          },
+                          {
+                            "source": "one.raw",
+                            "filename": "ai-{{git_short_sha}}"
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "name": "comp2",
+                      "staged": {
+                        "destination": "ai-2-for-isos",
+                        "files": [
+                          {
+                            "source": "two.qcow2",
+                            "filename": "ai-{{digest_sha}}"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+              EOF
+
+              cat > $(workspaces.config.path)/test_snapshot_spec.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1:tag1",
+                    "source": {
+                      "git": {
+                        "revision": "testrevision",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2:tag2",
+                    "source": {
+                      "git": {
+                        "revision": "testrevision2",
+                        "url": "myurl2"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: test_snapshot_spec.json
+        - name: dataPath
+          value: test_data.json
+      runAfter:
+        - setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that comp1 has the proper files
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -c '.components[] | select(.name=="comp1") | .staged.files') == \
+                '[{"source":"one.qcow2","filename":"ai-testrevision"},{"source":"one.raw","filename":"ai-testrev"}]'
+
+              echo Test that comp2 has the proper files
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -c '.components[] | select(.name=="comp2") | .staged.files') == \
+                '[{"source":"two.qcow2","filename":"ai-tag2"}]'
+      runAfter:
+        - run-task
