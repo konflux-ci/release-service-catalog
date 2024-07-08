@@ -19,6 +19,9 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.9.0
+* Removed `verify-access-to-resources` script and replaced it with a task.
+
 ## Changes in 3.8.0
 * The `rh-sign-image` task no longer receives the `commonTags` parameter
 * The `create-pyxis-image` task no longer receives the `commonTags` nor `dataPath` parameter

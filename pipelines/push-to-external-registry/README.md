@@ -19,6 +19,9 @@ Tekton pipeline to release Snapshots to an external registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 4.7.0
+- Removed `verify-access-to-resources` script and replaced it with a task.
+
 ## Changes in 4.6.0
 - The `push-snapshot` task now gets the `resultsDirPath` parameter from `collect-data` results
 
