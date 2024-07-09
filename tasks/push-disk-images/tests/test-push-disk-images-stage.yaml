@@ -1,0 +1,137 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-disk-images-stage
+spec:
+  description: |
+    Run the push-disk-images task with the stage env and ensure the task succeeds
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils:6a7ca9ba0ddd70404fe2267551409925cf513132
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > "$(workspaces.data.path)/snapshot_spec.json" << EOF
+              {
+                "application": "disk-images",
+                "components": [
+                  {
+                    "name": "nvidia-disk-image",
+                    "containerImage": "quay.io/workload/tenant/disk-image/nvidia@sha256:123456",
+                    "repository": "repo1"
+                  },
+                  {
+                    "name": "amd-disk-image",
+                    "containerImage": "quay.io/workload/tenant/disk-image/amd@sha256:abcdefg",
+                    "repository": "repo2"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "cdn": {
+                  "env": "stage"
+                }
+              }
+              EOF
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: push-disk-images
+      params:
+        - name: snapshotPath
+          value: "snapshot_spec.json"
+        - name: dataPath
+          value: "data.json"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:6a7ca9ba0ddd70404fe2267551409925cf513132
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+
+              # Check the request field
+              if [ "$(jq -r '.spec.request' <<< "$internalRequest")" != "push-disk-images" ]; then
+                echo "InternalRequest doesn't contain 'push-disk-images' in 'request' field"
+                exit 1
+              fi
+
+              # Check the serviceAccount field
+              if [ "$(jq -r '.spec.serviceAccount' <<< "$internalRequest")" != "release-service-account" ]; then
+                echo "InternalRequest doesn't contain the proper serviceAccount"
+                exit 1
+              fi
+
+              # Check the snapshot parameter
+              if [ "$(jq -r '.spec.params.snapshot_json' <<< "$internalRequest")" != \
+              '{"application":"disk-images","components":[{"name":"nvidia-disk-image","containerImage":'`
+              `'"quay.io/workload/tenant/disk-image/nvidia@sha256:123456","repository":"repo1"},{"name":'`
+              `'"amd-disk-image","containerImage":"quay.io/workload/tenant/disk-image/amd@sha256:abcdefg"'`
+              `',"repository":"repo2"}]}' ]; then
+                echo "InternalRequest has the wrong snapshot_json parameter"
+                exit 1
+              fi
+
+              # Check the exodusGwSecret parameter
+              if [ "$(jq -r '.spec.params.exodusGwSecret' <<< "$internalRequest")" != "exodus-prod-secret" ]; then
+                echo "InternalRequest has the wrong exodusGwSecret parameter"
+                exit 1
+              fi
+
+              # Check the exodusGwEnv parameter
+              if [ "$(jq -r '.spec.params.exodusGwEnv' <<< "$internalRequest")" != "pre" ]; then
+                echo "InternalRequest has the wrong exodusGwEnv parameter"
+                exit 1
+              fi
+
+              # Check the pulpSecret parameter
+              if [ "$(jq -r '.spec.params.pulpSecret' <<< "$internalRequest")" != "rhsm-pulp-stage-secret" ]; then
+                echo "InternalRequest has the wrong pulpSecret parameter"
+                exit 1
+              fi
+
+              # Check the udcacheSecret parameter
+              if [ "$(jq -r '.spec.params.udcacheSecret' <<< "$internalRequest")" != "udcache-stage-secret" ]; then
+                echo "InternalRequest has the wrong udcacheSecret parameter"
+                exit 1
+              fi
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:6a7ca9ba0ddd70404fe2267551409925cf513132
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all

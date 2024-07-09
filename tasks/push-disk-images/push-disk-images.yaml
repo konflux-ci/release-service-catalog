@@ -1,0 +1,93 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-disk-images
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to push disk images via an InternalRequest
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: Path to the data JSON in the data workspace
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+  workspaces:
+    - name: data
+      description: Workspace where the json files are stored
+  steps:
+    - name: run-script
+      image: quay.io/konflux-ci/release-service-utils:6a7ca9ba0ddd70404fe2267551409925cf513132
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
+        snapshot=$(jq -c '.' "$(workspaces.data.path)/$(params.snapshotPath)")
+        # .cdn.env is likely to change in the future. This is just for POC
+        env=$(jq -r '.cdn.env' "$(workspaces.data.path)/$(params.dataPath)")
+
+        # There are three envs supported...production, stage, and qa
+        exodusGwSecret=""
+        exodusGwEnv=""
+        pulpSecret=""
+        udcacheSecret=""
+
+        if [ "${env}" = "production" ] ; then
+          exodusGwSecret="exodus-prod-secret"
+          exodusGwEnv="live"
+          pulpSecret="rhsm-pulp-prod-secret"
+          udcacheSecret="udcache-prod-secret"
+        elif [ "${env}" = "stage" ] ; then
+          # The url is the same for exodus in both prod and stage, it is just a different env and pulp url
+          exodusGwSecret="exodus-prod-secret"
+          exodusGwEnv="pre"
+          pulpSecret="rhsm-pulp-stage-secret"
+          udcacheSecret="udcache-stage-secret"
+        elif [ "${env}" = "qa" ]; then
+          exodusGwSecret="exodus-stage-secret"
+          exodusGwEnv="live"
+          pulpSecret="rhsm-pulp-qa-secret"
+          udcacheSecret="udcache-qa-secret"
+        else
+          echo "cdn.env in the data file must be one of [production, stage, qa]."
+          exit 1
+        fi
+
+        echo "Creating InternalRequest to push disk images..."
+        internal-request -r "push-disk-images" \
+                         -p snapshot_json="${snapshot}" \
+                         -p exodusGwSecret="${exodusGwSecret}" \
+                         -p exodusGwEnv="${exodusGwEnv}" \
+                         -p pulpSecret="${pulpSecret}" \
+                         -p udcacheSecret="${udcacheSecret}" \
+                         -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
+                         -s true \
+                         -t 7200 \
+                         --service-account release-service-account \
+                         --pipeline-timeout 2h0m0s \
+                         --task-timeout 1h50m0s \
+                         --finally-timeout 0h10m0s \
+                         > "$(workspaces.data.path)"/ir-result.txt
+
+        set +x
+        internalRequest=$(awk 'NR==1{ print $2 }' "$(workspaces.data.path)/ir-result.txt" | xargs)
+        echo "done (${internalRequest})"
+
+        results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
+        if [ "$(echo "${results}" | jq -r '.result')" == "Success" ]; then
+          echo "Disk images pushed"
+        else
+          echo "Disk image push failed"
+          echo "${results}" | jq -r '.result'
+          exit 1
+        fi
