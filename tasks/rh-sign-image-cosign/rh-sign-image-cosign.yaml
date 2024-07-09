@@ -1,0 +1,96 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rh-sign-image-cosign
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Task to sign container images in snapshot by cosign
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: secretName
+      description: Name of secret containing needed credentials
+      type: string
+  workspaces:
+    - name: data
+      description: Workspace to read and save files
+  steps:
+    - name: sign-image
+      image: quay.io/konflux-ci/release-service-utils:38c3bfd7479c86b832cba5b61f9bbde40c469393
+      env:
+        - name: AWS_REGION
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: AWS_REGION
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: AWS_SECRET_ACCESS_KEY
+        - name: SIGN_KEY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.secretName)
+              key: SIGN_KEY
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
+        COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
+
+        for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
+            COMPONENT_NAME=$(jq -r ".components[${COMPONENTS_INDEX}].name" ${SNAPSHOT_PATH})
+            echo "Processing component ${COMPONENT_NAME}"
+
+            # Get public image references
+            INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
+            PUB_CONTAINER_REFS=$(translate-delivery-repo $INTERNAL_CONTAINER_REF | jq -r ".[].url")
+
+            # Check if image is manifest list
+            BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" ${SNAPSHOT_PATH})
+            DIGEST="${BUILD_CONTAINER_IMAGE/*@}"
+            INTERNAL_CONTAINER_IMAGE="${INTERNAL_CONTAINER_REF}@${DIGEST}"
+            IMAGE=$(skopeo inspect --raw "docker://${INTERNAL_CONTAINER_IMAGE}")
+            MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
+            LIST=0
+            if [ "$MEDIA_TYPE" = "application/vnd.docker.distribution.manifest.list.v2+json" ]; then LIST=1; fi
+            if [ "$MEDIA_TYPE" = "application/vnd.oci.image.index.v1+json" ]; then LIST=1; fi
+
+            # Sign each manifest in manifest list
+            COSIGN_COMMON_ARGS="-y --tlog-upload=false --key $SIGN_KEY"
+            if [ $LIST -eq 1 ]; then
+                for PUB_CONTAINER_REF in $PUB_CONTAINER_REFS; do
+                    for MDIGEST in $(echo "$IMAGE" | jq -r '.manifests[]|.digest'); do
+                        echo "Signing manifest ${INTERNAL_CONTAINER_REF}@${MDIGEST}"
+                        cosign -t 3m0s sign\
+                        ${COSIGN_COMMON_ARGS}\
+                        --sign-container-identity "${PUB_CONTAINER_REF}@${MDIGEST}"\
+                        "${INTERNAL_CONTAINER_REF}@${MDIGEST}"
+                    done
+                done
+            fi
+
+            # Sign manifest list itself or manifest if it's not list
+            for PUB_CONTAINER_REF in $PUB_CONTAINER_REFS; do
+                echo "Signing manifest ${INTERNAL_CONTAINER_REF}@${DIGEST}"
+                cosign -t 3m0s sign\
+                ${COSIGN_COMMON_ARGS}\
+                --sign-container-identity "${PUB_CONTAINER_REF}@${DIGEST}"\
+                "${INTERNAL_CONTAINER_REF}@${DIGEST}"
+            done
+        done
+        echo "done"
