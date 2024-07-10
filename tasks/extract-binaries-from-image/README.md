@@ -17,6 +17,9 @@ passed.
 | subdirectory | Subdirectory inside the workspace to be used for storing the binaries | Yes | "" |
 | dataPath | Path to the JSON string of the merged data to use in the data workspace   | No | |
 
+## Changes in 2.1.0
+- updated the base image used in this task
+
 ## Changes in 2.0.0
  - support multiple components in snapshot
 

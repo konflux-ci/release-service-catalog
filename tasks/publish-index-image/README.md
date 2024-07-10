@@ -16,6 +16,9 @@ Publish a built FBC index image using skopeo
 
 ## Changelog
 
+### Changes in 3.3.0
+- updated the base image used in this task
+
 ### Changes in 3.2.0
 - updated the base image used in this task
 

@@ -11,6 +11,9 @@ Tekton task to update version tag of FBC pull-spec
 | dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | ocpVersion |  OCP version fetched from fbcFragment | No | - |
 
+## Changes in 1.4.0
+* Updated the base image used in this task
+
 ## Changes in 1.3.0
 * Updated the base image used in this task
 

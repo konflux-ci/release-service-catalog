@@ -14,6 +14,9 @@ to each component, so other task can use them.
 | snapshotPath | Path to the JSON string of the Snapshot spec in the data workspace      | No       |                    |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace | No       |                    |
 
+## Changes in 1.3.0
+- updated the base image used in this task
+
 ## Changes in 1.2.0
 - updated the base image used in this task
 

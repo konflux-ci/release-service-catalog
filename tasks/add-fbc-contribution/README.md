@@ -14,6 +14,10 @@ Task to create a internalrequest to add fbc contributions to index images
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       |                      |
 | resultsDirPath | Path to results directory in the data workspace                                           | No       |                      |
 
+
+## Changes in 3.1.0
+- Updated the base image used in this task
+
 ## changes in 3.0.0
 - the task now writes the updated targetIndex to a results json file in the workspace
 
