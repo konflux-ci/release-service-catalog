@@ -19,6 +19,9 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 3.10.0
+* Add tasks `collect-cosign-params` and `rh-sign-image-cosign` to sign images by cosign. `rh-sign-image-cosign` is only run if sign.cosignSecretName is set in the data file.
+
 ## Changes in 3.9.0
 * Removed `verify-access-to-resources` script and replaced it with a task.
 
