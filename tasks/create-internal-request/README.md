@@ -17,6 +17,9 @@ Creates an InternalRequest resource to call IIB service
 
 ## Changelog
 
+## Changes in 0.13.0
+- Updated the base image used in this task
+
 ## Changes in 0.12.0
 - Updated the base image used in this task
 

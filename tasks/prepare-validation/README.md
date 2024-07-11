@@ -25,6 +25,10 @@ tasks:
         value: '{"components":[{"name":"component1","containerImage":"quay.io/repo/component1:digest"}}]}'
 ```
 
+## Changes in 0.7.0
+
+  * Updated the base image used in this task
+
 ## Changes in 0.6.0
 
   * Updated the base image used in this task

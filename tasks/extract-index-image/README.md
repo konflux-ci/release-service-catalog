@@ -12,6 +12,9 @@ the workspace name for this task *must* be input.
 | inputDataFile | File to read json data from | No | - |
 | resultsDirPath | Path to results directory in the data workspace | No | - |
 
+## Changes in 1.1.0
+- Updated the base image used in this task
+
 ## Changes in 1.0.0
 - The task now writes the index_image and index_image_resolved values to a results json file in the workspace
 

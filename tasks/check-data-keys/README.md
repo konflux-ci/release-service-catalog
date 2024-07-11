@@ -15,6 +15,9 @@ Currently, `releaseNotes` is the only supported system.
 | dataPath | Path to the JSON string of the merged data to use       | No       |               |
 | systems  | The systems to check that all data keys are present for | Yes      | []            |
 
+## Changes in 0.8.0
+- Updated the base image used in this task
+
 ## Changes in 0.7.0
 - Updated the base image used in this task
 

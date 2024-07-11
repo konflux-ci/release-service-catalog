@@ -16,6 +16,9 @@ the field `spec.data.fileUpdates` in the ReleasePlanAdmission resource.
 
 ## Changelog
 
+## Changes in 1.3.0
+- Updated the base image used in this task
+
 ## Changes in 1.2.0
 - Updated the base image used in this task
 
