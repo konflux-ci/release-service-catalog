@@ -19,8 +19,13 @@ Tekton pipeline to release Red Hat binaries to the Red Hat Developer Portal.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+
+## Changes in 0.2.2
+- Fixed incorrect task references
+  - Some of the references incorrectly specified a name
+
 ## Changes in 0.2.1
 - Update params for `push-to-cdn`and `publish-to-cgw` tasks
-  
+
 ## Changes in 0.2.0
 - Removed `verify-access-to-resources` script and replaced it with a task.
