@@ -1,0 +1,157 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-multi-redhat-components
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json containing multiple components 
+    and Red Hat specific repository formats. Verify that the resulting json contains the expected transformations.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup-multi-component
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: setup-multi-component-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.config.path)/test_data_multi_component.json << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "repository": "quay.io/redhat-prod/product-name----image1"
+                    },
+                    {
+                      "name": "comp2",
+                      "repository": "registry.redhat.io/product-name/image2"
+                    },
+                    {
+                      "name": "comp3",
+                      "repository": "quay.io/redhat-pending/product-name----image3"
+                    }
+                  ]
+                }
+              }
+              EOF
+
+              cat > $(workspaces.config.path)/test_snapshot_spec_multi_component.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "imageurl1@sha256:123456",
+                    "source": {
+                      "git": {
+                        "revision": "myrev",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "imageurl2@sha256:789012",
+                    "source": {
+                      "git": {
+                        "revision": "myrev2",
+                        "url": "myurl2"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "imageurl3@sha256:345678",
+                    "source": {
+                      "git": {
+                        "revision": "myrev3",
+                        "url": "myurl3"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+    - name: run-task-multi-component
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: test_snapshot_spec_multi_component.json
+        - name: dataPath
+          value: test_data_multi_component.json
+      runAfter:
+        - setup-multi-component
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+    - name: check-result-multi-component
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: check-result-multi-component
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              # Test for comp1
+              echo Test that SNAPSHOT contains component comp1
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '[ .components[] | select(.name=="comp1") ] | length') -eq 1
+
+              echo Test that rh-registry-repo for comp1 is correctly set
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '.components[] | select(.name=="comp1") | ."rh-registry-repo"') == \
+                registry.redhat.io/product-name/image1
+
+              echo Test that registry-access-repo for comp1 is correctly set
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '.components[] | select(.name=="comp1") | ."registry-access-repo"') == \
+                registry.access.redhat.com/product-name/image1
+
+              # Test for comp2
+              echo Test that SNAPSHOT contains component comp2
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '[ .components[] | select(.name=="comp2") ] | length') -eq 1
+
+              echo Test that quay.io repository for comp2 is correctly set
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '.components[] | select(.name=="comp2") | .repository') == \
+                quay.io/redhat-prod/product-name----image2
+
+              echo Test that registry-access-repo for comp2 is correctly set
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '.components[] | select(.name=="comp2") | ."registry-access-repo"') == \
+                registry.access.redhat.com/product-name/image2
+
+              # Test for comp3
+              echo Test that SNAPSHOT contains component comp3
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '[ .components[] | select(.name=="comp3") ] | length') -eq 1
+
+              echo Test that rh-registry-repo for comp3 is correctly set
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '.components[] | select(.name=="comp3") | ."rh-registry-repo"') == \
+                registry.stage.redhat.io/product-name/image3
+
+              echo Test that registry-access-repo for comp3 is correctly set
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_multi_component.json \
+                | jq -r '.components[] | select(.name=="comp3") | ."registry-access-repo"') == \
+                registry.access.stage.redhat.com/product-name/image3
+      runAfter:
+        - run-task-multi-component

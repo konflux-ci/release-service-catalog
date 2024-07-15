@@ -13,6 +13,11 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                    |
 
+## Changes in 3.4.0
+* Added changes in order to eliminate the `translate-delivery-repo` script because the
+ `registry.redhat.io` and `registry.access.redhat.com ` repo are now available
+ in snapshot with key `rh-registry-repo` and `registry-access-repo` respectively.
+
 ## Changes in 3.3.0
 * This task now also signs the manifest list digest when processing a multi-arch image
 

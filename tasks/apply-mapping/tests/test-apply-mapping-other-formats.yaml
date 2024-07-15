@@ -1,0 +1,95 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-other-formats
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json where the repository is in a format not specifically
+    handled by the task. Verify that the resulting json remains unchanged in the repository field.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup-other-formats
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: setup-other-formats-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > $(workspaces.config.path)/test_data_other_formats.json << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "repository": "quay.io/my-sample/my-image"
+                    }
+                  ]
+                }
+              }
+              EOF
+
+              cat > $(workspaces.config.path)/test_snapshot_spec_other_formats.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "imageurl1@sha256:123456"
+                  }
+                ]
+              }
+              EOF
+    - name: run-task-other-formats
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: test_snapshot_spec_other_formats.json
+        - name: dataPath
+          value: test_data_other_formats.json
+      runAfter:
+        - setup-other-formats
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+    - name: check-result-other-formats
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: check-result-other-formats
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that SNAPSHOT contains component comp1
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_other_formats.json \
+                | jq -r '[ .components[] | select(.name=="comp1") ] | length') -eq 1
+
+              echo Test that repository of component comp1 stayed intact
+              test $(cat $(workspaces.config.path)/test_snapshot_spec_other_formats.json \
+                | jq -r '.components[] | select(.name=="comp1") | .repository') == \
+                quay.io/my-sample/my-image
+
+              echo Test that rh-registry-repo for comp1 is not set because it was not in a known format
+              test -z "$(cat $(workspaces.config.path)/test_snapshot_spec_other_formats.json \
+                | jq -r '.components[] | select(.name=="comp1") | ."rh-registry-repo" // empty')"
+
+              echo Test that registry-access-repo for comp1 is not set because it was not in a known format
+              test -z "$(cat $(workspaces.config.path)/test_snapshot_spec_other_formats.json \
+                | jq -r '.components[] | select(.name=="comp1") | ."registry-access-repo" // empty')"
+      runAfter:
+        - run-task-other-formats

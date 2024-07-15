@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: apply-mapping
   labels:
-    app.kubernetes.io/version: "1.4.0"
+    app.kubernetes.io/version: "1.5.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -31,8 +31,7 @@ spec:
       description: A true/false value depicting whether or not the snapshot was mapped.
   steps:
     - name: apply-mapping
-      image:
-        quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       script: |
         #!/usr/bin/env bash
         set -eux
@@ -93,12 +92,66 @@ spec:
             echo -n $tags | jq -c
         }
 
-        # Merge the mapping key contents in the data json file with the components key in the snapshot based
-        # on component name. Save the output as a compact json in mapped_snapshot.json file in the workspace
-        { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${MAPPING}"; } | jq -c -s '.[0] as $snapshot
-          | .[0].components + .[1].components | group_by(.name) | [.[] | select(length > 1)]
-          | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents | $snapshot | .components = $mergedComponents' \
-          > "${SNAPSHOT_SPEC_FILE}"
+        convert_to_quay () { # Convert the registry.redhat.io URL to the quay.io format
+            local repository=$1
+            case "$repository" in
+                registry.redhat.io/*)
+                    echo "${repository/registry.redhat.io/quay.io/redhat-prod}" \
+                        | sed 's|/|----|g; s|quay.io----redhat-prod----|quay.io/redhat-prod/|'
+                    ;;
+                registry.stage.redhat.io/*)
+                    echo "${repository/registry.stage.redhat.io/quay.io/redhat-pending}" \
+                        | sed 's|/|----|g; s|quay.io----redhat-pending----|quay.io/redhat-pending/|'
+                    ;;
+                *)
+                    echo "$repository"
+                    ;;
+            esac
+        }
+
+        # This block is temporary to support both quay.io and registry.redhat.io
+        # It should be removed once all repositories are migrated to registry.redhat.io
+        convert_to_registry () { # Convert the repository URL to the registry.redhat.io format
+            local repository=$1
+            case "$repository" in
+                quay.io/redhat-prod/*)
+                    echo "${repository/quay.io\/redhat-prod/registry.redhat.io}" | sed 's|----|/|g'
+                    ;;
+                quay.io/redhat-pending/*)
+                    echo "${repository/quay.io\/redhat-pending/registry.stage.redhat.io}" | sed 's|----|/|g'
+                    ;;
+                registry.redhat.io/* | registry.stage.redhat.io/*)
+                    # Return the original Red Hat registry paths
+                    echo "$repository"
+                    ;;
+                *)
+                    # Return empty for unhandled formats
+                    echo ""
+                    ;;
+            esac
+        }
+
+        convert_to_registry_access () { # Convert the repository URL to the registry.access.redhat.com format
+            local repository=$1
+            case "$repository" in
+                registry.redhat.io/*)
+                    echo "${repository/registry.redhat.io/registry.access.redhat.com}"
+                    ;;
+                registry.stage.redhat.io/*)
+                    echo "${repository/registry.stage.redhat.io/registry.access.stage.redhat.com}"
+                    ;;
+                *)
+                    echo ""
+                    ;;
+            esac
+        }
+
+        # Merge the mapping key contents in the data JSON file with the components key in the snapshot based
+        # on component name. Save the output as a compact JSON in the mapped_snapshot.json file in the workspace
+        { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${MAPPING}"; } | jq -c -s '
+          .[0] as $snapshot | .[0].components + .[1].components | group_by(.name) |
+          [.[] | select(length > 1)] | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents |
+          $snapshot | .components = $mergedComponents' > "${SNAPSHOT_SPEC_FILE}"
 
         printf "true" | tee $(results.mapped.path)
 
@@ -152,4 +205,31 @@ spec:
                   '.components[$i].staged.files[$j].filename = $filename' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
                   && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             done
+
+            # Determine the format of the original repository and update keys accordingly
+            repository=$(jq -r '.repository' <<< "$component")
+            echo "Processing component: $NAME"
+            echo "Original repository: $repository"
+
+            # This block is temporary to support both quay.io and registry.redhat.io
+            # It should be removed once all repositories are migrated to registry.redhat.io
+            if [[ "$repository" == quay.io/redhat-prod/* || "$repository" == quay.io/redhat-pending/* ]]; then
+                repository=$(convert_to_registry "$repository")
+            fi
+
+            # Convert to registry and quay format
+            if [[ "$repository" == registry.redhat.io/* || "$repository" == registry.stage.redhat.io/* ]]; then
+              rh_registry_repo=$repository
+              registry_access_repo=$(convert_to_registry_access "$repository")
+              repository=$(convert_to_quay "$repository")
+      
+              jq --argjson i "$i" \
+                --arg repository "$repository" \
+                --arg rh_registry_repo "$rh_registry_repo" \
+                --arg registry_access_repo "$registry_access_repo" \
+                '(.components[$i].repository = $repository) |
+                    .components[$i]["rh-registry-repo"] = $rh_registry_repo |
+                    .components[$i]["registry-access-repo"] = $registry_access_repo' \
+              "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
         done
