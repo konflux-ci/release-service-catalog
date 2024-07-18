@@ -25,6 +25,12 @@ This task supports variable expansion in tag values from the mapping. The curren
 | dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
 
+## Changes in 1.3.1
+* Fix bug when there are no tags
+  * Without a default `[]` value when loading tags for components with jq, the tags variable
+    would be an empty string instead of an empty array, which would result in an error
+    running `jq 'length'` on it
+
 ## Changes in 1.3.0
 *  Updated the base image used in the task
 
