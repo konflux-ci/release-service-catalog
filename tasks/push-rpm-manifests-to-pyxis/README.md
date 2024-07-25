@@ -11,6 +11,9 @@ Tekton task that extracts all rpms from the sboms and pushes them to Pyxis as an
 | server | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'. | Yes | production |
 | concurrentLimit | The maximum number of images to be processed at once | Yes | 4 |
 
+## Changes in 0.4.2
+* fixed a bug that would treat a multiarch image containing just one arch as a plain single arch image
+
 ## Changes in 0.4.1
 * updated the base image used in this task
   * the new image contains an updated upload_rpm_manifest script with nvra and summary
