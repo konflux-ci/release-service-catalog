@@ -4,7 +4,7 @@
 kubectl delete secret test-cosign-secret --ignore-not-found
 
 kubectl create secret generic test-cosign-secret\
-  --from-literal=AWS_REGION=us-test-1\
+  --from-literal=AWS_DEFAULT_REGION=us-test-1\
   --from-literal=AWS_ACCESS_KEY_ID=test-access-key\
   --from-literal=AWS_SECRET_ACCESS_KEY=test-secret-access-key\
   --from-literal=SIGN_KEY=aws://arn:mykey
