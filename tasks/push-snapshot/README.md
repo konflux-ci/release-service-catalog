@@ -11,6 +11,11 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | resultsDirPath     | Path to results directory in the data workspace                           | No       |                      |
 | retries            | Retry copy N times                                                        | Yes      | 0                    |
 
+## Changes in 6.2.1
+* Create new docker config for each cosign call
+  * It only contains entries for the source and destination repos
+  * This is to fix a bug with partial oci auth matches
+
 ## Changes in 6.2.0
 * Updated the base image used in this task
 
