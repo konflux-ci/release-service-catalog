@@ -41,6 +41,6 @@ function kubectl() {
   then
     echo '{"result":"Failure","embargoed_cves":"CVE-999"}'
   else
-    kubectl $*
+    /usr/bin/kubectl $*
   fi
 }

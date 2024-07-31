@@ -9,6 +9,6 @@ function kubectl() {
   then
     echo '{"result":"Success","advisory_url":"https://github.com/org/repo/advisory"}'
   else
-    kubectl $*
+    /usr/bin/kubectl $*
   fi
 }
