@@ -20,5 +20,8 @@ Tekton Pipeline to push disk images to a cdn using pulp
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+## Changes in 0.2.0
+- Add `requireInternalServices` parameter to the 'verify-access-to-resources' task.
+
 ## Changes in 0.1.1
 - Override timeout of push-disk-images task. Default is now 2h.

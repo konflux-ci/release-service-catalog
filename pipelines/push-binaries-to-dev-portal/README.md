@@ -20,6 +20,9 @@ Tekton pipeline to release Red Hat binaries to the Red Hat Developer Portal.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+### Changes in 0.3.0
+- Add `requireInternalServices` parameter to the 'verify-access-to-resources' task.
+
 ### Changes in 0.2.4
 - Increase `enterpriseContractTimeout` parameter default value.
 
