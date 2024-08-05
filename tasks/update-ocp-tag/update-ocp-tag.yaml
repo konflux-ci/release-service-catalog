@@ -4,14 +4,14 @@ kind: Task
 metadata:
   name: update-ocp-tag
   labels:
-    app.kubernetes.io/version: "1.4.0"
+    app.kubernetes.io/version: "1.4.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task to update pull-spec tag with
-    valid OCP version from get-ocp-version task.
+    Tekton task to update pull-spec tag with the OCP version gotten from the get-ocp-version task. The replacement only
+    occurs when the {{ OCP_VERSION }} placeholder is present.
   params:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
@@ -36,8 +36,8 @@ spec:
     - name: update-ocp-tag
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       script: |
-       #!/usr/bin/env sh
-       set -eu
+       #!/usr/bin/env bash
+       set -eux
 
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
@@ -45,21 +45,41 @@ spec:
             exit 1
         fi
 
-        # Function to replace tag in an image
+        # The replace_tag function receives a FBC index image as parameter and replaces it with the ocpVersion found
+        # by the `get-ocp-version` task, when the {{ OCP_VERSION }} placeholder is present.
         replace_tag() {
-            local updatedImage="${1%:*}:$(params.ocpVersion)"
-            echo "$updatedImage"
+            # replaces the tag if the placeholder exists
+            sed -E "s/\{\{(\\s+)?OCP_VERSION(\\s+)?\}\}/$(params.ocpVersion)/g" <<< "${1}"
+        }
+
+        # The validateOCPVersion function receives the tag version of a given index and the OCP version of a given
+        # base image as parameters, returning valid (0) if the arguments match each other
+        validateOCPVersion() {
+          indexVersion="${1#*:}"
+          expectedOCPVersion="${2}"
+          if [ "${indexVersion}" != "${expectedOCPVersion}" ]; then
+            echo "The OCP version of the targetIndex does not match with the base image"
+            echo "- index version: ${indexVersion}"
+            echo "- base image version: ${expectedOCPVersion}"
+            return 1
+          fi
         }
 
         # Access the updated image
-        updatedFromIndex=$(replace_tag "$(jq -r '.fbc.fromIndex' $DATA_FILE)")
-        updatedTargetIndex=$(replace_tag "$(jq -r '.fbc.targetIndex' $DATA_FILE)")
-        updatedBinaryImage=$(replace_tag "$(jq -r '.fbc.binaryImage' $DATA_FILE)")
+        updatedFromIndex=$(replace_tag "$(jq -r '.fbc.fromIndex' "$DATA_FILE")")
+        updatedTargetIndex=$(replace_tag "$(jq -r '.fbc.targetIndex' "$DATA_FILE")")
+        updatedBinaryImage=$(replace_tag "$(jq -r '.fbc.binaryImage' "$DATA_FILE")")
+
+        # if {{OCP_VERSION}} is not set, the original targetIndex will be kept but its ocp version should
+        # match base image version.
+        for index in "${updatedFromIndex}" "${updatedTargetIndex}" "${updatedBinaryImage}"; do
+          validateOCPVersion "${index}" "$(params.ocpVersion)"
+        done
 
         echo "Updated values"
-        echo -n "$updatedFromIndex" | tee $(results.updated-fromIndex.path)
+        echo -n "$updatedFromIndex" | tee "$(results.updated-fromIndex.path)"
         echo
-        echo -n "$updatedTargetIndex" | tee $(results.updated-targetIndex.path)
+        echo -n "$updatedTargetIndex" | tee "$(results.updated-targetIndex.path)"
         echo
-        echo -n "$updatedBinaryImage" | tee $(results.updated-binaryImage.path)
+        echo -n "$updatedBinaryImage" | tee "$(results.updated-binaryImage.path)"
         echo

@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: prepare-fbc-release
   labels:
-    app.kubernetes.io/version: "1.3.0"
+    app.kubernetes.io/version: "1.3.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -48,7 +48,6 @@ spec:
         pattern="^v[0-9]+\.[0-9]+$"
 
         # Read components and initial values
-        components=$(jq -c '.components[]' "$SNAPSHOT_PATH")
         fromIndex=$(jq -r '.fbc.fromIndex' "$DATA_FILE")
         targetIndex=$(jq -r '.fbc.targetIndex' "$DATA_FILE")
         binaryImage=$(jq -r '.fbc.binaryImage' "$DATA_FILE")
@@ -65,8 +64,20 @@ spec:
 
         # Function to replace tag in an image
         replace_tag() {
-            local updatedImage="${1%:*}:${2}"
-            echo "$updatedImage"
+            # replaces the tag if the placeholder exists
+            echo "${1}" |sed -E "s/\{\{(\\s+)?OCP_VERSION(\\s+)?\}\}/${2}/g"
+        }
+
+        # validateOCPVersion function validates if the base image ocp ver matches with the one in the tested index
+        validateOCPVersion() {
+          indexVersion="${1#*:}"
+          expectedOCPVersion="${2}"
+          if [ "${indexVersion}" != "${expectedOCPVersion}" ]; then
+            echo "The OCP version of the targetIndex does not match with the base image"
+            echo "- index version: ${indexVersion}"
+            echo "- base image version: ${expectedOCPVersion}"
+            return 1
+          fi
         }
 
         # Iterate over component indices
@@ -93,6 +104,12 @@ spec:
             updatedFromIndex=$(replace_tag "$fromIndex" "$ocpVersion")
             updatedTargetIndex=$(replace_tag "$targetIndex" "$ocpVersion")
             updatedBinaryImage=$(replace_tag "$binaryImage" "$ocpVersion")
+
+            # if {{OCP_VERSION}} is not set, the original targetIndex will be kept but its ocp version should
+            # match base image version.
+            for index in "${updatedFromIndex}" "${updatedTargetIndex}" "${updatedBinaryImage}"; do
+              validateOCPVersion "${index}" "${ocpVersion}"
+            done
 
             # Print updated values
             echo "Component: $componentName"
