@@ -20,6 +20,9 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
+### Changes in 4.10.0
+- Add `requireInternalServices` parameter to the 'verify-access-to-resources' task.
+
 ### Changes in 4.9.2
 - Increase `enterpriseContractTimeout` parameter default value.
 
