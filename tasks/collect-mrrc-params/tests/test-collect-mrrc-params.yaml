@@ -1,0 +1,85 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-mrrc-params
+spec:
+  description: |
+    Run the collect-mrrc-params task
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "mrrc": {
+                  "product": {
+                    "name": "activemq",
+                    "version": "0.0.1",
+                    "cosignPubKeyConfig": "test-cosign-pub-key",
+                    "zipRegistry": "quay.io/ligangty/activemq.zip:0.0.1"
+                  },
+                  "awsSecret": "charon-aws-credentials",
+                  "environment": "dev",
+                  "release": "ga"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: collect-mrrc-params
+      params:
+        - name: dataJsonPath
+          value: data.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: mrrcParamFilePath
+          value: $(tasks.run-task.results.mrrcParamFilePath)
+        - name: cosignPubKeyConfig
+          value: $(tasks.run-task.results.cosignPubKeyConfig)
+        - name: charonAWSSecret
+          value: $(tasks.run-task.results.charonAWSSecret)
+      taskSpec:
+        params:
+          - name: mrrcParamFilePath
+          - name: cosignPubKeyConfig
+          - name: charonAWSSecret
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              test "$(params.cosignPubKeyConfig)" == "test-cosign-pub-key"
+              test "$(params.charonAWSSecret)" == "charon-aws-credentials"
+
+              MRRC_FILE="$(workspaces.data.path)/$(params.mrrcParamFilePath)"
+              test -f "$MRRC_FILE"
+              
+              . "$MRRC_FILE"
+              test "$MRRC_ZIP_REGISTRY" == "quay.io/ligangty/activemq.zip:0.0.1"
+              test "$MRRC_TARGET" == "dev-maven-ga"
+              test "$MRRC_PRODUCT_NAME" == "activemq"
+              test "$MRRC_PRODUCT_VERSION" == "0.0.1"
+      runAfter:
+        - run-task
