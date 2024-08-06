@@ -12,7 +12,6 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | releaseServiceConfig | The namespaced name (namespace/name) of the releaseServiceConfig | No | - |
 | snapshot | The namespaced name (namespace/name) of the snapshot | No | - |
 | enterpriseContractPolicy | JSON representation of the policy to be applied when validating the enterprise contract | No | - |
-| enterpriseContractPublicKey | Public key to use for validation by the enterprise contract | Yes | k8s://openshift-pipelines/public-key |
 | enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes | pipeline_intention=release |
 | enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                        | Yes       | 40m0s                                                           |
 | postCleanUp | Cleans up workspace after finishing executing the pipeline | Yes | true |
@@ -20,10 +19,13 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used | No | - |
 
-### Changes in 3.11.0
+## Changes in 4.0.0
+- Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.
+
+## Changes in 3.11.0
 - Add `requireInternalServices` parameter to the 'verify-access-to-resources' task.
 
-### Changes in 3.10.2
+## Changes in 3.10.2
 - Increase `enterpriseContractTimeout` parameter default value.
 
 ## Changes in 3.10.1
