@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "6.2.0"
+    app.kubernetes.io/version: "6.2.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -41,13 +41,21 @@ spec:
           # oras has very limited support for selecting the right auth entry,
           # so create a custom auth file with just one entry.
           DEST_AUTH_FILE=$(mktemp)
-          select-oci-auth "$4:$5" > "$DEST_AUTH_FILE"
+          registry=$(echo "$4" | cut -d '/' -f 1)
+          select-oci-auth "$4" | jq -c \
+            '.auths."'"$4"'" = .auths."'"$registry"'" | del(.auths."'"$registry"'")' > "$DEST_AUTH_FILE"
 
           # We need this default value for $7 when oras_args is equal to ()
           destination_digest=$(oras resolve --registry-config "$DEST_AUTH_FILE" ${7:-} "$4:$5" || true)
 
           if [[ "$destination_digest" != "$1" || -z "$destination_digest" ]]; then
             printf '* Pushing component: %s to %s:%s\n' "$2" "$4" "$5"
+            # Create a combined auth file to enable partial oci matches to work
+            DOCKER_CONFIG="$(mktemp -d)"
+            export DOCKER_CONFIG
+            # shellcheck disable=SC2128
+            jq -s 'reduce .[] as $item ({}; . * $item)' \
+              "$SOURCE_AUTH_FILE" "$DEST_AUTH_FILE" > "$DOCKER_CONFIG"/config.json
             attempt=0
             until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
               cosign copy -f "$3" "$4:$5" && break
@@ -86,6 +94,7 @@ spec:
 
         RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/push-snapshot-results.json"
         RESULTS_JSON='{"images":[]}'
+        SOURCE_AUTH_FILE=$(mktemp)
 
         defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' $DATA_FILE)
 
@@ -101,8 +110,11 @@ spec:
 
           # oras has very limited support for selecting the right auth entry,
           # so create a custom auth file with just one entry.
-          AUTH_FILE=$(mktemp)
-          select-oci-auth "${containerImage}" > "$AUTH_FILE"
+          registry=$(echo "${containerImage}" | cut -d '/' -f 1)
+          # Apply-mapping ensures that the containerImage contains a sha256 digest
+          source_repo=${containerImage%%@sha256:*}
+          select-oci-auth "${containerImage}" | jq -c \
+            '.auths."'"$source_repo"'" = .auths."'"$registry"'" | del(.auths."'"$registry"'")' > "$SOURCE_AUTH_FILE"
 
           arch_json=$(get-image-architectures "${containerImage}")
           arches=$(jq -s 'map(.platform.architecture)' <<< $arch_json)
@@ -121,7 +133,7 @@ spec:
           fi
 
           # we do not use oras_args here since we want to get the manifest index image digest
-          origin_digest=$(oras resolve --registry-config "$AUTH_FILE" "${containerImage}")
+          origin_digest=$(oras resolve --registry-config "$SOURCE_AUTH_FILE" "${containerImage}")
 
           RESULTS_JSON=$(jq --arg i "$i" --argjson arches "$arches" --argjson oses "$oses" --arg name "$name" \
             --arg sha "$origin_digest" \
@@ -135,12 +147,11 @@ spec:
             || [[ $(jq 'has("pushSourceContainer")' <<< $component) == "false" && \
                   ${defaultPushSourceContainer} == "true" ]] ; then
 
-            source_repo=${containerImage%%@sha256:*}
             source_tag=${origin_digest/:/-}.src
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
             # Check if the source container exists
-            source_container_digest=$(oras resolve --registry-config "$AUTH_FILE" \
+            source_container_digest=$(oras resolve --registry-config "$SOURCE_AUTH_FILE" \
               "${sourceContainer}" ${oras_args[@]})
 
             if [ -z "$source_container_digest" ] ; then
