@@ -13,6 +13,9 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                      |
 
+## Changes in 3.3.0
+* This task now also signs the manifest list digest when processing a multi-arch image
+
 ## Changes in 3.2.0
 * Updated the base image used in this task
 
