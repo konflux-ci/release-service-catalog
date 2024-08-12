@@ -1,0 +1,125 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-snapshot-mount-certs
+spec:
+  description: |
+    Run the push-snapshot task and verify custom certificate is mounted
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir $(workspaces.data.path)/results
+              cat > $(workspaces.data.path)/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1:tag1",
+                    "repository": "prod-registry.io/prod-location1",
+                    "tags": [
+                      "tag1-12345",
+                      "tag2-zyxw"
+                    ],
+                    "pushSourceContainer": false
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "private-registry.io/image:tag",
+                    "repository": "prod-registry.io/prod-location2",
+                    "tags": [
+                      "some-cool-tag"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              cat > $(workspaces.data.path)/data.json << EOF
+              {
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": true
+                  }
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: push-snapshot
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: retries
+          value: 0
+        - name: resultsDirPath
+          value: results
+        - name: caTrustConfigMapName
+          value: test-use-custom-ca-cert
+        - name: caTrustConfigMapKey
+          value: cert
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              # 2 for comp1 (the 2 provided tags)
+              # 3 for comp2 (provided tag, once for image, once for source container, + once for source tag)
+              if [ $(cat $(workspaces.data.path)/mock_cosign.txt | wc -l) != 5 ]; then
+                echo Error: cosign was expected to be called 5 times. Actual calls:
+                cat $(workspaces.data.path)/mock_cosign.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_skopeo.txt | wc -l) != 2 ]; then
+                echo Error: skopeo was expected to be called 2 times. Actual calls:
+                cat $(workspaces.data.path)/mock_skopeo.txt
+                exit 1
+              fi
+
+              if [ $(cat $(workspaces.data.path)/mock_oras.txt | wc -l) != 8 ]; then
+                echo Error: oras was expected to be called 8 times. Actual calls:
+                cat $(workspaces.data.path)/mock_oras.txt
+                exit 1
+              fi
+
+              test $(jq -r '.images[0].name' $(workspaces.data.path)/results/push-snapshot-results.json) == "comp1"
+              test $(jq -r '.images[0].shasum' $(workspaces.data.path)/results/push-snapshot-results.json) == \
+                "sha256:6ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15e"
+              test $(jq -r '.images[0].urls | length' $(workspaces.data.path)/results/push-snapshot-results.json) \
+                == "2"
+              test $(jq -r '.images[0].arches | length' $(workspaces.data.path)/results/push-snapshot-results.json) \
+                == "2"
+      runAfter:
+        - run-task

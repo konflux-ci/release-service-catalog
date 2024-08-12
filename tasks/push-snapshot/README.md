@@ -4,12 +4,17 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 
 ## Parameters
 
-| Name               | Description                                                               | Optional | Default value        |
-|--------------------|---------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath       | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       | -                    |
-| dataPath           | Path to the JSON string of the merged data to use in the data workspace   | No       | -                    |
-| resultsDirPath     | Path to results directory in the data workspace                           | No       | -                    |
-| retries            | Retry copy N times                                                        | Yes      | 0                    |
+| Name                 | Description                                                               | Optional | Default value        |
+|----------------------|---------------------------------------------------------------------------|----------|----------------------|
+| snapshotPath         | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       | -                    |
+| dataPath             | Path to the JSON string of the merged data to use in the data workspace   | No       | -                    |
+| resultsDirPath       | Path to results directory in the data workspace                           | No       | -                    |
+| retries              | Retry copy N times                                                        | Yes      | 0                    |
+| caTrustConfigMapName | The name of the ConfigMap to read CA bundle data from                     | Yes      | trusted-ca           |
+| caTrustConfigMapKey  | The name of the key in the ConfigMap that contains the CA bundle data     | Yes      | ca-bundle.crt        |
+
+## Changes in 6.3.0
+* Add support for custom CA cert in push-snapshot task
 
 ## Changes in 6.2.1
 * Create new docker config for each cosign call

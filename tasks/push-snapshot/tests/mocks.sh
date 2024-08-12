@@ -17,6 +17,15 @@ function cosign() {
     fi
   fi
 
+  if [[ "$*" == "copy -f private-registry.io/image:tag "*":"* ]]
+  then
+    if [[ $(cat /etc/ssl/certs/ca-custom-bundle.crt) != "mycert" ]]
+    then
+      echo Custom certificate not mounted
+      return 1
+    fi
+  fi
+
   if [[ "$*" != "copy -f "*":"*" "*":"* ]]
   then
     echo Error: Unexpected call
