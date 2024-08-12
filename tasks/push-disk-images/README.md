@@ -4,8 +4,8 @@ Tekton task to push disk images via an InternalRequest. The environment to use i
 
 ## Parameters
 
-| Name                     | Description                                                                               | Optional | Default value               |
-|--------------------------|-------------------------------------------------------------------------------------------|----------|-----------------------------|
-| snapshotPath             | Path to the JSON file of the Snapshot spec in the data workspace                          | No       |                             |
-| dataPath                 | Path to data JSON in the data workspace                                                   | No       |                             |
-| pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       |                             |
+| Name                     | Description                                                                               | Optional | Default value |
+|--------------------------|-------------------------------------------------------------------------------------------|----------|---------------|
+| snapshotPath             | Path to the JSON file of the Snapshot spec in the data workspace                          | No       | -             |
+| dataPath                 | Path to data JSON in the data workspace                                                   | No       | -             |
+| pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -             |

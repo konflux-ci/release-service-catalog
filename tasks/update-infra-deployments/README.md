@@ -21,31 +21,31 @@
 | defaultGithubAppInstallationID | Installation ID of Github app in the organization                                            | true     | 35269675                                                                                                                                         |
 
 ## Changes in 1.2.0
-- Updated the base image used in this task
+* Updated the base image used in this task
 
 ## Changes in 1.1.0
-- Updated the base image used in this task
+* Updated the base image used in this task
 
 ## Changes in 1.0.0
-- Modified `update-infra-deployments` task to dynamically fetch
+* Modified `update-infra-deployments` task to dynamically fetch
   `targetGHRepo`, `githubAppID`, and `githubAppInstallationID` from the dataJsonPath JSON file.
   (defaults to redhat-appstudio/infra-deployments for targetGHRepo,
   and provided defaults for githubAppID and githubAppInstallationID)
-- Added `defaultTargetGHRepo`, `defaultGithubAppID`, and `defaultGithubAppInstallationID` parameters
+* Added `defaultTargetGHRepo`, `defaultGithubAppID`, and `defaultGithubAppInstallationID` parameters
   to the update-infra-deployments task to specify the default values
   for the GitHub repository and app configurations.
 
-## Changes since 0.4.1
-- Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
+## Changes in 0.4.1
+* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
-## Changes since 0.4.0
-- add protection to prevent failures if there are no updated files.
+## Changes in 0.4.0
+* add protection to prevent failures if there are no updated files.
 
-## Changes since 0.3
-- extraDataJsonPath is renamed to dataJsonPath to more closely match the API spec
+## Changes in 0.3
+* extraDataJsonPath is renamed to dataJsonPath to more closely match the API spec
 
-## Changes since 0.2
-- update Tekton API to v1
+## Changes in 0.2
+* update Tekton API to v1
 
-## Changes since 0.1
-- extraDataJsonPath and snapshotPath are now required parameters
+## Changes in 0.1
+* extraDataJsonPath and snapshotPath are now required parameters

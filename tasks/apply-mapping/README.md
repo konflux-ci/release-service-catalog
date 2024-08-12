@@ -19,11 +19,11 @@ This task supports variable expansion in tag values from the mapping. The curren
 
 ## Parameters
 
-| Name | Description | Optional | Default value |
-|------|-------------|----------|---------------|
-| snapshotPath | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No | |
-| dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
-| failOnEmptyResult | Fail the task if the resulting snapshot contains zero components | Yes | false |
+| Name              | Description                                                                                  | Optional | Default value |
+|-------------------|----------------------------------------------------------------------------------------------|----------|---------------|
+| snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |  
+| dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
+| failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
 
 ## Changes in 1.4.0
 * Add a check that all component containerImage values use a sha reference
@@ -62,40 +62,40 @@ This task supports variable expansion in tag values from the mapping. The curren
     Using `echo` resulted in appending `true\n` to the output,
     which caused discrepancies with the `when` expression in the pipeline.
 
-## Changes since 0.8.0
+## Changes in 0.8.0
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
-## Changes since 0.7.0
+## Changes in 0.7.0
   * No longer uses extraConfigPath
     * The mapping is provided by the ReleasePlanAdmission now instead. This change includes replacing the `extraConfigPath`
       parameter with the `releasePlanAdmissionPath` parameter
 
-## Changes since 0.6
+## Changes in 0.6
   * Update Tekton API to v1
 
-## Changes since 0.5
+## Changes in 0.5
   * Instead of saving the mapped json to a new file, override the original snapshot spec file
     * We never really use the original after the mapping anyway and this way we can continue to use the path to the snapshot
       that we already know in other tasks of the pipeline (at the moment the mapped json file is hardcoded in other places
       of the pipeline that use it).
 
-## Changes since 0.4
+## Changes in 0.4
   * The snapshot parameter was replaced with the snapshotPath parameter
     * The snapshot is now provided via the workspace instead of directly as a parameter
     * The mapped snapshot is now stored in a `mapped_snapshot.json` file in the workspace instead of as a task result
 
-## Changes since 0.3
+## Changes in 0.3
 
   * New optional parameter `failOnEmptyResult` was added. When enabled, the task
     will fail if the resulting snapshot contains 0 components.
 
-## Changes since 0.2
+## Changes in 0.2
 
   * Base image was changed from `release-utils` to `release-base-image`
   * The syntax for `taskRef.bundle` and `pipelineRef.bundle` is deprecated,
   bundles resolver is used with new format.
 
-## Changes since 0.1 (milestone-8)
+## Changes in 0.1 (milestone-8)
 
   * Task `apply-mapping` was changed
     * Task parameter `applicationSnapshot` value was changed

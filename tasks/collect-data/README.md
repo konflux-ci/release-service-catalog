@@ -61,22 +61,22 @@ should not be present in the Release data section).
     * The step lists keys that are disallowed for each of the three release resources
     * If any of the disallowed keys are found in the corresponding resource, the check will fail the task
 
-## Changes since 1.0.1
+## Changes in 1.0.1
   * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
-## Changes since 1.0.0
+## Changes in 1.0.0
   * Replace all references to extraData with data due to change in the Release CRDs
   * Bump the image used in the task to get a bug fix in the merge-json script
 
-## Changes since 0.4
+## Changes in 0.4
   * Remove releasestrategy param and result from the task
   * Collect data field instead of extraData as the Release Service API has changed
 
-## Changes since 0.3
+## Changes in 0.3
   * Update Tekton API to v1
 
-## Changes since 0.2
+## Changes in 0.2
   * Added task results for the path to each of the stored resources
 
-## Changes since 0.1
+## Changes in 0.1
   * Added new `subdirectory` parameter to specify a subdirectory inside the workspace dir to be used
