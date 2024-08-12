@@ -19,8 +19,8 @@ does not publish the repository.
 |--------------|---------------------------------------------------------------------------------------------------|----------|--------------------|
 | server       | The server type to use. Options are 'production' and 'stage'                                      | Yes      | production         |
 | pyxisSecret  | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No       | -                  |
-| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       |                    |
-| dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       |                    |
+| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       | -                  |
+| dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       | -                  |
 
 ## Changes in 1.1.0
 * Updated the base image used in this task
@@ -51,11 +51,10 @@ does not publish the repository.
 
 ## Changes in 0.2.0
 * If a data JSON is provided and images.pushSourceContainer is set to true inside it, a call is made
-  to mark the repository as source_container_image_enabled true
+to mark the repository as source_container_image_enabled true
 
-## Changes since 0.0.2
+## Changes in 0.0.2
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
-## Changes since 0.0.1
-
+## Changes in 0.0.1
 * Minor change to logging to provide more context about the pyxis repo request on failure

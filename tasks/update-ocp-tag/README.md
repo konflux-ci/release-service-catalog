@@ -6,10 +6,10 @@ Tekton task to update version tag of FBC pull-spec
 
 ## Parameters
 
-| Name | Description | Optional | Default value |
-|------|-------------|----------|---------------|
-| dataPath | Path to the JSON string of the merged data to use in the data workspace | No | |
-| ocpVersion |  OCP version fetched from fbcFragment | No | - |
+| Name       | Description                                                             | Optional | Default value |
+|------------|-------------------------------------------------------------------------|----------|---------------|
+| dataPath   | Path to the JSON string of the merged data to use in the data workspace | No       | -             |
+| ocpVersion | OCP version fetched from fbcFragment                                    | No       | -             |
 
 ## Changes in 1.4.0
 * Updated the base image used in this task
@@ -20,13 +20,13 @@ Tekton task to update version tag of FBC pull-spec
 ## Changes in 1.2.0
 * Remove `dataPath` default value
 
-## Changes since 1.0.0
+## Changes in 1.0.0
 * Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead
 
-## Changes since 0.2
+## Changes in 0.2
 * A new parameter exists called dataPath that specifies the path to the JSON string of merged data in the workspace
 * fromIndex, targetIndex, and binaryImage are no longer task parameters
     * They are now pulled from the data json.
 
-## Changes since 0.1
-- update Tekton API to v1
+## Changes in 0.1
+* update Tekton API to v1
