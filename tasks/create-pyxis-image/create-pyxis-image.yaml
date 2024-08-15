@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-pyxis-image
   labels:
-    app.kubernetes.io/version: "3.2.0"
+    app.kubernetes.io/version: "3.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -48,7 +48,7 @@ spec:
       description: The relative path in the workspace to the stored pyxis data json
   steps:
     - name: create-pyxis-image
-      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      image: quay.io/konflux-ci/release-service-utils:65d8db844c008e7736ec8dff307868525279484d
       env:
         - name: pyxisCert
           valueFrom:
@@ -62,7 +62,7 @@ spec:
               key: key
       script: |
         #!/usr/bin/env bash
-        set -eo pipefail
+        set -exo pipefail
 
         if [[ "$(params.server)" == "production" ]]
         then
@@ -94,8 +94,12 @@ spec:
         PYXIS_DATA_PATH="$(dirname $(params.snapshotPath))/pyxis.json"
         echo -n "${PYXIS_DATA_PATH}" > $(results.pyxisDataPath.path)
 
+        set +x
         echo "${pyxisCert}" > /tmp/crt
         echo "${pyxisKey}" > /tmp/key
+        set -x
+
+        AUTH_FILE=$(mktemp)
 
         COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
         JSON_OUTPUT='{}'
@@ -105,14 +109,29 @@ spec:
               '.components[$id] += { "containerImage": $image, "pyxisImages": []}' <<< "$JSON_OUTPUT")
             REPOSITORY=$(jq -r ".components[${i}].repository" "${SNAPSHOT_SPEC_FILE}")
             REPOSITORY=${REPOSITORY%:*} # strip tag just in case - it should not be there
+            SOURCE_REPO=${CONTAINER_IMAGE%%@sha256:*}
             DIGEST="${CONTAINER_IMAGE##*@}"
             PULLSPEC="${REPOSITORY}@${DIGEST}"
             MEDIA_TYPE=$(skopeo inspect --raw "docker://${PULLSPEC}" | jq -r .mediaType)
             TAGS=$(jq -r ".components[${i}].tags | join(\" \")" "${SNAPSHOT_SPEC_FILE}")
 
             # oras has very limited support for selecting the right auth entry,
-            # so create a custom auth file with just one entry
-            AUTH_FILE=$(mktemp)
+            # so create a custom auth file with just one entry before each oras call
+            select-oci-auth "${SOURCE_REPO}" > "$AUTH_FILE"
+            DOCKERFILE_DIR="$(mktemp -d)"
+            DOCKERFILE_PATH=""
+            # try fetching Dockerfile for the image
+            if oras pull --registry-config "$AUTH_FILE" "${SOURCE_REPO}:${DIGEST}.dockerfile" -o "${DOCKERFILE_DIR}"
+            then
+              DOCKERFILE_PATH="${DOCKERFILE_DIR}/Dockerfile"
+              if [ ! -f "${DOCKERFILE_PATH}" ]; then
+                echo Error: Dockerfile pull succeeded, but the Dockerfile was not saved.
+                exit 1
+              fi
+            else
+              echo "Unable to get Dockerfile for the image. Maybe it's not enabled in the build pipeline?"
+            fi
+
             select-oci-auth "${REPOSITORY}" > "$AUTH_FILE"
 
             index=0
@@ -146,7 +165,8 @@ spec:
                   --digest "$DIGEST" \
                   --architecture-digest "$ARCH_DIGEST" \
                   --architecture "$ARCH" \
-                  --rh-push $(params.rhPush) | tee "/tmp/output"
+                  --rh-push "$(params.rhPush)" \
+                  --dockerfile "${DOCKERFILE_PATH}" | tee "/tmp/output"
                 # The rh-push-to-external-registry e2e test depends on this line being in the task log
                 IMAGEID=$(awk '/The image id is/{print $NF}' /tmp/output)
 
