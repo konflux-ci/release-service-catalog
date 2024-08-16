@@ -8,9 +8,40 @@ function internal-request() {
   # set to async
   /home/utils/internal-request $@ -s false
 
-  # mimic the sync output
-  echo "Sync flag set to true. Waiting for the InternalRequest to be completed."
-  sleep 2
+  sleep 1
+  NAME=$(kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
+      --sort-by=.metadata.creationTimestamp | tail -1)
+  if [ -z $NAME ]; then
+      echo Error: Unable to get IR name
+      echo Internal requests:
+      kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
+          --sort-by=.metadata.creationTimestamp
+      exit 1
+  fi
+
+  if [[ "$*" == *"fbcFragment=fail.io"* ]]; then
+      set_ir_status $NAME 1
+  else
+      set_ir_status $NAME 0
+  fi
+}
+
+function set_ir_status() {
+    NAME=$1
+    EXITCODE=$2
+    PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    cat > $PATCH_FILE << EOF
+{
+  "status": {
+    "results": {
+      "genericResult": "{\"public_index_image\":\"foo\",\"sign_index_image\":\"bar\"}",
+      "iibLog": "Dummy IIB Log",
+      "exitCode": "${EXITCODE}"
+    }
+  }
+}
+EOF
+    kubectl patch internalrequest $NAME --type=merge --subresource status --patch-file $PATCH_FILE
 }
 
 function date() {
