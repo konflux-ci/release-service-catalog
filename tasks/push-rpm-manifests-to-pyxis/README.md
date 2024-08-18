@@ -11,6 +11,11 @@ Tekton task that extracts all rpms from the sboms and pushes them to Pyxis as an
 | server          | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'. | Yes      | production    |
 | concurrentLimit | The maximum number of images to be processed at once                                                | Yes      | 4             |
 
+## Changes in 0.4.3
+* Create new docker config for each `cosign download sbom` call
+  * It only contains an entry for the specific image
+  * This is to fix a bug with partial oci auth matches
+
 ## Changes in 0.4.2
 * fixed a bug that would treat a multiarch image containing just one arch as a plain single arch image
 

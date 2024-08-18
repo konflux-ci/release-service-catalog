@@ -44,3 +44,7 @@ function upload_rpm_manifest() {
     rm $LOCK_FILE
   fi
 }
+
+function select-oci-auth() {
+  echo $* >> $(workspaces.data.path)/mock_select-oci-auth.txt
+}
