@@ -22,6 +22,10 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes     | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                       | No       | -             |
 
+## Changes in 1.0.1
+* Increase `rh-sign-image` timeout from 600s to 1200s as we have seen reports
+  of it timing out while waiting for internalRequests to complete.
+
 ## Changes in 1.0.0
 * Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.
 
