@@ -14,6 +14,14 @@ Task to create a internalrequest to add fbc contributions to index images
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       | -                    |
 | resultsDirPath | Path to results directory in the data workspace                                           | No       | -                    |
 
+## Changes in 3.2.0
+* Changed the way service account secret is determined
+  * Setting `.fbc.iibServiceAccountSecret` is no longer allowed (it was never used anyway). Instead, it's based on the stagedIndex setting now.
+  * If `.fbc.stagedIndex` is `true`, we'll use `iib-service-account-stage`.
+    Otherwise we'll use `iib-service-account-prod`.
+  * The reason is that IIB has a priority queue for requests made with our prod
+    kerberos principal and we were asked to use it only for prod index requests.
+
 ## Changes in 3.1.0
 * Updated the base image used in this task
 
@@ -54,7 +62,7 @@ Task to create a internalrequest to add fbc contributions to index images
 
 ## Changes in 1.4.0
 * add the possibility of setting a stagedIndex tag
- 
+
 ## Changes in 1.3.0
 * add the possibility of setting a hotfix tag
 * replace the `fbcOptIn` result with `mustSignIndexImage` and `mustPublishIndexImage`
