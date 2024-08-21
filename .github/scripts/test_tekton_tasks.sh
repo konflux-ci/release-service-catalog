@@ -60,9 +60,13 @@ for ITEM in $TEST_ITEMS
 do
   echo Task item: $ITEM
   TASK_NAME=$(echo $ITEM | cut -d '/' -f 2)
+  TASK_DIR=$(echo $ITEM | cut -d '/' -f -2)
+  if [ "$(echo $ITEM | cut -d '/' -f 1)" == "internal" ] ; then
+    TASK_NAME=$(echo $ITEM | cut -d '/' -f 3)
+    TASK_DIR=$(echo $ITEM | cut -d '/' -f -3)
+  fi
   echo "  Task name: $TASK_NAME"
 
-  TASK_DIR=$(echo $ITEM | cut -d '/' -f -2)
   TASK_PATH=${TASK_DIR}/${TASK_NAME}.yaml
   if [ ! -f $TASK_PATH ]
   then
