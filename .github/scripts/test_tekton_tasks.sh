@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script will run task tests for all task directories
-# provided either via TASK_DIRS env var, or as arguments
+# provided either via TEST_ITEMS env var, or as arguments
 # when running the script.
 #
 # Requirements:
@@ -10,7 +10,7 @@
 # - tkn installed
 #
 # Examples of usage:
-# export TASK_DIRS="mydir/tasks/apply-mapping some/other/dir"
+# export TEST_ITEMS="mydir/tasks/apply-mapping some/other/dir"
 # ./test_tekton_tasks.sh
 #
 # or
