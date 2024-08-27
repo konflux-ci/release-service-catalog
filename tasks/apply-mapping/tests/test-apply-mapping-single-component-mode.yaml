@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping-no-data-file
+  name: test-apply-mapping-single-component-mode
 spec:
   description: |
-    Run the apply-mapping with a basic snapshot.spec json without a data json file
-    provided and verify that the returned json is the same as the one in the input.
+    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
+    the data json file and verify that the resulting json contains the expected values.
   workspaces:
     - name: tests-workspace
   tasks:
@@ -15,8 +15,6 @@ spec:
         - name: config
           workspace: tests-workspace
       taskSpec:
-        results:
-          - name: snapshot
         workspaces:
           - name: config
         steps:
@@ -26,7 +24,33 @@ spec:
               #!/usr/bin/env sh
               set -eux
 
-              cat > $(workspaces.config.path)/snapshot_spec.json << EOF
+              cat > $(workspaces.config.path)/test_data.json << EOF
+              {
+                "singleComponent": "true",
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "repository": "repo1"
+                    },
+                    {
+                      "name": "comp2",
+                      "repository": "repo2"
+                    },
+                    {
+                      "name": "comp3",
+                      "repository": "repo3a"
+                    },
+                    {
+                      "name": "comp4",
+                      "customfield": "custom"
+                    }
+                  ]
+                }
+              }
+              EOF
+
+              cat > $(workspaces.config.path)/test_snapshot_spec.json << EOF
               {
                 "application": "myapp",
                 "components": [
@@ -49,6 +73,10 @@ spec:
                     "name": "comp4",
                     "containerImage": "imageurl4@sha256:123456",
                     "repository": "repo4"
+                  },
+                  {
+                    "name": "comp5",
+                    "containerImage": "imageurl5@sha256:123456"
                   }
                 ]
               }
@@ -58,16 +86,16 @@ spec:
         name: apply-mapping
       params:
         - name: snapshotPath
-          value: snapshot_spec.json
+          value: test_snapshot_spec.json
         - name: dataPath
-          value: ""
+          value: test_data.json
         - name: snapshot
           value: default/snapshot
+      runAfter:
+        - setup
       workspaces:
         - name: config
           workspace: tests-workspace
-      runAfter:
-        - setup
     - name: check-result
       workspaces:
         - name: config
@@ -82,8 +110,16 @@ spec:
               #!/usr/bin/env sh
               set -eux
 
-              # the resulting json is exactly the same as the original one (since no mapping was used)
-              test "$(cat $(workspaces.config.path)/snapshot_spec.json|jq --sort-keys .)" \
-                == "$(cat $(workspaces.config.path)/snapshot_spec.json.orig|jq --sort-keys .)"
+              echo Test that SNAPSHOT contains only 1 component
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '[ .components[] ] | length') -eq 1
+
+              echo Test that SNAPSHOT contains component comp1
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '[ .components[] | select(.name=="comp1") ] | length') -eq 1
+
+              echo Test that SNAPSHOT does not contain component comp3
+              test $(cat $(workspaces.config.path)/test_snapshot_spec.json \
+                | jq -r '[ .components[] | select(.name=="comp3") ] | length') -eq 0
       runAfter:
         - run-task

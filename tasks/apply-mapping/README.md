@@ -2,7 +2,7 @@
 
 Tekton task to apply a mapping to an Snapshot.
 
-The purpose of this task is to merge a mapping with the components contained in an Snapshot.
+The purpose of this task is to merge a mapping with the components contained in a Snapshot.
 The mapping is expected to be present in the data field of the ReleasePlanAdmission provided in
 the `releasePlanAdmissionPath`. If the data field does not contain a `mapping` key, the original
 Snapshot is returned. If there is a `mapping` key, it is merged with the `components` key in the
@@ -17,6 +17,9 @@ This task supports variable expansion in tag values from the mapping. The curren
 * "{{ git_short_sha }}" -> The git sha reduced to 7 characters
 * "{{ digest_sha }}" -> The image digest of the respective component
 
+This task also supports *singleComponent* mode. This mode, when activated, will reconstruct the snapshot to contain
+a single component. The component who successful build caused the creation of the snapshot.
+
 ## Parameters
 
 | Name              | Description                                                                                  | Optional | Default value |
@@ -24,6 +27,12 @@ This task supports variable expansion in tag values from the mapping. The curren
 | snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |  
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
+| snapshot          | Namespaced name of Snapshot                                                                  | No       | -             |
+
+## Changes in 1.5.1
+* A new feature was added called *singleComponent* mode.
+  * When activated, via the *.data.singleComponent = true* setting, the task will create a new single component Snapshot
+    based on which component caused the Snapshot to be built.
 
 ## Changes in 1.5.0
 * Change the way the component repository field in RPA mapping is handled:

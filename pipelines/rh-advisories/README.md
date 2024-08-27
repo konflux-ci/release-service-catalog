@@ -22,6 +22,9 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes     | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                       | No       | -             |
 
+## Changes in 1.1.1
+* Add required snapshot parameter to the apply-mapping task.
+
 ## Changes in 1.1.0
 * The `publish-pyxis-repository` now gets the `resultsDirPath` parameter from the `collect-data` results
 
