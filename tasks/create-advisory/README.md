@@ -18,6 +18,9 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                           |
 
+## Changes in 4.4.0
+- Update task to use repository value from snapshot JSON insted of data JSON.
+
 ## Changes in 4.3.0
 * Updated the base image used in this task
 

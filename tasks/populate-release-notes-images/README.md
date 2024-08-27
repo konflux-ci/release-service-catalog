@@ -10,6 +10,13 @@ in place so that downstream tasks relying on the releaseNotes data can use it.
 | dataPath     | Path to the JSON string of the merged data to update                 | No       | -             |
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 
+## Changes in 2.2.0
+* Updated to use the `rh-registry-repo` key from the snapshot JSON for constructing 
+  the image repository path, instead of relying on the data field. This change 
+  ensures that the task correctly references the internal Red Hat registry format.
+* Removed the use of the `translate-delivery-repo` script as the task now directly 
+  accesses the `rh-registry-repo` value from the snapshot JSON.
+
 ## Changes in 2.1.0
 * Updated the base image used in this task
 

@@ -25,6 +25,13 @@ This task supports variable expansion in tag values from the mapping. The curren
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
 
+## Changes in 1.5.0
+* Change the way the component repository field in RPA mapping is handled:
+  * Added support for converting quay.io repository URLs to registry.redhat.io format and vice versa.
+  * Introduced a new key rh-registry-repo to store the updated repository value in the registry.redhat.io format.
+  * Added a new key registry-access-repo to store the repository value in the registry.access.redhat.com format.
+  * If the repository key contains registry.redhat.io, it will be rewritten to the equivalent quay repo. Otherwise, it is left as is  
+
 ## Changes in 1.4.0
 * Add a check that all component containerImage values use a sha reference
   * If some value does not comply, fail the task
