@@ -1,0 +1,82 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-cleanup-workspace-internalrequests
+spec:
+  description: |
+    Run the cleanup-workspace task with internalrequests created
+    to ensure the proper ones are cleaned up
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      params:
+        - name: uid
+          value: $(context.pipelineRun.uid)
+      taskSpec:
+        params:
+          - name: uid
+            type: string
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              cat > irs << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: InternalRequest
+              metadata:
+                name: ir-1
+              spec:
+                request: foo
+              ---
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: InternalRequest
+              metadata:
+                name: ir-2
+                labels:
+                  internal-services.appstudio.openshift.io/pipelinerun-uid: $(params.uid)
+              spec:
+                request: foo
+              EOF
+              kubectl apply -f irs
+    - name: run-task
+      taskRef:
+        name: cleanup-workspace
+      params:
+        - name: subdirectory
+          value: ""
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: input
+          workspace: tests-workspace
+    - name: check-result
+      runAfter:
+        - run-task
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/bin/sh
+              set -ex
+
+              # Make sure ir-1 was not deleted
+              if ! kubectl get internalrequest ir-1 ; then
+                  echo "InternalRequest ir-1 was deleted and should not have been"
+                  exit 1
+              fi
+
+              # Make sure ir-2 was deleted
+              if kubectl get internalrequest ir-2 ; then
+                  echo "InternalRequest ir-2 was not deleted and should have been"
+                  exit 1
+              fi
+
+              kubectl delete internalrequests --all
