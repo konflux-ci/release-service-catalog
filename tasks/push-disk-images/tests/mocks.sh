@@ -7,7 +7,7 @@ function internal-request() {
   echo Mock internal-request called with: $*
   echo $* >> $(workspaces.data.path)/mock_internal-request.txt
 
-  /home/utils/internal-request $@ -s false
+  /home/utils/internal-request "$@" -s false
 
   if [[ "$*" == *'snapshot_json={"application":"disk-images","components":[{"name":"failing-disk-image"'* ]]; then
       echo '{"result":"Failure"}' > $(workspaces.data.path)/mock_internal-request_result.txt
