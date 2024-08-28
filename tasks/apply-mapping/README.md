@@ -25,6 +25,9 @@ This task supports variable expansion in tag values from the mapping. The curren
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
 
+## Changes in 1.5.1
+* Fixing checkton/shellcheck linting issues in the task and test
+
 ## Changes in 1.5.0
 * Change the way the component repository field in RPA mapping is handled:
   * Added support for converting quay.io repository URLs to registry.redhat.io format and vice versa.
