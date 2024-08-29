@@ -15,12 +15,17 @@ does not publish the repository.
 
 ## Parameters
 
-| Name         | Description                                                                                       | Optional | Default value      |
-|--------------|---------------------------------------------------------------------------------------------------|----------|--------------------|
-| server       | The server type to use. Options are 'production' and 'stage'                                      | Yes      | production         |
-| pyxisSecret  | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert | No       | -                  |
-| snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       | -                  |
-| dataPath     | Path to the JSON string of the merged data to use in the data workspace                           | No       | -                  |
+| Name           | Description                                                                                      | Optional | Default value   |
+|----------------|--------------------------------------------------------------------------------------------------|----------|-----------------|
+| server         | The server type to use. Options are 'production' and 'stage'                                     | Yes      | production      |
+| pyxisSecret    | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert| No       | -               |
+| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                        | No       |                 |
+| dataPath       | Path to the JSON string of the merged data to use in the data workspace                          | No       |                 |
+| resultsDirPath | Path to the results directory in the data workspace                                              | No       |                 |
+
+## Changes in 2.0.0
+* Added JSON results output for published repositories, contains Catalog (RHEC) URL
+* Introduced a new `resultsDirPath` parameter to specify the path to the results directory
 
 ## Changes in 1.1.0
 * Updated the base image used in this task
@@ -40,7 +45,7 @@ does not publish the repository.
 * Add option to skip publishing via `skipRepoPublishing` flag in the data file
 
 ## Changes in 0.3.0
-* remove `dataPath` and `snapshotPath` default values
+* Remove `dataPath` and `snapshotPath` default values
 
 ## Changes in 0.2.2
 * Add support for server types of production-internal and stage-internal

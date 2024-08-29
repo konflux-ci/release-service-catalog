@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-pyxis-repository
   labels:
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -34,6 +34,9 @@ spec:
       type: string
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: resultsDirPath
+      description: Path to the results directory in the data workspace
       type: string
   workspaces:
     - name: data
@@ -85,6 +88,10 @@ spec:
         fi
 
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/publish-pyxis-repository-results.json"
+
+        # Use a unique key to avoid conflicts with other tasks
+        RESULTS_JSON='{"catalog_urls":[]}'
 
         # Default to false
         if [[ -f "${DATA_FILE}" && $(jq -r ".pyxis.skipRepoPublishing" "${DATA_FILE}") == "true" ]] ; then
@@ -102,6 +109,7 @@ spec:
         do
             COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
             PAYLOAD='{"published":true}'
+            COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
             REPOSITORY=$(jq -r '.repository' <<< $COMPONENT)
             PYXIS_REPOSITORY=${REPOSITORY##*/}
             # Replace "----" with "/"
@@ -136,6 +144,24 @@ spec:
 
             curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
                 -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
+
+            # Determine the correct CATALOG_BASE_URL based on the repository prefix
+            if [[ "$REPOSITORY" == quay.io/redhat-prod/* ]]
+            then
+              CATALOG_BASE_URL="https://catalog.redhat.com/software/containers"
+            elif [[ "$REPOSITORY" == quay.io/redhat-pending/* ]]
+            then
+              CATALOG_BASE_URL="https://catalog.stage.redhat.com/software/containers"
+            else
+              echo "Unknown repository prefix. Exiting..."
+              exit 1
+            fi
+
+            URL="${CATALOG_BASE_URL}/${PYXIS_REPOSITORY}/${PYXIS_REPOSITORY_ID}"
+            RESULTS_JSON=$(jq --arg name "$COMPONENT_NAME" --arg url "$URL" \
+              '.catalog_urls += [{"name": $name, "url": $url}]' <<< "$RESULTS_JSON")
         done
+
+        jq <<< "${RESULTS_JSON}" | tee "$RESULTS_FILE"
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
