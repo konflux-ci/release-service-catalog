@@ -18,6 +18,11 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | rhPush      | If set to true, an additional entry will be created in ContainerImage.repositories with the registry and repository fields converted to use Red Hat's official registry. E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted to use registry "registry.access.redhat.com" and repository "product/my-image". Also, this repository entry will be marked as published.                                                                                                         | Yes      | false         |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       | -             |
 
+## Changes in 3.3.0
+* Updated the base image used in this task
+  * The new image supports the --dockerfile cli argument for create_container_image
+* Added support for Dockerfile upload to Pyxis
+
 ## Changes in 3.2.0
 * Updated the base image used in this task
 

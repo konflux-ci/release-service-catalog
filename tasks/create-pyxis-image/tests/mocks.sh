@@ -61,6 +61,17 @@ function oras() {
   if [[ "$*" == "manifest fetch --registry-config"* ]]
   then
     echo '{"mediaType": "my_media_type"}'
+  elif [[ "$*" == "pull --registry-config"*dockerfile-not-found* ]]
+  then
+    echo Mock oras called with: $*
+    return 1
+  elif [[ "$*" == "pull --registry-config"*dockerfile-file-missing* ]]
+  then
+    echo Mock oras called with: $*
+  elif [[ "$*" == "pull --registry-config"* ]]
+  then
+    echo Mock oras called with: $*
+    echo mydocker > $6/Dockerfile
   else
     echo Mock oras called with: $*
     echo Error: Unexpected call
