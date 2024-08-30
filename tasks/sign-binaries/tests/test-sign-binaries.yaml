@@ -1,0 +1,99 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-sign-binaries
+spec:
+  description: |
+    Run the sign-binaries task and verify the results
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: run-task
+      taskRef:
+        name: sign-binaries
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: windowsCredentials
+          value: windows-credentials
+        - name: ssh_key_secret
+          value: windows-ssh-key
+        - name: quaySecret
+          value: quay-secret
+        - name: quayURL
+          value: quay.io/konflux-artifacts
+        - name: pipelineRunUid
+          value: 12345678
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: signedWindowsDigest
+          value: $(tasks.run-task.results.signedWindowsDigest)
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: signedWindowsDigest
+            description: The digest of the signed content pushed using ORAS for signing hosts
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+
+              expected_calls="2"
+              actual_content=$(cat "$(workspaces.data.path)/ssh_calls.txt")
+              if [[ "$actual_content" == "$expected_calls" ]]; then
+                  echo "Test passed: SSH called two times as expected."
+              else
+                  echo "Test failed: SSH not called expected number of times."
+                  echo "Expected: '$expected_calls'"
+                  echo "Actual: '$actual_content'"
+                  exit 1
+              fi
+
+              expected_signed_digest="sha256:0c4355ee4ef8d9d3875d5421972aed405ce6d8f5262983eeea3f6cbf5740c6e2"
+              if [ "$(params.signedWindowsDigest)" != "$expected_signed_digest" ]; then
+                echo Error: signedWindowsDigest was expected to be $expected_signed_digest.
+                echo "Actual: $(params.signedWindowsDigest)"
+                exit 1
+              else
+                echo signedWindowsDigest matches expected value
+              fi
+
+              mock_scp_1=$(cat "$(workspaces.data.path)/mock_scp_1.txt")
+              expected_scp="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P 22 \
+              /tmp/signing_script.bat \
+              myusername@myserver.com:C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
+
+              if [[ "$mock_scp_1" == "$expected_scp" ]]; then
+                  echo "Test passed: First SCP command is correct."
+              else
+                  echo "Test failed: First SCP command is incorrect."
+                  echo "Expected: '$expected_scp'"
+                  echo "Actual: '$mock_scp_1'"
+                  exit 1
+              fi
+
+              # check second scp command
+              mock_scp_2=$(cat "$(workspaces.data.path)/mock_scp_2.txt")
+              expected_scp_2="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P 22 \
+              myusername@myserver.com:C:\Users\Administrator\AppData\Local\Temp\12345678\digest.txt \
+              /tekton/results/signedWindowsDigest"
+
+              if [[ "$mock_scp_2" == "$expected_scp_2" ]]; then
+                  echo "Test passed: Second SCP command is correct."
+              else
+                  echo "Test failed: Second SCP command is incorrect."
+                  echo "Expected: '$expected_scp_2'"
+                  echo "Actual: '$mock_scp_2'"
+                  exit 1
+              fi
+
+      runAfter:
+        - run-task

@@ -1,0 +1,172 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-binaries
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to sign windows and mac binaries before they are pushed to the Red Hat Developer Portal
+  params:
+    - name: quayURL
+      type: string
+      description: quay URL of the repo where content will be shared
+    - name: quaySecret
+      type: string
+      description: Secret to interact with Quay
+    - name: windowsCredentials
+      type: string
+      description: Secret to interact with the Windows signing host
+    - name: windowsSSHKey
+      type: string
+      description: Secret containing SSH private key for the Windows signing host
+      default: windows-ssh-key
+    - name: pipelineRunUid
+      type: string
+      description: Unique identifier for the pipeline run
+  volumes:
+    - name: windows-ssh-key-vol
+      secret:
+        secretName: $(params.windowsSSHKey)
+  workspaces:
+    - name: data
+      description: Workspace to save the results to
+  results:
+    - name: unsignedWindowsDigest
+      type: string
+      description: |
+        Digest used by signing host to pull unsignged content via ORAS
+    - name: signedWindowsDigest
+      type: string
+      description: |
+        Digest used to pull signed content back to pipeline via ORAS
+  steps:
+    - name: push-unsigned-using-oras
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      script: |
+        #!/usr/bin/env bash
+
+        # TODO CLDX-134
+
+        output=$(oras push "$(params.quayURL)/unsigned" .)
+        windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+        echo "Digest for windows content: $windows_digest"
+        echo -n "$windows_digest" > "$(results.unsignedWindowsDigest.path)"
+
+    # - name: sign-mac-binaries
+    #   image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+    #   script: |
+    #     #!/usr/bin/env bash
+    #     # TODO CLDX-79
+    - name: sign-windows-binaries
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      volumeMounts:
+        - name: windows-ssh-key-vol
+          mountPath: "/etc/secrets"
+          readOnly: true
+      env:
+        - name: WINDOWS_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.windowsCredentials)
+              key: username
+        - name: WINDOWS_PORT
+          valueFrom:
+            secretKeyRef:
+              name: $(params.windowsCredentials)
+              key: port
+        - name: WINDOWS_HOST
+          valueFrom:
+            secretKeyRef:
+              name: $(params.windowsCredentials)
+              key: host
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        cp "/etc/secrets/id_rsa" /root/.ssh/id_rsa
+        cp "/etc/secrets/fingerprint" /root/.ssh/known_hosts
+        chmod 600 root/.ssh/known_hosts /root/.ssh/id_rsa
+
+        SSH_OPTS="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -p ${WINDOWS_PORT} \
+        ${WINDOWS_USER}@${WINDOWS_HOST}"
+        SCP_OPTS="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P ${WINDOWS_PORT}"
+
+        unsigned_digest=$(cat "$(results.unsignedWindowsDigest.path)")
+        # Create the batch script
+        signing_script_file="/tmp/signing_script.bat"
+        set +x
+        cat << EOF > "$signing_script_file"
+
+        mkdir %TEMP%\$(params.pipelineRunUid) && cd /d %TEMP%\$(params.pipelineRunUid)
+        @echo off
+        oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
+        @echo on
+        oras pull $(params.quayURL)/unsigned@${unsigned_digest}
+
+        signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 ^
+        %TEMP%\$(params.pipelineRunUid)\*
+
+        if errorlevel 1 (
+          echo Signing of binaries failed
+          exit /B %ERRORLEVEL%
+        )
+
+        signtool verify /v /pa %TEMP%\$(params.pipelineRunUid)\*
+
+        if errorlevel 1 (
+          echo Verification of binaries failed
+          exit /B %ERRORLEVEL%
+        )
+
+        echo [%DATE% %TIME%] Signing of Windows binaries completed successfully
+
+        oras push $(params.quayURL)/signed:$(params.pipelineRunUid) %TEMP%\$(params.pipelineRunUid) \
+        > oras_push_output.txt 2>&1
+
+        for /f "tokens=2,3 delims=: " %%a in ('findstr "Digest:" oras_push_output.txt') do @echo %%a:%%b > digest.txt
+        EOF
+        set -x
+        scp "$SCP_OPTS" "$signing_script_file" \
+        "${WINDOWS_USER}@${WINDOWS_HOST}:C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
+
+        # Execute the script on the Windows host
+        ssh "$SSH_OPTS" "C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
+
+        # disable shellcheck for escaping the pipelineRunUid as we want that evaluated on client side
+        # shellcheck disable=SC2029
+
+        scp "$SCP_OPTS" "${WINDOWS_USER}@${WINDOWS_HOST}:\
+        C:\\Users\\Administrator\\AppData\\Local\\Temp\\$(params.pipelineRunUid)\\digest.txt" \
+        "$(results.signedWindowsDigest.path)"
+
+        # Clean up the windows host now that we are done
+        # shellcheck disable=SC2029
+        ssh "$SSH_OPTS" "rmdir /s /q C:\\Users\\Administrator\\AppData\\Local\\Temp\\$(params.pipelineRunUid)"
+
+    # - name: pull-signed-using-oras
+    #   image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+    #   script: |
+    #     #!/usr/bin/env bash
+    #     # TODO CLDX-79
+    # - name: generate-checksums
+    #   image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+    #   script: |
+    #     #!/usr/bin/env bash
+    #     # TODO CLDX-82
