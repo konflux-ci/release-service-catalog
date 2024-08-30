@@ -10,6 +10,9 @@ Tekton task that collects the three parameters to pass to the `create-github-rel
 | snapshotPath | Path to the Snapshot file                                        | No       | -             |
 | binariesPath | Path to the binaries directory to release                        | Yes      | binaries      |
 
+## Changes in 1.3.1
+* Fix shellcheck/checkton linting issues in the task and tests
+
 ## Changes in 1.3.0
 * Updated the base image used in this task
 
