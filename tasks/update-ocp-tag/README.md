@@ -1,8 +1,6 @@
 # update-ocp-tag
-
-Tekton task to update version tag of FBC pull-spec
- `fromIndex`, `targetIndex` and `binaryImage` with the 
- provided OCP version.
+Tekton task to update pull-spec tag with the OCP version gotten from the get-ocp-version task. The replacement only
+occurs when the {{ OCP_VERSION }} placeholder is present.
 
 ## Parameters
 
@@ -10,6 +8,11 @@ Tekton task to update version tag of FBC pull-spec
 |------------|-------------------------------------------------------------------------|----------|---------------|
 | dataPath   | Path to the JSON string of the merged data to use in the data workspace | No       | -             |
 | ocpVersion | OCP version fetched from fbcFragment                                    | No       | -             |
+
+## Changes in 1.4.1
+* Changed the replace_tag function to only replace the OCP version tag of an index image when the {{ OCP_VERSION }}
+  placeholder is present
+* Added the validateOcpVersion function to check if the index version matches with the version found in the base image
 
 ## Changes in 1.4.0
 * Updated the base image used in this task
