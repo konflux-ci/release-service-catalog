@@ -19,6 +19,12 @@ Tekton pipeline to release Snapshots to an external registry.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored                  | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                         | No       | -             |
 
+## Changes in 5.1.0
+* Add tasks `collect-registry-token-secret` and `make-repo-public`
+  * `collect-registry-token-secret` will get the secret containing the token to access quay.io API
+  * `make-repo-public` will use the token in the secret to make repositories in mapping public,
+    if requested
+
 ## Changes in 5.0.0
 * Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.
 

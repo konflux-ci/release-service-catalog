@@ -1,0 +1,94 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-make-repo-public
+spec:
+  description: |
+    Run the test-make-repo-public task and check curl was called
+    with the right parameters.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:a5072c6da901bc9cf4d767da82e700784c7df981
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "mycomponent1",
+                      "repository": "quay.io/redhat-services-prod/myrepo1"
+                    },
+                    {
+                      "name": "mycomponent2",
+                      "repository": "quay.io/redhat-services-prod/myrepo2",
+                      "public": true
+                    },
+                    {
+                      "name": "mycomponent3",
+                      "repository": "quay.io/redhat-services-prod/myrepo3",
+                      "public": true
+                    },
+                    {
+                      "name": "mycomponent4",
+                      "repository": "myregistry.org/myspace/myrepo3",
+                      "public": true
+                    }
+                  ],
+                  "defaults": {}
+                },
+                "registrySecret": "test-registry-secret"
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: make-repo-public
+      params:
+        - name: dataPath
+          value: data.json
+        - name: registrySecret
+          value: "test-registry-secret"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:a5072c6da901bc9cf4d767da82e700784c7df981
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_curl.txt")" != 2 ]; then
+                  echo Error: curl was expected to be called 2 times. Actual calls:
+                  cat "$(workspaces.data.path)/mock_curl.txt"
+                  exit 1
+              fi
+
+              [[ "$(head -n 1 "$(workspaces.data.path)/mock_curl.txt")" \
+                  == */redhat-services-prod/myrepo2/* ]]
+              [[ "$(head -n 2 "$(workspaces.data.path)/mock_curl.txt" | tail -n 1)" \
+                  == */redhat-services-prod/myrepo3/* ]]
+      runAfter:
+        - run-task
