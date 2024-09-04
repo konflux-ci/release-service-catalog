@@ -14,6 +14,10 @@ Task to create a internalrequest to add fbc contributions to index images
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       | -                    |
 | resultsDirPath | Path to results directory in the data workspace                                           | No       | -                    |
 
+## Changes in 3.2.1
+* The InternalRequest will no longer fail, so success/failure check is found from a result on the internal pipelineRun
+* The last 2,000 characters of the IIB log is printed
+
 ## Changes in 3.2.0
 * Changed the way service account secret is determined
   * Setting `.fbc.iibServiceAccountSecret` is no longer allowed (it was never used anyway). Instead, it's based on the stagedIndex setting now.
