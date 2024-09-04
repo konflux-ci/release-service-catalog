@@ -13,6 +13,9 @@ operator passes them as lowercase.
 A task result is returned for each resource with the relative path to the stored JSON for it in the workspace. There is
 also a task result for the fbcFragment extracted from the snapshot's first component.
 
+A task result is also emitted when Single Component Mode is activated. The result, snapshotCreationComponent, contains
+the name of the Component for which the Snapshot was created for.
+
 Finally, the task checks that the keys from the correct resource (a key that should come from the ReleasePlanAdmission
 should not be present in the Release data section).
 
@@ -26,6 +29,11 @@ should not be present in the Release data section).
 | releaseServiceConfig | Namespaced name of the ReleaseServiceConfig        | No       | -             |
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
+
+## Changes in 4.5.1
+* A new feature was added called *Single Component* mode.
+  * Emits new result called 'snapshotCreationComponent' if single component mode is enabled.
+    * Enabled when *.data.singleComponent = true* and Snapshot contains specific labels.
 
 ## Changes in 4.5.0
   * Updated the base image used in this task

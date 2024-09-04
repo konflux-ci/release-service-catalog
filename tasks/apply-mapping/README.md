@@ -17,17 +17,18 @@ This task supports variable expansion in tag values from the mapping. The curren
 * "{{ git_short_sha }}" -> The git sha reduced to 7 characters
 * "{{ digest_sha }}" -> The image digest of the respective component
 
-This task also supports *singleComponent* mode. This mode, when activated, will reconstruct the snapshot to contain
-a single component. The component who successful build caused the creation of the snapshot.
+This task also supports *singleComponent* mode. This mode, when activated, (via a non-empty snapshotCreationComponent
+parameter) will reconstruct the snapshot to contain a single component. The component who successful build caused the
+creation of the snapshot.
 
 ## Parameters
 
-| Name              | Description                                                                                  | Optional | Default value |
-|-------------------|----------------------------------------------------------------------------------------------|----------|---------------|
-| snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |  
-| dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
-| failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
-| snapshot          | Namespaced name of Snapshot                                                                  | No       | -             |
+| Name                      | Description                                                                                  | Optional | Default value  |
+|---------------------------|----------------------------------------------------------------------------------------------|----------|----------------|
+| snapshotPath              | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -              |  
+| dataPath                  | Path to the JSON string of the merged data to use in the data workspace                      | No       | -              |
+| failOnEmptyResult         | Fail the task if the resulting snapshot contains zero components                             | Yes      | false          |
+| snapshotCreationComponent | Name of component that caused a Snapshot to be created.                                      | Yes      | ""             |
 
 ## Changes in 1.5.1
 * A new feature was added called *singleComponent* mode.

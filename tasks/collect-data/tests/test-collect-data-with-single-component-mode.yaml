@@ -1,0 +1,177 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-data-with-single-component-mode
+spec:
+  description: |
+    Run the collect-data task and verify that data task result is accurate.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-with-data-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+                data:
+                  rkey: rvalue
+                  foo: shouldGetOverwritten
+              EOF
+              kubectl apply -f release
+
+              cat > releaseplan << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlan
+              metadata:
+                name: releaseplan-with-data-sample
+                namespace: default
+              spec:
+                application: foo
+                target: foo
+                data:
+                  foo: bar
+                  one: one
+              EOF
+              kubectl apply -f releaseplan
+
+              cat > releaseplanadmission << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlanAdmission
+              metadata:
+                name: releaseplanadmission-with-data-sample
+                namespace: default
+              spec:
+                applications:
+                  - foo
+                origin: foo
+                data:
+                  singleComponent: true
+                  components:
+                    - name: comp1
+                      containerImage: newimage
+                    - name: comp2
+                      containerImage: oldimage
+                policy: foo
+                pipeline:
+                  pipelineRef:
+                    resolver: cluster
+                    params:
+                      - name: name
+                        value: release-pipeline
+                      - name: namespace
+                        value: default
+                      - name: kind
+                        value: pipeline
+              EOF
+              kubectl apply -f releaseplanadmission
+
+              cat > releaseserviceconfig << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleaseServiceConfig
+              metadata:
+                name: releaseserviceconfig-with-data-sample
+                namespace: default
+              spec:
+              EOF
+              kubectl apply -f releaseserviceconfig
+
+              cat > snapshot << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Snapshot
+              metadata:
+                labels:
+                  appstudio.openshift.io/application: golden-container
+                  appstudio.openshift.io/build-pipelinerun: golden-container-on-push-rfjsw
+                  appstudio.openshift.io/component: comp1
+                  pac.test.appstudio.openshift.io/check-run-id: '29271572623'
+                  pac.test.appstudio.openshift.io/event-type: push
+                  pac.test.appstudio.openshift.io/original-prname: golden-container-on-push
+                  pac.test.appstudio.openshift.io/repository: golden-container
+                  pac.test.appstudio.openshift.io/sha: 0c0846586598288647d220a7cc71045336ee0eed
+                  pac.test.appstudio.openshift.io/state: completed
+                  pac.test.appstudio.openshift.io/url-org: enterprise-contract
+                  pac.test.appstudio.openshift.io/url-repository: golden-container
+                  test.appstudio.openshift.io/pipelinerunfinishtime: '1724700599'
+                  test.appstudio.openshift.io/type: component
+                name: snapshot-with-data-sample
+                namespace: default
+              spec:
+                application: foo
+              EOF
+              kubectl apply -f snapshot
+    - name: run-task
+      taskRef:
+        name: collect-data
+      params:
+        - name: release
+          value: default/release-with-data-sample
+        - name: releasePlan
+          value: default/releaseplan-with-data-sample
+        - name: releasePlanAdmission
+          value: default/releaseplanadmission-with-data-sample
+        - name: releaseServiceConfig
+          value: default/releaseserviceconfig-with-data-sample
+        - name: snapshot
+          value: default/snapshot-with-data-sample
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      params:
+        - name: data
+          value: $(tasks.run-task.results.data)
+        - name: snapshotCreationComponent
+          value: $(tasks.run-task.results.snapshotCreationComponent)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: data
+            type: string
+          - name: snapshotCreationComponent
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that snapshotCreationComponent result was set properly
+              test "$(params.snapshotCreationComponent)" == "comp1"
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-with-data-sample
+              kubectl delete releaseplan releaseplan-with-data-sample
+              kubectl delete releaseplanadmission releaseplanadmission-with-data-sample
+              kubectl delete releaseserviceconfig releaseserviceconfig-with-data-sample
+              kubectl delete snapshot snapshot-with-data-sample

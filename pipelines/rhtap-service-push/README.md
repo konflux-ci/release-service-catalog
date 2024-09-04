@@ -22,7 +22,7 @@
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                          | No       | -             |
 
 ## Changes in 4.0.1
-* Add required snapshot parameter to the apply-mapping task.
+* Use collect-data `snapshotCreationComponent` result as a parameter to the apply-mapping task.
 
 ## Changes in 4.0.0
 * Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.

@@ -21,7 +21,7 @@ Tekton Pipeline to push disk images to a cdn using pulp
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                         | No       | -               |
 
 ## Changes in 1.0.1
-* Add required snapshot parameter to the apply-mapping task.
+* Use collect-data `snapshotCreationComponent` result as a parameter to the apply-mapping task.
 
 ## Changes in 1.0.0
 * Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.

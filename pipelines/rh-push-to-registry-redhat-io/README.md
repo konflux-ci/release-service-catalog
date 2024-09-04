@@ -20,7 +20,7 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitRevision       | The revision in the taskGitUrl repo to be used                               | No       | -             |
 
 ## Changes in 4.1.1
-* Add required snapshot parameter to the apply-mapping task.
+* Use collect-data `snapshotCreationComponent` result as a parameter to the apply-mapping task.
 
 ## Changes in 4.1.0
 * The `publish-pyxis-repository` now gets the `resultsDirPath` parameter from the `collect-data` results

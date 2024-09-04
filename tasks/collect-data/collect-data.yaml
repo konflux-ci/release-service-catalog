@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: collect-data
   labels:
-    app.kubernetes.io/version: "4.5.0"
+    app.kubernetes.io/version: "4.5.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -60,6 +60,8 @@ spec:
     - name: resultsDir
       type: string
       description: The relative path in the workspace to the results directory
+    - name: snapshotCreationComponent
+      description: The name of the component that the Snapshot was built for.
   steps:
     - name: collect-data
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -131,6 +133,28 @@ spec:
         DATA_PATH=$(params.subdirectory)/data.json
         echo -n $DATA_PATH > $(results.data.path)
         echo "$merged_output" | tee $(workspaces.data.path)/$DATA_PATH
+        
+        # check if RP/RPA has a single-component mode
+        SINGLE_COMPONENT_MODE=$(jq -cer '.singleComponent // "false"' "$(workspaces.data.path)/$DATA_PATH")
+        echo "Single Component mode? ${SINGLE_COMPONENT_MODE}"
+        if [ "${SINGLE_COMPONENT_MODE}" == "true" ]; then
+          # get the SNAPSHOT
+          SNAPSHOT_NAME=$(echo "${SNAPSHOT}" | cut -f2 -d/)
+          SNAPSHOT_NAMESPACE=$(echo "${SNAPSHOT}" | cut -f1 -d/)
+
+          # get the Single component labels from the Snapshot      
+          SNAPSHOT_CREATION_TYPE=$(kubectl get "snapshot/$SNAPSHOT_NAME" -n "${SNAPSHOT_NAMESPACE}" -ojson | jq -rec '.metadata.labels."test.appstudio.openshift.io/type" // ""')
+          SNAPSHOT_CREATION_COMPONENT=$(kubectl get "snapshot/$SNAPSHOT_NAME" -n "${SNAPSHOT_NAMESPACE}" -ojson | jq -rec '.metadata.labels."appstudio.openshift.io/component" // ""')
+
+          echo "SNAPSHOT_CREATION_TYPE: ${SNAPSHOT_CREATION_TYPE}"
+          echo "SNAPSHOT_CREATION_COMPONENT: ${SNAPSHOT_CREATION_COMPONENT}"
+          echo -n "" > $(results.snapshotCreationComponent.path)
+          if [ "${SNAPSHOT_CREATION_TYPE}" == "component" ] && [ "${SNAPSHOT_CREATION_COMPONENT}" != "" ]; then
+            echo "Single Component mode is ${SINGLE_COMPONENT_MODE} and Snapshot type is component"
+            echo -n "${SNAPSHOT_CREATION_COMPONENT}" > $(results.snapshotCreationComponent.path)
+          fi       
+        fi
+
     - name: check-data-key-sources
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       script: |

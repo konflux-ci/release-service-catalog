@@ -22,9 +22,10 @@ spec:
       type: string
       description: Fail the task if the resulting snapshot contains 0 components
       default: "false"
-    - name: snapshot
-      description: Namespaced name of Snapshot
+    - name: snapshotCreationComponent
+      description: The name of the component that the Snapshot was built for
       type: string
+      default: ""
   workspaces:
     - name: config
       description: The workspace where the extra config file containing the mapping and snapshot json reside
@@ -35,9 +36,12 @@ spec:
   steps:
     - name: apply-mapping
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      env:
+        - name: "SNAPSHOT_CREATION_COMPONENT"
+          value: '$(params.snapshotCreationComponent)'
       script: |
         #!/usr/bin/env bash
-        set -eu
+        set -eux
 
         SNAPSHOT_SPEC_FILE="$(workspaces.config.path)/$(params.snapshotPath)"
         DATA_FILE="$(workspaces.config.path)/$(params.dataPath)"
@@ -150,33 +154,18 @@ spec:
         }
 
         SNAPSHOT_CONTENT=$(cat "${SNAPSHOT_SPEC_FILE_ORIG}")
-        # check if RP/RPA has a single-component mode
-        SINGLE_COMPONENT_MODE=$(jq -cer '.singleComponent // "false"' "${DATA_FILE}")
-        echo "Single Component mode? ${SINGLE_COMPONENT_MODE}"
-        if [ "${SINGLE_COMPONENT_MODE}" == "true" ]; then
-          # get the SNAPSHOT
-          SNAPSHOT_NAME=$(echo $(params.snapshot) | cut -f2 -d/)
-          SNAPSHOT_NAMESPACE=$(echo $(params.snapshot) | cut -f1 -d/)
-
-          # get the Single component labels from the Snapshot      
-          SNAPSHOT_CREATION_TYPE=$(kubectl get "snapshot/$SNAPSHOT_NAME" -n "${SNAPSHOT_NAMESPACE}" -ojson | jq -rec '.metadata.labels."test.appstudio.openshift.io/type" // ""')
-          SNAPSHOT_CREATION_COMPONENT=$(kubectl get "snapshot/$SNAPSHOT_NAME" -n "${SNAPSHOT_NAMESPACE}" -ojson | jq -rec '.metadata.labels."appstudio.openshift.io/component" // ""')
-
-          echo "SNAPSHOT_CREATION_TYPE: ${SNAPSHOT_CREATION_TYPE}"
+        if [ "${SNAPSHOT_CREATION_COMPONENT}" != "" ]; then
           echo "SNAPSHOT_CREATION_COMPONENT: ${SNAPSHOT_CREATION_COMPONENT}"
-          if [ "${SNAPSHOT_CREATION_TYPE}" == "component" ] && [ "${SNAPSHOT_CREATION_COMPONENT}" != "" ]; then
-            echo "Single Component mode is ${SINGLE_COMPONENT_MODE} and Snapshot type is component"
-            REDUCED_SNAPSHOT=$(echo "${SNAPSHOT_CONTENT}" | jq --arg component "${SNAPSHOT_CREATION_COMPONENT}" \
-                'del(.components[] | select(.name != $component))')
-            echo "Reducing Snapshot to:"
-            SNAPSHOT_CONTENT=$(echo "$REDUCED_SNAPSHOT" | tr -d ' ' | tr -d '\n')
-            echo "${SNAPSHOT_CONTENT}" | jq .
-          fi       
+          REDUCED_SNAPSHOT=$(echo "${SNAPSHOT_CONTENT}" | jq --arg component "${SNAPSHOT_CREATION_COMPONENT}" \
+              'del(.components[] | select(.name != $component))')
+          echo "Reducing Snapshot to:"
+          SNAPSHOT_CONTENT=$(echo "$REDUCED_SNAPSHOT" | tr -d ' ' | tr -d '\n')
+          echo "${SNAPSHOT_CONTENT}" | jq .
         fi
         
         # Merge the mapping key contents in the data json file with the components key in the snapshot based
         # on component name. Save the output as a compact json in mapped_snapshot.json file in the workspace
-        { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${MAPPING}"; } | jq -c -s '.[0] as $snapshot
+        { echo -n "${SNAPSHOT_CONTENT}"; echo "${MAPPING}"; } | jq -c -s '.[0] as $snapshot
           | .[0].components + .[1].components | group_by(.name) | [.[] | select(length > 1)]
           | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents | $snapshot | .components = $mergedComponents' \
           > "${SNAPSHOT_SPEC_FILE}"
