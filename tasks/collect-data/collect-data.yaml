@@ -61,7 +61,16 @@ spec:
       type: string
       description: The relative path in the workspace to the results directory
     - name: snapshotCreationComponent
+      type: string
       description: The name of the component that the Snapshot was built for.
+    - name: singleComponentMode
+      type: string
+    - name: snapshotName
+      type: string
+    - name: snapshotNamespace
+      type: string
+    - name: snapshotSpec
+      type: string
   steps:
     - name: collect-data
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -76,6 +85,15 @@ spec:
           value: '$(params.releaseServiceConfig)'
         - name: "SNAPSHOT"
           value: '$(params.snapshot)'
+#      results:
+#        - name: singleComponentMode
+#          type: string
+#        - name: snapshotName
+#          type: string
+#        - name: snapshotNamespace
+#          type: string
+#        - name: snapshotSpec
+#          type: string
       script: |
         #!/usr/bin/env sh
         set -eo pipefail
@@ -110,6 +128,7 @@ spec:
         echo -e "\nFetching Snapshot Spec"
         SNAPSHOTSPEC_PATH=$(params.subdirectory)/snapshot_spec.json
         echo -n $SNAPSHOTSPEC_PATH > $(results.snapshotSpec.path)
+        #echo -n $SNAPSHOTSPEC_PATH > $(step.results.snapshotSpec.path)
         get-resource "snapshot" "${SNAPSHOT}" "{.spec}" | tee $(workspaces.data.path)/$SNAPSHOTSPEC_PATH
 
         echo -e "\nFetching fbcFragment"
@@ -136,24 +155,34 @@ spec:
         
         # check if RP/RPA has a single-component mode
         SINGLE_COMPONENT_MODE=$(jq -cer '.singleComponent // "false"' "$(workspaces.data.path)/$DATA_PATH")
-        echo "Single Component mode? ${SINGLE_COMPONENT_MODE}"
-        if [ "${SINGLE_COMPONENT_MODE}" == "true" ]; then
-          # get the SNAPSHOT
-          SNAPSHOT_NAME=$(echo "${SNAPSHOT}" | cut -f2 -d/)
-          SNAPSHOT_NAMESPACE=$(echo "${SNAPSHOT}" | cut -f1 -d/)
+        SNAPSHOT_NAME=$(echo "${SNAPSHOT}" | cut -f2 -d/)
+        SNAPSHOT_NAMESPACE=$(echo "${SNAPSHOT}" | cut -f1 -d/)
 
-          # get the Single component labels from the Snapshot      
-          SNAPSHOT_CREATION_TYPE=$(kubectl get "snapshot/$SNAPSHOT_NAME" -n "${SNAPSHOT_NAMESPACE}" -ojson | jq -rec '.metadata.labels."test.appstudio.openshift.io/type" // ""')
-          SNAPSHOT_CREATION_COMPONENT=$(kubectl get "snapshot/$SNAPSHOT_NAME" -n "${SNAPSHOT_NAMESPACE}" -ojson | jq -rec '.metadata.labels."appstudio.openshift.io/component" // ""')
+        echo -n "${SINGLE_COMPONENT_MODE}" > $(results.singleComponentMode.path)
+        echo -n "${SNAPSHOT_NAME}" > $(results.snapshotName.path)
+        echo -n "${SNAPSHOT_NAMESPACE}" > $(results.snapshotNamespace.path)
 
-          echo "SNAPSHOT_CREATION_TYPE: ${SNAPSHOT_CREATION_TYPE}"
-          echo "SNAPSHOT_CREATION_COMPONENT: ${SNAPSHOT_CREATION_COMPONENT}"
-          echo -n "" > $(results.snapshotCreationComponent.path)
-          if [ "${SNAPSHOT_CREATION_TYPE}" == "component" ] && [ "${SNAPSHOT_CREATION_COMPONENT}" != "" ]; then
-            echo "Single Component mode is ${SINGLE_COMPONENT_MODE} and Snapshot type is component"
-            echo -n "${SNAPSHOT_CREATION_COMPONENT}" > $(results.snapshotCreationComponent.path)
-          fi       
-        fi
+    - name: reduce
+      params:
+        - name: IMAGES
+          value: $(workspaces.data.path)/$(steps.collect-data.results.snapshotSpec)
+        - name: SINGLE_COMPONENT
+          value: $(steps.collect-data.results.singleComponentMode)
+        - name: CR_TO_QUERY
+          value: snapshot/$(steps.collect-data.results.snapshotName)
+        - name: CR_TO_QUERY_NAMESPACE
+          value: $(steps.collect-data.results.snapshotNamespace)
+        - name: SNAPSHOT_PATH
+          value: $(workspaces.data.path)/$(steps.collect-data.results.snapshotSpec)
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/scoheb/release-service-catalog
+          - name: revision
+            value: single-component-mode
+          - name: pathInRepo
+            value: stepactions/reduce-snapshot/reduce-snapshot.yaml
 
     - name: check-data-key-sources
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
