@@ -7,7 +7,6 @@ Creates an InternalRequest to sign an index image
 | Name                 | Description                                                                               | Optional | Default value          |
 |----------------------|-------------------------------------------------------------------------------------------|----------|------------------------|
 | dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | No       | -                      |
-| request              | Signing pipeline name to handle this request                                              | Yes      | hacbs-signing-pipeline |
 | referenceImage       | The image to be signed                                                                    | No       | -                      |
 | manifestListDigests  | The manifest digests for each arch in manifest list                                       | No       | -                      |
 | requester            | Name of the user that requested the signing, for auditing purposes                        | No       | -                      |
@@ -26,6 +25,10 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 3.4.0
+* Removed the `request` parameter and references of `fbc.request` from the task and set the default
+  internal request pipeline to `hacbs-signing-pipeline`
 
 ## Changes in 3.3.0
 * Updated the base image used in this task
