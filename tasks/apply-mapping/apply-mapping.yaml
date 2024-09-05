@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: apply-mapping
   labels:
-    app.kubernetes.io/version: "1.5.0"
+    app.kubernetes.io/version: "1.5.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -50,7 +50,7 @@ spec:
 
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No data JSON file was found."
-            printf "false" | tee $(results.mapped.path)
+            printf "false" | tee "$(results.mapped.path)"
             exit 0
         fi
 
@@ -58,7 +58,7 @@ spec:
 
         if [[ $MAPPING == "null" ]] ; then
             echo "Data file contains no mapping key."
-            printf "false" | tee $(results.mapped.path)
+            printf "false" | tee "$(results.mapped.path)"
             exit 0
         fi
 
@@ -82,14 +82,14 @@ spec:
             tags=$1
 
             NUM_VARIABLES=$(jq 'length' <<< "${SUPPORTED_VARIABLES}")
-            for ((i = 0; i < $NUM_VARIABLES; i++)); do
+            for ((i = 0; i < NUM_VARIABLES; i++)); do
                 variable=$(jq -c --argjson i "$i" '.[$i]' <<< "${SUPPORTED_VARIABLES}")
-                KEY=$(jq -r 'to_entries[] | .key' <<< $variable)
-                VALUE=$(jq -r 'to_entries[] | .value' <<< $variable)
-                tags=$(echo -n $tags | sed "s/$KEY/$VALUE/g")
+                KEY=$(jq -r 'to_entries[] | .key' <<< "$variable")
+                VALUE=$(jq -r 'to_entries[] | .value' <<< "$variable")
+                tags=$(echo -n "$tags" | sed "s/$KEY/$VALUE/g")
             done
 
-            echo -n $tags | jq -c
+            echo -n "$tags" | jq -c
         }
 
         convert_to_quay () { # Convert the registry.redhat.io URL to the quay.io format
@@ -115,10 +115,14 @@ spec:
             local repository=$1
             case "$repository" in
                 quay.io/redhat-prod/*)
-                    echo "${repository/quay.io\/redhat-prod/registry.redhat.io}" | sed 's|----|/|g'
+                    repository="${repository//quay.io\/redhat-prod/registry.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
                     ;;
                 quay.io/redhat-pending/*)
-                    echo "${repository/quay.io\/redhat-pending/registry.stage.redhat.io}" | sed 's|----|/|g'
+                    repository="${repository//quay.io\/redhat-pending/registry.stage.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
                     ;;
                 registry.redhat.io/* | registry.stage.redhat.io/*)
                     # Return the original Red Hat registry paths
@@ -148,16 +152,15 @@ spec:
 
         # Merge the mapping key contents in the data JSON file with the components key in the snapshot based
         # on component name. Save the output as a compact JSON in the mapped_snapshot.json file in the workspace
-        { echo -n $(cat "${SNAPSHOT_SPEC_FILE_ORIG}"); echo "${MAPPING}"; } | jq -c -s '
+        { echo -n "$(cat "${SNAPSHOT_SPEC_FILE_ORIG}")"; echo "${MAPPING}"; } | jq -c -s '
           .[0] as $snapshot | .[0].components + .[1].components | group_by(.name) |
           [.[] | select(length > 1)] | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents |
           $snapshot | .components = $mergedComponents' > "${SNAPSHOT_SPEC_FILE}"
 
-        printf "true" | tee $(results.mapped.path)
+        printf "true" | tee "$(results.mapped.path)"
 
         if [ "$(params.failOnEmptyResult)" = "true" ] && \
-          [ $(cat "${SNAPSHOT_SPEC_FILE}" | jq '.components | length') -eq 0 ]
-        then
+          [ "$(jq '.components | length' < "${SNAPSHOT_SPEC_FILE}")" -eq 0 ]; then
           echo "ERROR: Resulting snapshot contains 0 components"
           exit 1
         fi
@@ -167,7 +170,7 @@ spec:
         defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< "$MAPPING")
         currentTimestamp="$(date "+%Y%m%d %T")"
         NUM_MAPPED_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
-        for ((i = 0; i < $NUM_MAPPED_COMPONENTS; i++)) ; do
+        for ((i = 0; i < NUM_MAPPED_COMPONENTS; i++)) ; do
             component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
 
             # images are required to use sha reference - check this
@@ -181,7 +184,7 @@ spec:
             imageTags=$(jq '.tags // []' <<< "$component")
             git_sha=$(jq -r '.source.git.revision' <<< "$component") # this sets the value to "null" if it doesn't exist
             build_sha=$(echo "$IMAGE_REF" | cut -d ':' -f 2)
-            passedTimestampFormat=$(jq -r --arg default $defaultTimestampFormat \
+            passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
               '.timestampFormat // $default' <<< "$component")
             timestamp="$(date -d "$currentTimestamp" "+$passedTimestampFormat")"
 
@@ -190,18 +193,18 @@ spec:
             tags=$(translate_tags "${allTagsPreSubstitution}" "${timestamp}" "${git_sha}" \
               "${git_sha:0:7}" "${build_sha}")
             if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
-              jq --argjson i "$i" --argjson updatedTags $tags '.components[$i].tags = $updatedTags' \
+              jq --argjson i "$i" --argjson updatedTags "$tags" '.components[$i].tags = $updatedTags' \
                 "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             fi
 
             # Also substitute filename values in the staged section of components
             STAGED_FILES=$(jq '.staged.files | length' <<< "$component")
-            for ((j = 0; j < $STAGED_FILES; j++)) ; do
+            for ((j = 0; j < STAGED_FILES; j++)) ; do
                 file=$(jq -c --argjson j "$j" '.staged.files[$j]' <<< "$component")
-                filenameArrayPreSubstitution=$(jq '.filename' <<< $file | jq -cs)
+                filenameArrayPreSubstitution=$(jq '.filename' <<< "$file" | jq -cs)
                 subbedFilename=$(translate_tags "${filenameArrayPreSubstitution}" "${timestamp}" "${git_sha}" \
                   "${git_sha:0:7}" "${build_sha}" | jq -r '.[0]')
-                jq --argjson i "$i" --argjson j "$j" --arg filename $subbedFilename \
+                jq --argjson i "$i" --argjson j "$j" --arg filename "$subbedFilename" \
                   '.components[$i].staged.files[$j].filename = $filename' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
                   && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             done
