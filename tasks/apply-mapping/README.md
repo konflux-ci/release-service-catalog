@@ -12,7 +12,8 @@ A `mapped` result is also returned from this task containing a simple true/false
 meant to inform whether a mapped Snapshot is being returned or the original one.
 
 This task supports variable expansion in tag values from the mapping. The currently supported variables are:
-* "{{ timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
+* "{{ timestamp }}" -> The build-date label from the image in the format provided by timestampFormat or %s as the default
+* "{{ release_timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
 * "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
 * "{{ git_short_sha }}" -> The git sha reduced to 7 characters
 * "{{ digest_sha }}" -> The image digest of the respective component
@@ -24,6 +25,11 @@ This task supports variable expansion in tag values from the mapping. The curren
 | snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |  
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
+
+## Changes in 1.6.0
+* The {{ timestamp }} tag now uses the build-date label of the image
+* Added {{ release_timestamp }} tag which works as the old {{ timestamp }} tag did
+* If a tag is translated with a value equal to null, the task will now fail
 
 ## Changes in 1.5.1
 * Fixing checkton/shellcheck linting issues in the task and test

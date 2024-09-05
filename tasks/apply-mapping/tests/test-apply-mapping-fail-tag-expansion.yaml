@@ -1,0 +1,78 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-fail-tag-expansion
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
+    the data file with tags per component, but some of the tags (in this case the timestamp
+    tag) are evaluated with a null value. The task should fail instead of injecting `null`
+    in the tags.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: config
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > "$(workspaces.config.path)/test_data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "repository": "repo1",
+                      "tags": [
+                        "tag1-{{timestamp}}",
+                        "tag2-{{ timestamp }}",
+                        "{{ digest_sha }}"
+                      ]
+                    }
+                  ]
+                }
+              }
+              EOF
+
+              cat > "$(workspaces.config.path)/test_snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/badimage-no-build-date@sha256:123456",
+                    "source": {
+                      "git": {
+                        "revision": "testrevision",
+                        "url": "myurl"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: test_snapshot_spec.json
+        - name: dataPath
+          value: test_data.json
+      runAfter:
+        - setup
+      workspaces:
+        - name: config
+          workspace: tests-workspace
