@@ -316,3 +316,28 @@ PR paired with an e2e change (documented [here](https://github.com/redhat-appstu
 but the catalog PR pairing process will be complete.
 * Pairing is typically only required for breaking changes, so once the catalog PR is merged, things are now in a broken state. This should be resolved ASAP by
 marking the release-service PR as ready, merging it, and promoting its results to the infra-deployments overlays.
+
+### Data Keys Schema
+
+This repository maintains a json schema for the data key used in various tasks in this repo. It is stored [here](schema/dataKeys.json).
+
+If your change adds or removes a key to the data file, the schema must be updated accordingly as part of your pull request.
+
+### Checkton check
+
+This repository uses [checkton](https://github.com/chmeliik/checkton) to run [shellcheck](https://www.shellcheck.net) on the embedded shell in the Tekton resources.
+
+This check shows itself as the `Linters / checkton (pull_request)` check on the pull request.
+
+If it fails and you click details, the tool does a pretty good job of highlighting the failures and telling you how to fix them.
+
+We strive to have all of our tekton resources abide by shellcheck, so this check is mandatory for pull requests submitted to this repo.
+
+### Symlinks (internal dir changes only)
+
+This repository contains [one directory](internal/resources) for all tekton resources inside of the internal directory.
+
+This is so that we can point ArgoCD at it and have both the tasks and pipelines deployed to the cluster (but not the test files).
+
+If you submit a change that either adds or removes a pipeline from the [internal pipelines directory](internal/pipelines) or a task from the [internal tasks directory](internal/tasks),
+your pull request must also add or remove a sym link from the [internal resources directory](internal/resources).
