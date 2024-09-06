@@ -15,6 +15,9 @@ Currently, `releaseNotes`, and `cdn` are the only supported systems.
 | dataPath | Path to the JSON string of the merged data to use       | No       |               |
 | systems  | The systems to check that all data keys are present for | Yes      | []            |
 
+## Changes in 0.9.2
+* Fixing checkton/shellcheck linting issues in the task and test
+
 ## Changes in 0.9.1
 * The task would show failure output if a system with just one key was added (as cdn currently is)
 
