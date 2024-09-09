@@ -14,6 +14,9 @@ Task to create a internalrequest to add fbc contributions to index images
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       | -                    |
 | resultsDirPath | Path to results directory in the data workspace                                           | No       | -                    |
 
+## Changes in 3.3.0
+* Added a new result `isFbcOptIn` to expose the FBC opt-in status
+
 ## Changes in 3.2.2
 * Fixing checkton/shellcheck linting issues in the task and test
 

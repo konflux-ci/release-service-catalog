@@ -34,7 +34,7 @@ function set_ir_status() {
 {
   "status": {
     "results": {
-      "genericResult": "{\"public_index_image\":\"foo\",\"sign_index_image\":\"bar\"}",
+      "genericResult": "{\"fbc_opt_in\":\"true\",\"publish_index_image\":\"false\",\"sign_index_image\":\"false\"}",
       "iibLog": "Dummy IIB Log",
       "exitCode": "${EXITCODE}"
     }

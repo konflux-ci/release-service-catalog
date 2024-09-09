@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: add-fbc-contribution
   labels:
-    app.kubernetes.io/version: "3.2.2"
+    app.kubernetes.io/version: "3.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -40,6 +40,8 @@ spec:
       description: Whether the index image should be signed
     - name: mustPublishIndexImage
       description: Whether the index image should be published
+    - name: isFbcOptIn
+      description: Indicates whether the FBC fragment is opt-in (true/false)
     - name: requestTargetIndex
       description: The targetIndex used in this request
     - name: requestResultsFile
@@ -167,8 +169,24 @@ spec:
 
         jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.sign_index_image' |tr -d "\n" \
             | tee "$(results.mustSignIndexImage.path)"
-        jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.publish_index_image' |tr -d "\n" \
-            | tee "$(results.mustPublishIndexImage.path)"
+
+        mustPublishIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.publish_index_image')
+        fbc_opt_in=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.fbc_opt_in')
+
+        # Store the results in Tekton's results files
+        echo -n "${mustPublishIndexImage}" | tee "$(results.mustPublishIndexImage.path)"
+        echo -n "${fbc_opt_in}" | tee "$(results.isFbcOptIn.path)"
+
+        # Whether the index image will be published
+        if [ "$mustPublishIndexImage" = "true" ]; then
+          echo "Index image will be published."
+        elif [ "$fbc_opt_in" = "false" ]; then
+          echo "Index image will not be published because FBC opt-in is set to false in Pyxis."
+        elif [ "${staged_index}" = "true" ]; then
+          echo "Index image will not be published because this is a staging release."
+        else
+          echo "Index image will not be published for an unspecified reason."
+        fi
 
         jq '.reason // "Unset"'  <<< "${conditions}" | tee "$(results.requestReason.path)"
         jq '.message // "Unset"' <<< "${conditions}" | tee "$(results.requestMessage.path)"
