@@ -21,6 +21,9 @@
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored   | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                          | No       | -             |
 
+## Changes in 4.1.0
+* The `push-rpm-manifest-to-pyxis` task is renamed to `push-rpm-data-to-pyxis`
+
 ## Changes in 4.0.0
 * Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.
 
@@ -36,9 +39,9 @@
 ## Changes in 3.11.0
 * Updated the image passed to the `infra-deployments-pr` task
 
-## Changes in 3.10.0 
+## Changes in 3.10.0
 * Removed `verify-access-to-resources` script and replaced it with a task.
-  
+
 ## Changes in 3.9.0
 * The `create-pyxis-image` task no longer receives the `dataPath` parameter
 

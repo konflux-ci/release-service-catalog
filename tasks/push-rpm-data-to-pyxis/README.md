@@ -1,15 +1,23 @@
-# push-rpm-manifests-to-pyxis
+# push-rpm-data-to-pyxis
 
 Tekton task that extracts all rpms from the sboms and pushes them to Pyxis as an RPM Manifest.
+In addition, it will also update ContainerImage.content_sets field in Pyxis to include
+all repository_id strings found in rpm purl strings in the sboms.
 
 ## Parameters
 
 | Name            | Description                                                                                         | Optional | Default value |
 |-----------------|-----------------------------------------------------------------------------------------------------|----------|---------------|
-| pyxisJsonPath   | Path to the JSON string of the saved Pyxis data in the data workspace                               | No       | -             | 
+| pyxisJsonPath   | Path to the JSON string of the saved Pyxis data in the data workspace                               | No       | -             |
 | pyxisSecret     | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert   | No       | -             |
 | server          | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'. | Yes      | production    |
 | concurrentLimit | The maximum number of images to be processed at once                                                | Yes      | 4             |
+
+## Changes in 1.0.0
+* Renamed task from `push-rpm-manifest-to-pyxis` to `push-rpm-data-to-pyxis`
+* Updated the image used in this task
+  * The `upload_rpm_manifest` is renamed to `upload_rpm_data` and on top of RPM Manifest,
+    it also updates the ContainerImage.content_sets field in Pyxis
 
 ## Changes in 0.4.4
 * Updated the base image used in this task

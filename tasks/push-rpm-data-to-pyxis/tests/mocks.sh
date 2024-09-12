@@ -17,9 +17,9 @@ function cosign() {
   touch /workdir/sboms/${4}
 }
 
-function upload_rpm_manifest() {
-  echo Mock upload_rpm_manifest called with: $*
-  echo $* >> $(workspaces.data.path)/mock_upload_rpm_manifest.txt
+function upload_rpm_data() {
+  echo Mock upload_rpm_data called with: $*
+  echo $* >> "$(workspaces.data.path)/mock_upload_rpm_data.txt"
 
   if [[ "$*" != "--retry --image-id "*" --sbom-path "*".json --verbose" ]]
   then
@@ -29,7 +29,7 @@ function upload_rpm_manifest() {
 
   if [[ "$3" == myImageID1Failing ]]
   then
-    echo "Simulating a failing RPM Manifest push..."
+    echo "Simulating a failing RPM data push..."
     return 1
   fi
 
