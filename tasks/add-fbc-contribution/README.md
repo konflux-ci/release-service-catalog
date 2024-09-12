@@ -13,6 +13,10 @@ Task to create a internalrequest to add fbc contributions to index images
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       | -                    |
 | resultsDirPath | Path to results directory in the data workspace                                           | No       | -                    |
 
+## Changes in 3.4.1
+* Removed references to data parameters `iibServiceConfigSecret` and `iibOverwriteFromIndexCredential` as
+  they should not be changed by users.
+
 ## Changes in 3.4.0
 * Removed the `binaryImage` parameter so IIB can auto resolve it
 
