@@ -1,0 +1,115 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-product-sbom-multiple-purls
+spec:
+  description: |
+    Create a product-level SBOM where components can contain multiple purls.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils:c7e14c3521e37e99f407e11d6f7f1b15f1b3ec01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "releaseNotes": {
+                  "product_name": "Red Hat Openstack Product",
+                  "product_version": "123",
+                  "cpe": "cpe:/a:example:openstack:el8",
+                  "images": [
+                    {
+                      "component": "test-component-1",
+                      "purl": "test-component-1-purl-1"
+                    },
+                    {
+                      "component": "test-component-1",
+                      "purl": "test-component-1-purl-2"
+                    },
+                    {
+                      "component": "test-component-2",
+                      "purl": "test-component-2-purl-1"
+                    }
+                  ]
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: create-product-sbom
+      params:
+        - name: dataJsonPath
+          value: "data.json"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: sbom
+          value: $(tasks.run-task.results.productSBOMPath)
+      taskSpec:
+        params:
+          - name: sbom
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:c7e14c3521e37e99f407e11d6f7f1b15f1b3ec01
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cp "$(workspaces.data.path)/$(params.sbom)" sbom.json
+
+              test "$(jq -r '.name' sbom.json)" == "Red Hat Openstack Product"
+
+              # Check product SPDX package and relationship
+              test "$(jq -r '.packages[0].SPDXID' sbom.json)" == "SPDXRef-product"
+              test "$(jq -r '.packages[0].name' sbom.json)" == "Red Hat Openstack Product"
+              test "$(jq -r '.packages[0].versionInfo' sbom.json)" == "123"
+              test "$(jq -r '.packages[0].externalRefs[0].referenceLocator' sbom.json)" == \
+                "cpe:/a:example:openstack:el8"
+
+              test "$(jq -r '.relationships[0].relationshipType' sbom.json)" == "DESCRIBES"
+              test "$(jq -r '.relationships[0].relatedSpdxElement' sbom.json)" == "SPDXRef-product"
+
+              # Check component SPDX packages and relationships
+              # Component 1
+              test "$(jq -r '.packages[1].name' sbom.json)" == "test-component-1"
+              test "$(jq -r '.packages[1].externalRefs[0].referenceLocator' sbom.json)" == \
+                "test-component-1-purl-1"
+              test "$(jq -r '.packages[1].externalRefs[1].referenceLocator' sbom.json)" == \
+                "test-component-1-purl-2"
+
+              test "$(jq -r '.relationships[1].relationshipType' sbom.json)" == "PACKAGE_OF"
+              test "$(jq -r '.relationships[1].relatedSpdxElement' sbom.json)" == "SPDXRef-component-0"
+
+              # Component 2
+              test "$(jq -r '.packages[2].name' sbom.json)" == "test-component-2"
+              test "$(jq -r '.packages[2].externalRefs[0].referenceLocator' sbom.json)" == \
+                "test-component-2-purl-1"
+
+              test "$(jq -r '.relationships[2].relationshipType' sbom.json)" == "PACKAGE_OF"
+              test "$(jq -r '.relationships[2].relatedSpdxElement' sbom.json)" == "SPDXRef-component-1"
+
+              test "$(jq -r '.packages | length' sbom.json)" == 3
+              test "$(jq -r '.relationships | length' sbom.json)" == 3
+      runAfter:
+        - run-task
