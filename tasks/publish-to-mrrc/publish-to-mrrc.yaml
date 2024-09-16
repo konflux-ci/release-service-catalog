@@ -1,0 +1,72 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: publish-to-mrrc
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  params:
+    - name: mrrcParamFilePath
+      description: path of the env file for mrrc parameters to use
+      type: string
+    - name: charonAWSSecret
+      description: the secret name for charon aws credential file
+      type: string
+  steps:
+    - name: prepare-repo
+      image: quay.io/konflux-ci/release-service-utils:4576e1e2a30439129cb69c8a4f39f7ced2d44376
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        MRRC_FILE="$(workspaces.data.path)/$(params.mrrcParamFilePath)"
+        # shellcheck source=/dev/null
+        . "$MRRC_FILE"
+        echo "Downloading the maven repo zip $MRRC_ZIP_REGISTRY"
+        mkdir -p /workdir/mrrc
+        cd /workdir/mrrc
+
+        SOURCE_REPO=${MRRC_ZIP_REGISTRY%%@sha256:*}
+        AUTH_FILE=$(mktemp)
+        select-oci-auth "${SOURCE_REPO}" > "$AUTH_FILE"
+        oras pull --registry-config "$AUTH_FILE" "$MRRC_ZIP_REGISTRY" -o /workdir/mrrc
+      volumeMounts:
+        - name: workdir
+          mountPath: "/workdir"
+    - name: upload-maven-repo
+      image: quay.io/konflux-ci/charon:b99585182f6750b3f6352889fe9c2222b57833ef
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+        MRRC_FILE="$(workspaces.data.path)/$(params.mrrcParamFilePath)"
+        # shellcheck source=/dev/null
+        . "$MRRC_FILE"
+        target=$MRRC_TARGET
+        productName=$MRRC_PRODUCT_NAME
+        productVersion=$MRRC_PRODUCT_VERSION
+        work_dir="/workdir/mrrc"
+        mavenRepoPath="$(ls "$work_dir"/*.zip)"
+        echo "Release $productName-$productVersion into $target"
+        charon upload -p "$productName" -v "$productVersion" -t "$target" "$mavenRepoPath"
+      volumeMounts:
+        - name: "charon-configs-vol"
+          mountPath: "/home/charon/.charon"
+        - name: "charon-aws-vol"
+          mountPath: "/home/charon/.aws"
+        - name: workdir
+          mountPath: "/workdir"
+  volumes:
+    - name: "charon-configs-vol"
+      configMap:
+        name: "charon-configs"
+    - name: "charon-aws-vol"
+      secret:
+        secretName: "$(params.charonAWSSecret)"
+    - name: workdir
+      emptyDir: {}
+  workspaces:
+    - name: data

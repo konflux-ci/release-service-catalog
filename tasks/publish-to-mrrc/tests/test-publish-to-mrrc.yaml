@@ -1,0 +1,71 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-to-mrrc
+spec:
+  description: |
+    Run the publish-to-mrrc task with required parameters - a happy path scenario.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:4fc4e746955ed7b6d43f7a0e327b7f573980fd6d
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > "$(workspaces.data.path)"/mrrc.env << EOF
+              export MRRC_ZIP_REGISTRY=quay.io/testorg/test-prod.zip@sha256:0b15aad24f1b847
+              export MRRC_TARGET=dev-maven-ga
+              export MRRC_PRODUCT_NAME=test-prod
+              export MRRC_PRODUCT_VERSION=0.0.1
+              EOF
+    - name: run-task
+      taskRef:
+        name: publish-to-mrrc
+      params:
+        - name: mrrcParamFilePath
+          value: "mrrc.env"
+        - name: charonAWSSecret
+          value: test-charon-aws-credentials
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:4fc4e746955ed7b6d43f7a0e327b7f573980fd6d
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ "$(< "$(workspaces.data.path)"/mock_oras.txt wc -l)" != 1 ]; then
+                echo Error: oras was expected to be called 1 times. Actual calls:
+                cat "$(workspaces.data.path)"/mock_oras.txt
+                exit 1
+              fi
+
+              if [ "$(< "$(workspaces.data.path)"/mock_charon.txt wc -l)" != 1 ]; then
+                echo Error: charon was expected to be called 1 times. Actual calls:
+                cat "$(workspaces.data.path)"/mock_charon.txt
+                exit 1
+              fi
+      runAfter:
+        - run-task
