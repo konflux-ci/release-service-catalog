@@ -1,0 +1,166 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-collectors-resources
+spec:
+  description: |
+    Run the collect-collectors-resources task and verify that all resources are stored in the workspace.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > previousrelease << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: previous-release-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f previousrelease
+              
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+
+              cat > releaseplan << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlan
+              metadata:
+                name: releaseplan-sample
+                namespace: default
+              spec:
+                application: foo
+                target: foo
+              EOF
+              kubectl apply -f releaseplan
+
+              cat > releaseplanadmission << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlanAdmission
+              metadata:
+                name: releaseplanadmission-sample
+                namespace: default
+              spec:
+                applications:
+                  - foo
+                origin: foo
+                policy: foo
+                pipeline:
+                  pipelineRef:
+                    resolver: cluster
+                    params:
+                      - name: name
+                        value: release-pipeline
+                      - name: namespace
+                        value: default
+                      - name: kind
+                        value: pipeline
+              EOF
+              kubectl apply -f releaseplanadmission
+    - name: run-task
+      taskRef:
+        name: collect-collectors-resources
+      params:
+        - name: previousRelease
+          value: default/previous-release-sample
+        - name: release
+          value: default/release-sample
+        - name: releasePlan
+          value: default/releaseplan-sample
+        - name: releasePlanAdmission
+          value: default/releaseplanadmission-sample
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      params:
+        - name: resultsDir
+          value: $(tasks.run-task.results.resultsDir)
+        - name: previousRelease
+          value: $(tasks.run-task.results.previousRelease)
+        - name: release
+          value: $(tasks.run-task.results.release)
+        - name: releasePlan
+          value: $(tasks.run-task.results.releasePlan)
+        - name: releasePlanAdmission
+          value: $(tasks.run-task.results.releasePlanAdmission)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: resultsDir
+            type: string
+          - name: previousRelease
+            type: string
+          - name: release
+            type: string
+          - name: releasePlan
+            type: string
+          - name: releasePlanAdmission
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo Test that the results directory was created
+              test -d "$(workspaces.data.path)/$(params.resultsDir)"
+
+              echo Test that previous Release CR was saved to workspace
+              test "$(jq -r '.metadata.name' < "$(workspaces.data.path)/$(params.previousRelease)")" == \
+                previous-release-sample
+              
+              echo Test that Release CR was saved to workspace
+              test "$(jq -r '.metadata.name' < "$(workspaces.data.path)/$(params.release)")" == release-sample
+
+              echo Test that ReleasePlan CR was saved to workspace
+              test "$(jq -r '.metadata.name' < "$(workspaces.data.path)/$(params.releasePlan)")" == releaseplan-sample
+
+              echo Test that ReleasePlanAdmission CR was saved to workspace
+              test "$(jq -r '.metadata.name' < "$(workspaces.data.path)/$(params.releasePlanAdmission)")" == \
+                releaseplanadmission-sample
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release previous-release-sample
+              kubectl delete release release-sample
+              kubectl delete releaseplan releaseplan-sample
+              kubectl delete releaseplanadmission releaseplanadmission-sample
