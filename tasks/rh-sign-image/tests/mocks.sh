@@ -57,8 +57,17 @@ EOF
 function skopeo() {
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
   echo Mock skopeo called with: $*  >> /dev/stderr
-  if [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
-  then
+  
+  # Mock scenarios where the image is already signed for both registries
+  if [[ "$*" == "inspect --raw docker://registry.redhat.io/myproduct/signedrepo"* ]] || \
+     [[ "$*" == "inspect --raw docker://registry.access.redhat.com/myproduct/signedrepo"* ]]; then
+    echo '{
+            "signatures": [
+              { "digest": "sha256:0000" }
+            ]
+          }'
+    return
+  elif [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]; then
     echo '{"mediaType": "my_media_type"}'
   else
     if [[ "$*" != "inspect --no-tags docker://"* ]]
@@ -122,8 +131,7 @@ function skopeo() {
                     "org.opencontainers.image.base.digest": "sha256:5ee218882a725fe3fcc8ebd803e82a7182dbee47aef0efcaf3852df9ad15347b",
                     "org.opencontainers.image.base.name": "registry.access.redhat.com/ubi8/ubi:8.9-1028"
                   }
-                }
-            '
+                }'
         else
           if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
           then
