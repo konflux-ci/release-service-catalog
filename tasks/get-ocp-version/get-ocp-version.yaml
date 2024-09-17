@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: get-ocp-version
   labels:
-    app.kubernetes.io/version: "0.5.0"
+    app.kubernetes.io/version: "0.5.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -23,20 +23,43 @@ spec:
     - name: get-ocp-version
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       script: |
-       #!/usr/bin/env sh
-       set -eux
+        #!/usr/bin/env bash
+        set -eux
 
-        # The value to be checked
-        value=$(skopeo inspect --raw docker://"$(params.fbcFragment)" \
-         | jq '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+        fbc_fragment="$(params.fbcFragment)"
+
+        # get the media type
+        media_type=$(skopeo inspect --raw "docker://${fbc_fragment}" | jq -r .mediaType)
+
+        # multiplatform images will not contain the base name with the OCP version, so it should fetch
+        # the manifest image
+        if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]]; then
+          # image is an index of multiplatform components
+          arch_json=$(get-image-architectures "${fbc_fragment}")
+
+          # it is not required to loop all images as they are all built for the same OCP version
+          manifest_image_sha="$(jq -rs 'map(.platform.digest)[0]'  <<< "$arch_json")"
+
+          # replace the image sha with the manifests's one
+          manifest_image="${fbc_fragment%@*}@${manifest_image_sha}"
+
+          # fetch the image base name containing the version for the found manifest image
+          image_base_name=$(skopeo inspect --raw docker://"${manifest_image}" \
+           | jq '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+
+        else
+          # fetch the image base name containing the version for a manifest image
+          image_base_name=$(skopeo inspect --raw docker://"${fbc_fragment}" \
+          | jq '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+        fi
 
         # Define the regular expression
         pattern="^v[0-9]\.[0-9]+$"
 
         # Check if the value matches the pattern
-        if ! echo "${value}" | grep -Eq "${pattern}"; then
+        if ! echo "${image_base_name}" | grep -Eq "${pattern}"; then
             echo "Invalid format or value does not exist or does not match the required pattern."
             exit 1
         fi
         echo "Valid format."
-        printf "%s" "$value" | tee "$(results.stored-version.path)"
+        printf "%s" "$image_base_name" | tee "$(results.stored-version.path)"

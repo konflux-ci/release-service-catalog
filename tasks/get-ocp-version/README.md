@@ -8,6 +8,10 @@ Tekton task to collect OCP version tag from FBC fragment using `skopeo inspect`.
 |-------------|-----------------------|----------|---------------|
 | fbcFragment | A FBC container Image | No       | -             |
 
+
+## Changes in 0.5.1
+* Task updated to handle multi-arch fbc fragments
+
 ## Changes in 0.5.0
 * Updated the base image used in this task
 
