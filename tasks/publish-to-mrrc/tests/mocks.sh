@@ -25,6 +25,12 @@ function charon(){
   echo Mock charon called with: $*
   echo $* >> $(workspaces.data.path)/mock_charon.txt
 
+  if [ ! test -f "$HOME/.charon/charon.yaml" ]
+  then
+    echo Error: Missing charon config file
+    exit 1
+  fi
+
   if [[ "$*" != "upload -p "*" -v "*" -t "*" "*"" ]]
   then
     echo Error: Unexpected call
