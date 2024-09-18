@@ -26,6 +26,9 @@ This task supports variable expansion in tag values from the mapping. The curren
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
 
+## Changes in 1.6.1
+* The task no longer fails if the build-date label is missing from the image
+
 ## Changes in 1.6.0
 * The {{ timestamp }} tag now uses the build-date label of the image
 * Added {{ release_timestamp }} tag which works as the old {{ timestamp }} tag did
