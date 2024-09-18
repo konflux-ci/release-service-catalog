@@ -1,12 +1,12 @@
 # Push to Developer Portal Pipeline
 
-Tekton pipeline to release Red Hat binaries to the Red Hat Developer Portal.
+Tekton pipeline to sign and release Red Hat binaries to the Red Hat Developer Portal.
 
 ## Parameters
 
 | Name                            | Description                                                                                            | Optional | Default value |
 |---------------------------------|--------------------------------------------------------------------------------------------------------|----------|---------------|
-| release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No       | -             |  
+| release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution | No       | -             |
 | releasePlan                     | The namespaced name (namespace/name) of the releasePlan                                                | No       | -             |
 | releasePlanAdmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                       | No       | -             |
 | releaseServiceConfig            | The namespaced name (namespace/name) of the releaseServiceConfig                                       | No       | -             |
@@ -18,6 +18,9 @@ Tekton pipeline to release Red Hat binaries to the Red Hat Developer Portal.
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                              | No       | -             |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                  | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                         | No       | -             |
+
+## Changes in 1.1.0
+* Add the `sign-binaries` task to this pipeline.
 
 ## Changes in 1.0.0
 * Drop the `enterpriseContractPublicKey` param. The verify task will take the value from the policy.
