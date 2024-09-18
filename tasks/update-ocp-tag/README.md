@@ -9,6 +9,9 @@ occurs when the {{ OCP_VERSION }} placeholder is present.
 | dataPath   | Path to the JSON string of the merged data to use in the data workspace | No       | -             |
 | ocpVersion | OCP version fetched from fbcFragment                                    | No       | -             |
 
+## Changes in 1.4.2
+* Changed to skip validating the targetIndex when empty, as staged indexes does not have it set.
+
 ## Changes in 1.4.1
 * Changed the replace_tag function to only replace the OCP version tag of an index image when the {{ OCP_VERSION }}
   placeholder is present
