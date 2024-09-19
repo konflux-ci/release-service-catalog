@@ -12,19 +12,34 @@ A `mapped` result is also returned from this task containing a simple true/false
 meant to inform whether a mapped Snapshot is being returned or the original one.
 
 This task supports variable expansion in tag values from the mapping. The currently supported variables are:
-* "{{ timestamp }}" -> The build-date label from the image in the format provided by timestampFormat or %s as the default
+* "{{ timestamp }}" -> The build-date label from the image in the format provided by timestampFormat or %s as the default.
+  If the build-date label is not available, we use the Created field in the image metadata as a fallback.
 * "{{ release_timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
 * "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
 * "{{ git_short_sha }}" -> The git sha reduced to 7 characters
 * "{{ digest_sha }}" -> The image digest of the respective component
 
+You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
+
 ## Parameters
 
 | Name              | Description                                                                                  | Optional | Default value |
 |-------------------|----------------------------------------------------------------------------------------------|----------|---------------|
-| snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |  
+| snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
+
+## Changes in 1.7.0
+* Added support for image labels in tag variables,
+  e.g. `{{ labels.mylabel }}`
+* Some more things related to tags:
+  * Templates can include arbitrary amount of spaces in `{{}}` now
+  * Multiple variables can be used at once,
+    e.g. `tag-{{ timestamp }}.{{ labels.release }}`
+  * Added validation of template variables
+  * Added validation of resulting tag values
+  * Expansion of `{{ timestamp }}` now falls back to `Created` field
+    in image metadata if `Labels.build-time` is not available
 
 ## Changes in 1.6.1
 * The task no longer fails if the build-date label is missing from the image
@@ -42,7 +57,7 @@ This task supports variable expansion in tag values from the mapping. The curren
   * Added support for converting quay.io repository URLs to registry.redhat.io format and vice versa.
   * Introduced a new key rh-registry-repo to store the updated repository value in the registry.redhat.io format.
   * Added a new key registry-access-repo to store the repository value in the registry.access.redhat.com format.
-  * If the repository key contains registry.redhat.io, it will be rewritten to the equivalent quay repo. Otherwise, it is left as is  
+  * If the repository key contains registry.redhat.io, it will be rewritten to the equivalent quay repo. Otherwise, it is left as is
 
 ## Changes in 1.4.0
 * Add a check that all component containerImage values use a sha reference
