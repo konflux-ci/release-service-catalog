@@ -22,7 +22,7 @@ spec:
             script: |
               #!/usr/bin/env sh
               set -eux
-               cat > "$(workspaces.data.path)/data.json" << EOF
+              cat > "$(workspaces.data.path)/data.json" << EOF
               {
                 "somekey": {
                   "key": "value",
@@ -30,10 +30,28 @@ spec:
                 }
               }
               EOF
-              mkdir -p "$(workspaces.data.path)/content/linux"
-              cat > "$(workspaces.data.path)/content/linux/linux_binary.bin" << EOF
+
+              # shellcheck disable=SC3037
+              echo -n "sha256:0c4355ee4ef8d9d3875d5421972aed405ce6d8f5262983eeea3f6cbf5740c6e2" > \
+              /tekton/results/signedWindowsDigest
+
+              mkdir -p "$(workspaces.data.path)/content"
+              cd "$(workspaces.data.path)/content"
+
+              cat > "linux_binary.bin" << EOF
               some data
               EOF
+              gzip --keep linux_binary.bin
+
+              cat > "darwin_binary.bin" << EOF
+              some data
+              EOF
+              gzip --keep darwin_binary.bin
+
+              cat > "windows_binary.bin" << EOF
+              some data
+              EOF
+              gzip --keep windows_binary.bin
 
               # Create release.json status.attribution.author
               cat > "$(workspaces.data.path)/release.json" << EOF
@@ -63,8 +81,10 @@ spec:
       params:
         - name: windowsCredentials
           value: windows-credentials
-        - name: ssh_key_secret
+        - name: windows_ssh_key_secret
           value: windows-ssh-key
+        - name: mac_ssh_key_secret
+          value: mac-ssh-key
         - name: macHostCredentials
           value: mac-host-credentials
         - name: macSigningCredentials
@@ -107,17 +127,62 @@ spec:
             script: |
               #!/usr/bin/env bash
 
-              expected_calls="2"
-              actual_content=$(cat "$(workspaces.data.path)/ssh_calls.txt")
-              if [[ "$actual_content" == "$expected_calls" ]]; then
-                  echo "Test passed: SSH called two times as expected."
+              # Check Mac ssh calls
+              mac_expected_ssh_calls="2"
+              mac_ssh_calls=$(cat "$(workspaces.data.path)/mac_ssh_count.txt")
+              if [[ "$mac_ssh_calls" == "$mac_expected_ssh_calls" ]]; then
+                  echo "Test passed: Mac SSH called as expected. Number of calls: $mac_ssh_calls"
               else
-                  echo "Test failed: SSH not called expected number of times."
-                  echo "Expected: '$expected_calls'"
-                  echo "Actual: '$actual_content'"
+                  echo "Test failed: Mac SSH not called expected number of times."
+                  echo "Expected: '$mac_expected_ssh_calls'"
+                  echo "Actual: '$mac_ssh_calls'"
                   exit 1
               fi
 
+              # Check Windows ssh calls
+              windows_expected_ssh_calls="2"
+              windows_ssh_calls=$(cat "$(workspaces.data.path)/win_ssh_count.txt")
+              if [[ "$windows_ssh_calls" == "$windows_expected_ssh_calls" ]]; then
+                  echo "Test passed: Windows SSH called as expected. Number of calls: $windows_ssh_calls"
+              else
+                  echo "Test failed: Windows SSH not called expected number of times."
+                  echo "Expected: '$windows_expected_ssh_calls'"
+                  echo "Actual: '$windows_ssh_calls'"
+                  exit 1
+              fi
+
+              # Check Mac scp calls
+              scp_mac_args=$(cat "$(workspaces.data.path)/scp_mac_args.txt")
+              expected_scp_mac_args="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts "
+              expected_scp_mac_args+="/tmp/mac_signing_script.sh "
+              expected_scp_mac_args+="mac_user@mac_host:/tmp/mac_signing_script.sh"
+
+              if [[ "$scp_mac_args" == "$expected_scp_mac_args" ]]; then
+                  echo "Test passed: Mac scp command called with correct arguments."
+              else
+                  echo "Test failed: Mac scp command called with incorrect arguments."
+                  echo "Expected: '$expected_scp_mac_args'"
+                  echo "Actual: '$scp_mac_args'"
+                  exit 1
+              fi
+
+              # Check Windows scp calls
+              scp_windows_args=$(cat "$(workspaces.data.path)/scp_windows_args.txt")
+              expected_scp_windows_args="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts "
+              expected_scp_windows_args+="-P 22 /tmp/windows_signing_script_file.bat "
+              expected_scp_windows_args+="windowsusername@windowsserver.com:"
+              expected_scp_windows_args+="C:/Users/Administrator/AppData/Local/Temp/windows_signing_script_file.bat"
+
+              if [[ "$scp_windows_args" == "$expected_scp_windows_args" ]]; then
+                  echo "Test passed: Windows scp command called with correct arguments."
+              else
+                  echo "Test failed: Windows scp command called with incorrect arguments."
+                  echo "Expected: '$expected_scp_windows_args'"
+                  echo "Actual: '$scp_windows_args'"
+                  exit 1
+              fi
+
+              # Check signed windows digest
               expected_signed_digest="sha256:0c4355ee4ef8d9d3875d5421972aed405ce6d8f5262983eeea3f6cbf5740c6e2"
               if [ "$(params.signedWindowsDigest)" != "$expected_signed_digest" ]; then
                 echo Error: signedWindowsDigest was expected to be $expected_signed_digest.
@@ -129,8 +194,9 @@ spec:
 
               mock_scp_1=$(cat "$(workspaces.data.path)/mock_scp_1.txt")
               expected_scp="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P 22 \
-              /tmp/signing_script.bat \
-              myusername@myserver.com:C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
+              /tmp/windows_signing_script_file.bat \
+              windowsusername@windowsserver.com:\
+              C:/Users/Administrator/AppData/Local/Temp/windows_signing_script_file.bat"
 
               if [[ "$mock_scp_1" == "$expected_scp" ]]; then
                   echo "Test passed: First SCP command is correct."
@@ -144,7 +210,7 @@ spec:
               # check second scp command
               mock_scp_2=$(cat "$(workspaces.data.path)/mock_scp_2.txt")
               expected_scp_2="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P 22 \
-              myusername@myserver.com:C:\Users\Administrator\AppData\Local\Temp\12345678\digest.txt \
+              windowsusername@windowsserver.com:C:/Users/Administrator/AppData/Local/Temp/12345678/digest.txt \
               /tekton/results/signedWindowsDigest"
 
               if [[ "$mock_scp_2" == "$expected_scp_2" ]]; then

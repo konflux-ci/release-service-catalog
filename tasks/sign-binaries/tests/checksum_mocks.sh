@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 
 count_file="/tmp/ssh_count_checksum.txt"
@@ -12,7 +12,6 @@ function ssh() {
     ssh_call_count=$(cat "$count_file")
     ssh_call_count=$((ssh_call_count + 1))
     echo "$ssh_call_count" > "$count_file"
-
     echo "$ssh_call_count" > $(workspaces.data.path)/ssh_calls_checksum.txt
 }
 
@@ -20,6 +19,7 @@ scp_count_file="/tmp/scp_count_checksum.txt"
 if [[ ! -f "$scp_count_file" ]]; then
     echo "0" > "$scp_count_file"
 fi
+
 function scp() {
     scp_call_count=$(cat "$scp_count_file")
     scp_call_count=$((scp_call_count + 1))
@@ -42,5 +42,17 @@ function kinit() {
 }
 
 function oras() {
-    echo "oras $@"
+    oras_args=$@
+    echo "Trying to use oras with $oras_args"
+
+    # Check for Windows signing script
+    if [[ "$oras_args" == *"pull"* && "$oras_args" == *"signed"* ]]; then
+        echo "Trying to pull signed digests: $@"
+        mkdir -p "$(workspaces.data.path)/$(params.contentDir)/signed/macos/"
+        mkdir -p "$(workspaces.data.path)/$(params.contentDir)/signed/windows/"
+        echo -n "some data" | \
+        tee "$(workspaces.data.path)/$(params.contentDir)/signed/macos/mac_binary.bin"
+        echo -n "some data" | \
+        tee "$(workspaces.data.path)/$(params.contentDir)/signed/windows/windows_binary.bin"
+    fi
 }
