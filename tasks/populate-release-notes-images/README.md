@@ -10,9 +10,6 @@ in place so that downstream tasks relying on the releaseNotes data can use it.
 | dataPath     | Path to the JSON string of the merged data to update                 | No       | -             |
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 
-## Changes in 2.2.1
-* Add unique tag info to purl
-
 ## Changes in 2.2.0
 * Updated to use the `rh-registry-repo` key from the snapshot JSON for constructing 
   the image repository path, instead of relying on the data field. This change 
