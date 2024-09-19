@@ -4,8 +4,9 @@
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' "$TASK_PATH"
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/checksum_mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mac_mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
+yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+yq -i '.spec.steps[3].script = load_str("'$SCRIPT_DIR'/checksum_mocks.sh") + .spec.steps[3].script' "$TASK_PATH"
 
 # Delete existing secrets if they exist
 kubectl delete secret windows-credentials --ignore-not-found
@@ -19,16 +20,16 @@ kubectl delete secret checksum-keytab --ignore-not-found
 
 # Create the windows-credentials secret
 kubectl create secret generic windows-credentials \
-    --from-literal=username=myusername \
-    --from-literal=password=mypass \
+    --from-literal=username=windowsusername \
+    --from-literal=password=windowspass \
     --from-literal=port=22 \
-    --from-literal=host=myserver.com \
+    --from-literal=host=windowsserver.com \
     --namespace=default
 
 # Create the windows-ssh-key secret
 kubectl create secret generic windows-ssh-key \
-    --from-literal=id_rsa="some private key" \
-    --from-literal=fingerprint="some fingerprint" \
+    --from-literal=windows_id_rsa="windows private key" \
+    --from-literal=windows_fingerprint="windows fingerprint" \
     --namespace=default
 
 # Create the quay-secret secret
@@ -39,22 +40,22 @@ kubectl create secret generic quay-secret \
 
 # Create the mac-host-credentials secret
 kubectl create secret generic mac-host-credentials \
-    --from-literal=mac-host="some_host" \
-    --from-literal=mac-user="some_user" \
-    --from-literal=mac-password="some_password" \
+    --from-literal=host="mac_host" \
+    --from-literal=username="mac_user" \
+    --from-literal=mac-password="mac_password" \
 
 # Create the mac-signing-credentials secret
 kubectl create secret generic mac-signing-credentials \
-    --from-literal=keychain_password="some_password" \
-    --from-literal=signing_identity="some_identity" \
-    --from-literal=apple_id="some_id" \
-    --from-literal=app_specific_password="some_password" \
-    --from-literal=team_id="some_id" \
+    --from-literal=keychain_password="keychain_password" \
+    --from-literal=signing_identity="signing_identity" \
+    --from-literal=apple_id="apple_id" \
+    --from-literal=app_specific_password="app_specific_password" \
+    --from-literal=team_id="team_id" \
 
 # Create the mac-ssh-key secret
 kubectl create secret generic mac-ssh-key \
-    --from-literal=id_rsa="some private key" \
-    --from-literal=fingerprint="some fingerprint" \
+    --from-literal=mac_id_rsa="some private key" \
+    --from-literal=mac_fingerprint="some fingerprint" \
     --namespace=default
 
 # Create the checksum fingerprint

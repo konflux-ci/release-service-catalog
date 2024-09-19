@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: sign-binaries
   labels:
-    app.kubernetes.io/version: "2.0.0"
+    app.kubernetes.io/version: "2.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -71,14 +71,25 @@ spec:
     - name: checksum-keytab-vol
       secret:
         secretName: $(params.checksumKeytab)
+    - name: mac-ssh-key-vol
+      secret:
+        secretName: $(params.macSSHKey)
   workspaces:
     - name: data
       description: Workspace to save the results to
   results:
+    - name: unsignedMacDigest
+      type: string
+      description: |
+        Digest used by Mac signing host to pull unsigned content via ORAS
+    - name: signedMacDigest
+      type: string
+      description: |
+        Digest used to pull signed Mac content back to pipeline via ORAS
     - name: unsignedWindowsDigest
       type: string
       description: |
-        Digest used by signing host to pull unsignged content via ORAS
+        Digest used by Windows signing host to pull unsigned content via ORAS
     - name: signedWindowsDigest
       type: string
       description: |
@@ -86,29 +97,213 @@ spec:
     - name: unsignedMacDigest
       type: string
       description: |
-        Digest used by signing host to pull unsignged content via ORAS
+        Digest used by signing host to pull unsigned content via ORAS
     - name: signedMacDigest
       type: string
       description: |
         Digest used to pull signed content back to pipeline via ORAS
+    - name: binaries_path
+      type: string
+      description: |
+        Path where the final signed content is stored in the workspace
   steps:
     - name: push-unsigned-using-oras
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      env:
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
       script: |
         #!/usr/bin/env bash
+        set -eux
 
-        # TODO CLDX-134
+        CONTENT_DIR=$(workspaces.data.path)/$(params.contentDir)
+        UNSIGNED_DIR=$CONTENT_DIR/unsigned
+        MAC_CONTENT=$UNSIGNED_DIR/macos
+        WINDOWS_CONTENT=$UNSIGNED_DIR/windows
+        LINUX_CONTENT=$CONTENT_DIR/linux
 
-        output=$(oras push "$(params.quayURL)/unsigned" .)
+        mkdir -p "$MAC_CONTENT" "$WINDOWS_CONTENT" "$LINUX_CONTENT"
+        cd "$CONTENT_DIR"
+
+        # Loop through each gz file and move them to the appropriate directory
+        for file in *.gz; do
+          case "$file" in
+            (*darwin*)
+              mv "$file" unsigned/macos/
+              ;;
+            (*windows*)
+              mv "$file" unsigned/windows/
+              ;;
+            (*linux*)
+              mv "$file" linux/
+              ;;
+          esac
+        done
+
+        # Unzip files in each directory
+        for dir in unsigned/macos unsigned/windows linux; do
+          for file in "$dir"/*.gz; do
+            gunzip "$file"
+          done
+        done
+
+        cd "$UNSIGNED_DIR"
+
+        echo "Logging into Quay..."
+        set +x
+        oras login quay.io -u "${QUAY_USER}" -p "${QUAY_PASS}" > /dev/null 2>&1
+        set -x
+        echo "Pushing unsigned Macos content to $(params.quayURL)..."
+        output=$(oras push "$(params.quayURL)/unsigned" macos)
+        mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+        echo "Digest for mac content: $mac_digest"
+        echo -n "$mac_digest" > "$(results.unsignedMacDigest.path)"
+
+        echo "Pushing unsigned Windows content to $(params.quayURL)..."
+        output=$(oras push "$(params.quayURL)/unsigned" windows)
         windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
         echo "Digest for windows content: $windows_digest"
         echo -n "$windows_digest" > "$(results.unsignedWindowsDigest.path)"
+    - name: sign-mac-binaries
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      volumeMounts:
+        - name: mac-ssh-key-vol
+          mountPath: "/etc/secrets"
+          readOnly: true
+      env:
+        - name: MAC_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macHostCredentials)
+              key: username
+        - name: MAC_HOST
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macHostCredentials)
+              key: host
+        - name: KEYCHAIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: keychain_password
+        - name: SIGNING_IDENTITY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: signing_identity
+        - name: APPLE_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: apple_id
+        - name: TEAM_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: team_id
+        - name: APP_SPECIFIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: app_specific_password
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+        - name: QUAY_URL
+          value: $(params.quayURL)
+        - name: PIPELINE_UID
+          value: $(params.pipelineRunUid)
+      script: |
+        #!/usr/bin/env bash
+        set -eux
 
-    # - name: sign-mac-binaries
-    #   image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
-    #   script: |
-    #     #!/usr/bin/env bash
-    #     # TODO CLDX-79
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        cp "/etc/secrets/mac_id_rsa" /root/.ssh/id_rsa
+        cp "/etc/secrets/mac_fingerprint" /root/.ssh/known_hosts
+        chmod 600 /root/.ssh/id_rsa /root/.ssh/known_hosts
+
+        SSH_OPTS=(-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts)
+
+        # shell check complains about the variable (unsigned_digest) not being used but it is used in the script
+        # shellcheck disable=SC2034
+        unsigned_digest=$(cat "$(results.unsignedMacDigest.path)")
+        mac_signing_script="/tmp/mac_signing_script.sh"
+
+        TEMP_DIR="/tmp/$(params.pipelineRunUid)"
+        BINARY_PATH="$TEMP_DIR/unsigned/macos"
+        ZIP_PATH="$TEMP_DIR/signed_content.zip"
+        DIGEST_FILE="$TEMP_DIR/push_digest.txt"
+
+        cat << EOF > "$mac_signing_script"
+        #!/bin/bash
+        set -eux
+
+        mkdir -p "$TEMP_DIR"
+        mkdir -p "$BINARY_PATH"
+
+        cd "$TEMP_DIR"
+        /usr/local/bin/oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
+        /usr/local/bin/oras pull $(params.quayURL)/unsigned@$unsigned_digest -o "$BINARY_PATH"
+        # This is the directory where the content was extracted
+        CONTENT_DIR=\$(find "$BINARY_PATH" -maxdepth 1 -type d | tail -n 1)
+
+        security unlock-keychain -p $KEYCHAIN_PASSWORD login.keychain
+
+        echo "Signing files in the \$CONTENT_DIR directory..."
+        find "\$CONTENT_DIR" -type f | while read file; do
+            echo "Signing: \$file"
+            if ! xcrun codesign --sign "Developer ID Application: $SIGNING_IDENTITY" \
+                --options runtime --timestamp --force "\$file"; then
+                echo "Failed to sign file: \$file"
+                exit 1
+            fi
+        done
+
+        cd "$BINARY_PATH"
+        NEW_CONTENT_DIR=\$(basename "\$CONTENT_DIR")
+        zip -r "$ZIP_PATH" "\$NEW_CONTENT_DIR"
+
+        xcrun notarytool submit "$ZIP_PATH" \
+            --wait \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_SPECIFIC_PASSWORD"
+
+        PUSH_OUTPUT=\$(/usr/local/bin/oras push "$QUAY_URL/signed:$(params.pipelineRunUid)-mac" "\$NEW_CONTENT_DIR")
+        SIGNED_DIGEST=\$(echo "\$PUSH_OUTPUT" | grep 'Digest:' | awk '{print \$2}')
+        echo -n "\$SIGNED_DIGEST" >> "$DIGEST_FILE"
+        echo "Process completed successfully."
+        EOF
+        # Copy the script to the Mac host
+        scp "${SSH_OPTS[@]}" "$mac_signing_script" "${MAC_USER}@${MAC_HOST}:/tmp/mac_signing_script.sh"
+
+        # Execute the script on the Mac host
+        ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash /tmp/mac_signing_script.sh
+
+        # Copy the signed digest back to the pipeline
+        scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:/tmp/$(params.pipelineRunUid)/push_digest.txt" \
+            "$(results.signedMacDigest.path)"
+
+        # Clean up the Mac host now that we are done
+        # shell check complains about the variable (params.pipelineRunUid) being evaluated on the client side
+        # shellcheck disable=SC2029
+        ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf /tmp/$(params.pipelineRunUid)"
     - name: sign-windows-binaries
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       volumeMounts:
@@ -147,9 +342,9 @@ spec:
 
         mkdir -p /root/.ssh
         chmod 700 /root/.ssh
-        cp "/etc/secrets/id_rsa" /root/.ssh/id_rsa
-        cp "/etc/secrets/fingerprint" /root/.ssh/known_hosts
-        chmod 600 root/.ssh/known_hosts /root/.ssh/id_rsa
+        cp "/etc/secrets/windows_id_rsa" /root/.ssh/id_rsa
+        cp "/etc/secrets/windows_fingerprint" /root/.ssh/known_hosts
+        chmod 600 /root/.ssh/known_hosts /root/.ssh/id_rsa
 
         SSH_OPTS="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -p ${WINDOWS_PORT} \
         ${WINDOWS_USER}@${WINDOWS_HOST}"
@@ -157,9 +352,9 @@ spec:
 
         unsigned_digest=$(cat "$(results.unsignedWindowsDigest.path)")
         # Create the batch script
-        signing_script_file="/tmp/signing_script.bat"
+        windows_signing_script_file="/tmp/windows_signing_script_file.bat"
         set +x
-        cat << EOF > "$signing_script_file"
+        cat << EOF > "$windows_signing_script_file"
 
         mkdir %TEMP%\$(params.pipelineRunUid) && cd /d %TEMP%\$(params.pipelineRunUid)
         @echo off
@@ -168,14 +363,14 @@ spec:
         oras pull $(params.quayURL)/unsigned@${unsigned_digest}
 
         signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 ^
-        %TEMP%\$(params.pipelineRunUid)\*
+        %TEMP%\$(params.pipelineRunUid)\windows\*
 
         if errorlevel 1 (
           echo Signing of binaries failed
           exit /B %ERRORLEVEL%
         )
 
-        signtool verify /v /pa %TEMP%\$(params.pipelineRunUid)\*
+        signtool verify /v /pa %TEMP%\$(params.pipelineRunUid)\windows\*
 
         if errorlevel 1 (
           echo Verification of binaries failed
@@ -184,29 +379,33 @@ spec:
 
         echo [%DATE% %TIME%] Signing of Windows binaries completed successfully
 
-        oras push $(params.quayURL)/signed:$(params.pipelineRunUid) %TEMP%\$(params.pipelineRunUid) \
+        oras push $(params.quayURL)/signed:$(params.pipelineRunUid)-windows windows \
         > oras_push_output.txt 2>&1
 
         for /f "tokens=2,3 delims=: " %%a in ('findstr "Digest:" oras_push_output.txt') do @echo %%a:%%b > digest.txt
         EOF
         set -x
-        scp "$SCP_OPTS" "$signing_script_file" \
-        "${WINDOWS_USER}@${WINDOWS_HOST}:C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
+        # shellcheck disable=SC2086
+        scp $SCP_OPTS "$windows_signing_script_file" \
+        "${WINDOWS_USER}@${WINDOWS_HOST}:C:/Users/Administrator/AppData/Local/Temp/windows_signing_script_file.bat"
 
         # Execute the script on the Windows host
-        ssh "$SSH_OPTS" "C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
+        # shellcheck disable=SC2086
+        ssh $SSH_OPTS "C:/Users/Administrator/AppData/Local/Temp/windows_signing_script_file.bat"
 
         # disable shellcheck for escaping the pipelineRunUid as we want that evaluated on client side
-        # shellcheck disable=SC2029
-
-        scp "$SCP_OPTS" "${WINDOWS_USER}@${WINDOWS_HOST}:\
-        C:\\Users\\Administrator\\AppData\\Local\\Temp\\$(params.pipelineRunUid)\\digest.txt" \
+        # shellcheck disable=SC2029,SC2086
+        scp $SCP_OPTS "${WINDOWS_USER}@${WINDOWS_HOST}:\
+        C:/Users/Administrator/AppData/Local/Temp/$(params.pipelineRunUid)/digest.txt" \
         "$(results.signedWindowsDigest.path)"
 
-        # Clean up the windows host now that we are done
-        # shellcheck disable=SC2029
-        ssh "$SSH_OPTS" "rmdir /s /q C:\\Users\\Administrator\\AppData\\Local\\Temp\\$(params.pipelineRunUid)"
+        # Remove trailing spaces, carriage returns, newlines
+        sed -i 's/[[:space:]]*$//; s/\r//g; :a;N;$!ba;s/\n//g' "$(results.signedWindowsDigest.path)"
 
+        # Clean up the windows host now that we are done
+        # disable shellcheck for escaping the pipelineRunUid as we want that evaluated on client side
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "rmdir /s /q C:\\Users\\Administrator\\AppData\\Local\\Temp\\$(params.pipelineRunUid)"
     - name: generate-checksums
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       volumeMounts:
@@ -229,6 +428,7 @@ spec:
               key: password
       script: |
         #!/usr/bin/env bash
+        set -eux
 
         #---------------------------------------------------------------------------------------
         # This step generates checksums for all of the binaries in the content directory and
@@ -257,8 +457,8 @@ spec:
             input_file="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt"
 
             echo "Executing SSH command with sign method: $sign_method"
-            # shellcheck disable=SC2029
-            ssh "$SSH_OPTS" "$checksum_user@$checksum_host" \
+            # shellcheck disable=SC2029,SC2086
+            ssh $SSH_OPTS "$checksum_user@$checksum_host" \
             "rpm-sign --nat $sign_method --key redhatrelease2 --onbehalfof=$AUTHOR \
             --output $output_path $input_file"
         }
@@ -281,12 +481,22 @@ spec:
         mkdir -p "$SIGNED_DIR"
         mkdir -p "$CONTENT_DIR"/linux
         cp -r "$CONTENT_DIR"/linux/* "$SIGNED_DIR"
-        cd "$SIGNED_DIR" || exit
+        cd "$SIGNED_DIR"
+        set +x
         oras login quay.io -u "$QUAY_USER" -p "$QUAY_PASS"
+        set -x
         signed_mac_digest=$(cat "$(results.signedMacDigest.path)")
         signed_windows_digest=$(cat "$(results.signedWindowsDigest.path)")
-        oras pull "$(params.quayURL)/signed@${signed_mac_digest}"
-        oras pull "$(params.quayURL)/signed@${signed_windows_digest}"
+        signed_windows_digest=${signed_windows_digest//[[:space:]]/}
+        # shellcheck disable=SC2086,SC2046
+        oras pull $(params.quayURL)/signed@${signed_mac_digest}
+        # shellcheck disable=SC2086,SC2046
+        oras pull $(params.quayURL)/signed@${signed_windows_digest}
+
+        # Copy everything to SIGNED_DIR and remove mac,windows dirs
+        cp macos/* .
+        cp windows/* .
+        rm -r macos/ windows/
 
         # generate checksums for all of the binaries
         SHA_SUM_PATH="${CONTENT_DIR}/sha256sum.txt"
@@ -298,9 +508,10 @@ spec:
             fi
         done
         # Send sha256sum.txt to the checksum host for signing
-        # shellcheck disable=SC2029
-        ssh "$SSH_OPTS" "$(params.checksumUser)@$(params.checksumHost)" "mkdir -p ~/$(params.pipelineRunUid)/checksum"
-        scp "$SSH_OPTS" "${SHA_SUM_PATH}" \
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "$(params.checksumUser)@$(params.checksumHost)" "mkdir -p ~/$(params.pipelineRunUid)/checksum"
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "${SHA_SUM_PATH}" \
         "$(params.checksumUser)@$(params.checksumHost):~/$(params.pipelineRunUid)/checksum"
 
         sign_file --clearsign sig
@@ -316,3 +527,6 @@ spec:
         "${SIGNED_DIR}/sha256sum.txt.gpg"
 
         mv "$SHA_SUM_PATH" "${SIGNED_DIR}/sha256sum.txt"
+
+        # shellcheck disable=SC2086
+        echo -n "$(params.contentDir)/signed" | tee "$(results.binaries_path.path)"
