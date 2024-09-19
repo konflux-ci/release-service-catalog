@@ -10,4 +10,7 @@ Tekton task to sign windows and mac binaries before they are pushed to the Red H
 | quaySecret | Secret to interact with Quay | No |  |
 | windowsCredentials | Secret to interact with the Windows signing host | No |  |
 | windowsSSHKey | Secret containing private key and fingerprint for Windows signing host | Yes | windows-ssh-key |
+| macHostCredentials | Secret to interact with the Mac signing host | No |  |
+| macSigningCredentials | Secret to interact with the Mac signing utils | No |  |
+| macSSHKey | Secret containing SSH private key for the Mac signing host | Yes | mac-ssh-key
 | pipelineRunUid | Unique ID of the pipelineRun | No |  |
