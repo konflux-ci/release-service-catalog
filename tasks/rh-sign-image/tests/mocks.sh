@@ -57,8 +57,36 @@ EOF
 function skopeo() {
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
   echo Mock skopeo called with: $*  >> /dev/stderr
-  if [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
-  then
+  
+  # Simulate an error for specific images to test error handling
+  if [[ "$*" == "inspect --raw docker://registry.access.redhat.com/unauthorizedproduct/unauthorized"* ]]; then
+    # Simulate the registry error for terms acceptance
+    echo '{
+      "errors": [{
+        "code": "UNAUTHORIZED",
+        "message": "This repo requires terms acceptance and is only available on registry.redhat.io"
+      }]
+    }' >&2
+    return 1  # Simulate skopeo returning a non-zero exit code
+  elif [[ "$*" == "inspect --raw docker://registry.redhat.io/unauthorizedproduct/unauthorized"* ]]; then
+    # Simulate an authentication error
+    echo '{
+      "errors": [{
+        "code": "UNAUTHORIZED",
+        "message": "invalid username/password: unauthorized"
+      }]
+    }' >&2
+    return 1  # Simulate skopeo returning a non-zero exit code
+  elif [[ "$*" == "inspect --raw docker://registry.redhat.io/myproduct/signedrepo"* ]] || \
+       [[ "$*" == "inspect --raw docker://registry.access.redhat.com/myproduct/signedrepo"* ]]; then
+    # Mock scenarios where the image is already signed
+    echo '{
+            "signatures": [
+              { "digest": "sha256:0000" }
+            ]
+          }'
+    return
+  elif [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]; then
     echo '{"mediaType": "my_media_type"}'
   else
     if [[ "$*" != "inspect --no-tags docker://"* ]]

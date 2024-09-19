@@ -13,6 +13,9 @@ Task to create internalrequests to sign snapshot components
 | concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 16                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                    |
 
+## Changes in 3.4.2
+* Updated the `rh-sign-image` task to skip signing an image if it is already signed.
+
 ## Changes in 3.4.1
 * Increased default `concurrentLimit` to 16 to make signing faster.
 
