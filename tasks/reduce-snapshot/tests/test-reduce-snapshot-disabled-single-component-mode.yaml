@@ -1,0 +1,95 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-reduce-snapshot-disabled-single-component-mode
+spec:
+  description: |
+    Run the reduce snapshot task with single component mode being false
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > snapshot << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Snapshot
+              metadata:
+                name: snapshot-sample
+                namespace: default
+                labels:
+                  test.appstudio.openshift.io/type: component
+                  appstudio.openshift.io/component: tom
+              spec:
+                application: foo
+                components:
+                  - name: scott
+                    containerImage: newimage
+                  - name: tom
+                    containerImage: newimage2
+              EOF
+              kubectl apply -f snapshot
+              
+              kubectl get snapshot/snapshot-sample -ojson | jq .spec | tee "$(workspaces.data.path)/snapshot.json"
+              chmod 666 "$(workspaces.data.path)/snapshot.json"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: reduce-snapshot
+      params:
+        - name: SNAPSHOT
+          value: $(workspaces.data.path)/snapshot.json
+        - name: SINGLE_COMPONENT
+          value: false
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE
+          value: snapshot/snapshot-sample
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE_NS
+          value: default
+        - name: SNAPSHOT_PATH
+          value: $(workspaces.data.path)/snapshot.json
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat "$(workspaces.data.path)/snapshot.json"
+              if [ "$(jq '.components | length' < "$(workspaces.data.path)/snapshot.json")" -ne 2 ]; then
+                echo "ERROR: Resulting snapshot does not contain 2 components"
+                exit 1
+              fi
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete snapshot snapshot-sample
