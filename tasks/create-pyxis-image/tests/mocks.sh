@@ -44,7 +44,7 @@ function skopeo() {
 }
 
 function get-image-architectures() {
-  if [[ "$*" =~ registry.io/multi-arch-image.?@mydigest.? ]]; then
+  if [[ "$*" =~ registry.io/multi-arch-image.?@sha256:mydigest.? ]]; then
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
     echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
   else
@@ -61,14 +61,14 @@ function oras() {
   if [[ "$*" == "manifest fetch --registry-config"* ]]
   then
     echo '{"mediaType": "my_media_type"}'
-  elif [[ "$*" == "pull --registry-config"*dockerfile-not-found* ]]
+  elif [[ "$*" == "pull --registry-config"*dockerfile-not-found:sha256-*.dockerfile* ]]
   then
     echo Mock oras called with: $*
     return 1
-  elif [[ "$*" == "pull --registry-config"*dockerfile-file-missing* ]]
+  elif [[ "$*" == "pull --registry-config"*dockerfile-file-missing:sha256-*.dockerfile* ]]
   then
     echo Mock oras called with: $*
-  elif [[ "$*" == "pull --registry-config"* ]]
+  elif [[ "$*" == "pull --registry-config"*":sha256-"*.dockerfile* ]]
   then
     echo Mock oras called with: $*
     echo mydocker > $6/Dockerfile
