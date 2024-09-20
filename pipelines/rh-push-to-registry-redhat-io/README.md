@@ -19,6 +19,9 @@ Tekton pipeline to release content to registry.redhat.io registry.
 | taskGitUrl            | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision       | The revision in the taskGitUrl repo to be used                               | No       | -             |
 
+## Changes in 4.3.0
+* Add new reduce-snapshot task
+
 ## Changes in 4.2.0
 * The `push-rpm-manifest-to-pyxis` task is renamed to `push-rpm-data-to-pyxis`
 
