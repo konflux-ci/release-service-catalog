@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -eux
 
-function oras() {
-    echo "sha256:manifest"
-}
-
 function skopeo() {
     if [[ "$*" == "inspect --raw docker://quay.io/fbc/multi-arch@sha256:index" ]]; then
         echo '{ "mediaType": "application/vnd.oci.image.index.v1+json" }'
@@ -19,6 +15,6 @@ function skopeo() {
 }
 
 function get-image-architectures() {
-    echo '{"platform":{"digest": "sha256:manifest", "architecture": "amd64", "os": "linux"}}'
-    echo '{"platform":{"digest": "sha256:manifest", "architecture": "ppc64le", "os": "linux"}}'
+    echo '{"mediaType": "application/vnd.oci.image.manifest.v1+json" ,"digest": "sha256:manifest", "size": 100, "platform":{"architecture": "amd64", "os": "linux"}}'
+    echo '{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": "sha256:manifest", "size": 100, "platform":{"architecture": "ppc64le", "os": "linux"}}'
 }
