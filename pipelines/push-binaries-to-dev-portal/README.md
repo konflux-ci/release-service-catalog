@@ -19,6 +19,9 @@ Tekton pipeline to sign and release Red Hat binaries to the Red Hat Developer Po
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                  | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                         | No       | -             |
 
+## Changes in 1.2.0
+* Add new reduce-snapshot task
+
 ## Changes in 1.1.0
 * Add the `sign-binaries` task to this pipeline.
 
