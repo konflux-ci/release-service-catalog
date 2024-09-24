@@ -1,0 +1,90 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: run-collectors
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to run collectors defined in the ReleasePlan and ReleasePlanAdmission
+  params:
+    - name: releasePlanAdmissionPath
+      type: string
+      description: Path to the JSON string of the ReleasePlanAdmission in the data workspace
+    - name: releasePlanPath
+      type: string
+      description: Path to the JSON string of the ReleasePlan in the data workspace
+    - name: resultsDir
+      type: string
+      description: The relative path in the workspace to save the collector results to
+  workspaces:
+    - name: data
+      description: Workspace where the CRs are stored
+  steps:
+    - name: run-collectors
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      script: |
+        #!/usr/bin/env bash
+        set -xeo pipefail
+
+        DEFAULT_TIMEOUT=900
+        COLLECTORS_REPOSITORY="https://github.com/SOME_ORG/SOME_REPO" # TODO - update this once repo is created
+        RELEASEPLAN_FILE="$(workspaces.data.path)/$(params.releasePlanPath)"
+        RELEASEPLANADMISSION_FILE="$(workspaces.data.path)/$(params.releasePlanAdmissionPath)"
+        RESULTS_DIR="$(workspaces.data.path)/$(params.resultsDir)"
+
+        if [ ! -d "${RESULTS_DIR}" ] ; then
+            echo The passed results directory does not exist. Failing as there is nowhere to save the results to
+            exit 1
+        fi
+
+        git clone "${COLLECTORS_REPOSITORY}" collectors
+        pushd collectors
+
+        if [ ! -f "${RELEASEPLAN_FILE}" ] ; then
+            echo "No valid releasePlan file was found so no tenant collectors will be run."
+        else
+            NUM_TENANT_COLLECTORS="$(jq '.spec.collectors | length' "${RELEASEPLAN_FILE}")"
+            for ((i = 0; i < NUM_TENANT_COLLECTORS; i++)) ; do
+                collector="$(jq -c --argjson i "$i" '.spec.collectors[$i]' "${RELEASEPLAN_FILE}")"
+                name="$(jq -r '.name' <<< "$collector")"
+                type="$(jq -r '.type' <<< "$collector")"
+                TIMEOUT="$(jq -r --arg default "$DEFAULT_TIMEOUT" '.timeout // $default' <<< "$collector")"
+                ARGS=()
+                NUM_ARGS="$(jq '.params | length' <<< "$collector")"
+                for ((j = 0; j < NUM_ARGS; j++)) ; do
+                    param="$(jq -c --argjson j "$j" '.params[$j]' <<< "$collector")"
+                    arg_name="$(jq -r '.name' <<< "$param")"
+                    arg_value="$(jq -r '.value' <<< "$param")"
+                    ARGS=("${ARGS[@]}" --"${arg_name}" "${arg_value}")
+                done
+                # Execute collector
+                timeout "$TIMEOUT" python3 "$type" "${ARGS[@]}" | tee "$RESULTS_DIR"/tenant-"$name".json
+            done
+        fi
+
+        if [ ! -f "${RELEASEPLANADMISSION_FILE}" ] ; then
+            echo "No valid releasePlanAdmission file was found so no managed collectors will be run."
+        else
+            NUM_MANAGED_COLLECTORS="$(jq '.spec.collectors | length' "${RELEASEPLANADMISSION_FILE}")"
+            for ((i = 0; i < NUM_MANAGED_COLLECTORS; i++)) ; do
+                collector="$(jq -c --argjson i "$i" '.spec.collectors[$i]' "${RELEASEPLANADMISSION_FILE}")"
+                name="$(jq -r '.name' <<< "$collector")"
+                type="$(jq -r '.type' <<< "$collector")"
+                TIMEOUT="$(jq -r --arg default "$DEFAULT_TIMEOUT" '.timeout // $default' <<< "$collector")"
+                ARGS=()
+                NUM_ARGS="$(jq '.params | length' <<< "$collector")"
+                for ((j = 0; j < NUM_ARGS; j++)) ; do
+                    param="$(jq -c --argjson j "$j" '.params[$j]' <<< "$collector")"
+                    arg_name="$(jq -r '.name' <<< "$param")"
+                    arg_value="$(jq -r '.value' <<< "$param")"
+                    ARGS=("${ARGS[@]}" --"${arg_name}" "${arg_value}")
+                done
+                # Execute collector
+                timeout "$TIMEOUT" python3 "$type" "${ARGS[@]}" | tee "$RESULTS_DIR"/managed-"$name".json
+            done
+        fi
