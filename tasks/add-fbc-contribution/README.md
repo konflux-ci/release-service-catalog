@@ -8,11 +8,13 @@ Task to create a internalrequest to add fbc contributions to index images
 |----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
 | snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | No       | -                    |
 | dataPath       | Path to the JSON string of the merged data to use in the data workspace                   | No       | -                    |
-| binaryImage    | binaryImage value updated by update-ocp-tag task                                          | No       | -                    |
 | fromIndex      | fromIndex value updated by update-ocp-tag task                                            | No       | -                    |
 | pipelineRunUid | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                    |
 | targetIndex    | targetIndex value updated by update-ocp-tag task                                          | No       | -                    |
 | resultsDirPath | Path to results directory in the data workspace                                           | No       | -                    |
+
+## Changes in 3.4.0
+* Removed the `binaryImage` parameter so IIB can auto resolve it
 
 ## Changes in 3.3.1
 * Removed references of the redundant field `fbc.request` as FBC releases uses `iib` exclusively as its internal request pipeline
