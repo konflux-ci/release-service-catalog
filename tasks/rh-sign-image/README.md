@@ -1,17 +1,29 @@
 # rh-sign-image
 
-Task to create internalrequests to sign snapshot components
+Task to create internalrequests or pipelineruns to sign snapshot components
 
 ## Parameters
 
-| Name            | Description                                                                               | Optional | Default value        |
-|-----------------|-------------------------------------------------------------------------------------------|----------|----------------------|
-| snapshotPath    | Path to the JSON string of the mapped Snapshot spec in the data workspace                 | No       | -                    |
-| dataPath        | Path to the JSON string of the merged data to use in the data workspace                   | No       | -                    |
-| requester       | Name of the user that requested the signing, for auditing purpose                         | No       | -                    |
-| requestTimeout  | InternalRequest timeout                                                                   | Yes      | 180                  |
-| concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 16                    |
-| pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                    |
+| Name                     | Description                                                                                          | Optional | Default value |
+|--------------------------|------------------------------------------------------------------------------------------------------|----------|---------------|
+| snapshotPath             | Path to the JSON string of the mapped Snapshot spec in the data workspace                            | No       | -             |
+| dataPath                 | Path to the JSON string of the merged data to use in the data workspace                              | No       | -             |
+| releasePlanAdmissionPath | Path to the JSON string of the releasePlanAdmission in the data workspace                            | No       | -             |
+| requester                | Name of the user that requested the signing, for auditing purpose                                    | No       | -             |
+| requestTimeout           | Request timeout                                                                                      | Yes      | 180           |
+| concurrentLimit          | The maximum number of images to be processed at once                                                 | Yes      | 16            |
+| pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating a requests                   | No       | -             |
+| taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored                | No       | -             |
+| taskGitRevision          | The revision in the taskGitUrl repo to be used                                                       | No       | -             |
+| pyxisServer              | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'.  | Yes      | production    |
+| pyxisSecret              | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert    | No       | -             |
+
+
+## Changes in 4.0.0
+* New mandatory parameter `releasePlanAdmissionPath`
+* New `internal-pipelinerun` requestType mode which can be enabled for the case of private, internal clusters.
+  * Use `.data.sign.requestType` to choose between `internal-request` and `internal-pipelinerun` 
+* Attempts to sign are now skipped if the manifest digest for a given repository have already been signed.
 
 ## Changes in 3.4.1
 * Increased default `concurrentLimit` to 16 to make signing faster.
@@ -57,7 +69,7 @@ Task to create internalrequests to sign snapshot components
 * remove `dataPath` and `snapshotPath` default values
 
 ## Changes in 2.2.3
-* Add `set -e` to the task script, so it can fail if the `wait-for-ir` script exits with a non-zero status code, when at
+* Add `set -e` to the task script, so it can fail if the `wait-for-internal-request` script exits with a non-zero status code, when at
   least one of the InternalRequests has not succeeded
 
 ## Changes in 2.2.2
