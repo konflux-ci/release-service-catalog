@@ -10,8 +10,11 @@ Task to create internalrequests to sign snapshot components
 | dataPath        | Path to the JSON string of the merged data to use in the data workspace                   | No       | -                    |
 | requester       | Name of the user that requested the signing, for auditing purpose                         | No       | -                    |
 | requestTimeout  | InternalRequest timeout                                                                   | Yes      | 180                  |
-| concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 4                    |
+| concurrentLimit | The maximum number of images to be processed at once                                      | Yes      | 16                    |
 | pipelineRunUid  | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                    |
+
+## Changes in 3.4.1
+* Increased default `concurrentLimit` to 16 to make signing faster.
 
 ## Changes in 3.4.0
 * Added changes in order to eliminate the `translate-delivery-repo` script because the
