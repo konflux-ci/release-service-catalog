@@ -2,9 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-rh-sign-image-multiple-components
+  name: test-rh-sign-image-single-component-plr
 spec:
-  description: Test creating internal requests to sign images
+  description: Test creating an internal pipelinerun to sign an image
   workspaces:
     - name: tests-workspace
   tasks:
@@ -28,34 +28,16 @@ spec:
                 "components": [
                   {
                     "name": "comp0",
+                    "source": {
+                      "git": {
+                        "revision": "deadbeef"
+                      }
+                    },
                     "containerImage": "registry.io/image0@sha256:0000",
-                    "repository": "quay.io/redhat-pending/prod----repo0",
-                    "rh-registry-repo": "registry.stage.redhat.io/prod/repo0",
-                    "registry-access-repo": "registry.access.stage.redhat.com/prod/repo0",
+                    "repository": "quay.io/redhat-prod/myproduct----myrepo",
+                    "rh-registry-repo": "registry.redhat.io/myproduct/myrepo",
+                    "registry-access-repo": "registry.access.redhat.com/myproduct/myrepo",
                     "tags": [
-                      "some-prefix-12345",
-                      "some-prefix"
-                    ]
-                  },
-                  {
-                    "name": "comp1",
-                    "containerImage": "registry.io/image1@sha256:0001",
-                    "repository": "quay.io/redhat-pending/prod----repo1",
-                    "rh-registry-repo": "registry.stage.redhat.io/prod/repo1",
-                    "registry-access-repo": "registry.access.stage.redhat.com/prod/repo1",
-                    "tags": [
-                      "some-prefix-12345",
-                      "some-prefix"
-                    ]
-                  },
-                  {
-                    "name": "comp2",
-                    "containerImage": "registry.io/image2@sha256:0002",
-                    "repository": "quay.io/redhat-pending/prod----repo2",
-                    "rh-registry-repo": "registry.stage.redhat.io/prod/repo2",
-                    "registry-access-repo": "registry.access.stage.redhat.com/prod/repo2",
-                    "tags": [
-                      "some-prefix-12345",
                       "some-prefix"
                     ]
                   }
@@ -65,8 +47,14 @@ spec:
 
               cat > "$(workspaces.data.path)/data.json" << EOF
               {
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": "false"
+                  }
+                },
                 "sign": {
-                  "request": "hacbs-signing-pipeline",
+                  "request": "simple-signing-pipeline",
+                  "requestType": "internal-pipelinerun",
                   "configMapName": "signing-config-map"
                 }
               }
@@ -102,7 +90,7 @@ spec:
         name: rh-sign-image
       params:
         - name: requester
-          value: testuser-multiple
+          value: testuser-single
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: snapshotPath
@@ -134,50 +122,48 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
-              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
+              
+              internalPipelineruns="$(kubectl get pr \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" \
+                -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              plrsLength=$(jq ".items | length" <<< "${internalPipelineruns}" )
 
               expectedReferences=()
+              expectedReferences+=("registry.redhat.io/myproduct/myrepo:some-prefix")
+              expectedReferences+=("registry.access.redhat.com/myproduct/myrepo:some-prefix")
+
               expectedDigests=()
-              for((i=0; i<3; i++)); do
-                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix-12345")
-                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix-12345")
-                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix")
-                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix")
-                expectedDigests+=("sha256:000${i}")
-              done
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
 
               foundReferences=()
               foundDigests=()
-              for((ir=0; ir<irsLength; ir++)); do
-                params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
-                refValue=$(jq -r '.reference' <<< "${params}")
-                manifestDigest=$(jq -r '.manifest_digest' <<< "${params}")
+              for((iplr=0; iplr<plrsLength; iplr++)); do
+                params=$(jq -r ".items[$iplr].spec.params" <<< "${internalPipelineruns}")
+                refValue=$(jq -r '.[1].value' <<< "${params}")
+                manifestDigest=$(jq -r '.[2].value' <<< "${params}")
                 foundReferences+=("${refValue}")
                 foundDigests+=("${manifestDigest}")
 
-                if [ $(jq -r '.config_map_name' <<< "${params}") != "signing-config-map" ]
-                then
+                if [ "$(jq -r '.[4].value' <<< "${params}")" != "signing-config-map" ]; then
                   echo "config_map_name does not match"
                   exit 1
                 fi
 
-                if [ $(jq -r '.requester' <<< "${params}") != "testuser-multiple" ]
-                then
+                if [ "$(jq -r '.[3].value' <<< "${params}")" != "testuser-single" ]; then
                   echo "requester does not match"
                   exit 1
                 fi
 
-                if [ $(jq -r '.pipeline_image' <<< "${params}") != \
-                  "quay.io/redhat-isv/operator-pipelines-images:released" ]
-                then
+                if [ "$(jq -r '.[0].value' <<< "${params}")" != \
+                   "quay.io/redhat-isv/operator-pipelines-images:released" ]; then
                   echo "pipeline_image does not match"
                   exit 1
                 fi
               done
 
-              differenceReferences=$(echo "${expectedReferences[@]}" "${foundReferences[@]}" | tr ' ' '\n' | \
-                sort | uniq -u)
+              differenceReferences=$(echo "${expectedReferences[@]}" "${foundReferences[@]}" | tr ' ' '\n' \
+                | sort | uniq -u)
               differenceDigests=$(echo "${expectedDigests[@]}" "${foundDigests[@]}" | tr ' ' '\n' | sort | uniq -u)
 
               if [ -n "${differenceReferences}" ] ; then
@@ -192,17 +178,15 @@ spec:
                 echo "${differenceDigests}"
                 exit 1
               fi
-
       runAfter:
         - run-task
   finally:
     - name: cleanup
       taskSpec:
         steps:
-          - name: delete-crs
+          - name: delete-plrs
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
               #!/usr/bin/env bash
               set -eux
-
-              kubectl delete internalrequests --all
+              kubectl delete pr -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)"
