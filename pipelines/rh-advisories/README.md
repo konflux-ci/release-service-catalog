@@ -22,6 +22,10 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes     | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                       | No       | -             |
 
+## Changes in 1.3.1
+* Increase timeout for signing IRs from 20 to 30 min
+  * We got reports from users that they repeatedly see timeouts here
+
 ## Changes in 1.3.0
 * Add new reduce-snapshot task
 
