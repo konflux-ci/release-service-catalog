@@ -2,31 +2,121 @@
 set -eux
 
 # mocks to be injected into task step scripts
+
+function internal-pipelinerun() {
+  TIMEOUT=30
+  END_TIME=$(date -ud "$TIMEOUT seconds" +%s)
+
+  echo Mock internal-pipelinerun called with: $*
+  echo $* >> $(workspaces.data.path)/mock_internal-pipelinerun.txt
+
+  # since we put the PLR in the background, we need to be able to locate it so we can
+  # get the name to patch it. We do this by tacking on another random label that we can use
+  # to select with later.
+  rando=$(openssl rand -hex 12)
+  /home/utils/internal-pipelinerun $@ -l "internal-services.appstudio.openshift.io/test-id=$rando" &
+
+  sleep 10
+  NAME=
+  while [[ -z ${NAME} ]]; do
+    if [ "$(date +%s)" -gt "$END_TIME" ]; then
+        echo "ERROR: Timeout while waiting to locate PipelineRun"
+        echo "Internal pipelineruns:"
+        kubectl get pr --no-headers -o custom-columns=":metadata.name" \
+            --sort-by=.metadata.creationTimestamp
+        exit 124
+    fi
+
+    NAME=$(kubectl get pr -l "internal-services.appstudio.openshift.io/test-id=$rando" \
+        --no-headers -o custom-columns=":metadata.name" \
+        --sort-by=.metadata.creationTimestamp | tail -1)
+    if [ -z $NAME ]; then
+        echo "Warning: Unable to get PLR name"
+        sleep 2
+    fi
+  done
+  echo "PLR Name: $NAME"
+
+  if [[ "$*" == *"requester=testuser-failure"* ]]; then
+      set_plr_status $NAME Failure 3 &
+  elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
+      # The interval in wait-for-internal-request is 5 sec, so increase the ir delay to timeout for sure
+      set_plr_status $NAME Succeeded 10 &
+  else
+      set_plr_status $NAME Succeeded 5 &
+  fi
+
+}
+
+function set_plr_status() {
+    NAME=$1
+    REASON=$2
+    DELAY=$3
+    echo Setting status of $NAME to reason $REASON in $DELAY seconds... >&2
+    sleep $DELAY
+    PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    cat > $PATCH_FILE << EOF
+{
+  "status": {
+    "conditions": [
+     {
+        "lastTransitionTime": "2024-10-11T00:23:10Z",
+        "message": "Tasks Completed: 4 (Failed: 0, Cancelled 0), Skipped: 0",
+        "reason": "${REASON}",
+        "status": "True",
+        "type": "Succeeded"
+     }
+    ]
+  }
+}
+EOF
+    echo "Calling kubectl patch for $NAME..."
+    kubectl patch pr $NAME --type=merge --subresource status --patch-file $PATCH_FILE
+}
+
 function internal-request() {
+  TIMEOUT=30
+  END_TIME=$(date -ud "$TIMEOUT seconds" +%s)
+
   echo Mock internal-request called with: $*
   echo $* >> $(workspaces.data.path)/mock_internal-request.txt
 
-  /home/utils/internal-request $@
+  # since we put the IR in the background, we need to be able to locate it so we can
+  # get the name to patch it. We do this by tacking on another random label that we can use
+  # to select with later.
+  rando=$(openssl rand -hex 12)
+  /home/utils/internal-request $@ -l "internal-services.appstudio.openshift.io/test-id=$rando" &
 
-  sleep 1
-  NAME=$(kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
-      --sort-by=.metadata.creationTimestamp | tail -1)
-  if [ -z $NAME ]; then
-      echo Error: Unable to get IR name
-      echo Internal requests:
-      kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
-          --sort-by=.metadata.creationTimestamp
-      exit 1
-  fi
+  sleep 10
+  NAME=
+  while [[ -z ${NAME} ]]; do
+    if [ "$(date +%s)" -gt "$END_TIME" ]; then
+        echo "ERROR: Timeout while waiting to locate InternalRequest"
+        echo "Internal requests:"
+        kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
+            --sort-by=.metadata.creationTimestamp
+        exit 124
+    fi
+
+    NAME=$(kubectl get internalrequest -l "internal-services.appstudio.openshift.io/test-id=$rando" \
+        --no-headers -o custom-columns=":metadata.name" \
+        --sort-by=.metadata.creationTimestamp | tail -1)
+    if [ -z $NAME ]; then
+        echo "Warning: Unable to get IR name"
+        sleep 2
+    fi
+  done
+  echo "IR Name: $NAME"
 
   if [[ "$*" == *"requester=testuser-failure"* ]]; then
       set_ir_status $NAME Failure 3 &
   elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
-      # The interval in wait-for-ir is 5 sec, so increase the ir delay to timeout for sure
+      # The interval in wait-for-internal-request is 5 sec, so increase the ir delay to timeout for sure
       set_ir_status $NAME Succeeded 10 &
   else
       set_ir_status $NAME Succeeded 5 &
   fi
+
 }
 
 function set_ir_status() {
@@ -51,6 +141,7 @@ function set_ir_status() {
   }
 }
 EOF
+    echo "Calling kubectl patch for $NAME..."
     kubectl patch internalrequest $NAME --type=merge --subresource status --patch-file $PATCH_FILE
 }
 
@@ -159,4 +250,24 @@ function oras() {
         exit 1
       fi
   fi
+}
+
+function find_signatures() {
+  echo $* >> $(workspaces.data.path)/mock_find_signatures.txt
+
+  reference=$(echo $* | grep -oP 'repository \K\w+')
+  file=$(echo $* | grep -oP 'output_file (.+)$' | cut -f2 -d' ')
+  touch "${file}"
+
+  if [ "${repository}" == "already/signed" ]; then
+    echo "registry.redhat.io/already/signed:some-prefix" >> "${file}"
+    echo "registry.access.redhat.com/already/signed:some-prefix" >> "${file}"
+  fi
+
+#  if [[ "$*" != "--verbose --retry --pyxis-graphql-api https://graphql-pyxis.preprod.api.redhat.com/graphql/ "00?? ]]
+#  then
+#    echo Error: Unexpected call
+#    echo Mock cleanup_tags called with: $*
+#    exit 1
+#  fi
 }
