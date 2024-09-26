@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: sign-binaries
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -12,6 +12,9 @@ spec:
   description: >-
     Tekton task to sign windows and mac binaries before they are pushed to the Red Hat Developer Portal
   params:
+    - name: releasePath
+      type: string
+      description: Path to the release data JSON file
     - name: quayURL
       type: string
       description: quay URL of the repo where content will be shared
@@ -38,10 +41,36 @@ spec:
     - name: pipelineRunUid
       type: string
       description: Unique identifier for the pipeline run
+    - name: checksumUser
+      type: string
+      description: User to interact with the checksum host
+    - name: checksumHost
+      type: string
+      description: Hostname of the checksum host
+    - name: checksumFingerprint
+      type: string
+      description: Secret containing the fingerprint for the checksum host
+      default: checksum-fingerprint
+    - name: checksumKeytab
+      type: string
+      description: Secret containing the keytab for the checksum host
+      default: checksum-keytab
+    - name: kerberosRealm
+      type: string
+      description: Kerberos realm for the checksum host
+    - name: contentDir
+      type: string
+      description: Path where the content to push is stored in the workspace
   volumes:
     - name: windows-ssh-key-vol
       secret:
         secretName: $(params.windowsSSHKey)
+    - name: checksum-fingerprint-vol
+      secret:
+        secretName: $(params.checksumFingerprint)
+    - name: checksum-keytab-vol
+      secret:
+        secretName: $(params.checksumKeytab)
   workspaces:
     - name: data
       description: Workspace to save the results to
@@ -51,6 +80,14 @@ spec:
       description: |
         Digest used by signing host to pull unsignged content via ORAS
     - name: signedWindowsDigest
+      type: string
+      description: |
+        Digest used to pull signed content back to pipeline via ORAS
+    - name: unsignedMacDigest
+      type: string
+      description: |
+        Digest used by signing host to pull unsignged content via ORAS
+    - name: signedMacDigest
       type: string
       description: |
         Digest used to pull signed content back to pipeline via ORAS
@@ -170,13 +207,112 @@ spec:
         # shellcheck disable=SC2029
         ssh "$SSH_OPTS" "rmdir /s /q C:\\Users\\Administrator\\AppData\\Local\\Temp\\$(params.pipelineRunUid)"
 
-    # - name: pull-signed-using-oras
-    #   image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
-    #   script: |
-    #     #!/usr/bin/env bash
-    #     # TODO CLDX-79
-    # - name: generate-checksums
-    #   image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
-    #   script: |
-    #     #!/usr/bin/env bash
-    #     # TODO CLDX-82
+    - name: generate-checksums
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      volumeMounts:
+        - name: checksum-fingerprint-vol
+          mountPath: "/etc/secrets_fingerprint"
+          readOnly: true
+        - name: checksum-keytab-vol
+          mountPath: "/etc/secrets_keytab"
+          readOnly: true
+      env:
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+      script: |
+        #!/usr/bin/env bash
+
+        #---------------------------------------------------------------------------------------
+        # This step generates checksums for all of the binaries in the content directory and
+        # signs them using the checksum host.
+        # The general workflow is that the binaries are extracted from the image(previous task),
+        # signed on remote hosts (windows and mac) and then a sha256sum is generated for each
+        # binary. The shasums are collected in a sha256sum.txt file which is then transferred to
+        # the checksum host for signing with Red Hat's GPG key.
+        # The detached signatures are returned to the workspace for inclusion in the later tasks
+        # to be pushed to CDN and the Red Hat Developer Portal.
+        #---------------------------------------------------------------------------------------
+
+        AUTHOR=$(jq -r '.status.attribution.author' "$(workspaces.data.path)/$(params.releasePath)")
+        if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
+
+        SSH_OPTS="-o UserKnownHostsFile=/root/.ssh/known_hosts \
+                    -o GSSAPIAuthentication=yes \
+                    -o GSSAPIDelegateCredentials=yes"
+
+        sign_file() {
+            sign_method=$1  # The signing method: --clearsign or --gpgsign
+            checksum_user=$(params.checksumUser)
+            checksum_host=$(params.checksumHost)
+            pipeline_run_uid=$(params.pipelineRunUid)
+            output_path="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt.$2"
+            input_file="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt"
+
+            echo "Executing SSH command with sign method: $sign_method"
+            # shellcheck disable=SC2029
+            ssh "$SSH_OPTS" "$checksum_user@$checksum_host" \
+            "rpm-sign --nat $sign_method --key redhatrelease2 --onbehalfof=$AUTHOR \
+            --output $output_path $input_file"
+        }
+
+        # Generate a kerberos ticket to ssh to the checksum host.
+        # The ticket is required for interacting with rpm-sign as well,
+        # so we use GSSAPI Delegate (in ssh opts) to transfer the ticket to the checksum host
+        KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
+        export KRB5CCNAME
+        kinit -kt /etc/secrets_keytab/keytab "$(params.checksumUser)@$(params.kerberosRealm)"
+
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        cp "/etc/secrets_fingerprint/fingerprint" /root/.ssh/known_hosts
+        chmod 600 root/.ssh/known_hosts
+
+        # get all of the signed binaries into a common directory
+        CONTENT_DIR="$(workspaces.data.path)/$(params.contentDir)"
+        SIGNED_DIR="$CONTENT_DIR/signed"
+        mkdir -p "$SIGNED_DIR"
+        mkdir -p "$CONTENT_DIR"/linux
+        cp -r "$CONTENT_DIR"/linux/* "$SIGNED_DIR"
+        cd "$SIGNED_DIR" || exit
+        oras login quay.io -u "$QUAY_USER" -p "$QUAY_PASS"
+        signed_mac_digest=$(cat "$(results.signedMacDigest.path)")
+        signed_windows_digest=$(cat "$(results.signedWindowsDigest.path)")
+        oras pull "$(params.quayURL)/signed@${signed_mac_digest}"
+        oras pull "$(params.quayURL)/signed@${signed_windows_digest}"
+
+        # generate checksums for all of the binaries
+        SHA_SUM_PATH="${CONTENT_DIR}/sha256sum.txt"
+        touch "$SHA_SUM_PATH"
+        for file in *; do
+            if [ -f "$file" ]; then
+                checksum=$(sha256sum "$file" | awk '{ print $1 }')
+                echo "$checksum  $file" >> "$SHA_SUM_PATH"
+            fi
+        done
+        # Send sha256sum.txt to the checksum host for signing
+        # shellcheck disable=SC2029
+        ssh "$SSH_OPTS" "$(params.checksumUser)@$(params.checksumHost)" "mkdir -p ~/$(params.pipelineRunUid)/checksum"
+        scp "$SSH_OPTS" "${SHA_SUM_PATH}" \
+        "$(params.checksumUser)@$(params.checksumHost):~/$(params.pipelineRunUid)/checksum"
+
+        sign_file --clearsign sig
+        sign_file --gpgsign gpg
+
+        # scp the two files back to the content directory
+        scp "$SSH_OPTS" \
+        "$(params.checksumUser)@$(params.checksumHost):~/$(params.pipelineRunUid)/checksum/sha256sum.txt.sig" \
+        "${SIGNED_DIR}/sha256sum.txt.sig"
+
+        scp "$SSH_OPTS" \
+        "$(params.checksumUser)@$(params.checksumHost):~/$(params.pipelineRunUid)/checksum/sha256sum.txt.gpg" \
+        "${SIGNED_DIR}/sha256sum.txt.gpg"
+
+        mv "$SHA_SUM_PATH" "${SIGNED_DIR}/sha256sum.txt"

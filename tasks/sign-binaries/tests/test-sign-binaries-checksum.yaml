@@ -2,7 +2,7 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-sign-binaries
+  name: test-sign-binaries-checksum
 spec:
   description: |
     Run the sign-binaries task and verify the results
@@ -107,10 +107,10 @@ spec:
             script: |
               #!/usr/bin/env bash
 
-              expected_calls="2"
-              actual_content=$(cat "$(workspaces.data.path)/ssh_calls.txt")
+              expected_calls="3"
+              actual_content=$(cat "$(workspaces.data.path)/ssh_calls_checksum.txt")
               if [[ "$actual_content" == "$expected_calls" ]]; then
-                  echo "Test passed: SSH called two times as expected."
+                  echo "Test passed: SSH called three times as expected."
               else
                   echo "Test failed: SSH not called expected number of times."
                   echo "Expected: '$expected_calls'"
@@ -118,41 +118,53 @@ spec:
                   exit 1
               fi
 
-              expected_signed_digest="sha256:0c4355ee4ef8d9d3875d5421972aed405ce6d8f5262983eeea3f6cbf5740c6e2"
-              if [ "$(params.signedWindowsDigest)" != "$expected_signed_digest" ]; then
-                echo Error: signedWindowsDigest was expected to be $expected_signed_digest.
-                echo "Actual: $(params.signedWindowsDigest)"
-                exit 1
+              # assert sha256sum.txt is generated properly
+              expected_sha256sum="5aa03f96c77536579166fba147929626cc3a97960e994057a9d80271a736d10f  linux_binary.bin
+              1e26ce5588db2ef5080a3df10385a731af2a4bfd0d2515f691d05d9dd900e18a  mac_binary.bin
+              a809cbf745ba013315fd174e0319d7159b856d1a09733cfd457636bf3898d581  windows_binary.bin"
+              actual_sha256sum=$(cat "$(workspaces.data.path)/content/signed/sha256sum.txt")
+              if [[ "$actual_sha256sum" == "$expected_sha256sum" ]]; then
+                  echo "Test passed: sha256sum.txt is generated properly."
               else
-                echo signedWindowsDigest matches expected value
+                  echo "Test failed: sha256sum.txt is not generated properly."
+                  echo "Expected: '$expected_sha256sum'"
+                  echo "Actual: '$actual_sha256sum'"
+                  exit 1
               fi
 
-              mock_scp_1=$(cat "$(workspaces.data.path)/mock_scp_1.txt")
-              expected_scp="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P 22 \
-              /tmp/signing_script.bat \
-              myusername@myserver.com:C:/Users/Administrator/AppData/Local/Temp/signing_script.bat"
-
-              if [[ "$mock_scp_1" == "$expected_scp" ]]; then
+              actual=$(cat "$(workspaces.data.path)/mock_scp_1_checksum.txt")
+              expected_scp="-o UserKnownHostsFile=/root/.ssh/known_hosts \
+              -o GSSAPIAuthentication=yes \
+              -o GSSAPIDelegateCredentials=yes \
+              /workspace/data/content/sha256sum.txt \
+              konflux-release-signing-sa@etera-worker.hosted.upshift.rdu2.redhat.com:~/12345678/checksum"
+              normalized_expected=$(echo "$expected_scp" | tr -s '[:space:]')
+              normalized_actual=$(echo "$actual" | tr -s '[:space:]')
+              if [[ "$normalized_actual" == "$normalized_expected" ]]; then
                   echo "Test passed: First SCP command is correct."
               else
                   echo "Test failed: First SCP command is incorrect."
-                  echo "Expected: '$expected_scp'"
-                  echo "Actual: '$mock_scp_1'"
+                  echo "Expected: '$normalized_expected'"
+                  echo "Actual: '$normalized_actual'"
                   exit 1
               fi
 
               # check second scp command
-              mock_scp_2=$(cat "$(workspaces.data.path)/mock_scp_2.txt")
-              expected_scp_2="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P 22 \
-              myusername@myserver.com:C:\Users\Administrator\AppData\Local\Temp\12345678\digest.txt \
-              /tekton/results/signedWindowsDigest"
-
-              if [[ "$mock_scp_2" == "$expected_scp_2" ]]; then
+              actual=$(cat "$(workspaces.data.path)/mock_scp_2_checksum.txt")
+              expected_scp="-o UserKnownHostsFile=/root/.ssh/known_hosts \
+              -o GSSAPIAuthentication=yes -o \
+              GSSAPIDelegateCredentials=yes \
+              konflux-release-signing-sa@etera-worker.hosted.upshift.rdu2.redhat.com:\
+              ~/12345678/checksum/sha256sum.txt.sig \
+              /workspace/data/content/signed/sha256sum.txt.sig"
+              normalized_expected=$(echo "$expected_scp" | tr -s '[:space:]')
+              normalized_actual=$(echo "$actual" | tr -s '[:space:]')
+              if [[ "$normalized_actual" == "$normalized_expected" ]]; then
                   echo "Test passed: Second SCP command is correct."
               else
                   echo "Test failed: Second SCP command is incorrect."
-                  echo "Expected: '$expected_scp_2'"
-                  echo "Actual: '$mock_scp_2'"
+                  echo "Expected: '$normalized_expected'"
+                  echo "Actual: '$normalized_actual'"
                   exit 1
               fi
       runAfter:
