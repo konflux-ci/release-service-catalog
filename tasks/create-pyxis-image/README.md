@@ -18,8 +18,13 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | rhPush      | If set to true, an additional entry will be created in ContainerImage.repositories with the registry and repository fields converted to use Red Hat's official registry. E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted to use registry "registry.access.redhat.com" and repository "product/my-image". Also, this repository entry will be marked as published.                                                                                                         | Yes      | false         |
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                         | No       | -             |
 
+## Changes in 3.3.2
+* Fixed fetching of Dockerfile oci artifact
+  * The filename can be different than Dockerfile which is what we would expect
+  * Now we get the filename from the manifest
+
 ## Changes in 3.3.1
-* Fix fetching of Dockerfile oci artifact
+* Fixed fetching of Dockerfile oci artifact
   * The pull spec is composed from the digest, but we need to replace `:` with `-`
 
 ## Changes in 3.3.0

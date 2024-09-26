@@ -58,7 +58,10 @@ function select-oci-auth() {
 
 function oras() {
   echo $* >> $(workspaces.data.path)/mock_oras.txt
-  if [[ "$*" == "manifest fetch --registry-config"* ]]
+  if [[ "$*" == "manifest fetch --registry-config"*.dockerfile ]]
+  then
+    echo '{"layers": [{"annotations": {"org.opencontainers.image.title": "Dockerfile.custom"}}]}'
+  elif [[ "$*" == "manifest fetch --registry-config"* ]]
   then
     echo '{"mediaType": "my_media_type"}'
   elif [[ "$*" == "pull --registry-config"*dockerfile-not-found:sha256-*.dockerfile* ]]
@@ -71,7 +74,7 @@ function oras() {
   elif [[ "$*" == "pull --registry-config"*":sha256-"*.dockerfile* ]]
   then
     echo Mock oras called with: $*
-    echo mydocker > $6/Dockerfile
+    echo mydocker > $6/Dockerfile.custom
   else
     echo Mock oras called with: $*
     echo Error: Unexpected call
