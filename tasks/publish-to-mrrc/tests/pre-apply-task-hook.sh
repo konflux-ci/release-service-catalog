@@ -3,18 +3,6 @@
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Create a dummy charon config (and delete it first if it exists)
-charon_config=$(cat <<- EOF
-aws_profile: test
-targets:
-  dev-maven-ga:
-  - bucket: test-maven-bucket
-    prefix: ga
-EOF
-)
-kubectl delete configmap charon-configs --ignore-not-found
-kubectl create configmap charon-configs --from-literal=charon.yaml="$charon_config"
-
 # Create a dummy charon aws crendentials secret (and delete it first if it exists)
 aws_creds=$(cat <<- EOF
 [test]

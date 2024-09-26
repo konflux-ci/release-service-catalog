@@ -5,7 +5,12 @@ This task will work with [collect-mrrc-task](../collect-mrrc-params/README.md) t
 
 ## Parameters
 
-| Name               | Description                                                                                                                                     | Optional | Default value |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------- |
-| mrrcParamFilePath  | Path of the mrrc.env file which contains the MRRC parameters as environment viariables                                                          | No       | -             |
-| charonAWSSecret    | The secret which contains the aws credential settings for the charon usage                                                                      | No       | -             |
+| Name              | Description                                                                            | Optional | Default value |
+| ----------------- | -------------------------------------------------------------------------------------- | -------- | ------------- |
+| mrrcParamFilePath | Path of the mrrc.env file which contains the MRRC parameters as environment viariables | No       | -             |
+| charonAWSSecret   | The secret which contains the aws credential settings for the charon usage             | No       | -             |
+
+## Changes in 0.2.0
+
+* Used the single charon-config file instead of a configmap
+* Consumed the OCI registries which are collected through Snapshot from collect-mrrc-params task
