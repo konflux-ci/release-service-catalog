@@ -1,6 +1,7 @@
 # mocks to be injected into task step scripts
 
-#!/bin/sh -ex
+#!/usr/bin/env bash
+set -ex
 
 function skopeo() {
   echo "Mock skopeo called with: $*"
