@@ -37,6 +37,14 @@ function skopeo() {
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}}'
     return
+  elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/labels"* ]]
+  then
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "Goodlabel": "labelvalue", "Badlabel": "label with space"}}'
+    return
+  elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/onlycreated"* ]]
+  then
+    echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}, "Created": "2024-07-29T02:17:29"}'
+    return
   elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
