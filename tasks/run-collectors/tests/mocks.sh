@@ -27,6 +27,15 @@ function timeout() {
     return
   fi
 
+  if [[ "$*" == *"python3 parallel-collector --test-arg test-value" ]]
+  then
+    date +%s >> $(workspaces.data.path)/parallel-time.txt
+    sleep 10
+    echo '{"name": "dummy", "example-argument": "test-value", "issues": ["RELEASE-1", "RELEASE-2"]}'
+    date +%s >> $(workspaces.data.path)/parallel-time.txt
+    return
+  fi
+
   echo Error: Unexpected call
   exit 1
 }
