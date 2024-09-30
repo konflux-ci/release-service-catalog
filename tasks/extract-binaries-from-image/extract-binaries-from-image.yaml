@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: extract-binaries-from-image
   labels:
-    app.kubernetes.io/version: "2.1.0"
+    app.kubernetes.io/version: "2.1.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -38,7 +38,8 @@ spec:
     - name: extract-binaries-from-image
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       script: |
-        #!/bin/sh -ex
+        #!/usr/bin/env bash
+        set -ex
 
         SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
@@ -48,47 +49,47 @@ spec:
 
         BINARIES_DIR=binaries
         BINARIES_PATH=$(workspaces.data.path)/$(params.subdirectory)/$BINARIES_DIR
-        mkdir -p $BINARIES_PATH
+        mkdir -p "$BINARIES_PATH"
 
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
-        DESIRED_COMPONENTS_LIST=()
+        DESIRED_COMPONENTS_LIST=
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No data JSON was provided."
-        elif [ $(jq '."content-gateway" | has("components")' "${DATA_FILE}") = true ]; then
-            DESIRED_COMPONENTS_LIST=$(jq -r '."content-gateway".components[].name' "${DATA_FILE}")
+        elif [ "$(jq '."content-gateway" | has("components")' "${DATA_FILE}")" = true ]; then
+            DESIRED_COMPONENTS_LIST="$(jq -r '."content-gateway".components[].name' "${DATA_FILE}")"
         fi
 
         NUM_COMPONENTS=$(jq '.components | length' "$SNAPSHOT_SPEC_FILE")
         for ((i=0; i < NUM_COMPONENTS; i++)); do
           COMPONENT=$(jq -c ".components[$i]" "$SNAPSHOT_SPEC_FILE")
-          COMPONENT_NAME=$(echo $COMPONENT | jq -r '.name')
+          COMPONENT_NAME="$(jq -r '.name' <<< "$COMPONENT")"
 
           # If desired components list is not empty and COMPONENT_NAME is not in desired components list, skip
           if [ -n "$DESIRED_COMPONENTS_LIST" ] && ! echo "$DESIRED_COMPONENTS_LIST" | grep -qw "$COMPONENT_NAME"; then
             continue
           fi
 
-          IMAGE_URL=$(echo $COMPONENT | jq -r '.containerImage // ""')
+          IMAGE_URL="$(jq -r '.containerImage // ""' <<< "$COMPONENT")"
           if [ -z "${IMAGE_URL}" ] ; then
               echo "Error: Unable to get image url from snapshot."
               exit 1
           fi
 
           TMP_DIR=$(mktemp -d)
-          skopeo copy docker://$IMAGE_URL dir:$TMP_DIR
+          skopeo copy docker://"$IMAGE_URL" dir:"$TMP_DIR"
 
-          cd $TMP_DIR
+          cd "$TMP_DIR"
 
           for DIGEST in $(jq -r ".layers[].digest" manifest.json)
           do
               FILE=${DIGEST#sha256:}
-              tar -xzvf $FILE
+              tar -xzvf "$FILE"
           done
 
-          cp "$IMAGE_PATH"/* $BINARIES_PATH/
+          cp "$IMAGE_PATH"/* "$BINARIES_PATH"/
         done
 
-        echo -n $(params.subdirectory)/$BINARIES_DIR | tee $(results.binaries_path.path)
+        echo -n "$(params.subdirectory)/$BINARIES_DIR" | tee "$(results.binaries_path.path)"
       env:
         - name: "IMAGE_PATH"
           value: "$(params.image_binaries_path)"
