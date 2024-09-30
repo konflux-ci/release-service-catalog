@@ -13,6 +13,9 @@ This Tekton task is used to verify access to various resources in the pipelines.
 | snapshot                | Namespace/name of the Snapshot                          | No       | -             |
 | requireInternalServices | Whether to check if internal requests can be created    | Yes      | false         |
 
+## Changes in 0.3.1
+* Fix shellcheck/checkton linting issues in the task
+
 ## Changes in 0.3.0
 * Added `requireInternalServices` parameter to determine if internal request checks are required.
 
