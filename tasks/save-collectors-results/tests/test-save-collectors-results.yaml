@@ -1,0 +1,80 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-save-collectors-results
+spec:
+  description: |
+    Run the save-collectors-results task with rbac present and one proper results
+    file in the results directory. The pipeline should succeed.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir "$(workspaces.data.path)/results/"
+              cat > "$(workspaces.data.path)/results/managed-test.json" << EOF
+              {
+                  "foo": "bar"
+              }
+              EOF
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-cr-status
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: save-collectors-results
+      params:
+        - name: resource
+          value: default/release-cr-status
+        - name: resultsDirPath
+          value: results
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo Test that the Release.Status contains proper data
+              test "$(kubectl get release release-cr-status -n default \
+                  -o jsonpath='{.status.collectors.managed.test.foo}')" == bar
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-cr-status
