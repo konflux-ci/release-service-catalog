@@ -10,6 +10,9 @@ Sends message to Slack using postMessage API
 | secretName      | Name of secret which contains authentication token for app | No       | -                         |
 | secretKeyName   | Name of key within secret which contains webhook URL       | No       | -                         |
 
+## Changes in 1.3.1
+* Fix shellcheck/checkton linting issues in the task and tests
+
 ## Changes in 1.3.0
 * Updated the base image used in this task
 
