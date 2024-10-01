@@ -1,0 +1,270 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: upload-sbom-to-atlas
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task for uploading a SBOM file to Atlas.
+  params:
+    - name: productSBOMPath
+      default: "sboms"
+      description: >-
+        Directory containing SBOM files. The task will search for CycloneDX JSON
+        SBOMs recursively in this directory and upload them all to Atlas.
+        The path is relative to the 'sboms' workspace.
+      type: string
+    - name: httpRetries
+      default: "3"
+      description: Maximum number of retries for transient HTTP(S) errors
+      type: string
+    - name: atlasSecretName
+      default: atlas-prod-sso-secret
+      description: Name of the Secret containing SSO auth credentials for Atlas
+      type: string
+    - name: bombasticApiUrl
+      default: "https://sbom.atlas.devshift.net"
+      description: URL of the BOMbastic API host of Atlas
+      type: string
+    - name: ssoTokenUrl
+      default: "https://auth.redhat.com/auth/realms/EmployeeIDP/protocol/openid-connect/token"
+      description: URL of the SSO token issuer
+      type: string
+    - name: skipUploadingSbom
+      default: "true"
+      description: >-
+        If enabled, all steps of the task are skipped.
+      type: string
+    - name: supportedCycloneDxVersion
+      default: "1.4"
+      description: >-
+        If the SBOM uses a higher CycloneDX version, `syft convert` in the task
+        will convert all SBOMs to this CycloneDX version before uploading them
+        to Atlas. If the SBOM is already in this version or lower,
+        it will be uploaded as is.
+      type: string
+    - name: supportedSpdxVersion
+      default: "2.3"
+      description: >-
+        If the SBOM uses a higher SPDX version, `syft convert` in the task
+        will convert all SBOMs to this SPDX version before uploading them
+        to Atlas. If the SBOM is already in this version or lower,
+        it will be uploaded as is.
+      type: string
+  workspaces:
+    - name: data
+  volumes:
+    - name: atlas-secret
+      secret:
+        secretName: $(params.atlasSecretName)
+  steps:
+    - name: gather-sboms
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      script: |
+        #!/usr/bin/env bash
+        set -o errexit -o pipefail -o nounset
+
+        # creating working directory
+        mkdir -p "$(workspaces.data.path)/workdir"
+
+        sbomsDir="$(workspaces.data.path)/$(params.productSBOMPath)"
+        workdir="$(workspaces.data.path)/workdir"
+        
+        skipUploadingSbom=$(params.skipUploadingSbom)
+        if [[ "$skipUploadingSbom" == "true" ]]; then
+          echo "Skipping SBOM uploading - skipUploadingSbom == true"
+          exit 0
+        fi
+
+        version_lesser_equal() {
+          local first
+          first="$(printf "%s\n%s" "$1" "$2" | sort --version-sort | head -n 1)"
+        
+          if [ "$1" = "$first" ]; then
+            echo "SBOM version ($1) is supported (<= $2), will not convert"
+          else
+            echo "SBOM version ($1) is not supported, will convert to $2"
+            printf "%s" "$2" > "${sbom_path}.convert_to_version"
+          fi
+        }
+
+        echo "Looking for CycloneDX or SPDX SBOMs in $sbomsDir"
+
+        find "$sbomsDir" -type f | while read -r filepath; do
+          # Skip non-JSON files
+          file_relpath=$(realpath "$filepath" --relative-base="$sbomsDir")
+          if ! jq empty "$filepath" 2>/dev/null; then
+            echo "$file_relpath: not a valid JSON"
+            continue
+          fi
+
+          # Extract the format information using jq
+          sbom_format=$(
+            jq -r '
+              if .bomFormat == "CycloneDX" then
+                "CycloneDX"
+              else if .spdxVersion then
+                "SPDX"
+              else
+                empty
+              end end' "$filepath"
+          )
+
+          # If sbom_format is empty, it's not a valid SBOM (CycloneDX or SPDX)
+          if [ -z "$sbom_format" ]; then
+            echo "$file_relpath: not a valid SBOM (CycloneDX or SPDX)"
+            continue  # Skip further processing for non-SBOM files
+          fi
+
+          # The 'id' of each SBOM is checksum of the original content, before (possibly)
+          # downgrading the CycloneDX version. The conversion always updates some metadata
+          # (timestamp, UUID), changing the checksum. To avoid duplication, use the original
+          # checksum.
+          echo "Calculating SBOM ID for $file_relpath"
+          sbom_id="sha256:$(sha256sum "$filepath" | cut -d ' ' -f 1)"
+
+          # Symlink the discovered SBOMS to $workdir/${sbom_id}.json so that subsequent steps
+          # don't have to look for them again.
+          sbom_path="$workdir/$sbom_id.json"
+          ln -s "$(realpath "$filepath")" "$sbom_path"
+
+          # Check if SBOM is CycloneDX or SPDX
+          if [ "$sbom_format" == "CycloneDX" ]; then
+            echo "Found CycloneDX SBOM: $file_relpath"
+
+            sbom_version="$(jq -r ".specVersion" "$sbom_path")"
+            supportedCycloneDxVersion=$(params.supportedCycloneDxVersion)
+            version_lesser_equal "$sbom_version" "$supportedCycloneDxVersion"
+
+            printf "%s" "cyclonedx-json" > "${sbom_path}.sbom_format"
+
+          else
+            echo "Found SPDX SBOM: $file_relpath"
+
+            sbom_version="$(jq -r '.spdxVersion | sub("SPDX-"; "")' "$sbom_path")"
+            supportedSpdxVersion=$(params.supportedSpdxVersion)
+            version_lesser_equal "$sbom_version" "$supportedSpdxVersion"
+
+            printf "%s" "spdx-json" > "${sbom_path}.sbom_format"
+
+          fi
+        done
+        echo "Found $(find "$workdir" -name "*.json" | wc -l) SBOMs"
+
+    # Needs syft, which is in a different image => has to be a separate step
+    - name: convert-sboms-if-needed
+      image: quay.io/konflux-ci/release-service-utils:80a575e7e12d32f866a6105827804f2f122cea73
+      script: |
+        #!/usr/bin/env bash    
+        set -o errexit -o pipefail -o nounset
+
+        workdir="$(workspaces.data.path)/workdir"
+        sbomsDir="$(workspaces.data.path)/$(params.productSBOMPath)"
+
+        skipUploadingSbom=$(params.skipUploadingSbom)
+        if [[ "$skipUploadingSbom" == "true" ]]; then
+          exit 0
+        fi
+
+        # Return zero matches when a glob doesn't match rather than returning the glob itself
+        shopt -s nullglob
+
+        for sbom_path in "$workdir"/*.json; do
+          conversion_attr="${sbom_path}.convert_to_version"
+          sbom_format="$(cat "${sbom_path}.sbom_format")"
+
+          if [[ -f "$conversion_attr" ]]; then
+            sbom_version="$(cat "$conversion_attr")"
+            original_sbom_path="$(realpath "$sbom_path")"
+            original_sbom_relpath="$(realpath "$sbom_path" --relative-base="$sbomsDir")"
+
+            echo "Converting $original_sbom_relpath to $sbom_format $sbom_version"
+            syft convert "$original_sbom_path" -o "${sbom_format}@${sbom_version}=${sbom_path}.supported_version"
+          else
+            # Just duplicate the symlink, the original SBOM already has a supported CDX version
+            cp --no-dereference "$sbom_path" "${sbom_path}.supported_version"
+          fi
+        done
+
+    - name: upload-sboms
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      volumeMounts:
+        - name: atlas-secret
+          mountPath: /secrets/
+      script: |
+        #!/usr/bin/env bash    
+        set -o errexit -o pipefail -o nounset
+
+        sbomsDir="$(workspaces.data.path)/$(params.productSBOMPath)"
+        workdir="$(workspaces.data.path)/workdir"
+
+        skipUploadingSbom=$(params.skipUploadingSbom)
+        if [[ "$skipUploadingSbom" == "true" ]]; then
+          exit 0
+        fi
+
+        shopt -s nullglob
+        sboms_to_upload=("$workdir"/*.json)
+
+        if [[ "${#sboms_to_upload[@]}" -eq 0 ]]; then
+          echo "No SBOMs to upload"
+          exit 0
+        fi
+
+        httpRetries=$(params.httpRetries)
+        curl_opts=(--silent --show-error --fail-with-body --retry "$httpRetries")
+
+        # Access the base64-encoded secret values from the mounted volume
+        sso_account_base64="$(cat /secrets/sso_account)"
+        sso_token_base64="$(cat /secrets/sso_token)"
+
+        # Decode the base64-encoded values
+        sso_account=$(echo "$sso_account_base64" | base64 --decode)
+        sso_token=$(echo "$sso_token_base64" | base64 --decode)
+
+        for sbom_path in "${sboms_to_upload[@]}"; do
+          original_sbom_relpath="$(realpath "$sbom_path" --relative-base="$sbomsDir")"
+          echo "--- Processing $original_sbom_relpath ---"
+
+          ssoTokenUrl=$(params.ssoTokenUrl)
+          echo "Getting SSO token from $ssoTokenUrl"
+
+          token_response="$(
+            curl -X POST "${curl_opts[@]}" \
+              -d "grant_type=client_credentials" \
+              -d "client_id=$sso_account" \
+              -d "client_secret=$sso_token" \
+              "$ssoTokenUrl"
+            )"
+
+          # https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1
+          access_token="$(jq -r .access_token <<< "$token_response")"
+          token_type="$(jq -r .token_type <<< "$token_response")"
+          expires_in="$(jq -r ".expires_in // empty" <<< "$token_response")"
+
+          retry_max_time=0  # no limit
+          if [[ -n "$expires_in" ]]; then
+            retry_max_time="$expires_in"
+          fi
+
+          # This sbom_id is the one created in the gather-sboms step - sha256:${checksum}
+          sbom_id="$(basename -s .json "$sbom_path")"
+          supported_version_of_sbom="${sbom_path}.supported_version"
+
+          bombasticApiUrl=$(params.bombasticApiUrl)
+          echo "Uploading SBOM to $bombasticApiUrl (with id=$sbom_id)"
+
+          curl -X PUT "${curl_opts[@]}" \
+            --retry-max-time "$retry_max_time" \
+            -H "authorization: $token_type $access_token" \
+            -H "transfer-encoding: chunked" \
+            -H "content-type: application/json" \
+            --data "@$supported_version_of_sbom" \
+            "$bombasticApiUrl/api/v1/sbom?id=$sbom_id"
+
+        done
