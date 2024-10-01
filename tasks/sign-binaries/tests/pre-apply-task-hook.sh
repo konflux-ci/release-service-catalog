@@ -5,6 +5,7 @@ TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' "$TASK_PATH"
 yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
+yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/checksum_mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
 
 # Delete existing secrets if they exist
 kubectl delete secret windows-credentials --ignore-not-found
@@ -13,6 +14,9 @@ kubectl delete secret mac-signing-credentials --ignore-not-found
 kubectl delete secret mac-host-credentials --ignore-not-found
 kubectl delete secret mac-ssh-key --ignore-not-found
 kubectl delete secret quay-secret --ignore-not-found
+kubectl delete secret checksum-fingerprint --ignore-not-found
+kubectl delete secret checksum-keytab --ignore-not-found
+
 # Create the windows-credentials secret
 kubectl create secret generic windows-credentials \
     --from-literal=username=myusername \
@@ -51,4 +55,14 @@ kubectl create secret generic mac-signing-credentials \
 kubectl create secret generic mac-ssh-key \
     --from-literal=id_rsa="some private key" \
     --from-literal=fingerprint="some fingerprint" \
+    --namespace=default
+
+# Create the checksum fingerprint
+kubectl create secret generic checksum-fingerprint \
+    --from-literal=fingerprint="some fingerprint" \
+    --namespace=default
+
+# Create the checksum keytab
+kubectl create secret generic checksum-keytab \
+    --from-literal=keytab="some keytab" \
     --namespace=default
