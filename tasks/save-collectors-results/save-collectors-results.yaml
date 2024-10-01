@@ -1,0 +1,69 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: save-collectors-results
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to update the passed CR status with the
+    collectors results.
+  params:
+    - name: resourceType
+      description: The type of resource that is being patched
+      type: string
+      default: release
+    - name: statusKey
+      description: The top level key to overwrite in the resource status
+      type: string
+      default: collectors
+    - name: resource
+      description: The namespaced name of the resource to be patched
+      type: string
+    - name: resultsDirPath
+      description: |
+        The relative path in the workspace where the collectors results
+        are saved to
+      type: string
+  workspaces:
+    - name: data
+      description: Workspace where the results directory is stored
+  steps:
+    - name: save-collectors-results
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        RESULTS_JSON="{}"
+        RESULTS_DIR="$(workspaces.data.path)/$(params.resultsDirPath)"
+        for resultsFile in $([ -d "$RESULTS_DIR" ] && find "$RESULTS_DIR" -type f); do
+            if ! jq . >/dev/null 2>&1 "${resultsFile}" ; then
+                echo "Ignoring not JSON file: ${resultsFile}."
+                continue
+            fi
+        
+            fileName=$(basename "$resultsFile")
+        
+            # Check if the file name does NOT match the pattern
+            if ! [[ "$fileName" =~ ^(managed|tenant)-([a-zA-Z0-9_-]+)\.json$ ]]; then
+                echo "Ignoring invalid file name: $fileName"
+            else    
+                prefix="${BASH_REMATCH[1]}"
+                collector="${BASH_REMATCH[2]}"
+        
+                # Update RESULTS_JSON with the content of the current file under the correct key
+                RESULTS_JSON=$(jq --arg prefix "$prefix" --arg collector "$collector" \
+                    --slurpfile content "$resultsFile" \
+                    '.[$prefix][$collector] = $content[0]' <<< "$RESULTS_JSON")
+            fi
+        done
+
+        IFS='/' read -r namespace name <<< "$(params.resource)"
+
+        kubectl --warnings-as-errors=true patch "$(params.resourceType)" -n "$namespace" "$name" \
+          --type=merge --subresource status --patch "status: {'$(params.statusKey)':${RESULTS_JSON}}"
