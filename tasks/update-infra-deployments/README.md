@@ -20,6 +20,9 @@
 | defaultGithubAppID             | ID of Github app used for updating PR                                                        | true     | 305606                                                                                                                                           |
 | defaultGithubAppInstallationID | Installation ID of Github app in the organization                                            | true     | 35269675                                                                                                                                         |
 
+## Changes in 1.2.1
+* Fix shellcheck/checkton linting issues in the task
+
 ## Changes in 1.2.0
 * Updated the base image used in this task
 
