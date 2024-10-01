@@ -1,0 +1,229 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-upload-sbom-to-atlas-cyclonedx
+spec:
+  description: |
+    Tests uploading CycloneDX SBOMs to Atlas using the upload-sbom-to-atlas task.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: productSBOMPath
+            default: "sboms"
+            description: Directory containing generated SBOM files.
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:91d9f4886c57a8b86c3c643ea00617250ac30ff0
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # creating directory for generated SBOM-s
+              mkdir "$(workspaces.data.path)/$(params.productSBOMPath)"
+              # creating working directory
+              mkdir "$(workspaces.data.path)/workdir"
+
+              sbomsDir="$(workspaces.data.path)/$(params.productSBOMPath)"
+              workdir="$(workspaces.data.path)/workdir"
+
+              # minimal CycloneDX SBOM - no need for conversion stays as 1.2
+              cat > "$sbomsDir/cyclonedx_minimal_1_2.json" << EOF
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.2",
+                "version": 1,
+                "components": []
+              }
+              EOF
+              sbom_id_1_2="sha256:$(sha256sum "$sbomsDir/cyclonedx_minimal_1_2.json" | cut -d ' ' -f 1)"
+              echo "$sbom_id_1_2" > "$workdir/sbom_id_1_2"
+
+              # minimal CycloneDX SBOM - no need for conversion
+              cat > "$sbomsDir/cyclonedx_minimal_1_4.json" << EOF
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.4",
+                "version": 1,
+                "components": []
+              }
+              EOF
+              sbom_id_1_4="sha256:$(sha256sum "$sbomsDir/cyclonedx_minimal_1_4.json" | cut -d ' ' -f 1)"
+              echo "$sbom_id_1_4" > "$workdir/sbom_id_1_4"
+
+              # minimal CycloneDX SBOM - needs to be converted to supported 1.4
+              cat > "$sbomsDir/cyclonedx_minimal_1_6.json" << EOF
+              {
+                "bomFormat": "CycloneDX",
+                "specVersion": "1.6",
+                "version": 1,
+                "components": []
+              }
+              EOF
+              sbom_id_1_6="sha256:$(sha256sum "$sbomsDir/cyclonedx_minimal_1_6.json" | cut -d ' ' -f 1)"
+              echo "$sbom_id_1_6" > "$workdir/sbom_id_1_6"
+
+              # Random JSON file that will be skipped
+              cat > "$sbomsDir/random_file.json" << EOF
+              {
+                "foo": "bar"
+              }
+              EOF
+
+              # Random empty file that will be skipped
+              touch "$sbomsDir/random_file"
+
+    - name: run-task
+      taskRef:
+        name: upload-sbom-to-atlas
+      params:
+        - name: atlasSecretName
+          value: atlas-test-sso-secret
+        - name: skipUploadingSbom
+          value: "false"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: productSBOMPath
+            default: "sboms"
+            description: Directory containing generated SBOM files.
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:a5072c6da901bc9cf4d767da82e700784c7df981
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              workdir="$(workspaces.data.path)/workdir"
+              sbomsDir="$(workspaces.data.path)/$(params.productSBOMPath)"
+
+              # Check count of curl calls
+              if [ "$(wc -l < "$workdir/mock_curl.txt")" -ne 6 ]; then
+                echo "TEST FAILED: curl was expected to be called 6 times. Actual calls:"
+                cat "$workdir/mock_curl.txt"
+                exit 1
+              else
+                echo "TEST PASSED: Curl has been called 6 times"
+              fi
+
+              # Check calls for SSO tokens
+              expected_url='https://auth.redhat.com/auth/realms/EmployeeIDP/protocol/openid-connect/token'
+              for line in 1 3 5; do
+                  curl_call=$(head -n "$line" "$workdir/mock_curl.txt")
+                  if ! echo "$curl_call" | grep -q "$expected_url"; then
+                      echo "TEST FAILED: Call for SSO token does not match the expected command."
+                      exit 1
+                  else
+                    echo "TEST PASSED: SSO token has been requested"
+                  fi
+              done
+
+              for id_file in sbom_id_1_2 sbom_id_1_4 sbom_id_1_6; do
+                sbom_id="$(cat "$workdir/$id_file")"
+                curl_calls="$(cat "$workdir/mock_curl.txt")"
+
+                # Check if proper SBOM format has been identified and stored in file
+                if [ "$(cat "$workdir/$sbom_id.json.sbom_format")" = "cyclonedx-json" ]; then
+                  echo "TEST PASSED: Correct format of the SBOM in *.json.sbom_format file."
+                else
+                  echo "TEST FAILED: Wrong format of SBOM in $workdir/$sbom_id.json.sbom_format file."
+                  exit 1
+                fi
+
+                # Check if all SBOM-s were uploaded
+                # calls are unsorted, so we are checking whole file
+                if ! echo "$curl_calls" | grep -q "https://sbom.atlas.devshift.net/api/v1/sbom?id=$sbom_id"; then
+                    echo "ERROR: Uploading the SBOM with ID $sbom_id does not match the expected command."
+                    exit 1
+                else
+                  echo "TEST PASSED: SBOM has been uploaded"
+                fi
+              done
+
+              # Check absent conversion file for supported version
+              sbom_id_1_2_="$(cat "$workdir/sbom_id_1_2")"
+              # Check absent conversion file
+              if [ ! -e "$workdir/$sbom_id_1_2_.json.convert_to_version" ]; then
+                echo "TEST PASSED: $sbom_id_1_2_.json.convert_to_version is absent, conversion not needed."
+              else
+                echo "TEST FAILED: $sbom_id_1_2_.json.convert_to_version is present."
+                exit 1
+              fi
+
+              # Check absent conversion file for supported version
+              sbom_id_1_4_="$(cat "$workdir/sbom_id_1_4")"
+              if [ ! -e "$workdir/$sbom_id_1_4_.json.convert_to_version" ]; then
+                echo "TEST PASSED: $sbom_id_1_4_.json.convert_to_version is absent, conversion not needed."
+              else
+                echo "TEST FAILED: $sbom_id_1_4_.json.convert_to_version is present."
+                exit 1
+              fi
+
+              # Check if unsupported version has proper conversion file
+              sbom_id_1_6_="$(cat "$workdir/sbom_id_1_6")"
+              if [ "$(cat "$workdir/$sbom_id_1_6_.json.convert_to_version")" = "1.4" ]; then
+                echo "TEST PASSED: Converting to correct version."
+              else
+                echo "TEST FAILED: Converting to incorrect version."
+                exit 1
+              fi
+
+              # Check if uploaded file has been properly converted
+              spec_version=$(jq -r '.specVersion' "$workdir/$sbom_id_1_6_.json.supported_version")
+              if [ "$spec_version" = "1.4" ]; then
+                  echo "TEST PASSED: SBOM has been correctly converted - specVersion is 1.4"
+              else
+                  echo "TEST FAILED: Conversion failed."
+              fi
+
+              # Non-converted files have to be identical
+              counter=2
+              for file in sbom_id_1_2 sbom_id_1_4; do
+                original=$(mktemp)
+                discovered=$(mktemp)
+                supported=$(mktemp)
+
+                jq -S . "$sbomsDir/cyclonedx_minimal_1_$counter.json" > "$original"
+                jq -S . "$workdir/$(cat "$workdir/$file").json" > "$discovered"
+                jq -S . "$workdir/$(cat "$workdir/$file").json.supported_version" > "$supported"
+                counter=$((counter + 2))
+
+                # Compare SBOM file contents between original and discovered
+                if diff "$original" "$discovered"; then
+                  echo "TEST PASSED: The original and discovered SBOM files are identical."
+                else
+                  echo "TEST FAILED: The original and discovered SBOM files are different."
+                  exit 1
+                fi
+
+                # Compare SBOM file contents between discovered and supported
+                if diff "$discovered" "$supported"; then
+                  echo "TEST PASSED: The discovered and supported SBOM files are identical."
+                else
+                  echo "TEST FAILED: The discovered and supported SBOM files are different."
+                  exit 1
+                fi
+              done
