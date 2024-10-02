@@ -58,28 +58,9 @@ function skopeo() {
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
   echo Mock skopeo called with: $*  >> /dev/stderr
   
-  # Simulate an error for specific images to test error handling
-  if [[ "$*" == "inspect --raw docker://registry.access.redhat.com/unauthorizedproduct/unauthorized"* ]]; then
-    # Simulate the registry error for terms acceptance
-    echo '{
-      "errors": [{
-        "code": "UNAUTHORIZED",
-        "message": "This repo requires terms acceptance and is only available on registry.redhat.io"
-      }]
-    }' >&2
-    return 1  # Simulate skopeo returning a non-zero exit code
-  elif [[ "$*" == "inspect --raw docker://registry.redhat.io/unauthorizedproduct/unauthorized"* ]]; then
-    # Simulate an authentication error
-    echo '{
-      "errors": [{
-        "code": "UNAUTHORIZED",
-        "message": "invalid username/password: unauthorized"
-      }]
-    }' >&2
-    return 1  # Simulate skopeo returning a non-zero exit code
-  elif [[ "$*" == "inspect --raw docker://registry.redhat.io/myproduct/signedrepo"* ]] || \
-       [[ "$*" == "inspect --raw docker://registry.access.redhat.com/myproduct/signedrepo"* ]]; then
-    # Mock scenarios where the image is already signed
+  # Mock scenarios where the image is already signed for both registries
+  if [[ "$*" == "inspect --raw docker://registry.redhat.io/myproduct/signedrepo"* ]] || \
+     [[ "$*" == "inspect --raw docker://registry.access.redhat.com/myproduct/signedrepo"* ]]; then
     echo '{
             "signatures": [
               { "digest": "sha256:0000" }
@@ -150,8 +131,7 @@ function skopeo() {
                     "org.opencontainers.image.base.digest": "sha256:5ee218882a725fe3fcc8ebd803e82a7182dbee47aef0efcaf3852df9ad15347b",
                     "org.opencontainers.image.base.name": "registry.access.redhat.com/ubi8/ubi:8.9-1028"
                   }
-                }
-            '
+                }'
         else
           if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
           then
