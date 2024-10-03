@@ -1,0 +1,130 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: run-collectors
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton pipeline to execute the collectors defined in the releasePlan and releasePlanAdmission. The pipeline will
+    save the required resources to the workspace, execute the collectors, then update the Release.Status with the
+    results.
+  params:
+    - name: release
+      type: string
+      description:
+        The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
+    - name: previousRelease
+      type: string
+      description: >-
+        The namespaced name (namespace/name) of the previous successful Release prior to the one
+        passed as params.release
+    - name: releasePlan
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  workspaces:
+    - name: release-workspace
+  tasks:
+    - name: collect-collectors-resources
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/collect-collectors-resources/collect-collectors-resources.yaml
+      params:
+        - name: previousRelease
+          value: $(params.previousRelease)
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      workspaces:
+        - name: data
+          workspace: release-workspace
+    - name: run-collectors
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/run-collectors/run-collectors.yaml
+      params:
+        - name: releasePlan
+          value: $(tasks.collect-collectors-resources.results.releasePlan)
+        - name: releasePlanAdmission
+          value: $(tasks.collect-collectors-resources.results.releasePlanAdmission)
+        - name: resultsDir
+          value: $(tasks.collect-collectors-resources.results.resultsDir)
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - collect-collectors-resources
+    - name: save-collectors-results
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/save-collectors-results/save-collectors-results.yaml
+      params:
+        - name: resourceType
+          value: release
+        - name: statusKey
+          value: collectors
+        - name: resource
+          value: $(params.release)
+        - name: resultsDirPath
+          value: $(tasks.collect-collectors-resources.results.resultsDir)
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - run-collectors
+  finally:
+    - name: cleanup
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/cleanup-workspace/cleanup-workspace.yaml
+      params:
+        - name: subdirectory
+          value: "$(context.pipelineRun.uid)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      workspaces:
+        - name: input
+          workspace: release-workspace
