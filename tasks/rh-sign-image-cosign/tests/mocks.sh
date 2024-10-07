@@ -4,9 +4,9 @@ set -eux
 echo "MOCK SETUP"
 
 
-_TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/redhat-pending/test-product----test-image0@sha256:0000"
-_TEST_MANIFEST_LIST_REFERENCE="quay.io/redhat-pending/test-product----test-image0@sha256:1111"
-_TEST_MANIFEST_REFERENCE="quay.io/redhat-pending/test-product----test-image0@sha256:2222"
+_TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/redhat-user-workloads/test-product/test-image0@sha256:0000"
+_TEST_MANIFEST_LIST_REFERENCE="quay.io/redhat-user-workloads/test-product/test-image1@sha256:1111"
+_TEST_MANIFEST_REFERENCE="quay.io/redhat-user-workloads/test-product/test-image2@sha256:2222"
 
 _DOCKER_MANIFEST_LIST=$(cat << EOF
 {
