@@ -19,6 +19,9 @@ Tekton pipeline to release Snapshots to an external registry.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored                  | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                         | No       | -             |
 
+## Changes in 5.2.1
+* Add retries for some tasks
+
 ## Changes in 5.2.0
 * Add new reduce-snapshot task
 
