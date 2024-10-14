@@ -29,6 +29,9 @@ You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of im
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
 
+## Changes in 1.7.1
+* Tweaked processing of tags to automatically remove any duplicate tags in a component
+
 ## Changes in 1.7.0
 * Added support for image labels in tag variables,
   e.g. `{{ labels.mylabel }}`
