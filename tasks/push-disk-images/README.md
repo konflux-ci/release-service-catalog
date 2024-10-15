@@ -11,6 +11,9 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | dataPath                 | Path to data JSON in the data workspace                                                   | No       | -             |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -             |
 
+## Changes in 0.2.2
+* Increase the InternalRequest PipelineRun timeout to 24 hours in total
+
 ## Changes in 0.2.1
 * Increase the InternalRequest PipelineRun timeout to 4 hours in total
 
