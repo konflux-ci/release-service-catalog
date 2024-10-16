@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: rh-sign-image
   labels:
-    app.kubernetes.io/version: "3.4.1"
+    app.kubernetes.io/version: "4.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -32,6 +32,12 @@ spec:
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: signRegistryAccessPath
+      type: string
+      description: |
+        The relative path in the workspace to a text file that contains a list of repositories
+        that needs registry.access.redhat.com image references to be signed (i.e.
+        requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
   workspaces:
     - name: data
       description: workspace to read and save files
@@ -55,6 +61,12 @@ spec:
             exit 1
         fi
 
+        SIGN_REGISTRY_ACCESS_FILE=$(workspaces.data.path)/$(params.signRegistryAccessPath)
+        if [ ! -f "${SIGN_REGISTRY_ACCESS_FILE}" ] ; then
+            echo "No valid file was provided as signRegistryAccessPath."
+            exit 1
+        fi
+
         # make sure RUNDIR exists
         mkdir -p $RUNDIR
 
@@ -74,6 +86,7 @@ spec:
 
             rh_registry_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"rh-registry-repo\"]" ${SNAPSHOT_PATH})
             registry_access_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"registry-access-repo\"]" ${SNAPSHOT_PATH})
+            repository="${rh_registry_repo#*/}"
 
             git_sha=$(jq -r ".components[${COMPONENTS_INDEX}].source.git.revision" ${SNAPSHOT_PATH})
 
@@ -108,10 +121,16 @@ spec:
               sourceContainerDigest=$(oras resolve --registry-config "$AUTH_FILE" "${sourceContainer}")
             fi
 
+            # Sign rh-registry-repo references (always) and registry-access-repo references
+            # (only if signatures for this registry are required)
+            REGISTRY_REFERENCES=("${rh_registry_repo}")
+            if grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
+              REGISTRY_REFERENCES+=("${registry_access_repo}")
+            fi
+
             for manifest_digest in $manifest_digests; do
               for tag in ${TAGS}; do
-                # Iterate over both rh-registry-repo and registry-access-repo
-                for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
+                for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
                   echo "Creating InternalRequest to sign image with tag ${tag}:"
                   echo "- reference=${registry_reference}:${tag}"
                   echo "- manifest_digest=${manifest_digest}"
@@ -140,7 +159,7 @@ spec:
               for tag in ${TAGS}; do
                 sourceTag=${tag}-source
 
-                for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
+                for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
                   echo "Creating InternalRequest to sign image with tag ${sourceTag}:"
                   echo "- reference=${registry_reference}:${sourceTag}"
                   echo "- manifest_digest=${sourceContainerDigest}"
