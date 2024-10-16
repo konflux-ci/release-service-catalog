@@ -18,6 +18,10 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | synchronously            | Whether the task should wait for InternalRequests to complete                             | Yes      | true                        |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                           |
 
+## Changes in 4.4.2
+* If the releaseNotes do not specify any CVEs fixed and the type is RHSA, fail the task
+* If the releaseNotes specify CVEs fixed, proceed with type set to RHSA regardless of the passed type
+
 ## Changes in 4.4.1
 * Fix linting issues in this task.
 

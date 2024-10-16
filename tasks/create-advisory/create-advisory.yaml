@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-advisory
   labels:
-    app.kubernetes.io/version: "4.4.1"
+    app.kubernetes.io/version: "4.4.2"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -55,10 +55,10 @@ spec:
         RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/create-advisory-results.json"
 
         # Obtain application from snapshot
-        application=$(jq -rc .application "$(workspaces.data.path)/$(params.snapshotPath)")
+        application=$(jq -r .application "$(workspaces.data.path)/$(params.snapshotPath)")
 
         # Obtain origin workspace from releasePlanAdmission
-        origin=$(jq -rc '.spec.origin' "$(workspaces.data.path)/$(params.releasePlanAdmissionPath)")
+        origin=$(jq -r '.spec.origin' "$(workspaces.data.path)/$(params.releasePlanAdmissionPath)")
 
         # Extract the advisory key and signing configMap name from the data JSON file
         advisoryData=$(jq -c "$(params.jsonKey)" "$(workspaces.data.path)/$(params.dataPath)")
@@ -69,6 +69,19 @@ spec:
         if ! [[ "$advisoryType" =~ ^(RHSA|RHBA|RHEA)$ ]]; then
             echo "Error: advisory type must be one of RHSA, RHBA or RHEA"
             exit 1
+        fi
+
+        # Ensure RHSA is only used if CVEs are provided
+        NUM_CVES=$(jq '[.content.images[]?.cves.fixed // [] | length] | add' <<< "$advisoryData")
+        if [[ "$advisoryType" == "RHSA" ]] && [[ "$NUM_CVES" -eq 0 ]] ; then
+            echo "Provided advisory type is RHSA, but no fixed CVEs were listed"
+            echo "RHSA should only be used if CVEs are fixed in the advisory. Failing..."
+            exit 1
+        fi
+
+        # Set type to RHSA if there are fixed CVEs
+        if [[ "$NUM_CVES" -gt 0 ]] ; then
+            advisoryData=$(jq -c '.type = "RHSA"' <<< "$advisoryData")
         fi
 
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
