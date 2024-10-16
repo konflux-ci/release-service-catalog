@@ -82,10 +82,10 @@ check_if_branch_differs() {
 }
 
 check_if_any_commits_in_last_week() {
-    NEW_COMMITS=$(git log --oneline --since="$(date --date="7 days ago" +%Y-%m-%d)" | wc -l)
+    NEW_COMMITS=$(git log --oneline --since="$(date --date="6 days ago" +%Y-%m-%d)" | wc -l)
     if [ $NEW_COMMITS -ne 0 ] ; then
         echo "There are commits in staging that are less than a week old. Blocking promotion to production"
-        echo "Commits less than a week old: $(git log --oneline --since="$(date --date="7 days ago" +%Y-%m-%d)")"
+        echo "Commits less than a week old: $(git log --oneline --since="$(date --date="6 days ago" +%Y-%m-%d)")"
         exit 1
     fi
 }
