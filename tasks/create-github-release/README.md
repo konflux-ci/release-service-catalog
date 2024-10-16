@@ -15,6 +15,9 @@ a `release` dir.
 | content_directory | The directory inside the workspace to find files for release      | No       | -             |
 | resultsDirPath    | Path to results directory in the data workspace                   | No       | -             |
 
+## Changes in 2.1.1
+* Fixed shellcheck linting issues
+
 ## Changes in 2.1.0
 * Updated the base image used in this task
 
