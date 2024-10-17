@@ -263,11 +263,4 @@ function find_signatures() {
     echo "registry.redhat.io/already/signed:some-prefix" >> "${file}"
     echo "registry.access.redhat.com/already/signed:some-prefix" >> "${file}"
   fi
-
-#  if [[ "$*" != "--verbose --retry --pyxis-graphql-api https://graphql-pyxis.preprod.api.redhat.com/graphql/ "00?? ]]
-#  then
-#    echo Error: Unexpected call
-#    echo Mock cleanup_tags called with: $*
-#    exit 1
-#  fi
 }

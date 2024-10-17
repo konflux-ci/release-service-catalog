@@ -76,14 +76,13 @@ spec:
       script: |
         #!/usr/bin/env bash
         #
-        set -e
+        set -ex
 
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         CONCURRENT_LIMIT=$(params.concurrentLimit)
         REQUEST_COUNT=0
 
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
-        RUNDIR="$(workspaces.data.path)/$(context.taskRun.uid)"
         TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
         TASK_ID=$(context.taskRun.uid)
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
@@ -103,36 +102,18 @@ spec:
         service_account_name=$(jq -r '.spec.pipeline.serviceAccountName // "appstudio-pipeline"' "${RPA_FILE}")
         if [ "${REQUESTTYPE}" == "internal-pipelinerun" ] ; then
           requestType=internal-pipelinerun
-          serviceAccountName=${service_account_name}
-          taskGitUrl=$(params.taskGitUrl)
-          taskGitRevision=$(params.taskGitRevision)
           defaultRequest="simple-signing-pipeline"
+          EXTRA_ARGS=(
+          --task-git-url "$(params.taskGitUrl)"
+          --task-git-revision "$(params.taskGitRevision)"
+          --service-account "${service_account_name}"
+          )
         else
           requestType=internal-request
-          # we do not need to set these for internal-requests
-          serviceAccountName=
-          taskGitUrl=
-          taskGitRevision=
           defaultRequest="hacbs-signing-pipeline"
+          EXTRA_ARGS=()
         fi
-        # shellcheck disable=SC2086
-        request=$(jq --arg defaultRequest "${defaultRequest}" -r '.sign.request // $defaultRequest' ${DATA_FILE})
-
-        serviceAccountArg=
-        if [ -n "${serviceAccountName}" ]; then
-          serviceAccountArg="--service-account ${serviceAccountName}"
-        fi
-        taskGitUrlArg=
-        if [ -n "${taskGitUrl}" ]; then
-          taskGitUrlArg="--task-git-url ${taskGitUrl}"
-        fi
-        taskGitRevisionArg=
-        if [ -n "${taskGitRevision}" ]; then
-          taskGitRevisionArg="--task-git-revision ${taskGitRevision}"
-        fi
-
-        # make sure RUNDIR exists
-        mkdir -p $RUNDIR
+        request=$(jq --arg defaultRequest "${defaultRequest}" -r '.sign.request // $defaultRequest' "${DATA_FILE}")
 
         default_pipeline_image="quay.io/redhat-isv/operator-pipelines-images:released"
 
@@ -158,6 +139,7 @@ spec:
               and 'stage' allowed."
           exit 1
         fi
+
         set +x
         echo "${pyxisCert:?}" > /tmp/crt
         echo "${pyxisKey:?}" > /tmp/key
@@ -211,12 +193,10 @@ spec:
 
             for manifest_digest in $manifest_digests; do
 
-              set -x
               find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
                   --manifest_digest "${manifest_digest}" \
                   --repository "${repository}" \
                   --output_file "/tmp/${manifest_digest}"
-              set +x
 
               # Iterate over both rh-registry-repo and registry-access-repo
               for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
@@ -250,8 +230,7 @@ spec:
                       -l ${TASK_LABEL}="${TASK_ID}" \
                       -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
                       -t 1800 --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
-                      ${taskGitUrlArg:+$taskGitUrlArg} ${taskGitRevisionArg:+$taskGitRevisionArg} \
-                      ${serviceAccountArg:+$serviceAccountArg} -s true &
+                      "${EXTRA_ARGS[@]}" -s true &
 
                   else
                     echo "Signature already exists for:"
@@ -267,12 +246,10 @@ spec:
 
             if [ "${sourceContainerDigest}" != "" ] ; then
 
-                set -x
                 find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
                     --manifest_digest "${sourceContainerDigest}" \
                     --repository "${repository}" \
                     --output_file "/tmp/${sourceContainerDigest}"
-                set +x
 
                 for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
 
@@ -307,8 +284,7 @@ spec:
                         -l ${TASK_LABEL}="${TASK_ID}" \
                         -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
                         -t 1800 --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
-                        ${taskGitUrlArg:+$taskGitUrlArg} ${taskGitRevisionArg:+$taskGitRevisionArg} \
-                        ${serviceAccountArg:+$serviceAccountArg} -s true &
+                        "${EXTRA_ARGS[@]}" -s true &
                     else
                       echo "Signature already exists for:"
                       echo "- reference=${registry_reference}:${sourceTag}"
