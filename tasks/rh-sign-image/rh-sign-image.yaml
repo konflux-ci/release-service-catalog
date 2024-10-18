@@ -4,19 +4,22 @@ kind: Task
 metadata:
   name: rh-sign-image
   labels:
-    app.kubernetes.io/version: "3.4.1"
+    app.kubernetes.io/version: "4.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Task to create internalrequests to sign snapshot components
+    Task to create internalrequests or pipelineruns to sign snapshot components
   params:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: releasePlanAdmissionPath
+      description: Path to the JSON string of the releasePlanAdmission in the data workspace
       type: string
     - name: requester
       type: string
@@ -32,19 +35,54 @@ spec:
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: pyxisServer
+      type: string
+      description: The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'.
+      default: production
+    - name: pyxisSecret
+      type: string
+      description: |
+        The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert
   workspaces:
     - name: data
       description: workspace to read and save files
   steps:
     - name: sign-image
-      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      image: quay.io/konflux-ci/release-service-utils:7d0135b80a47cdaa225010ea1e2dff78d057c922
+      computeResources:
+        limits:
+          memory: 4Gi
+          cpu: '2'
+        requests:
+          memory: 2Gi
+          cpu: '2'
+      env:
+        - name: pyxisCert
+          valueFrom:
+            secretKeyRef:
+              name: $(params.pyxisSecret)
+              key: cert
+        - name: pyxisKey
+          valueFrom:
+            secretKeyRef:
+              name: $(params.pyxisSecret)
+              key: key
       script: |
         #!/usr/bin/env bash
         #
         set -ex
 
+        RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
+        CONCURRENT_LIMIT=$(params.concurrentLimit)
+        REQUEST_COUNT=0
+
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
-        RUNDIR="$(workspaces.data.path)/$(context.taskRun.uid)"
         TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
         TASK_ID=$(context.taskRun.uid)
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
@@ -54,19 +92,62 @@ spec:
             echo "No valid data file was provided."
             exit 1
         fi
+        RPA_FILE="$(workspaces.data.path)/$(params.releasePlanAdmissionPath)"
+        if [ ! -f "${RPA_FILE}" ] ; then
+            echo "No valid rpa file was provided."
+            exit 1
+        fi
 
-        # make sure RUNDIR exists
-        mkdir -p $RUNDIR
+        REQUESTTYPE=$(jq -r '.sign.requestType // "internal-request"' "${DATA_FILE}")
+        service_account_name=$(jq -r '.spec.pipeline.serviceAccountName // "appstudio-pipeline"' "${RPA_FILE}")
+        if [ "${REQUESTTYPE}" == "internal-pipelinerun" ] ; then
+          requestType=internal-pipelinerun
+          defaultRequest="simple-signing-pipeline"
+          EXTRA_ARGS=(
+          --task-git-url "$(params.taskGitUrl)"
+          --task-git-revision "$(params.taskGitRevision)"
+          --service-account "${service_account_name}"
+          )
+        else
+          requestType=internal-request
+          defaultRequest="hacbs-signing-pipeline"
+          EXTRA_ARGS=()
+        fi
+        request=$(jq --arg defaultRequest "${defaultRequest}" -r '.sign.request // $defaultRequest' "${DATA_FILE}")
 
         default_pipeline_image="quay.io/redhat-isv/operator-pipelines-images:released"
-        request=$(jq -r '.sign.request // "hacbs-signing-pipeline"' ${DATA_FILE})
+
         pipeline_image=$(jq -r --arg default_pipeline_image ${default_pipeline_image} \
             '.sign.pipelineImage // $default_pipeline_image' ${DATA_FILE})
         config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' ${DATA_FILE})
         defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' ${DATA_FILE})
 
-        N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
-        count=0
+        if [[ "$(params.pyxisServer)" == "production" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql-pyxis.api.redhat.com/graphql/"
+        elif [[ "$(params.pyxisServer)" == "stage" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
+        elif [[ "$(params.pyxisServer)" == "production-internal" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
+        elif [[ "$(params.pyxisServer)" == "stage-internal" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
+        else
+          echo "Invalid pyxisServer parameter. Only 'production','production-internal,'stage-internal' \
+              and 'stage' allowed."
+          exit 1
+        fi
+
+        set +x
+        echo "${pyxisCert:?}" > /tmp/crt
+        echo "${pyxisKey:?}" > /tmp/key
+        set -x
+
+        export PYXIS_CERT_PATH=/tmp/crt
+        export PYXIS_KEY_PATH=/tmp/key
+
         COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
 
@@ -74,6 +155,8 @@ spec:
 
             rh_registry_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"rh-registry-repo\"]" ${SNAPSHOT_PATH})
             registry_access_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"registry-access-repo\"]" ${SNAPSHOT_PATH})
+
+            repository="${rh_registry_repo#*/}"
 
             git_sha=$(jq -r ".components[${COMPONENTS_INDEX}].source.git.revision" ${SNAPSHOT_PATH})
 
@@ -109,61 +192,102 @@ spec:
             fi
 
             for manifest_digest in $manifest_digests; do
-              for tag in ${TAGS}; do
-                # Iterate over both rh-registry-repo and registry-access-repo
-                for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
-                  echo "Creating InternalRequest to sign image with tag ${tag}:"
-                  echo "- reference=${registry_reference}:${tag}"
-                  echo "- manifest_digest=${manifest_digest}"
-                  echo "- requester=$(params.requester)"
 
-                  internal-request -r "${request}" \
-                      -p pipeline_image=${pipeline_image} \
-                      -p reference=${registry_reference}:${tag} \
-                      -p manifest_digest=${manifest_digest} \
-                      -p requester=$(params.requester) \
-                      -p config_map_name=${config_map_name} \
-                      -l ${TASK_LABEL}=${TASK_ID} \
-                      -l ${PIPELINERUN_LABEL}=$(params.pipelineRunUid) \
-                      -s false
-                  ((++count))
+              find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
+                  --manifest_digest "${manifest_digest}" \
+                  --repository "${repository}" \
+                  --output_file "/tmp/${manifest_digest}"
 
-                  if [ "$count" -eq "$N" ]; then
-                      wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
-                      count=0
+              # Iterate over both rh-registry-repo and registry-access-repo
+              for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
+
+                for tag in ${TAGS}; do
+
+                  if ! grep -q "^${registry_reference}:${tag}$" "/tmp/${manifest_digest}" ; then
+                    while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+                      wait -n
+                    done
+
+                    echo "Creating ${requestType} to sign image with tag ${tag}:"
+                    echo "- reference=${registry_reference}:${tag}"
+                    echo "- manifest_digest=${manifest_digest}"
+                    echo "- requester=$(params.requester)"
+
+                    ${requestType} -r "${request}" \
+                      -p pipeline_image="${pipeline_image}" \
+                      -p reference="${registry_reference}:${tag}" \
+                      -p manifest_digest="${manifest_digest}" \
+                      -p requester="$(params.requester)" \
+                      -p config_map_name="${config_map_name}" \
+                      -p taskGitUrl="$(params.taskGitUrl)" \
+                      -p taskGitRevision="$(params.taskGitRevision)" \
+                      -l ${TASK_LABEL}="${TASK_ID}" \
+                      -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                      -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
+                      "${EXTRA_ARGS[@]}" -s true &
+
+                  else
+                    echo "Signature already exists for:"
+                    echo "- reference=${registry_reference}:${tag}"
+                    echo "- manifest_digest=${manifest_digest}"
                   fi
+
+                  ((++REQUEST_COUNT))
+                  echo "Request Count: $REQUEST_COUNT"
                 done
               done
             done
 
             if [ "${sourceContainerDigest}" != "" ] ; then
-              for tag in ${TAGS}; do
-                sourceTag=${tag}-source
+
+                find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
+                    --manifest_digest "${sourceContainerDigest}" \
+                    --repository "${repository}" \
+                    --output_file "/tmp/${sourceContainerDigest}"
 
                 for registry_reference in ${rh_registry_repo} ${registry_access_repo}; do
-                  echo "Creating InternalRequest to sign image with tag ${sourceTag}:"
-                  echo "- reference=${registry_reference}:${sourceTag}"
-                  echo "- manifest_digest=${sourceContainerDigest}"
-                  echo "- requester=$(params.requester)"
 
-                  internal-request -r "${request}" \
-                      -p pipeline_image=${pipeline_image} \
-                      -p reference=${registry_reference}:${sourceTag} \
-                      -p manifest_digest=${sourceContainerDigest} \
-                      -p requester=$(params.requester) \
-                      -p config_map_name=${config_map_name} \
-                      -l ${TASK_LABEL}=${TASK_ID} \
-                      -l ${PIPELINERUN_LABEL}=$(params.pipelineRunUid) \
-                      -s false
-                  ((++count))
+                  for tag in ${TAGS}; do
+                    sourceTag=${tag}-source
 
-                  if [ "$count" -eq "$N" ]; then
-                      wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
-                      count=0
-                  fi
+                    if ! grep -q "^${registry_reference}:${sourceTag}$" "/tmp/${sourceContainerDigest}" ; then
+                      while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+                        wait -n
+                      done
+
+                      echo "Creating ${requestType} to sign image with tag ${tag}:"
+                      echo "- reference=${registry_reference}:${sourceTag}"
+                      echo "- manifest_digest=${sourceContainerDigest}"
+                      echo "- requester=$(params.requester)"
+
+                      ${requestType} -r "${request}" \
+                        -p pipeline_image="${pipeline_image}" \
+                        -p reference="${registry_reference}:${sourceTag}" \
+                        -p manifest_digest="${sourceContainerDigest}" \
+                        -p requester="$(params.requester)" \
+                        -p config_map_name="${config_map_name}" \
+                        -p taskGitUrl="$(params.taskGitUrl)" \
+                        -p taskGitRevision="$(params.taskGitRevision)" \
+                        -l ${TASK_LABEL}="${TASK_ID}" \
+                        -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                        -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
+                        "${EXTRA_ARGS[@]}" -s true &
+                    else
+                      echo "Signature already exists for:"
+                      echo "- reference=${registry_reference}:${sourceTag}"
+                      echo "- manifest_digest=${sourceContainerDigest}"
+                    fi
+
+                  ((++REQUEST_COUNT))
+                  echo "Request Count: $REQUEST_COUNT"
                 done
               done
             fi
         done
-        wait-for-ir -l ${TASK_LABEL}=${TASK_ID} -t $(params.requestTimeout)
+
+        echo "Waiting for remaining processes to finish..."
+        while (( ${RUNNING_JOBS@P} > 0 )); do
+          wait -n
+        done
+
         echo "done"

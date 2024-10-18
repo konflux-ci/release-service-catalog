@@ -15,13 +15,13 @@ does not publish the repository.
 
 ## Parameters
 
-| Name           | Description                                                                                      | Optional | Default value   |
-|----------------|--------------------------------------------------------------------------------------------------|----------|-----------------|
-| server         | The server type to use. Options are 'production' and 'stage'                                     | Yes      | production      |
-| pyxisSecret    | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert| No       | -               |
-| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                        | No       |                 |
-| dataPath       | Path to the JSON string of the merged data to use in the data workspace                          | No       |                 |
-| resultsDirPath | Path to the results directory in the data workspace                                              | No       |                 |
+| Name           | Description                                                                                          | Optional | Default value   |
+|----------------|------------------------------------------------------------------------------------------------------|----------|-----------------|
+| server         | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'.  | Yes      | production      |
+| pyxisSecret    | The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert    | No       | -               |
+| snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                            | No       |                 |
+| dataPath       | Path to the JSON string of the merged data to use in the data workspace                              | No       |                 |
+| resultsDirPath | Path to the results directory in the data workspace                                                  | No       |                 |
 
 ## Changes in 2.0.0
 * Added JSON results output for published repositories, contains Catalog (RHEC) URL
