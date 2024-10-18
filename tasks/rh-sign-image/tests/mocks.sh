@@ -16,7 +16,7 @@ function internal-pipelinerun() {
   rando=$(openssl rand -hex 12)
   /home/utils/internal-pipelinerun $@ -l "internal-services.appstudio.openshift.io/test-id=$rando" &
 
-  sleep 10
+  sleep 2
   NAME=
   while [[ -z ${NAME} ]]; do
     if [ "$(date +%s)" -gt "$END_TIME" ]; then
@@ -38,14 +38,13 @@ function internal-pipelinerun() {
   echo "PLR Name: $NAME"
 
   if [[ "$*" == *"requester=testuser-failure"* ]]; then
-      set_plr_status $NAME Failure 3 &
+      set_plr_status $NAME Failure 5
   elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
-      # The interval in wait-for-internal-request is 5 sec, so increase the ir delay to timeout for sure
-      set_plr_status $NAME Succeeded 10 &
+      echo "skipping setting PLR status since we want a timeout..."
   else
-      set_plr_status $NAME Succeeded 5 &
+      set_plr_status $NAME Succeeded 5
   fi
-
+  wait -n
 }
 
 function set_plr_status() {
@@ -55,6 +54,10 @@ function set_plr_status() {
     echo Setting status of $NAME to reason $REASON in $DELAY seconds... >&2
     sleep $DELAY
     PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    status="True"
+    if [ "${REASON}" == "Failure" ]; then
+      status="False"
+    fi
     cat > $PATCH_FILE << EOF
 {
   "status": {
@@ -63,7 +66,7 @@ function set_plr_status() {
         "lastTransitionTime": "2024-10-11T00:23:10Z",
         "message": "Tasks Completed: 4 (Failed: 0, Cancelled 0), Skipped: 0",
         "reason": "${REASON}",
-        "status": "True",
+        "status": "${status}",
         "type": "Succeeded"
      }
     ]
@@ -87,7 +90,7 @@ function internal-request() {
   rando=$(openssl rand -hex 12)
   /home/utils/internal-request $@ -l "internal-services.appstudio.openshift.io/test-id=$rando" &
 
-  sleep 10
+  sleep 2
   NAME=
   while [[ -z ${NAME} ]]; do
     if [ "$(date +%s)" -gt "$END_TIME" ]; then
@@ -109,14 +112,13 @@ function internal-request() {
   echo "IR Name: $NAME"
 
   if [[ "$*" == *"requester=testuser-failure"* ]]; then
-      set_ir_status $NAME Failure 3 &
+      set_ir_status $NAME Failure 5
   elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
-      # The interval in wait-for-internal-request is 5 sec, so increase the ir delay to timeout for sure
-      set_ir_status $NAME Succeeded 10 &
+      echo "skipping setting IR status since we want a timeout..."
   else
-      set_ir_status $NAME Succeeded 5 &
+      set_ir_status $NAME Succeeded 5
   fi
-
+  wait -n
 }
 
 function set_ir_status() {
@@ -126,6 +128,10 @@ function set_ir_status() {
     echo Setting status of $NAME to reason $REASON in $DELAY seconds... >&2
     sleep $DELAY
     PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    status="True"
+    if [ "${REASON}" == "Failure" ]; then
+      status="False"
+    fi
     cat > $PATCH_FILE << EOF
 {
   "status": {
@@ -134,7 +140,7 @@ function set_ir_status() {
         "reason": "${REASON}",
         "lastTransitionTime": "2023-12-06T15:22:45Z",
         "message": "my message",
-        "status": "True",
+        "status": "${status}",
         "type": "merge"
       }
     ]
