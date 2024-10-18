@@ -11,6 +11,11 @@ is true in the data JSON.
 Additionally, this task respects the `publish-on-push` flag. If `false`, then the task
 does not publish the repository.
 
+The task emits a result: `signRegistryAccessPath`
+
+This contains the relative path in the workspace to a text file that contains a list of repositories
+that needs registry.access.redhat.com image references to be signed (i.e.
+requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
 
 
 ## Parameters
@@ -22,6 +27,15 @@ does not publish the repository.
 | snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                        | No       |                 |
 | dataPath       | Path to the JSON string of the merged data to use in the data workspace                          | No       |                 |
 | resultsDirPath | Path to the results directory in the data workspace                                              | No       |                 |
+
+## Changes in 3.0.0
+* data json is now mandatory - technically, for some use cases the file is not needed, but requiring it always
+  makes it consistent with other tasks and it also makes the task script more readable
+* A new `signRegistryAccessPath` result is emitted
+  * This contains the relative path in the workspace to a text file that contains a list of repositories
+    that needs registry.access.redhat.com image references to be signed (i.e.
+    requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
+
 
 ## Changes in 2.0.0
 * Added JSON results output for published repositories, contains Catalog (RHEC) URL
