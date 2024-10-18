@@ -19,10 +19,10 @@ spec:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              cat > "$(workspaces.data.path)/snapshot_spec.json" << EOF
               {
                 "application": "myapp",
                 "components": [
@@ -41,11 +41,37 @@ spec:
               }
               EOF
 
-              cat > $(workspaces.data.path)/data.json << EOF
+              cat > "$(workspaces.data.path)/data.json" << EOF
               {
                 "sign": {
                   "request": "hacbs-signing-pipeline",
                   "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+              cat > "$(workspaces.data.path)/release_plan_admission.json" << EOF
+              {
+                "spec": {
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "https://localhost.git"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipelines/abc/abc.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "release-service-account"
+                  }
                 }
               }
               EOF
@@ -61,6 +87,14 @@ spec:
           value: snapshot_spec.json
         - name: dataPath
           value: data.json
+        - name: releasePlanAdmissionPath
+          value: release_plan_admission.json
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
       workspaces:
         - name: data
           workspace: tests-workspace
@@ -78,44 +112,39 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              counter=0
-              # first 4 are for manifest list digest for both registry.redhat.io
-              #      and registry.access.redhat.com
-              # 5-6 are for the 1st arch and registry.redhat.io
-              # 7-8 are for the 1st arch and registry.access.redhat.com
-              # 9-10 are for the 2nd arch and registry.redhat.io
-              # 11-12 are for the 2nd arch and registry.access.redhat.com
-              testValues=('sha256:0000' \
-                          'sha256:0000' \
-                          'sha256:0000' \
-                          'sha256:0000' \
-                          'sha256:6f9a420f660e73a' \
-                          'sha256:6f9a420f660e73a' \
-                          'sha256:6f9a420f660e73a' \
-                          'sha256:6f9a420f660e73a' \
-                          'sha256:6f9a420f660e73b' \
-                          'sha256:6f9a420f660e73b' \
-                          'sha256:6f9a420f660e73b' \
-                          'sha256:6f9a420f660e73b')
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
 
-              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
-              internalRequestsCount=$(echo $internalRequests | wc -w)
+              expectedDigests=()
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:6f9a420f660e73a")
+              expectedDigests+=("sha256:6f9a420f660e73a")
+              expectedDigests+=("sha256:6f9a420f660e73a")
+              expectedDigests+=("sha256:6f9a420f660e73a")
+              expectedDigests+=("sha256:6f9a420f660e73b")
+              expectedDigests+=("sha256:6f9a420f660e73b")
+              expectedDigests+=("sha256:6f9a420f660e73b")
+              expectedDigests+=("sha256:6f9a420f660e73b")
 
-              if [ "$internalRequestsCount" != "12" ] ; then
-                echo "incorrect number of internalRequests created. Expected 12"
+              foundDigests=()
+              for((ir=0; ir<irsLength; ir++)); do
+                params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
+                manifestDigest=$(jq -r '.manifest_digest' <<< "${params}")
+                foundDigests+=("${manifestDigest}")
+              done
+
+              differenceDigests=$(echo "${expectedDigests[@]}" "${foundDigests[@]}" | tr ' ' '\n' | sort | uniq -u)
+
+              if [ -n "${differenceDigests}" ] ; then
+                echo "error: digests expected compared to found do not match"
+                echo ""
+                echo "${differenceDigests}"
                 exit 1
               fi
 
-              for internalRequest in ${internalRequests};
-              do
-                params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
-
-                if [ $(jq -r '.manifest_digest' <<< "${params}") != "${testValues[$counter]}" ]; then
-                  echo "manifest_digest does not match"
-                  exit 1
-                fi
-                counter=$((counter+1))
-              done
       runAfter:
         - run-task
   finally:
@@ -125,7 +154,7 @@ spec:
           - name: delete-crs
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
               kubectl delete internalrequests --all
