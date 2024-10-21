@@ -9,5 +9,5 @@ releaseNotes content.
 |------------------|--------------------------------------------------------------------------|----------|---------------|
 | dataJsonPath     | Path to the JSON string of the merged data containing the release notes  | No       | -             |
 
-## Changes in 1.0.0
+## Changes in 0.2.0
 Output directory path instead of a file path.
