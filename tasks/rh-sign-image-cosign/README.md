@@ -11,6 +11,8 @@ Tekton task to sign container images in snapshot by cosign.
 
 # Changelog
 
-## Changes in 0.2.0
+## Changes in 0.3.0
+* Make rekor url configurable
 
+## Changes in 0.2.0
 * Identity passed to cosign uses tags mentioned in .tags in the Snapshot instead of digests
