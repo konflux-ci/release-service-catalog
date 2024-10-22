@@ -156,11 +156,47 @@ spec:
                   ORAS_ARGS+=("--platform $os/$arch")
                 fi
 
+                # Save the OCI manifest locally, to pass to a script to create the pyxis entry
+                MANIFEST_FILE="/tmp/oras-manifest-fetch.json"
                 oras manifest fetch \
                   --registry-config "$AUTH_FILE" \
                   "${ORAS_ARGS[@]}" \
                   "${PULLSPEC}" \
-                      | tee /tmp/oras-manifest-fetch.json
+                      | tee "${MANIFEST_FILE}"
+
+                # Augment that manifest with further information about the layers, decompressed
+                # This requires pulling the layers to decompress and then measure them
+                while IFS= read -r BLOB_DETAIL;
+                do
+                    BLOB_TYPE=$(jq -r '.mediaType' <<< "$BLOB_DETAIL")
+                    BLOB_DIGEST=$(jq -r '.digest' <<< "$BLOB_DETAIL")
+
+                    if [[ "$BLOB_TYPE" =~ ^.*\.gzip$|^.*\+gzip$ ]]; then
+                        BLOB_FILE="/tmp/oras-blob-fetch-${BLOB_DIGEST}"
+                        BLOB_PULLSPEC="${PULLSPEC%%@*}@${BLOB_DIGEST}"
+
+                        # Save the blob
+                        oras blob fetch \
+                          --registry-config "$AUTH_FILE" \
+                          --output "${BLOB_FILE}.gz" \
+                          "${BLOB_PULLSPEC}"
+
+                        # Decompress it
+                        gunzip "${BLOB_FILE}.gz"
+
+                        # Measure it
+                        EXPANDED_DIGEST=$(sha256sum "${BLOB_FILE}" | cut -d " " -f 1)
+                        EXPANDED_SIZE=$(wc --bytes "${BLOB_FILE}" | awk '{print $1}' | tr -d '\n')
+
+                        # Append this information to the parsed_data manifest
+                        cat <<< $(jq \
+                          '.uncompressed_layers += [{"digest": "'"$EXPANDED_DIGEST"'", "size": '"$EXPANDED_SIZE"'}]' \
+                          "${MANIFEST_FILE}") > "${MANIFEST_FILE}"
+
+                        # Clean up, in case we're dealing with large images
+                        rm "/tmp/oras-blob-fetch-${BLOB_DIGEST}"
+                    fi
+                done <<< $(jq -c '.layers[]' "${MANIFEST_FILE}")
 
                 PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
                   --pyxis-url $PYXIS_URL \
@@ -168,7 +204,7 @@ spec:
                   --tags "$TAGS" \
                   --is-latest "$(params.isLatest)" \
                   --verbose \
-                  --oras-manifest-fetch "/tmp/oras-manifest-fetch.json" \
+                  --oras-manifest-fetch "${MANIFEST_FILE}" \
                   --name "$REPOSITORY" \
                   --media-type "$MEDIA_TYPE" \
                   --digest "$DIGEST" \
