@@ -39,7 +39,7 @@ function skopeo() {
     return
   elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/labels"* ]]
   then
-    echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "Goodlabel": "labelvalue", "Goodlabel-with-dash": "labelvalue-with-dash", "Badlabel": "label with space"}}'
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "Goodlabel": "labelvalue", "Goodlabel.with-dash": "labelvalue-with-dash", "Badlabel": "label with space"}}'
     return
   elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/onlycreated"* ]]
   then
