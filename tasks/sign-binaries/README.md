@@ -2,6 +2,8 @@
 
 Tekton task to sign windows and mac binaries before they are pushed to the Red Hat Developer Portal
 
+If any help is needed with this task, please ping in [#clouddst](https://redhat.enterprise.slack.com/archives/C04QRCD4SQZ) slack channel. 
+
 ## Parameters
 
 | Name | Description | Optional | Default value |
@@ -22,6 +24,12 @@ Tekton task to sign windows and mac binaries before they are pushed to the Red H
 | contentDir | Path where the content to push is stored in the workspace | No | |
 | pipelineRunUid | Unique ID of the pipelineRun | No |  |
 
+
+## Changes in 2.1.0
+* Added sign-mac-binaries step
+* Added push-unsigned-using-oras step
+* Added a new task result named 'binaries_path' that can be utilized by subsequent tasks.
+* Fix sign-windows-binaries step
 
 ## Changes in 2.0.0
 * Add checksum signing step
