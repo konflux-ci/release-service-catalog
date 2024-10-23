@@ -29,6 +29,9 @@ You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of im
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
 
+## Changes in 1.7.3
+* Added verbosity to error message when 0 components are mapped, as many users are hitting this
+
 ## Changes in 1.7.2
 * Support dash in label name in tag expansion
   * Image labels can include `-` in their names, so we should support that.
