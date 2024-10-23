@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-internal-request
   labels:
-    app.kubernetes.io/version: "0.13.0"
+    app.kubernetes.io/version: "0.13.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -64,31 +64,31 @@ spec:
           fi
 
           IR_PARAMS_FILE="$(workspaces.data.path)/$(params.subdirectory)/ir-params-$$.txt"
-          cat > ${IR_PARAMS_FILE} <<JSON
+          cat > "${IR_PARAMS_FILE}" <<JSON
           $(params.internalRequestParams)
           JSON
 
           # the data json should be merged with the internalrequest parameters
-          JSON_PARAMS="$(jq -c '.' ${IR_PARAMS_FILE})"
+          JSON_PARAMS=$(jq -c '.' "${IR_PARAMS_FILE}")
           ARRAY_PARAMS=$(jq -c '.fbc | [ to_entries[] | { name: .key, value } ]' \
-            $(workspaces.data.path)/$(params.subdirectory)/$(params.dataPath))
+            "$(workspaces.data.path)/$(params.subdirectory)/$(params.dataPath)")
           ARRAY_PARAMS_LENGTH=$(jq '. | length' <<< "${ARRAY_PARAMS}")
 
-          INDEX=$(jq '. | length' ${IR_PARAMS_FILE})
-          for(( i=0; i<$ARRAY_PARAMS_LENGTH; i++ )); do
+          INDEX=$(jq '. | length' "${IR_PARAMS_FILE}")
+          for(( i=0; i<ARRAY_PARAMS_LENGTH; i++ )); do
             PARAM=$(jq -r ".[${i}].name" <<< "${ARRAY_PARAMS}")
             VALUE=$(jq -r ".[${i}].value" <<< "${ARRAY_PARAMS}")
 
             # parameters from the task should replace the ones from the data.json
-            if [[ -n $(jq ".[] | select(.name==\"${PARAM}\")" $IR_PARAMS_FILE) ]]; then
+            if [[ -n $(jq ".[] | select(.name==\"${PARAM}\")" "$IR_PARAMS_FILE") ]]; then
               continue
             fi
 
-            JSON_PARAMS=$(jq ".[${INDEX}] += {name: \"${PARAM}\", value: \"$(echo ${VALUE})\"}" \
+            JSON_PARAMS=$(jq ".[$INDEX] += {name: \"${PARAM}\", value: \"${VALUE}\"}" \
               <<< "${JSON_PARAMS}")
-            let INDEX=$(( INDEX + 1 ))
+            (( INDEX++ ))
           done
-          echo $JSON_PARAMS > $(workspaces.data.path)/$(params.subdirectory)/prepared-json-params.txt
+          echo "$JSON_PARAMS" > "$(workspaces.data.path)/$(params.subdirectory)/prepared-json-params.txt"
     - name: prepare-internal-request
       image:
         quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -108,13 +108,13 @@ spec:
             # UNESCAPED=$(grep -Po  "(?<=.sanitize.)(.*)+(?=./sanitize.)" ${1})
             SANITIZED_JSON=$(awk -e \
                 '{match($0, /"{.*}"/, m);
-                {start=index($0, m[0])+1; end=length(m[0])-2} print substr($0, start, end) }' ${1} | \
+                {start=index($0, m[0])+1; end=length(m[0])-2} print substr($0, start, end) }' "${1}" | \
                 jq -Rc "." | sed 's|\\|\\\\|g')
-            awk -v sanitized=${SANITIZED_JSON} -e '{gsub(/"{.*}"/, sanitized); gsub("\\\\","\\\\\\"); print}' ${1} \
-            | tee ${TEMP}
+            awk -v sanitized="${SANITIZED_JSON}" -e '{gsub(/"{.*}"/, sanitized); gsub("\\\\","\\\\\\"); print}' "${1}" \
+            | tee "${TEMP}"
 
-            if jq "." ${TEMP} >/dev/null; then
-              mv ${TEMP} ${1}
+            if jq "." "${TEMP}" >/dev/null; then
+              mv "${TEMP}" "${1}"
             else
                 return 1
             fi
@@ -124,14 +124,14 @@ spec:
           JSON_PARAMS="$(workspaces.data.path)/$(params.subdirectory)/prepared-json-params.txt"
 
           # sanitizing the string
-          sanitize ${JSON_PARAMS}
+          sanitize "${JSON_PARAMS}"
 
           # building the InternalRequest yaml
           #
           IR_DIR="$(workspaces.data.path)/$(params.subdirectory)/internal-request"
-          [ -d "${IR_DIR}" ] || mkdir ${IR_DIR}
+          [ -d "${IR_DIR}" ] || mkdir "${IR_DIR}"
           IR="${IR_DIR}/ir-$(params.pipelineRunName)-$(context.taskRun.uid).yaml"
-          cat > ${IR} <<YAML
+          cat > "${IR}" <<YAML
           apiVersion: appstudio.redhat.com/v1alpha1
           kind: InternalRequest
           metadata:
@@ -141,28 +141,28 @@ spec:
             params:
           YAML
 
-          LENGTH=`jq ". | length" ${JSON_PARAMS}`
-          for (( i=0; i<${LENGTH}; i++ )); do
-            INPUT=$(jq -r ".[${i}]|[.name, .value]| @tsv" ${JSON_PARAMS})
+          LENGTH=$(jq ". | length" "${JSON_PARAMS}")
+          for (( i=0; i<LENGTH; i++ )); do
+            INPUT=$(jq -r ".[${i}]|[.name, .value]| @tsv" "${JSON_PARAMS}")
             read -r PARAM VALUE <<< "${INPUT}"
-            if [ `jq -e ".[${i}]| has(\"jsonKey\")" ${JSON_PARAMS}` == "true" ]; then
-                JSON_KEY=`jq -r ".[${i}]|[.jsonKey]| @tsv" ${JSON_PARAMS}`
+            if [ "$(jq -e ".[${i}]| has(\"jsonKey\")" "${JSON_PARAMS}")" == "true" ]; then
+                JSON_KEY=$(jq -r ".[${i}]|[.jsonKey]| @tsv" "${JSON_PARAMS}")
                 # check if the request needs the sharedRequestFile;
                 # otherwise the source is a json string
-                IFS=":" read -r SOURCE TYPE KEY  <<< $VALUE
+                IFS=":" read -r SOURCE TYPE KEY  <<< "$VALUE"
                 if [ "${SOURCE}" == "sharedRequestFile" ]; then
                     case ${TYPE} in
                         "json")
                             # it has a nested json string
-                            VALUE=`jq -cr "${KEY}" $(params.inputDataFile) \
-                            | jq -cr "${JSON_KEY}"`
+                            VALUE=$(jq -cr "${KEY}" "$(params.inputDataFile)" \
+                            | jq -cr "${JSON_KEY}")
                         ;;
                     esac
                 else
                     VALUE=$(echo "${VALUE}" |tr -d "\\" 2>/dev/null |tr -d "\'" |jq -cr "${JSON_KEY}")
                 fi
             fi
-            echo "    ${PARAM}: \"${VALUE}\"" >> ${IR}
+            echo "    ${PARAM}: \"${VALUE}\"" >> "${IR}"
           done
     - name: create-internal-request
       image:
@@ -174,7 +174,7 @@ spec:
 
           IR_DIR="$(workspaces.data.path)/$(params.subdirectory)/internal-request"
           IR="${IR_DIR}/ir-$(params.pipelineRunName)-$(context.taskRun.uid).yaml"
-          kubectl create -f ${IR}
+          kubectl create -f "${IR}"
     - name: watch-internal-request-status
       image:
         quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -219,7 +219,7 @@ spec:
             jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}') == "Succeeded" ]
           SH
           chmod +x ${TASKRUN}
-          timeout $(jq -cr '.[]| select(.name=="requestUpdateTimeout") |.value' ${JSON_PARAMS}) ${TASKRUN}
+          timeout "$(jq -cr '.[]| select(.name=="requestUpdateTimeout") |.value' "${JSON_PARAMS}")" "${TASKRUN}"
           SYSEXIT=$?
           [ ${SYSEXIT} -eq 124 ] && echo "Timeout while waiting for the internal request update"
           exit ${SYSEXIT}
