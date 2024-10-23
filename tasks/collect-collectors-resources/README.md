@@ -10,10 +10,13 @@ A task result is returned for each resource with the relative path to the stored
 
 ## Parameters
 
-| Name                 | Description                                  | Optional | Default value |
-|----------------------|----------------------------------------------|----------|---------------|
-| previousRelease      | Namespaced name of the previous Release      | No       | -             |
-| release              | Namespaced name of the Release               | No       | -             |
-| releasePlan          | Namespaced name of the ReleasePlan           | No       | -             |
-| releasePlanAdmission | Namespaced name of the ReleasePlanAdmission  | No       | -             |
-| subdirectory         | Subdirectory inside the workspace to be used | Yes      | ""            |
+| Name                   | Description                                                      | Optional | Default value |
+|------------------------|------------------------------------------------------------------|----------|---------------|
+| previousRelease        | Namespaced name of the previous Release                          | No       | -             |
+| release                | Namespaced name of the Release                                   | No       | -             |
+| collectorsResourceType | The type of resource that contains the collectors                | No       | -             |
+| collectorsResource     | The namespaced name of the resource that contains the collectors | No       | -             |
+| subdirectory           | Subdirectory inside the workspace to be used                     | Yes      | ""            |
+
+## Changes in 0.2.0
+* Stop passing releasePlan and releasePlanAdmission and pass instead a reference to a resource
