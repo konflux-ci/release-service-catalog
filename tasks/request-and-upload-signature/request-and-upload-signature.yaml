@@ -1,0 +1,193 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: request-and-upload-signature
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to request and upload a simple signature.
+
+    - This task is meant to be used in an internal pipeline that can be triggered frequently
+      and is expected to complete as quickly as possible.
+
+  params:
+    - description: A docker image of operator-pipeline-images for the steps to run in.
+      name: pipeline_image
+      default: "quay.io/redhat-isv/operator-pipelines-images:released"
+      type: string
+    - description: Manifest digest for the signed content, usually in the format sha256:xxx
+      name: manifest_digest
+      type: string
+    - description: Docker reference for the signed content, e.g. registry.redhat.io/redhat/community-operator-index:v4.9
+      name: reference
+      type: string
+    - description: Name of the user that requested the signing, for auditing purposes
+      name: requester
+      type: string
+    - default: 4096R/55A34A82 SHA-256
+      description: The signing key id that the content is signed with
+      name: sig_key_id
+      type: string
+    - default: containerisvsign
+      description: The signing key name that the content is signed with
+      name: sig_key_name
+      type: string
+    - description: Kubernetes secret name that contains the umb SSL files
+      name: ssl_cert_secret_name
+      type: string
+    - description: The key within the Kubernetes secret that contains the umb SSL cert.
+      name: ssl_cert_file_name
+      type: string
+    - description: The key within the Kubernetes secret that contains the umb SSL key.
+      name: ssl_key_file_name
+      type: string
+    - default: operatorpipelines
+      description: Client name to connect to umb, usually a service account name
+      name: umb_client_name
+      type: string
+    - default: VirtualTopic.eng.robosignatory.isv.sign
+      description: umb topic to listen to for responses with signed content
+      name: umb_listen_topic
+      type: string
+    - default: VirtualTopic.eng.operatorpipelines.isv.sign
+      description: umb topic to publish to for requesting signing
+      name: umb_publish_topic
+      type: string
+    - default: umb.api.redhat.com
+      description: umb host to connect to for messaging
+      name: umb_url
+      type: string
+    - default: https://pyxis.engineering.redhat.com
+      description: Pyxis instance to upload the signature to.
+      name: pyxis_url
+      type: string
+    - name: signature_data_file
+      description: The file where the signing response should be placed
+      default: "signing_response.json"
+      type: string
+  steps:
+    - name: request-signature
+      image: "$(params.pipeline_image)"
+      workingDir: "$(workspaces.data.path)"
+      env:
+        - name: UmbCert
+          valueFrom:
+            secretKeyRef:
+              name: $(params.ssl_cert_secret_name)
+              key: $(params.ssl_cert_file_name)
+        - name: UmbKey
+          valueFrom:
+            secretKeyRef:
+              name: $(params.ssl_cert_secret_name)
+              key: $(params.ssl_key_file_name)
+        - name: UMB_CERT_PATH
+          value: "/tmp/crt"
+        - name: UMB_KEY_PATH
+          value: "/tmp/key"
+        - name: manifest_digest
+          value: $(params.manifest_digest)
+        - name: reference
+          value: $(params.reference)
+        - name: requester
+          value: $(params.requester)
+        - name: sig_key_id
+          value: $(params.sig_key_id)
+        - name: sig_key_name
+          value: $(params.sig_key_name)
+        - name: umb_client_name
+          value: $(params.umb_client_name)
+        - name: umb_listen_topic
+          value: $(params.umb_listen_topic)
+        - name: umb_publish_topic
+          value: $(params.umb_publish_topic)
+        - name: umb_url
+          value: $(params.umb_url)
+        - name: signature_data_file
+          value: "$(params.signature_data_file)"
+      script: |
+        #!/usr/bin/env /bin/bash
+        set -x
+        
+        MAX_RETRIES=3
+        RETRY_DELAY=5 # Initial delay
+        
+        set +x
+        # This helps with Shellcheck warning
+        echo "${UmbCert:?}" > /tmp/crt
+        echo "${UmbKey:?}" > /tmp/key
+        set -x
+        
+        echo "Requesting signing from RADAS"
+        for ((i=1; i<=MAX_RETRIES; i++)); do
+          if request-signature \
+            --manifest-digest "${manifest_digest}" \
+            --output "${signature_data_file:?}" \
+            --reference "${reference}" \
+            --requester "${requester}" \
+            --sig-key-id "${sig_key_id}" \
+            --sig-key-name "${sig_key_name}" \
+            --umb-client-name "${umb_client_name}" \
+            --umb-listen-topic "${umb_listen_topic}" \
+            --umb-publish-topic "${umb_publish_topic}" \
+            --umb-url "${umb_url}" \
+            --verbose
+          then
+            echo "request-signature command succeeded."
+            break
+          elif [ $i -eq $MAX_RETRIES ]; then
+            echo "Max retries reached. Exiting."
+            exit 1
+          else
+            echo "Attempt $i failed. Retrying in $RETRY_DELAY seconds..."
+            sleep $RETRY_DELAY
+            RETRY_DELAY=$((RETRY_DELAY * 2))  # Exponential backoff
+          fi
+        done
+        
+        SIG_DATA=$(cat "${signature_data_file:?}")
+        echo "${SIG_DATA}"
+        echo "signature data file: ${signature_data_file:?}"
+    - name: upload-signature
+      image: "$(params.pipeline_image)"
+      workingDir: "$(workspaces.data.path)"
+      env:
+        - name: PyxisCert
+          valueFrom:
+            secretKeyRef:
+              name: $(params.ssl_cert_secret_name)
+              key: $(params.ssl_cert_file_name)
+        - name: PyxisKey
+          valueFrom:
+            secretKeyRef:
+              name: $(params.ssl_cert_secret_name)
+              key: $(params.ssl_key_file_name)
+        - name: PYXIS_CERT_PATH
+          value: "/tmp/pyxisCert"
+        - name: PYXIS_KEY_PATH
+          value: "/tmp/pyxisKey"
+        - name: pyxis_url
+          value: $(params.pyxis_url)
+        - name: signature_data_file
+          value: "$(params.signature_data_file)"
+      script: |
+        #!/bin/bash
+        set -xe
+        
+        set +x
+        # This helps with Shellcheck warning
+        echo "${PyxisCert:?}" > /tmp/pyxisCert
+        echo "${PyxisKey:?}" > /tmp/pyxisKey
+        set -x
+        
+        echo "Signature verified. Uploading to Pyxis sigstore"
+        upload-signature \
+          --pyxis-url "${pyxis_url:?}" \
+          --signature-data "${signature_data_file:?}" \
+          --verbose
+  workspaces:
+    - name: data

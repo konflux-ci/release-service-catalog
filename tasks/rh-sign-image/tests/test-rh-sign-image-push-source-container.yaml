@@ -21,10 +21,10 @@ spec:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              cat > "$(workspaces.data.path)/snapshot_spec.json" << EOF
               {
                 "application": "myapp",
                 "components": [
@@ -82,7 +82,7 @@ spec:
               }
               EOF
 
-              cat > $(workspaces.data.path)/data.json << EOF
+              cat > "$(workspaces.data.path)/data.json" << EOF
               {
                 "mapping": {
                   "defaults": {
@@ -92,6 +92,32 @@ spec:
                 "sign": {
                   "request": "hacbs-signing-pipeline",
                   "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+              cat > "$(workspaces.data.path)/release_plan_admission.json" << EOF
+              {
+                "spec": {
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "https://localhost.git"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipelines/abc/abc.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "release-service-account"
+                  }
                 }
               }
               EOF
@@ -107,6 +133,14 @@ spec:
           value: snapshot_spec.json
         - name: dataPath
           value: data.json
+        - name: releasePlanAdmissionPath
+          value: release_plan_admission.json
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
       workspaces:
         - name: data
           workspace: tests-workspace
@@ -121,7 +155,7 @@ spec:
           - name: check-result
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
               # Just checking source container IRs because the others are checked in the single
@@ -134,36 +168,37 @@ spec:
               # 13 isn't for the comp1 source container. These will use registry.redhat.io and the
               # first commonTag which is some-prefix-12345
 
-              # source container internal request for component 0
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -5 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
 
-              if [ $(jq -r '.reference' <<< "${params}") \
-                != "registry.redhat.io/myproduct0/myrepo0:some-prefix-12345-source" ]; then
-                echo "floating tag reference does not match for source container comp0 IR"
-                exit 1
-              fi
+              expectedReferences=()
+              for((i=0; i<3; i++)); do
+                expectedReferences+=("registry.redhat.io/myproduct${i}/myrepo${i}:some-prefix-12345")
+                expectedReferences+=("registry.access.redhat.com/myproduct${i}/myrepo${i}:some-prefix-12345")
+                expectedReferences+=("registry.redhat.io/myproduct${i}/myrepo${i}:some-prefix")
+                expectedReferences+=("registry.access.redhat.com/myproduct${i}/myrepo${i}:some-prefix")
+                if [ "${i}" != "1" ] ; then
+                  expectedReferences+=("registry.redhat.io/myproduct${i}/myrepo${i}:some-prefix-12345-source")
+                  expectedReferences+=("registry.access.redhat.com/myproduct${i}/myrepo${i}:some-prefix-12345-source")
+                  expectedReferences+=("registry.redhat.io/myproduct${i}/myrepo${i}:some-prefix-source")
+                  expectedReferences+=("registry.access.redhat.com/myproduct${i}/myrepo${i}:some-prefix-source")
+                fi
+              done
 
-              # Ensure IR13 is not for a source container for comp1 as comp1 has pushSourceContainer false
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -13 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+              foundReferences=()
+              for((ir=0; ir<irsLength; ir++)); do
+                params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
+                refValue=$(jq -r '.reference' <<< "${params}")
+                foundReferences+=("${refValue}")
+              done
 
-              if [ $(jq -r '.reference' <<< "${params}") \
-                == "registry.redhat.io/myproduct1/myrepo1:some-prefix-12345-source" ]; then
-                echo "Incorrectly signed source container for comp1"
-                exit 1
-              fi
+              differenceReferences=$(echo "${expectedReferences[@]}" "${foundReferences[@]}" | tr ' ' '\n' \
+                | sort | uniq -u)
 
-              # source container internal request for component 2
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -17 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
-
-              if [ $(jq -r '.reference' <<< "${params}") \
-                != "registry.redhat.io/myproduct2/myrepo2:some-prefix-12345-source" ]; then
-                echo "floating tag reference does not match for source container comp2 IR"
+              if [ -n "${differenceReferences}" ] ; then
+                echo "error: references expected compared to found do not match"
+                echo ""
+                echo "${differenceReferences}"
                 exit 1
               fi
       runAfter:
@@ -175,7 +210,7 @@ spec:
           - name: delete-crs
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
               kubectl delete internalrequests --all

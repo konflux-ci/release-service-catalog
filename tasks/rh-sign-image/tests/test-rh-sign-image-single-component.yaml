@@ -19,10 +19,10 @@ spec:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              cat > $(workspaces.data.path)/snapshot_spec.json << EOF
+              cat > "$(workspaces.data.path)/snapshot_spec.json" << EOF
               {
                 "application": "myapp",
                 "components": [
@@ -46,7 +46,7 @@ spec:
               }
               EOF
 
-              cat > $(workspaces.data.path)/data.json << EOF
+              cat > "$(workspaces.data.path)/data.json" << EOF
               {
                 "mapping": {
                   "defaults": {
@@ -56,6 +56,32 @@ spec:
                 "sign": {
                   "request": "hacbs-signing-pipeline",
                   "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+              cat > "$(workspaces.data.path)/release_plan_admission.json" << EOF
+              {
+                "spec": {
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "https://localhost.git"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipelines/abc/abc.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "release-service-account"
+                  }
                 }
               }
               EOF
@@ -71,6 +97,14 @@ spec:
           value: snapshot_spec.json
         - name: dataPath
           value: data.json
+        - name: releasePlanAdmissionPath
+          value: release_plan_admission.json
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
       workspaces:
         - name: data
           workspace: tests-workspace
@@ -85,87 +119,72 @@ spec:
           - name: check-result
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              # First internal request with fixed tag and registry.redhat.io
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -1 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
 
-              if [ $(jq -r '.reference' <<< "${params}") \
-                != "registry.redhat.io/myproduct/myrepo:some-prefix-12345" ]; then
-                echo "fixed tag reference does not match for first IR"
+              expectedReferences=()
+              expectedReferences+=("registry.redhat.io/myproduct/myrepo:some-prefix-12345")
+              expectedReferences+=("registry.access.redhat.com/myproduct/myrepo:some-prefix-12345")
+              expectedReferences+=("registry.redhat.io/myproduct/myrepo:some-prefix")
+              expectedReferences+=("registry.access.redhat.com/myproduct/myrepo:some-prefix")
+              expectedReferences+=("registry.redhat.io/myproduct/myrepo:some-prefix-12345-source")
+              expectedReferences+=("registry.access.redhat.com/myproduct/myrepo:some-prefix-12345-source")
+              expectedReferences+=("registry.redhat.io/myproduct/myrepo:some-prefix-source")
+              expectedReferences+=("registry.access.redhat.com/myproduct/myrepo:some-prefix-source")
+
+              expectedDigests=()
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:0000")
+              expectedDigests+=("sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1")
+              expectedDigests+=("sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1")
+              expectedDigests+=("sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1")
+              expectedDigests+=("sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1")
+
+              foundReferences=()
+              foundDigests=()
+              for((ir=0; ir<irsLength; ir++)); do
+                params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
+                refValue=$(jq -r '.reference' <<< "${params}")
+                manifestDigest=$(jq -r '.manifest_digest' <<< "${params}")
+                foundReferences+=("${refValue}")
+                foundDigests+=("${manifestDigest}")
+
+                if [ $(jq -r '.config_map_name' <<< "${params}") != "signing-config-map" ]; then
+                  echo "config_map_name does not match"
+                  exit 1
+                fi
+
+                if [ $(jq -r '.requester' <<< "${params}") != "testuser-single" ]; then
+                  echo "requester does not match"
+                  exit 1
+                fi
+
+                if [ $(jq -r '.pipeline_image' <<< "${params}") != \
+                   "quay.io/redhat-isv/operator-pipelines-images:released" ]; then
+                  echo "pipeline_image does not match"
+                  exit 1
+                fi
+              done
+
+              differenceReferences=$(echo "${expectedReferences[@]}" "${foundReferences[@]}" | tr ' ' '\n' | \
+                sort | uniq -u)
+              differenceDigests=$(echo "${expectedDigests[@]}" "${foundDigests[@]}" | tr ' ' '\n' | sort | uniq -u)
+
+              if [ -n "${differenceReferences}" ] ; then
+                echo "error: references expected compared to found do not match"
+                echo ""
+                echo "${differenceReferences}"
                 exit 1
               fi
-
-              # Second internal request with fixed tag and registry.access.redhat.com
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -2 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
-
-              if [ $(jq -r '.reference' <<< "${params}") \
-                != "registry.access.redhat.com/myproduct/myrepo:some-prefix-12345" ]; then
-                echo "fixed tag reference does not match for second IR"
-                exit 1
-              fi
-
-              # Third internal request with floating tag and registry.redhat.io
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -3 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
-
-              if [ $(jq -r '.reference' <<< "${params}") != "registry.redhat.io/myproduct/myrepo:some-prefix" ]; then
-                echo "floating tag reference does not match for third IR"
-                exit 1
-              fi
-
-              # Fourth internal request with floating tag and registry.access.redhat.com
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                head -4 | tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
-
-              if [ $(jq -r '.reference' <<< "${params}") \
-                != "registry.access.redhat.com/myproduct/myrepo:some-prefix" ]; then
-                echo "floating tag reference does not match for fourth IR"
-                exit 1
-              fi
-
-              if [ $(jq -r '.manifest_digest' <<< "${params}") != "sha256:0000" ]; then
-                echo "manifest_digest does not match"
-                exit 1
-              fi
-
-              if [ $(jq -r '.config_map_name' <<< "${params}") != "signing-config-map" ]; then
-                echo "config_map_name does not match"
-                exit 1
-              fi
-
-              if [ $(jq -r '.requester' <<< "${params}") != "testuser-single" ]; then
-                echo "requester does not match"
-                exit 1
-              fi
-
-              if [ $(jq -r '.pipeline_image' <<< "${params}") != \
-                 "quay.io/redhat-isv/operator-pipelines-images:released" ]; then
-                echo "pipeline_image does not match"
-                exit 1
-              fi
-
-              # Last internal request for source container check
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                tail -1)"
-              params=$(kubectl get internalrequest ${internalRequest} -o jsonpath="{.spec.params}")
-
-              if [ $(jq -r '.reference' <<< "${params}") \
-                != "registry.access.redhat.com/myproduct/myrepo:some-prefix-source" ]; then
-                echo "floating tag reference does not match for source container IR"
-                exit 1
-              fi
-
-              if [ $(jq -r '.manifest_digest' <<< "${params}") != \
-                  "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1" ]; then
-                echo "manifest_digest does not match for source container IR"
+              if [ -n "${differenceDigests}" ] ; then
+                echo "error: digests expected compared to found do not match"
+                echo ""
+                echo "${differenceDigests}"
                 exit 1
               fi
       runAfter:
@@ -177,7 +196,7 @@ spec:
           - name: delete-crs
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
               kubectl delete internalrequests --all
