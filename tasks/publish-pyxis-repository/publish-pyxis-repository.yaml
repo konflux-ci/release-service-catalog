@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: publish-pyxis-repository
   labels:
-    app.kubernetes.io/version: "2.0.0"
+    app.kubernetes.io/version: "3.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -41,6 +41,13 @@ spec:
   workspaces:
     - name: data
       description: The workspace where the snapshot spec json file resides
+  results:
+    - name: signRegistryAccessPath
+      type: string
+      description: |
+        The relative path in the workspace to a text file that contains a list of repositories
+        that needs registry.access.redhat.com image references to be signed (i.e.
+        requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
   steps:
     - name: publish-pyxis-repository
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -57,7 +64,7 @@ spec:
               key: key
       script: |
         #!/usr/bin/env bash
-        set -eu
+        set -eux
 
         PYXIS_REGISTRY=registry.access.redhat.com
 
@@ -78,8 +85,11 @@ spec:
           exit 1
         fi
 
+        # Disable trace logging to avoid leaking of cert+key
+        set +x
         echo "${pyxisCert}" > /tmp/crt
         echo "${pyxisKey}" > /tmp/key
+        set -x
 
         SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
@@ -88,16 +98,22 @@ spec:
         fi
 
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
         RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/publish-pyxis-repository-results.json"
+        SIGN_REGISTRY_ACCESS_PATH="$(dirname "$(params.dataPath)")/sign-registry-access.txt"
+        echo -n "$SIGN_REGISTRY_ACCESS_PATH" > "$(results.signRegistryAccessPath.path)"
+        SIGN_REGISTRY_ACCESS_PATH="$(workspaces.data.path)/${SIGN_REGISTRY_ACCESS_PATH}"
+        touch "$SIGN_REGISTRY_ACCESS_PATH"
 
         # Use a unique key to avoid conflicts with other tasks
         RESULTS_JSON='{"catalog_urls":[]}'
 
         # Default to false
-        if [[ -f "${DATA_FILE}" && $(jq -r ".pyxis.skipRepoPublishing" "${DATA_FILE}") == "true" ]] ; then
-            echo "skipRepoPublishing is set to true, exiting..."
-            exit
-        fi
+        skipRepoPublishing="$(jq -r ".pyxis.skipRepoPublishing // false" "${DATA_FILE}")"
 
         defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' ${DATA_FILE} || echo false)
 
@@ -123,6 +139,17 @@ spec:
                 echo "Pyxis response for ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY}:"
                 echo $PYXIS_REPOSITORY_JSON
                 exit 1
+            fi
+
+            PYXIS_REPOSITORY_REQUIRES_TERMS=$(jq '.requires_terms' <<< "$PYXIS_REPOSITORY_JSON")
+            if [ "$PYXIS_REPOSITORY_REQUIRES_TERMS" = false ]; then
+              echo "$PYXIS_REPOSITORY" >> "$SIGN_REGISTRY_ACCESS_PATH"
+            fi
+
+            # Default to false
+            if [ "$skipRepoPublishing" = true ] ; then
+                echo "skipRepoPublishing is set to true, skipping publishing..."
+                continue
             fi
 
             # Set source_container_image_enabled based on pushSourceContainer value in components or use default if

@@ -1,7 +1,8 @@
 # publish-pyxis-repository
 
 Tekton task to mark all repositories in the mapped snapshot as published in Pyxis.
-This is currently only meant to be used in the rh-push-to-registry-redhat-io pipeline,
+This is currently only meant to be used in the rh-push-to-registry-redhat-io
+and rh-advisories pipelines,
 so it will convert the values to the ones used for registry.redhat.io releases.
 E.g. repository "quay.io/redhat-prod/my-product----my-image" will be converted to use
 registry "registry.access.redhat.com" and repository "my-product/my-image" to identify
@@ -11,6 +12,17 @@ is true in the data JSON.
 Additionally, this task respects the `publish-on-push` flag. If `false`, then the task
 does not publish the repository.
 
+The task emits a result: `signRegistryAccessPath`
+
+This contains the relative path in the workspace to a text file that contains a list of repositories
+that needs registry.access.redhat.com image references to be signed (i.e.
+requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
+
+Note: This task runs quite early on in the pipeline, because we need the result it produces
+for the signing tasks (and `rh-sign-image` runs quite early to begin with). So this means
+that if you're releasing to a repo for the first time, the repository might get published
+even before the actual image is pushed and published. But we checked with RHEC team and this
+shouldn't cause any problems, because RHEC will ignore repos with no published images.
 
 
 ## Parameters
@@ -22,6 +34,15 @@ does not publish the repository.
 | snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace                        | No       |                 |
 | dataPath       | Path to the JSON string of the merged data to use in the data workspace                          | No       |                 |
 | resultsDirPath | Path to the results directory in the data workspace                                              | No       |                 |
+
+## Changes in 3.0.0
+* data json is now mandatory - technically, for some use cases the file is not needed, but requiring it always
+  makes it consistent with other tasks and it also makes the task script more readable
+* A new `signRegistryAccessPath` result is emitted
+  * This contains the relative path in the workspace to a text file that contains a list of repositories
+    that needs registry.access.redhat.com image references to be signed (i.e.
+    requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
+
 
 ## Changes in 2.0.0
 * Added JSON results output for published repositories, contains Catalog (RHEC) URL

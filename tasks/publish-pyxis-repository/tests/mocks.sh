@@ -16,9 +16,12 @@ function curl() {
       echo '{"detail": "Document in containerRepository not found.", "status": 404, "title": "Not Found", "type": "about:blank", "trace_id": "0x4d7be17d142d24c5f2b10b5f1745cc89"}'
     else
       if [[ "$*" == *"my-image0"* ]]; then
-        echo '{"_id": "'$CALL_ID'", "publish_on_push": "false"}'
+        echo '{"_id": "'$CALL_ID'", "publish_on_push": false, "requires_terms": true}'
+      # condition for image not requiring terms
+      elif [[ "$*" == *"my-image"[56]* ]]; then
+        echo '{"_id": "'$CALL_ID'", "publish_on_push": true, "requires_terms": false}'
       else
-        echo '{"_id": "'$CALL_ID'", "publish_on_push": "true"}'
+        echo '{"_id": "'$CALL_ID'", "publish_on_push": true, "requires_terms": true}'
       fi
     fi
   elif [[ "$*" == '--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/id/'?' -X PATCH -H Content-Type: application/json --data-binary {"published":true}' ]]

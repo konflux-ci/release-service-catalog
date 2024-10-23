@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: rh-sign-image-cosign
   labels:
-    app.kubernetes.io/version: "0.3.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -18,6 +18,12 @@ spec:
     - name: secretName
       description: Name of secret containing needed credentials
       type: string
+    - name: signRegistryAccessPath
+      type: string
+      description: |
+        The relative path in the workspace to a text file that contains a list of repositories
+        that needs registry.access.redhat.com image references to be signed (i.e.
+        requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
   workspaces:
     - name: data
       description: Workspace to read and save files
@@ -56,21 +62,36 @@ spec:
         set -eux
 
         SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
-        COMPONENTS_LENGTH=$(jq '.components |length' ${SNAPSHOT_PATH})
+        COMPONENTS_LENGTH=$(jq '.components |length' "${SNAPSHOT_PATH}")
+
+        SIGN_REGISTRY_ACCESS_FILE=$(workspaces.data.path)/$(params.signRegistryAccessPath)
+        if [ ! -f "${SIGN_REGISTRY_ACCESS_FILE}" ] ; then
+            echo "No valid file was provided as signRegistryAccessPath."
+            exit 1
+        fi
 
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
-            COMPONENT_NAME=$(jq -r ".components[${COMPONENTS_INDEX}].name" ${SNAPSHOT_PATH})
+            COMPONENT_NAME=$(jq -r ".components[${COMPONENTS_INDEX}].name" "${SNAPSHOT_PATH}")
             echo "Processing component ${COMPONENT_NAME}"
 
             # Get public image references
-            INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" ${SNAPSHOT_PATH})
-            PUB_CONTAINER_REFS=$(translate-delivery-repo $INTERNAL_CONTAINER_REF | jq -r ".[].url")
+            INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" "${SNAPSHOT_PATH}")
+            rh_registry_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"rh-registry-repo\"]" "${SNAPSHOT_PATH}")
+            registry_access_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"registry-access-repo\"]" \
+              "${SNAPSHOT_PATH}")
+            repository="${rh_registry_repo#*/}"
+
+            # Sign rh-registry-repo references (always) and registry-access-repo references
+            # (only if signatures for this registry are required)
+            REGISTRY_REFERENCES=("${rh_registry_repo}")
+            if grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
+              REGISTRY_REFERENCES+=("${registry_access_repo}")
+            fi
 
             # Check if image is manifest list
-            BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" ${SNAPSHOT_PATH})
+            BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
             DIGEST="${BUILD_CONTAINER_IMAGE/*@}"
-            INTERNAL_CONTAINER_IMAGE="${INTERNAL_CONTAINER_REF}@${DIGEST}"
-            IMAGE=$(skopeo inspect --raw "docker://${INTERNAL_CONTAINER_IMAGE}")
+            IMAGE=$(skopeo inspect --raw "docker://${BUILD_CONTAINER_IMAGE}")
             MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
             TAGS=$(jq -r ".components[${COMPONENTS_INDEX}].tags|.[]" "${SNAPSHOT_PATH}")
             LIST=0
@@ -86,13 +107,13 @@ spec:
 
             # Sign each manifest in manifest list
             if [ $LIST -eq 1 ]; then
-                for PUB_CONTAINER_REF in $PUB_CONTAINER_REFS; do
+                for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
                     for MDIGEST in $(echo "$IMAGE" | jq -r '.manifests[]|.digest'); do
                         for TAG in $TAGS; do
                             echo "Signing manifest ${INTERNAL_CONTAINER_REF}:${TAG} (${MDIGEST})"
                             cosign -t 3m0s sign\
                             ${COSIGN_COMMON_ARGS}\
-                            --sign-container-identity "${PUB_CONTAINER_REF}:${TAG}"\
+                            --sign-container-identity "${REGISTRY_REF}:${TAG}"\
                             "${INTERNAL_CONTAINER_REF}@${MDIGEST}"
                         done
                     done
@@ -100,12 +121,12 @@ spec:
             fi
 
             # Sign manifest list itself or manifest if it's not list
-            for PUB_CONTAINER_REF in $PUB_CONTAINER_REFS; do
+            for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
                 for TAG in $TAGS; do
                     echo "Signing manifest ${INTERNAL_CONTAINER_REF}:${TAG} (${DIGEST})"
                     cosign -t 3m0s sign\
                     ${COSIGN_COMMON_ARGS}\
-                    --sign-container-identity "${PUB_CONTAINER_REF}:${TAG}"\
+                    --sign-container-identity "${REGISTRY_REF}:${TAG}"\
                     "${INTERNAL_CONTAINER_REF}@${DIGEST}"
                 done
             done
