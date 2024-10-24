@@ -4,17 +4,22 @@ kind: Task
 metadata:
   name: check-data-keys
   labels:
-    app.kubernetes.io/version: "0.9.2"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task to check that all required information is present to use the specified system(s)
+    Tekton task to check that all required information is present to use the specified system(s) 
+    and the data is valid against the schema.
   params:
     - name: dataPath
       description: Path to the JSON string of the merged data to use
       type: string
+    - name: schema 
+      description: URL to the JSON schema file to validate the data against
+      type: string
+      default: https://raw.githubusercontent.com/konflux-ci/release-service-catalog/refs/heads/development/schema/dataKeys.json
     - name: systems
       description: The systems to check that all data keys are present for
       type: array
@@ -24,52 +29,26 @@ spec:
       description: The workspace where the data JSON file resides
   steps:
     - name: check-data-keys
-      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      image: quay.io/konflux-ci/release-service-utils:9089cafbf36bb889b4b73d8c2965613810f13736
       args: ["$(params.systems[*])"]
       script: |
         #!/usr/bin/env bash
         set -ex
-
-        KEYS_JSON='{
-            "releaseNotes": [
-                "product_id",
-                "product_name",
-                "product_version",
-                "product_stream",
-                "cpe",
-                "type",
-                "content.images",
-                "synopsis",
-                "topic",
-                "description",
-                "solution",
-                "references"
-            ],
-            "cdn": [
-                "env"
-            ]
-        }'
 
         if [ ! -f "$(workspaces.data.path)/$(params.dataPath)" ] ; then
             echo "No data JSON was provided."
             exit 1
         fi
 
-        RC=0
+        if ! curl -s --fail-with-body "$(params.schema)" -o /tmp/schema ; then
+            echo "Failed to download schema file: $(params.schema)"
+            exit 1
+        fi
 
-        for SYSTEM in "$@" ; do
-            if [[ $(jq -r ".$SYSTEM" <<< "$KEYS_JSON") == null ]] ; then
-                echo "Unsupported system value: $SYSTEM"
-                RC=1
-            fi
+        systemsJSON=$(echo "$@" | jq -R 'split(" ")')
 
-            echo "Checking all required keys exist for: $SYSTEM"
-            for KEY in $(jq -r ".${SYSTEM}[]" <<< "$KEYS_JSON") ; do
-                if [[ $(jq ".$SYSTEM.$KEY" "$(workspaces.data.path)/$(params.dataPath)") == "null" ]] ; then
-                    echo "Missing required $SYSTEM key: $KEY"
-                    RC=1
-                fi
-            done
-        done
+        jq --argjson systems "$systemsJSON" '.systems += $systems' \
+            "$(workspaces.data.path)/$(params.dataPath)" > "/tmp/systems" 
+        mv "/tmp/systems" "$(workspaces.data.path)/$(params.dataPath)"
 
-        exit $RC
+        check-jsonschema --output-format=text --schemafile "/tmp/schema"  "$(workspaces.data.path)/$(params.dataPath)"
