@@ -62,6 +62,24 @@ spec:
             exit 0
         fi
 
+        # Function to handle incrementing rebuild number tags
+        increment_tag() {
+            local tag_prefix=$1
+            local repo=$2
+
+            # Get all tags matching vX.Y.Z-\d+
+            existing_tags=$(oras list "$repo" --filter "$tag_prefix-*" | grep -o "$tag_prefix-[0-9]\+" | sort -Vr)
+
+            if [ -z "$existing_tags" ]; then
+                echo "${tag_prefix}-1"
+            else
+                # Extract the highest number and increment it
+                last_tag=$(echo "$existing_tags" | head -n 1 | grep -o '[0-9]\+$')
+                next_tag=$((last_tag + 1))
+                echo "${tag_prefix}-${next_tag}"
+            fi
+        }
+
         # Expected arguments are: [variable, substitute_map, labels_map]
         substitute() {
             variable=$1
@@ -100,12 +118,20 @@ spec:
                   var_name="${BASH_REMATCH[1]}"
 
                   # Sanity check of the template variable name
-                  if [[ ! "$var_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                  if [[ "$var_name" != "incrementer" && ! "$var_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
                     echo "Error: Invalid variable name in tag definition: $var_name" >&2
                     exit 1
                   fi
 
-                  replacement=$(substitute "$var_name" "$substitute_map" "$labels_map")
+                  # Handle incrementer logic specifically
+                  if [[ "$var_name" == "incrementer" ]]; then
+                    repo=$(jq -r '.repository' <<< "${substitute_map}")
+                    tag_prefix=$(echo "$tag" | sed 's/{{ *incrementer *}}//')
+                    replacement=$(increment_tag "$tag_prefix" "$repo")
+                  else
+                    replacement=$(substitute "$var_name" "$substitute_map" "$labels_map")
+                  fi
+
                   if [ -z "$replacement" ]; then
                       echo Error: Substitution variable unknown or empty: "$var_name" >&2
                       exit 1
