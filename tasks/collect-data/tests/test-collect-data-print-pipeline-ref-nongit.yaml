@@ -1,0 +1,176 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-data-print-pipeline-ref-nongit
+spec:
+  description: |
+    Run the collect-data task and verify that the pipeline ref info is not available when not using a
+    git resolver
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > release << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-sample
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f release
+
+              cat > releaseplan << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlan
+              metadata:
+                name: releaseplan-sample
+                namespace: default
+              spec:
+                application: foo
+                target: foo
+              EOF
+              kubectl apply -f releaseplan
+
+              cat > releaseplanadmission << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleasePlanAdmission
+              metadata:
+                name: releaseplanadmission-sample
+                namespace: default
+              spec:
+                applications:
+                  - foo
+                origin: foo
+                data:
+                  singleComponentMode: true
+                  one:
+                    two: three
+                    four:
+                      - five
+                      - six
+                policy: foo
+                pipeline:
+                  pipelineRef:
+                    resolver: cluster
+                    params:
+                      - name: name
+                        value: release-pipeline
+                      - name: namespace
+                        value: default
+                      - name: kind
+                        value: pipeline
+              EOF
+              kubectl apply -f releaseplanadmission
+
+              cat > releaseserviceconfig << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: ReleaseServiceConfig
+              metadata:
+                name: releaseserviceconfig-sample
+                namespace: default
+              spec:
+              EOF
+              kubectl apply -f releaseserviceconfig
+
+              cat > snapshot << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Snapshot
+              metadata:
+                name: snapshot-sample
+                namespace: default
+              spec:
+                application: foo
+                components:
+                  - name: name
+                    containerImage: newimage
+              EOF
+              kubectl apply -f snapshot
+    - name: run-task
+      taskRef:
+        name: collect-data
+      params:
+        - name: release
+          value: default/release-sample
+        - name: releasePlan
+          value: default/releaseplan-sample
+        - name: releasePlanAdmission
+          value: default/releaseplanadmission-sample
+        - name: releaseServiceConfig
+          value: default/releaseserviceconfig-sample
+        - name: snapshot
+          value: default/snapshot-sample
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      params:
+        - name: releasePipelineMetadata
+          value: "$(tasks.run-task.results.releasePipelineMetadata)"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: releasePipelineMetadata
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              touch "$(workspaces.data.path)/mock_curl.txt"
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_curl.txt")" != 0 ]; then
+                echo Error: curl was expected to be called 0 times. Actual calls:
+                cat "$(workspaces.data.path)/mock_curl.txt"
+                exit 1
+              fi
+              
+              org=$(jq -r '.org' <<< "$(params.releasePipelineMetadata)")
+              repo=$(jq -r '.repo' <<< "$(params.releasePipelineMetadata)")
+              revision=$(jq -r '.revision' <<< "$(params.releasePipelineMetadata)")
+              pathinrepo=$(jq -r '.pathinrepo' <<< "$(params.releasePipelineMetadata)")
+              sha=$(jq -r '.sha' <<< "$(params.releasePipelineMetadata)")
+              
+              test "${org}" == 'unknown'
+              test "${repo}" == 'unknown'
+              test "${revision}" == 'unknown'
+              test "${pathinrepo}" == 'unknown'
+              test "${sha}" == 'unknown'
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-sample
+              kubectl delete releaseplan releaseplan-sample
+              kubectl delete releaseplanadmission releaseplanadmission-sample
+              kubectl delete releaseserviceconfig releaseserviceconfig-sample
+              kubectl delete snapshot snapshot-sample

@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: collect-data
   labels:
-    app.kubernetes.io/version: "4.5.2"
+    app.kubernetes.io/version: "4.5.3"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -69,6 +69,9 @@ spec:
     - name: snapshotNamespace
       type: string
       description: namespace where Snapshot is located
+    - name: releasePipelineMetadata
+      type: string
+      description: json object containing git resolver metadata about the running release pipeline
   steps:
     - name: collect-data
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -201,3 +204,45 @@ spec:
             "$(workspaces.data.path)/$(params.subdirectory)/release_plan_admission.json"
 
         exit $RC
+    - name: print-pipeline-ref-info
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      script: |
+        #!/usr/bin/env bash
+        set +x
+
+        pipelineref=$(jq -c '.spec.pipeline.pipelineRef' \
+          "$(workspaces.data.path)/$(params.subdirectory)/release_plan_admission.json")
+        resolver=$(jq -r '.resolver // ""' <<< "${pipelineref}")
+        if [ "${resolver}" == "git" ] ; then
+          url=$(jq -r '.params[] | select(.name=="url") | .value' <<< "${pipelineref}")
+          revision=$(jq -r '.params[] | select(.name=="revision") | .value' <<< "${pipelineref}")
+          pathinrepo=$(jq -r '.params[] | select(.name=="pathInRepo") | .value' <<< "${pipelineref}")
+          orgrepo="${url#*/*/*/}"
+          org=$(echo "${orgrepo}" | cut -f1 -d/)
+          repo=$(echo "${orgrepo}" | cut -f2 -d/ | cut -d. -f1)
+
+          sha=$(curl -s "https://api.github.com/repos/${org}/${repo}/commits/${revision}" | jq -r '.sha // ""')
+
+        fi
+
+        org="${org:-unknown}"
+        repo="${repo:-unknown}"
+        revision="${revision:-unknown}"
+        pathinrepo="${pathinrepo:-unknown}"
+        sha="${sha:-unknown}"
+
+        echo ""
+        echo "Release Pipeline Ref Info:"
+        echo "----------------------"
+      
+        json=$(jq -n -c \
+          --arg org "${org}" \
+          --arg repo "${repo}" \
+          --arg revision "${revision}" \
+          --arg pathinrepo "${pathinrepo}" \
+          --arg sha "${sha}" \
+          '$ARGS.named | tostring')
+
+        echo "${json}" > "$(results.releasePipelineMetadata.path)"
+        # pretty print for log message
+        echo "${json//\\/}" 

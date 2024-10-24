@@ -27,6 +27,10 @@ should not be present in the Release data section).
 | snapshot             | Namespaced name of the Snapshot                    | No       | -             |
 | subdirectory         | Subdirectory inside the workspace to be used.      | Yes      | -             |
 
+## Changes in 4.5.3
+* Introduce new step to collect, print and record information about the git resolver metadata for the
+  running release pipeline.
+
 ## Changes in 4.5.2
 * Introduce new step to collect information needed for reduce-snapshot task
 
