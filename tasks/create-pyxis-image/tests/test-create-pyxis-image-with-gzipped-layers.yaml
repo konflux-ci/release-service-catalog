@@ -1,0 +1,97 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-pyxis-image-with-gzipped-layers
+spec:
+  description: |
+    Run the create-pyxis-image task with an image that has gzipped layers, to
+    see that we reported the uncompressed digests correctly
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:65d8db844c008e7736ec8dff307868525279484d
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > "$(workspaces.data.path)"/mapped_snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "source@sha256:mydigest",
+                    "repository": "registry.io/image-with-gzipped-layers",
+                    "tags": [
+                      "testtag"
+                    ]
+                  }
+                ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: create-pyxis-image
+      params:
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: server
+          value: stage
+        - name: snapshotPath
+          value: mapped_snapshot.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: pyxisDataPath
+          value: $(tasks.run-task.results.pyxisDataPath)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: pyxisDataPath
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:65d8db844c008e7736ec8dff307868525279484d
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ "$(wc -l < "$(workspaces.data.path)"/mock_create_container_image.txt)" != 1 ]; then
+                echo Error: create_container_image was expected to be called 1 time. Actual calls:
+                cat "$(workspaces.data.path)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(workspaces.data.path)"/mock_oras.txt)" != 5 ]; then
+                echo Error: oras was expected to be called 4 times. Actual calls:
+                cat "$(workspaces.data.path)/mock_oras.txt"
+                exit 1
+              fi
+
+              [ "$(head -n 1 < "$(workspaces.data.path)"/mock_skopeo.txt)" \
+                = "inspect --raw docker://registry.io/image-with-gzipped-layers@sha256:mydigest" ]
+
+              # check that the size of the decompressed layers is as expected
+              jq -e '.uncompressed_layers[0].size == 21' "$(workspaces.data.path)/oras-manifest-fetch.json"
+              jq -e '.uncompressed_layers[1].size == 9' "$(workspaces.data.path)/oras-manifest-fetch.json"
+
+      runAfter:
+        - run-task
