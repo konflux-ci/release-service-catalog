@@ -1,10 +1,9 @@
 # check-data-keys
 
-Tekton task to check that all required information is present in the data file in order to use the
-specified system(s). If any required keys are missing, the task will fail.
+Tekton task that validates data keys against a schema to ensure that all required keys for a system(s) are present and correctly formatted. The system(s) passed into the `systems` parameter become required. The schema validation also applies to all data passed into the `dataPath` parameter, meaning all the data keys must be allowed and formatted correctly.
 
 For example, if `releaseNotes` is passed as a system and the data file does not have all the required
-releaseNotes keys, the task will fail.
+releaseNotes keys, the schema will give validation errors, and the task will fail.
 
 Currently, `releaseNotes`, and `cdn` are the only supported systems.
 
@@ -14,6 +13,10 @@ Currently, `releaseNotes`, and `cdn` are the only supported systems.
 |----------|---------------------------------------------------------|----------|---------------|
 | dataPath | Path to the JSON string of the merged data to use       | No       |               |
 | systems  | The systems to check that all data keys are present for | Yes      | []            |
+| schema   | The URl to the schema                                   | Yes      | https://github.com/konflux-ci/release-service-catalog/blob/production/schema/dataKeys.json |
+
+## Changes in 1.0.0
+* Replacing the check with a schema validator
 
 ## Changes in 0.9.2
 * Fixing checkton/shellcheck linting issues in the task and test
