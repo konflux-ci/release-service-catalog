@@ -9,7 +9,7 @@ function create_container_image() {
   # e.g. 0001, 0002, 0003...
   echo The image id is $(awk 'END{printf("%04i", NR)}' $(workspaces.data.path)/mock_create_container_image.txt)
 
-  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --oras-manifest-fetch /tmp/oras-manifest-fetch.json --name "*" --media-type my_media_type --digest "*" --architecture-digest "*" --architecture "*" --rh-push "* ]]
+  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --oras-manifest-fetch /workspace/data/oras-manifest-fetch.json --name "*" --media-type my_media_type+gzip --digest "*" --architecture-digest "*" --architecture "*" --rh-push "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
@@ -32,7 +32,7 @@ function skopeo() {
   echo $* >> $(workspaces.data.path)/mock_skopeo.txt
   if [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
   then
-    echo '{"mediaType": "my_media_type"}'
+    echo '{"mediaType": "my_media_type+gzip"}'
   else
     echo Mock skopeo called with: $*
     if [[ "$*" != "inspect --no-tags docker://"* ]]
@@ -61,9 +61,18 @@ function oras() {
   if [[ "$*" == "manifest fetch --registry-config"*.dockerfile ]]
   then
     echo '{"layers": [{"annotations": {"org.opencontainers.image.title": "Dockerfile.custom"}}]}'
+  elif [[ "$*" == "blob fetch --registry-config"*"/tmp/oras-blob-fetch-beef.gz"* ]]
+  then
+    echo -n 'H4sIAAAAAAAAA0vKzEssqlRISSxJVEjPTy1WyEgtSgUAXVhZVxUAAAA=' | base64 -d > /tmp/oras-blob-fetch-beef.gz
+  elif [[ "$*" == "blob fetch --registry-config"*"/tmp/oras-blob-fetch-pork.gz"* ]]
+  then
+    echo -n 'H4sIAAAAAAAAA8vNL0pVSEksSQQA2pxWLAkAAAA=' | base64 -d > /tmp/oras-blob-fetch-pork.gz
+  elif [[ "$*" == "manifest fetch --registry-config"*image-with-gzipped-layers* ]]
+  then
+    echo '{"mediaType": "my_media_type", "layers": [{"mediaType": "blob+gzip", "digest": "beef"}, {"mediaType": "blob+gzip", "digest": "pork"}]}'
   elif [[ "$*" == "manifest fetch --registry-config"* ]]
   then
-    echo '{"mediaType": "my_media_type"}'
+    echo '{"mediaType": "my_media_type", "layers": [{"mediaType": "blob+other", "digest": "tofu"}]}'
   elif [[ "$*" == "pull --registry-config"*dockerfile-not-found:sha256-*.dockerfile* ]]
   then
     echo Mock oras called with: $*
