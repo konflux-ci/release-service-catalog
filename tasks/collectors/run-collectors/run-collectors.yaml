@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: run-collectors
   labels:
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -21,6 +21,13 @@ spec:
     - name: resultsDir
       type: string
       description: The relative path in the workspace to save the collector results to
+    - name: collectorsRepository
+      type: string
+      description: Git repository where the collectors will be defined
+    - name: collectorsRepositoryRevision
+      type: string
+      default: main
+      description: Git repository revision
   workspaces:
     - name: data
       description: Workspace where the CRs are stored
@@ -32,7 +39,8 @@ spec:
         set -xeo pipefail
 
         DEFAULT_TIMEOUT=900
-        COLLECTORS_REPOSITORY="https://github.com/SOME_ORG/SOME_REPO" # TODO - update this once repo is created
+        COLLECTORS_REPOSITORY="$(params.collectorsRepository)"
+        COLLECTORS_REPOSITORY_REVISION="$(params.collectorsRepositoryRevision)"
         COLLECTORS_FILE="$(workspaces.data.path)/$(params.collectorsPath)"
         COLLECTORS_RESOURCE_TYPE="$(params.collectorsResourceType)"
         RESULTS_DIR="$(workspaces.data.path)/$(params.resultsDir)"
@@ -40,6 +48,7 @@ spec:
 
         execute_collector() { # Expected arguments are [collector json, type of collector]
             collector="$1"
+            collector_type="$2"
             name="$(jq -r '.name' <<< "$collector")"
             type="$(jq -r '.type' <<< "$collector")"
             TIMEOUT="$(jq -r --arg default "$DEFAULT_TIMEOUT" '.timeout // $default' <<< "$collector")"
@@ -52,7 +61,8 @@ spec:
                 ARGS=("${ARGS[@]}" --"${arg_name}" "${arg_value}")
             done
             # Execute collector
-            timeout "$TIMEOUT" python3 "$type" "${ARGS[@]}" | tee "$RESULTS_DIR"/"$2"-"$name".json
+            timeout "$TIMEOUT" python3 "lib/${type}.py" "${ARGS[@]}" "${collector_type}" | tee \
+              "$RESULTS_DIR"/"$2"-"$name".json
         }
 
         if [ ! -d "${RESULTS_DIR}" ] ; then
@@ -60,7 +70,9 @@ spec:
             exit 1
         fi
 
-        git clone "${COLLECTORS_REPOSITORY}" collectors
+        cd /tmp
+        
+        git clone "${COLLECTORS_REPOSITORY}" --branch "${COLLECTORS_REPOSITORY_REVISION}" collectors
         pushd collectors
         
         # Set COLLECTOR_TYPE based on the value of COLLECTORS_RESOURCE_TYPE
@@ -78,9 +90,9 @@ spec:
         if [ ! -f "${COLLECTORS_FILE}" ] ; then
             echo "No valid file was found so no collectors will be run."
         else
-            NUM_COLLECTORS="$(jq '.spec.collectors | length' "${COLLECTORS_FILE}")"
+            NUM_COLLECTORS="$(jq '.spec.collectors.items | length' "${COLLECTORS_FILE}")"
             for ((i = 0; i < NUM_COLLECTORS; i++)) ; do
-                collector="$(jq -c --argjson i "$i" '.spec.collectors[$i]' "${COLLECTORS_FILE}")"
+                collector="$(jq -c --argjson i "$i" '.spec.collectors.items[$i]' "${COLLECTORS_FILE}")"
                 # Limit batch size to concurrent limit
                 while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
                     wait -n

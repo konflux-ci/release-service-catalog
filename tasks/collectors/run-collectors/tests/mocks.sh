@@ -21,13 +21,13 @@ function timeout() {
   echo Mock timeout called with: $* >&2
   echo $* >> $(workspaces.data.path)/mock_timeout.txt
 
-  if [[ "$*" == *"python3 dummy-collector --test-arg test-value" ]]
+  if [[ "$*" == *"python3 lib/dummy-collector.py --test-arg test-value tenant" ]]
   then
     echo '{"name": "dummy", "example-argument": "test-value", "issues": ["RELEASE-1", "RELEASE-2"]}'
     return
   fi
 
-  if [[ "$*" == *"python3 parallel-collector --test-arg test-value" ]]
+  if [[ "$*" == *"python3 lib/parallel-collector.py --test-arg test-value tenant" ]]
   then
     date +%s >> $(workspaces.data.path)/parallel-time.txt
     sleep 5
@@ -36,7 +36,7 @@ function timeout() {
     return
   fi
 
-  if [[ "$*" == *"python3 timeout-collector --test-arg test-value" ]]
+  if [[ "$*" == *"python3 lib/timeout-collector.py --test-arg test-value tenant" ]]
   then
     exit 124 # timeout exits 124 if it times out
   fi
