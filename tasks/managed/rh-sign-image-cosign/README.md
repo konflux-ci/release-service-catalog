@@ -10,6 +10,11 @@ Tekton task to sign container images in snapshot by cosign.
 | secretName             | Name of secret containing needed credentials                                                                                                                                                                                                      | No       | -             |
 | signRegistryAccessPath | The relative path in the workspace to a text file that contains a list of repositories that needs registry.access.redhat.com image references to be signed (i.e. requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9". | No       | -             |
 | retries                | Retry cosign N times                                                                                                                                                                                                                              | Yes      | 3             |
+| concurrentLimit       | Number of concurrent cosign operations                                                                                                                                                                                                            | Yes      | 5             |
+
+## Changes in 1.3.0
+* Containers are signed only if the signature doesn't exist in the destination image
+* Existing signature validation and signing are done in parallel now controlled by concurrencyLimit paremeter
 
 ## Changes in 1.2.1
 * fix linting issues

@@ -36,6 +36,16 @@ spec:
                 ]
               }
               EOF
+              # create empty cosign verify mock files
+              for D in sha256:0000 sha256:1111 sha256:2222 ; do
+                REF="quay.io/redhat-pending/test-product----test-image2@${D}"
+                touch "$(workspaces.data.path)/$(echo $REF | tr '/' '-')"
+              done
+
+              # first 8 cosign calls should end with success
+              for _ in $(seq 1 8); do
+                  echo "1" >> "$(workspaces.data.path)/mock_cosign_success_calls"
+              done
 
               cat > "$(workspaces.data.path)/signRegistryAccess.txt" << EOF
               test-product/test-image2
@@ -50,6 +60,8 @@ spec:
           value: 'test-cosign-secret'
         - name: signRegistryAccessPath
           value: signRegistryAccess.txt
+        - name: concurrentLimit
+          value: 2
       workspaces:
         - name: data
           workspace: tests-workspace
@@ -75,15 +87,46 @@ spec:
               EXPECTED="inspect --raw docker://quay.io/redhat-user-workloads/test-product/test-image2@sha256:2222"
               test "$CALLS" = "$EXPECTED"
 
-              CALLS=$(cat "$(workspaces.data.path)/mock_cosign_calls")
+              # call records need to be sorted as concurrentLimit is set to 2
+              CALLS=$(sort "$(workspaces.data.path)/mock_cosign_sign_calls")
               COSIGN_COMMON="-t 3m0s sign --tlog-upload=false --key aws://arn:mykey --sign-container-identity"
               EXPECTED=$(cat <<EOF
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO}@sha256:2222
-              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO}@sha256:2222
               $COSIGN_COMMON ${_TEST_PUB_REPO2}:t1 ${_TEST_REPO}@sha256:2222
               $COSIGN_COMMON ${_TEST_PUB_REPO2}:t2 ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO}@sha256:2222
               EOF
               )
-              test "$CALLS" = "$EXPECTED"
+              echo "TESTING"
+              if [ "$CALLS" != "$EXPECTED" ]; then
+                echo "Diff:"
+                CALLS_FILE=$(mktemp XXXXX.calls)
+                EXPECTED_FILE=$(mktemp XXXXX.expected)
+                echo "$CALLS" > "$CALLS_FILE"
+                echo "$EXPECTED" > "$EXPECTED_FILE"
+                diff -Naur "$EXPECTED_FILE" "$CALLS_FILE"
+                exit 1
+              fi
+
+              CALLS=$(cat "$(workspaces.data.path)/mock_cosign_verify_calls")
+              COSIGN_COMMON="verify --insecure-ignore-tlog=true --key temp_key_file"
+              EXPECTED=$(cat <<EOF
+              $COSIGN_COMMON ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO}@sha256:2222
+              EOF
+              )
+              echo "TESTING VERIFY CALLS"
+              if [ "$CALLS" != "$EXPECTED" ]; then
+                echo "Diff:"
+                CALLS_FILE=$(mktemp XXXXX.calls)
+                EXPECTED_FILE=$(mktemp XXXXX.expected)
+                echo "$CALLS" > "$CALLS_FILE"
+                echo "$EXPECTED" > "$EXPECTED_FILE"
+                diff -Naur "$EXPECTED_FILE" "$CALLS_FILE"
+                rm "$CALLS_FILE" "$EXPECTED_FILE"
+                exit 1
+              fi
       runAfter:
         - run-task
