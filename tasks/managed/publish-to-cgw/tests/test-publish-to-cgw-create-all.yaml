@@ -1,0 +1,132 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-to-cgw-create-all
+spec:
+  description: |
+    Run the publish-to-cgw task and verify that all files are created
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:afef3c73a8475f9db6534769e54e601cff1eb40b
+            script: |
+              #!/bin/bash
+              set -eux
+
+              CONTENT_DIR="$(workspaces.data.path)/contentDir"
+              mkdir -p "$CONTENT_DIR"
+
+              # binaries to be created
+              cosign_binaries=(
+                "cosign"
+                "cosign-darwin-amd64.gz"
+                "cosign-darwin-arm64.gz"
+                "cosign-linux-amd64.gz"
+                "cosign-linux-arm64.gz"
+                "fake-name-linux-amd64.gz" # should be ignored
+                "checksum.txt" # should be ignored
+              )  
+              
+              # binaries to be created
+              gitsign_binaries=(
+                "gitsign-darwin-amd64.gz"
+                "gitsign-darwin-arm64.gz"
+                "gitsign-linux-amd64.gz"
+                "gitsign-linux-arm64.gz"
+                "checksum.txt" # should be ignored
+              )   
+              
+              all_binaries=("${cosign_binaries[@]}" "${gitsign_binaries[@]}")
+              
+              for binary in "${all_binaries[@]}"; do
+                echo "$binary content" > "$CONTENT_DIR/$binary"
+              done
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "contentGateway": {
+                  "mirrorOpenshiftPush": true,
+                  "productName": "product_name_1",
+                  "productCode": "product_code_1",
+                  "productVersionName": "1.2",
+                  "components": [
+                    {
+                      "name": "cosign",
+                      "description": "Red Hat OpenShift Local Sandbox Test",
+                      "shortURL": "/cgw/product_code_1/1.1",
+                      "hidden": false
+                    },
+                    {
+                      "name": "gitsign",
+                      "description": "Red Hat OpenShift Local Sandbox Test",
+                      "shortURL": "/cgw/product_code_1/1.1",
+                      "hidden": false
+                    }
+                  ]
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: publish-to-cgw
+      params:
+        - name: cgwHostname
+          value: "http://0.0.0.0:8080"
+        - name: dataPath
+          value: "data.json"
+        - name: contentDir
+          value: "contentDir"
+        - name: cgwSecret
+          value: "test-publish-to-cgw-secret"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: resultDataPath
+          value: $(tasks.run-task.results.resultDataPath)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: resultDataPath
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:3826e42200d46e2bd336bc7802332190a9ebd860
+            script: |
+              #!/usr/bin/env bash
+              python3 <<EOF
+              import json
+
+              with open("$(params.resultDataPath)", "r") as file:
+                  data = json.load(file)
+
+              no_of_files_processed = data.get("no_of_files_processed")
+              no_of_files_created = data.get("no_of_files_created")
+              no_of_files_skipped = data.get("no_of_files_skipped")
+
+              assert (
+                  no_of_files_processed == 9
+              ), f"Expected 9 files to be processed, got {no_of_files_processed}"
+              assert (
+                  no_of_files_created == 9
+              ), f"Expected 9 files to be created, got {no_of_files_created}"
+              assert (
+                  no_of_files_skipped == 0
+              ), f"Expected 0 files to be skipped, got {no_of_files_skipped}"
+
+              print("All checks passed")
+              EOF
