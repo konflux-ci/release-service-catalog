@@ -15,5 +15,10 @@ Tekton task to push artifacts to CDN and optionally Dev Portal with optional sig
 | cgwHostname     | The hostname of the content-gateway to publish the metadata to    | Yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret       | Env specific secret containing the content gateway credentials    | No       | -                                                        |
 
+## Changes in 1.0.0
+* Add steps for signing: `push-unsigned-using-oras`, `sign-mac-binaries`, `sign-windows-binaries`, `generate-checksums`
+  * The code was copied and adapted from the `sign-binaries` managed task
+  * New parameters were added to support signing, many of which have a default which is normally used
+
 ## Changes in 0.1.0
 * Split out the extracting of the artifacts (via oras pull) to a separate step

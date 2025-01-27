@@ -4,13 +4,13 @@ kind: Task
 metadata:
   name: push-artifacts-to-cdn-task
   labels:
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Tekton task to push artifacts to CDN and optionally Dev Portal with optional signing
+    Tekton task to pull, sign and push artifacts to CDN and optionally Dev Portal with optional signing
   params:
     - name: snapshot_json
       type: string
@@ -19,6 +19,59 @@ spec:
       type: string
       description: The maximum number of images to be pulled at once
       default: 3
+    # signing params start here
+    - name: author
+      type: string
+      description: Author taken from Release to be used for checksum signing
+    - name: quayURL
+      type: string
+      description: quay URL of the repo where content will be shared
+      default: quay.io/konflux-artifacts
+    - name: quaySecret
+      type: string
+      description: Secret to interact with Quay
+      default: quay-credentials
+    - name: windowsCredentials
+      type: string
+      description: Secret to interact with the Windows signing host
+      default: windows-credentials
+    - name: windowsSSHKey
+      type: string
+      description: Secret containing SSH private key for the Windows signing host
+      default: windows-ssh-key
+    - name: macHostCredentials
+      type: string
+      description: Secret to interact with the Mac signing host
+      default: mac-host-credentials
+    - name: macSigningCredentials
+      type: string
+      description: Secret to interact with the Mac signing utils
+      default: mac-signing-credentials
+    - name: macSSHKey
+      type: string
+      description: Secret containing SSH private key for the Mac signing host
+      default: mac-ssh-key
+    - name: checksumUser
+      type: string
+      description: User to interact with the checksum host
+      default: konflux-release-signing-sa
+    - name: checksumHost
+      type: string
+      description: Hostname of the checksum host
+      default: etera-worker.hosted.upshift.rdu2.redhat.com
+    - name: checksumFingerprint
+      type: string
+      description: Secret containing the fingerprint for the checksum host
+      default: checksum-fingerprint
+    - name: checksumKeytab
+      type: string
+      description: Secret containing the keytab for the checksum host
+      default: checksum-keytab
+    - name: kerberosRealm
+      type: string
+      description: Kerberos realm for the checksum host
+      default: IPA.REDHAT.COM
+    # cdn params start here
     - name: exodusGwSecret
       type: string
       description: Env specific secret containing the Exodus Gateway configs
@@ -40,9 +93,29 @@ spec:
   results:
     - name: result
       description: Success if the task succeeds, the error otherwise
+    - name: signedMacDigest
+      description: Digest for signed Mac files
+    - name: unsignedMacDigest
+      description: Digest for unsigned Mac files
+    - name: signedWindowsDigest
+      description: Digest from signed Windows files
+    - name: unsignedWindowsDigest
+      description: Digest from unsigned Windows files
   volumes:
     - name: shared-dir
       emptyDir: {}
+    - name: mac-ssh-key-vol
+      secret:
+        secretName: mac-ssh-key-secret
+    - name: windows-ssh-key-vol
+      secret:
+        secretName: windows-ssh-key-secret
+    - name: checksum-fingerprint-vol
+      secret:
+        secretName: checksum-fingerprint-secret
+    - name: checksum-keytab-vol
+      secret:
+        secretName: checksum-keytab-secret
   steps:
     - name: extract-artifacts
       image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
@@ -93,7 +166,9 @@ spec:
 
         process_component() { # Expected argument is [component json]
             COMPONENT=$1
-            PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}")
+            PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}") \
+                  || (echo "Missing containerImage for component." && exit 1 )
+
             DESTINATION="${DISK_IMAGE_DIR}/$(jq -er '.staged.destination' <<< "${COMPONENT}")/FILES" \
               || (echo "Missing staged.destination value for component. This should be an existing pulp repo. \
                   Failing" && exit 1)
@@ -108,8 +183,10 @@ spec:
             NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
             for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
                 FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
-                SOURCE=$(jq -er '.source' <<< "$FILE")
-                FILENAME=$(jq -er '.filename' <<< "$FILE")
+                SOURCE=$(jq -er '.source' <<< "$FILE") \
+                  || (echo "Missing staged.files.source for component." && exit 1 )
+                FILENAME=$(jq -er '.filename' <<< "$FILE") \
+                  || (echo "Missing staged.files.filename for component." && exit 1 )
                 # The .qcow2 images are not zipped
                 if [ -f "${SOURCE}.gz" ] ; then
                     gzip -d "${SOURCE}.gz"
@@ -119,8 +196,8 @@ spec:
                 # The race condition is if two files have the same $DESTINATION_FILE and both
                 # if checks are run before either mv is run a few lines below.
                 if [ -f "${DESTINATION_FILE}" ] ; then
-                    echo -n "Multiple files use the same destination value: $DESTINATION" >&2
-                    echo " and filename value: $FILENAME. Failing..." >&2
+                    echo "Multiple files use the same destination value: $DESTINATION" \
+                         "and filename value: $FILENAME. Failing..." >&2
                     exit 1
                 fi
                 mv "$SOURCE" "${DESTINATION_FILE}" || echo "didn't find mapped file: ${SOURCE}"
@@ -145,7 +222,558 @@ spec:
         while (( ${RUNNING_JOBS@P} > 0 )); do
             wait -n
         done
-    - name: push-images
+    - name: push-unsigned-using-oras
+      image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+      env:
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        CONTENT_DIR=/shared/artifacts
+        find $CONTENT_DIR
+        UNSIGNED_DIR=$CONTENT_DIR/unsigned
+        MAC_CONTENT=$UNSIGNED_DIR/macos
+        WINDOWS_CONTENT=$UNSIGNED_DIR/windows
+        LINUX_CONTENT=$CONTENT_DIR/linux
+
+        mkdir -p "$MAC_CONTENT" "$WINDOWS_CONTENT" "$LINUX_CONTENT"
+        cd "$CONTENT_DIR"
+
+        # Loop through each gz file and move them to the appropriate directory
+        find "$CONTENT_DIR" -type f -iregex ".*\.zip\|.*\.gz" 2>/dev/null | while read -r file; do
+          case "$file" in
+            (*darwin*)
+              mv "$file" unsigned/macos/
+              ;;
+            (*windows*)
+              mv "$file" unsigned/windows/
+              ;;
+            (*linux*)
+              mv "$file" linux/
+              ;;
+          esac
+        done
+
+        # Unzip files in each directory
+        for dir in unsigned/macos unsigned/windows linux; do
+          find "$dir"/*.{zip,gz} 2>/dev/null | while read -r file; do
+            ext="${file#*.}"
+            case "$ext" in
+              tar.gz)
+                tar -xf "$file"
+              ;;
+              gz)
+                gzip -d "$file"
+              ;;
+              zip)
+                zip -X "$file"
+              ;;
+            esac
+          done
+        done
+
+        cd "$UNSIGNED_DIR"
+
+        echo "Logging into Quay..."
+        set +x
+        oras login quay.io -u "${QUAY_USER}" -p "${QUAY_PASS}" > /dev/null 2>&1
+        set -x
+        echo "Pushing unsigned Macos content to $(params.quayURL)..."
+        output=$(oras push "$(params.quayURL)/unsigned" macos)
+        mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+        echo "Digest for mac content: $mac_digest"
+        echo -n "$mac_digest" > "$(results.unsignedMacDigest.path)"
+
+        echo "Pushing unsigned Windows content to $(params.quayURL)..."
+        output=$(oras push "$(params.quayURL)/unsigned" windows)
+        windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+        echo "Digest for windows content: $windows_digest"
+        echo -n "$windows_digest" > "$(results.unsignedWindowsDigest.path)"
+    - name: sign-mac-binaries
+      image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: mac-ssh-key-vol
+          mountPath: "/etc/secrets"
+          readOnly: true
+      env:
+        - name: MAC_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macHostCredentials)
+              key: username
+        - name: MAC_HOST
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macHostCredentials)
+              key: host
+        - name: KEYCHAIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: keychain_password
+        - name: SIGNING_IDENTITY
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: signing_identity
+        - name: APPLE_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: apple_id
+        - name: TEAM_ID
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: team_id
+        - name: APP_SPECIFIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.macSigningCredentials)
+              key: app_specific_password
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+        - name: QUAY_URL
+          value: $(params.quayURL)
+        - name: PIPELINE_UID
+          value: $(context.taskRun.uid)
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        cp "/etc/secrets/mac_id_rsa" /root/.ssh/id_rsa
+        cp "/etc/secrets/mac_fingerprint" /root/.ssh/known_hosts
+        chmod 600 /root/.ssh/id_rsa /root/.ssh/known_hosts
+
+        SSH_OPTS=(-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts)
+
+        # shell check complains about the variable (unsigned_digest) not being used but it is used in the script
+        # shellcheck disable=SC2034
+        unsigned_digest=$(cat "$(results.unsignedMacDigest.path)")
+        mac_signing_script="/tmp/mac_signing_script.sh"
+
+        TEMP_DIR="/tmp/$(context.taskRun.uid)"
+        BINARY_PATH="$TEMP_DIR/unsigned/macos"
+        ZIP_PATH="$TEMP_DIR/signed_content.zip"
+        DIGEST_FILE="$TEMP_DIR/push_digest.txt"
+
+        cat << EOF > "$mac_signing_script"
+        #!/bin/bash
+        set -eux
+
+        mkdir -p "$TEMP_DIR"
+        mkdir -p "$BINARY_PATH"
+
+        cd "$TEMP_DIR"
+        /usr/local/bin/oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
+        /usr/local/bin/oras pull $(params.quayURL)/unsigned@$unsigned_digest -o "$BINARY_PATH"
+        # This is the directory where the content was extracted
+        CONTENT_DIR=\$(find "$BINARY_PATH" -maxdepth 1 -type d | tail -n 1)
+
+        security unlock-keychain -p $KEYCHAIN_PASSWORD login.keychain
+
+        echo "Signing files in the \$CONTENT_DIR directory..."
+        find "\$CONTENT_DIR" -type f | while read file; do
+            echo "Signing: \$file"
+            if ! xcrun codesign --sign "Developer ID Application: $SIGNING_IDENTITY" \
+                --options runtime --timestamp --force "\$file"; then
+                echo "Failed to sign file: \$file"
+                exit 1
+            fi
+        done
+
+        cd "$BINARY_PATH"
+        NEW_CONTENT_DIR=\$(basename "\$CONTENT_DIR")
+        zip -r "$ZIP_PATH" "\$NEW_CONTENT_DIR"
+
+        xcrun notarytool submit "$ZIP_PATH" \
+            --wait \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$APP_SPECIFIC_PASSWORD"
+
+        PUSH_OUTPUT=\$(/usr/local/bin/oras push "$QUAY_URL/signed:$(context.taskRun.uid)-mac" "\$NEW_CONTENT_DIR")
+        SIGNED_DIGEST=\$(echo "\$PUSH_OUTPUT" | grep 'Digest:' | awk '{print \$2}')
+        echo -n "\$SIGNED_DIGEST" >> "$DIGEST_FILE"
+        echo "Process completed successfully."
+        EOF
+
+        # Copy the script to the Mac host
+        scp "${SSH_OPTS[@]}" "$mac_signing_script" "${MAC_USER}@${MAC_HOST}:/tmp/mac_signing_script.sh"
+
+        # Execute the script on the Mac host
+        ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash /tmp/mac_signing_script.sh
+
+        # Copy the signed digest back to the pipeline
+        scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:/tmp/$(context.taskRun.uid)/push_digest.txt" \
+            "$(results.signedMacDigest.path)"
+
+        # Clean up the Mac host now that we are done
+        # shell check complains about the variable $(context.taskRun.uid) being evaluated on the client side
+        # shellcheck disable=SC2029
+        ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf /tmp/$(context.taskRun.uid)"
+    - name: sign-windows-binaries
+      image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: windows-ssh-key-vol
+          mountPath: "/etc/secrets"
+          readOnly: true
+      env:
+        - name: WINDOWS_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.windowsCredentials)
+              key: username
+        - name: WINDOWS_PORT
+          valueFrom:
+            secretKeyRef:
+              name: $(params.windowsCredentials)
+              key: port
+        - name: WINDOWS_HOST
+          valueFrom:
+            secretKeyRef:
+              name: $(params.windowsCredentials)
+              key: host
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        cp "/etc/secrets/windows_id_rsa" /root/.ssh/id_rsa
+        cp "/etc/secrets/windows_fingerprint" /root/.ssh/known_hosts
+        chmod 600 /root/.ssh/known_hosts /root/.ssh/id_rsa
+
+        SSH_OPTS="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -p ${WINDOWS_PORT} \
+        ${WINDOWS_USER}@${WINDOWS_HOST}"
+        SCP_OPTS="-i /root/.ssh/id_rsa -o UserKnownHostsFile=/root/.ssh/known_hosts -P ${WINDOWS_PORT}"
+
+        unsigned_digest=$(cat "$(results.unsignedWindowsDigest.path)")
+        # Create the batch script
+        windows_signing_script_file="/tmp/windows_signing_script_file.bat"
+        set +x
+        cat << EOF > "$windows_signing_script_file"
+
+        mkdir %TEMP%\$(context.taskRun.uid) && cd /d %TEMP%\$(context.taskRun.uid)
+        @echo off
+        oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
+        @echo on
+        oras pull $(params.quayURL)/unsigned@${unsigned_digest}
+
+        signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 ^
+        %TEMP%\$(context.taskRun.uid)\windows\*
+
+        if errorlevel 1 (
+          echo Signing of binaries failed
+          exit /B %ERRORLEVEL%
+        )
+
+        signtool verify /v /pa %TEMP%\$(context.taskRun.uid)\windows\*
+
+        if errorlevel 1 (
+          echo Verification of binaries failed
+          exit /B %ERRORLEVEL%
+        )
+
+        echo [%DATE% %TIME%] Signing of Windows binaries completed successfully
+
+        oras push $(params.quayURL)/signed:$(context.taskRun.uid)-windows windows \
+        > oras_push_output.txt 2>&1
+
+        for /f "tokens=2,3 delims=: " %%a in ('findstr "Digest:" oras_push_output.txt') do @echo %%a:%%b > digest.txt
+        EOF
+        set -x
+        # shellcheck disable=SC2086
+        scp $SCP_OPTS "$windows_signing_script_file" \
+        "${WINDOWS_USER}@${WINDOWS_HOST}:C:/Users/${WINDOWS_USER}/AppData/Local/Temp/windows_signing_script_file.bat"
+
+        # Execute the script on the Windows host
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "C:/Users/${WINDOWS_USER}/AppData/Local/Temp/windows_signing_script_file.bat"
+
+        # disable shellcheck for escaping the taskRun.uid as we want that evaluated on client side
+        # shellcheck disable=SC2029,SC2086
+        scp $SCP_OPTS "${WINDOWS_USER}@${WINDOWS_HOST}:\
+        C:/Users/${WINDOWS_USER}/AppData/Local/Temp/$(context.taskRun.uid)/digest.txt" \
+        "$(results.signedWindowsDigest.path)"
+
+        # Remove trailing spaces, carriage returns, newlines
+        sed -i 's/[[:space:]]*$//; s/\r//g; :a;N;$!ba;s/\n//g' "$(results.signedWindowsDigest.path)"
+
+        # Clean up the windows host now that we are done
+        # disable shellcheck for escaping the taskRun.uid as we want that evaluated on client side
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "Remove-Item -LiteralPath \
+        C:\\Users\\${WINDOWS_USER}\\AppData\\Local\\Temp\\$(context.taskRun.uid) -Force -Recurse"
+    - name: generate-checksums
+      image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: checksum-fingerprint-vol
+          mountPath: "/etc/secrets_fingerprint"
+          readOnly: true
+        - name: checksum-keytab-vol
+          mountPath: "/etc/secrets_keytab"
+          readOnly: true
+      env:
+        - name: QUAY_USER
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: username
+        - name: QUAY_PASS
+          valueFrom:
+            secretKeyRef:
+              name: $(params.quaySecret)
+              key: password
+        - name: AUTHOR
+          value: $(params.author)
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        #---------------------------------------------------------------------------------------
+        # This step generates checksums for all of the binaries in the content directory and
+        # signs them using the checksum host.
+        # The general workflow is that the binaries are extracted from the image(previous task),
+        # signed on remote hosts (windows and mac) and then a sha256sum is generated for each
+        # binary. The shasums are collected in a sha256sum.txt file which is then transferred to
+        # the checksum host for signing with Red Hat's GPG key.
+        # The detached signatures are returned to the workspace for inclusion in the later tasks
+        # to be pushed to CDN and the Red Hat Developer Portal.
+        #---------------------------------------------------------------------------------------
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        if [[ ${AUTHOR} == "" ]] ; then
+          echo Error: invalid author
+          exit 1
+        fi
+
+        SSH_OPTS="-o UserKnownHostsFile=/root/.ssh/known_hosts \
+                    -o GSSAPIAuthentication=yes \
+                    -o GSSAPIDelegateCredentials=yes"
+
+        sign_file() {
+            sign_method=$1  # The signing method: --clearsign or --gpgsign
+            checksum_user=$(params.checksumUser)
+            checksum_host=$(params.checksumHost)
+            pipeline_run_uid=$(context.taskRun.uid)
+            output_path="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt.$2"
+            input_file="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt"
+
+            echo "Executing SSH command with sign method: $sign_method"
+            # shellcheck disable=SC2029,SC2086
+            ssh $SSH_OPTS "$checksum_user@$checksum_host" \
+            "rpm-sign --nat $sign_method --key redhatrelease2 --onbehalfof=$AUTHOR \
+            --output $output_path $input_file"
+        }
+
+        # Generate a kerberos ticket to ssh to the checksum host.
+        # The ticket is required for interacting with rpm-sign as well,
+        # so we use GSSAPI Delegate (in ssh opts) to transfer the ticket to the checksum host
+        KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
+        export KRB5CCNAME
+        kinit -kt /etc/secrets_keytab/keytab "$(params.checksumUser)@$(params.kerberosRealm)"
+
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        cp "/etc/secrets_fingerprint/fingerprint" /root/.ssh/known_hosts
+        chmod 600 root/.ssh/known_hosts
+
+        # get all of the signed binaries into a common directory
+        CONTENT_DIR=/shared/artifacts
+        SIGNED_DIR="$CONTENT_DIR/signed"
+        mkdir -p "$SIGNED_DIR"
+        mkdir -p "$CONTENT_DIR"/linux
+        cp -r "$CONTENT_DIR"/linux/* "$SIGNED_DIR"
+        cd "$SIGNED_DIR"
+        set +x
+        oras login quay.io -u "$QUAY_USER" -p "$QUAY_PASS"
+        set -x
+        signed_mac_digest=$(cat "$(results.signedMacDigest.path)")
+        signed_windows_digest=$(cat "$(results.signedWindowsDigest.path)")
+        signed_windows_digest=${signed_windows_digest//[[:space:]]/}
+        # shellcheck disable=SC2086,SC2046
+        oras pull $(params.quayURL)/signed@${signed_mac_digest}
+        # shellcheck disable=SC2086,SC2046
+        oras pull $(params.quayURL)/signed@${signed_windows_digest}
+
+        # Copy everything to SIGNED_DIR and remove mac,windows dirs
+        cp macos/* .
+        cp windows/* .
+        rm -r macos/ windows/
+
+        # generate checksums for all of the binaries
+        SHA_SUM_PATH="${CONTENT_DIR}/sha256sum.txt"
+        touch "$SHA_SUM_PATH"
+        for file in *; do
+            if [ -f "$file" ]; then
+                checksum=$(sha256sum "$file" | awk '{ print $1 }')
+                echo "$checksum  $file" >> "$SHA_SUM_PATH"
+            fi
+        done
+        # Send sha256sum.txt to the checksum host for signing
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "$(params.checksumUser)@$(params.checksumHost)" "mkdir -p ~/$(context.taskRun.uid)/checksum"
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "${SHA_SUM_PATH}" \
+        "$(params.checksumUser)@$(params.checksumHost):~/$(context.taskRun.uid)/checksum"
+
+        sign_file --clearsign sig
+        sign_file --gpgsign gpg
+
+        # scp the two files back to the content directory
+        scp "$SSH_OPTS" \
+        "$(params.checksumUser)@$(params.checksumHost):~/$(context.taskRun.uid)/checksum/sha256sum.txt.sig" \
+        "${SIGNED_DIR}/sha256sum.txt.sig"
+
+        scp "$SSH_OPTS" \
+        "$(params.checksumUser)@$(params.checksumHost):~/$(context.taskRun.uid)/checksum/sha256sum.txt.gpg" \
+        "${SIGNED_DIR}/sha256sum.txt.gpg"
+
+        mv "$SHA_SUM_PATH" "${SIGNED_DIR}/sha256sum.txt"
+    - name: push-artifacts
       image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
       volumeMounts:
         - name: shared-dir
@@ -227,10 +855,9 @@ spec:
             if [ "$err" -eq 0 ] ; then
                 echo -n "Success" > "$(results.result.path)"
             else
-                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
-                  > "$(results.result.path)"
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                    tail -n 20 "$STDERR_FILE" | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -260,7 +887,7 @@ spec:
         echo "$UDC_KEY" > "$UDCACHE_KEY"
         set -x
 
-        DISK_IMAGE_DIR="/shared/artifacts"
+        DISK_IMAGE_DIR="/shared/artifacts/signed"
         export DISK_IMAGE_DIR
 
         process_component_for_developer_portal() { # Expected argument are [component json], [content_directory]
@@ -273,21 +900,32 @@ spec:
             return
           fi
 
-          productName="$(jq -er '.productName' <<< "${contentGatewayConfig}")" \
-            || (echo "Missing contentGateway.productName value for component. This should be an existing product \
-                  in the Developer Portal. Failing" && exit 1)
+          productName="$(jq -r '.productName' <<< "${contentGatewayConfig}")"
+          if [ "${productName}" == "null" ]; then
+            echo "Missing contentGateway.productName value for component. This should be an existing product" \
+                 "in the Developer Portal. Failing" >&2
+            exit 1
+          fi
+           
+          productCode="$(jq -r '.productCode' <<< "${contentGatewayConfig}")"
+          if [ "${productCode}" == "null" ]; then
+            echo "Missing contentGateway.productCode value for component. This should be an existing product" >&2
+            exit 1
+          fi
 
-          productCode="$(jq -er '.productCode' <<< "${contentGatewayConfig}")" \
-            || (echo "Missing contentGateway.productCode value for component. This should be an existing product \
-                  in the Developer Portal. Failing" && exit 1)
+          productVersionName="$(jq -r '.productVersionName' <<< "${contentGatewayConfig}")"
+          if [ "${productVersionName}" == "null" ]; then
+            echo "Missing contentGateway.productVersionName value for component. This should be an existing" \
+                  "product in the Developer Portal. Failing" >&2
+            exit 1
+          fi
 
-          productVersionName="$(jq -er '.productVersionName' <<< "${contentGatewayConfig}")" \
-            || (echo "Missing contentGateway.productVersionName value for component. This should be an existing \
-                  product in the Developer Portal. Failing" && exit 1)
-
-          filePrefix="$(jq -er '.filePrefix' <<< "${contentGatewayConfig}")" \
-            || (echo "Missing contentGateway.filePrefix value for component. This should be the prefix for files to \
-                  upload to the Developer Portal. Failing" && exit 1)
+          filePrefix="$(jq -r '.filePrefix' <<< "${contentGatewayConfig}")"
+          if [ "${filePrefix}" == "null" ]; then
+            echo "Missing contentGateway.filePrefix value for component. This should be the prefix for files to" \
+                 "upload to the Developer Portal. Failing" >&2
+            exit 1
+          fi
 
           developer_portal_wrapper --debug --product-name "${productName}" \
             --product-code "${productCode}" \
@@ -339,5 +977,6 @@ spec:
         NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
         for ((i = 0; i < NUM_COMPONENTS; i++)) ; do
             COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            process_component_for_developer_portal "$COMPONENT" "${component_destinations[$i]}"  2> "$STDERR_FILE"
+            # eventually the function does not redirect the error to stderr, so looking for all output
+            process_component_for_developer_portal "$COMPONENT" "${component_destinations[$i]}" 2> "$STDERR_FILE"
         done
