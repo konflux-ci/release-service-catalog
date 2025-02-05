@@ -6,15 +6,24 @@ function curl() {
   echo Mock curl called with: $* >&2
   echo $* >> $(workspaces.data.path)/mock_curl.txt
 
-  if [[ "$*" == "--fail --output /dev/null https://jira.atlassian.com/rest/api/2/issue/ISSUE-123" ]]
+  if [[ "$*" == "--retry 3 --fail https://jira.atlassian.com/rest/api/2/issue/ISSUE-123" ]]
   then
     :
-  elif [[ "$*" == "--fail --output /dev/null https://bugzilla.redhat.com/rest/bug/12345" ]]
+  elif [[ "$*" == "--retry 3 --fail https://bugzilla.redhat.com/rest/bug/12345" ]]
   then
     :
-  elif [[ "$*" == "--fail --output /dev/null https://jira.atlassian.com/rest/api/2/issue/EMBARGOED-987" ]]
+  elif [[ "$*" == "--retry 3 --fail https://jira.atlassian.com/rest/api/2/issue/EMBARGOED-987" ]]
   then
     exit 1
+  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/MISSINGRH-123" ]]
+  then
+    exit 1
+  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/FEATURE-123" ]] # Not a Vulnerability
+  then
+    echo '{"fields":{"issuetype":{"name":"Feature"}}}'
+  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/CVE-123" ]] # Vulnerability
+  then
+    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-123","customfield_12324752":"my-component"}}'
   else
     echo Error: Unexpected call
     exit 1

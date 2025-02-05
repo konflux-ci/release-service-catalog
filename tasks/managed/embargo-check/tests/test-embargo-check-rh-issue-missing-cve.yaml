@@ -2,9 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-embargo-check-public-issues
+  name: test-embargo-check-rh-issue-missing-cve
+  annotations:
+    test/assert-task-failure: "run-task"
 spec:
-  description: Test for embargo-check where all issues are public
+  description: |
+    Test for embargo-check where a issues.redhat.com issue has a Downstream Component Name value
+    that matches a component in the releaseNotes.content.images section, but said images section
+    does not list CVE-123, which is what the mocks return
   workspaces:
     - name: tests-workspace
   tasks:
@@ -22,18 +27,34 @@ spec:
               #!/usr/bin/env sh
               set -eux
 
-              cat > "$(workspaces.data.path)"/data.json << EOF
+              cat > "$(workspaces.data.path)/data.json" << EOF
               {
                 "releaseNotes": {
                   "issues": {
                     "fixed": [
                       {
-                        "id": "ISSUE-123",
-                        "source": "jira.atlassian.com"
+                        "id": "CVE-123",
+                        "source": "issues.redhat.com"
                       },
                       {
                         "id": "12345",
                         "source": "bugzilla.redhat.com"
+                      }
+                    ]
+                  },
+                  "content": {
+                    "images": [
+                      {
+                        "component": "my-component",
+                        "architecture": "x86_64",
+                        "containerImage": "registry.io/org/repo",
+                        "cves": {
+                          "fixed": {
+                            "CVE-987": {
+                              "packages": []
+                            }
+                          }
+                        }
                       }
                     ]
                   }
@@ -57,25 +78,3 @@ spec:
           workspace: tests-workspace
       runAfter:
         - setup
-    - name: check-result
-      workspaces:
-        - name: data
-          workspace: tests-workspace
-      taskSpec:
-        steps:
-          - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              if [ "$(wc -l < "$(workspaces.data.path)"/mock_curl.txt)" != 2 ]; then
-                  echo Error: curl was expected to be called 2 times. Actual calls:
-                  cat "$(workspaces.data.path)"/mock_curl.txt
-                  exit 1
-              fi
-
-              [[ $(head -n 1 "$(workspaces.data.path)/mock_curl.txt") == *"ISSUE-123"* ]]
-              [[ $(tail -n 1 "$(workspaces.data.path)/mock_curl.txt") == *"12345"* ]]
-      runAfter:
-        - run-task
