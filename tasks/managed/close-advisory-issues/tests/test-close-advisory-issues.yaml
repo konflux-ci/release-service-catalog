@@ -1,0 +1,78 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-close-advisory-issues
+spec:
+  description: Test for close-advisory-issues where the curl commands all succeed
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "releaseNotes": {
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "ISSUE-123",
+                        "source": "issues.redhat.com"
+                      },
+                      {
+                        "id": "12345",
+                        "source": "bugzilla.redhat.com"
+                      }
+                    ]
+                  }
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: close-advisory-issues
+      params:
+        - name: dataPath
+          value: data.json
+        - name: advisoryUrl
+          value: https://domain.com/advisory.yaml
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ "$(wc -l < "$(workspaces.data.path)"/mock_curl.txt)" != 3 ]; then
+                  echo Error: curl was expected to be called 3 times. Actual calls:
+                  cat "$(workspaces.data.path)"/mock_curl.txt
+                  exit 1
+              fi
+
+              [[ $(head -n 1 "$(workspaces.data.path)/mock_curl.txt") == *"ISSUE-123" ]]
+              [[ $(head -n 2 "$(workspaces.data.path)/mock_curl.txt" | tail -n 1) == *"ISSUE-123/transitions" ]]
+              [[ $(tail -n 1 "$(workspaces.data.path)/mock_curl.txt") == *"Content-Type"*"ISSUE-123"* ]]
+      runAfter:
+        - run-task

@@ -1,0 +1,107 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: close-advisory-issues
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >
+    Tekton task to close all issues referenced in the releaseNotes. It is meant to run after
+    the advisory is published. A comment will be added to each closed issue with a link
+    to the advisory it was fixed in
+  params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: advisoryUrl
+      description: The url of the advisory the issues were fixed in. This is added in a comment on the issue
+      type: string
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot spec json file resides
+  steps:
+    - name: close-issues
+      image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+      env:
+        - name: ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: konflux-advisory-jira-secret
+              key: token
+      script: |
+        #!/usr/bin/env bash
+        # We do not set -x here because it would leak the ACCESS_TOKEN
+        set -eu
+
+        ISSUE_TRACKERS='{
+            "Jira": {
+                "api": "rest/api/2/issue",
+                "servers": [
+                    "issues.redhat.com",
+                    "jira.atlassian.com"
+                ]
+            },
+            "bugzilla": {
+                "api": "rest/bug",
+                "servers": [
+                    "bugzilla.redhat.com"
+                ]
+            }
+        }'
+
+        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        RC=0
+
+        NUM_ISSUES=$(jq -cr '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
+        for ((i = 0; i < NUM_ISSUES; i++)); do
+            issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
+            server=$(jq -r '.source' <<< "$issue")
+            if [ "$server" != "issues.redhat.com" ] ; then
+                echo "This task currently only supports closing issues on issues.redhat.com"
+                echo "Skipping issue $issue as it is on $server"
+                continue
+            fi
+
+            CURL_ARGS=(
+              -H "Authorization: Bearer $ACCESS_TOKEN"
+              --retry 3
+              --fail
+            )
+
+            API=$(jq -r '.[] | select(.servers[] | contains("'"$server"'")) | .api' <<< "$ISSUE_TRACKERS")
+            API_URL="https://$(jq -r '.source' <<< "$issue")/${API}/$(jq -r '.id' <<< "$issue")"
+
+            if [ "$(curl "${CURL_ARGS[@]}" "${API_URL}" | jq -r '.fields.status.name')" == "Closed" ] ; then
+                echo "Issue $issue is already in Closed state. Skipping it."
+                continue
+            fi
+
+            echo "Closing issue $issue"
+            # Get the Closed transition id. This varies per Jira project
+            if ! CLOSED_ID="$(curl "${CURL_ARGS[@]}" "${API_URL}/transitions" \
+              | jq -r '.transitions[] | select(.name=="Closed") | .id')"; then
+                echo "Error: failed to fetch the closed state id for issue $issue."
+                RC=1
+                continue
+            fi
+
+            # Close the issue
+            CLOSE_COMMENT="Fixed in Konflux Advisory $(params.advisoryUrl)"
+            if ! curl "${CURL_ARGS[@]}" -XPOST --data \
+              '{"transition":{"id":"'"$CLOSED_ID"'"},"update":{"comment":[{"add":{"body":"'"$CLOSE_COMMENT"'"}}]}}' \
+              -H "Content-Type: application/json" "${API_URL}/transitions"; then
+                echo "Error: failed to close issue $issue."
+                RC=1
+            fi
+        done
+
+        exit $RC
