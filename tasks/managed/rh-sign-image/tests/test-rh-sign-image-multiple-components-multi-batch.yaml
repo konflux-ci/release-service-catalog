@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-sign-index-image-multicomponent
+  name: test-rh-sign-image-multiple-components-multi-batch
 spec:
   description: |
-    Test creating a internal request to sign an image.
-    In this scenario there will be multiple index images to sign.
+    Test creating internal requests to sign images. 
+    This test simulates creating multiple internal requests.
   workspaces:
     - name: tests-workspace
   params:
@@ -60,8 +60,48 @@ spec:
             script: |
               #!/usr/bin/env bash
               set -eux
-
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "registry.io/image0@sha256:0000",
+                    "repository": "quay.io/redhat-pending/prod----repo0",
+                    "rh-registry-repo": "registry.stage.redhat.io/prod/repo0",
+                    "registry-access-repo": "registry.access.stage.redhat.com/prod/repo0",
+                    "tags": [
+                      "some-prefix-12345",
+                      "some-prefix"
+                    ]
+                  },
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1@sha256:0001",
+                    "repository": "quay.io/redhat-pending/prod----repo1",
+                    "rh-registry-repo": "registry.stage.redhat.io/prod/repo1",
+                    "registry-access-repo": "registry.access.stage.redhat.com/prod/repo1",
+                    "tags": [
+                      "some-prefix-12345",
+                      "some-prefix"
+                    ]
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2@sha256:0002",
+                    "repository": "quay.io/redhat-pending/prod----repo2",
+                    "rh-registry-repo": "registry.stage.redhat.io/prod/repo2",
+                    "registry-access-repo": "registry.access.stage.redhat.com/prod/repo2",
+                    "tags": [
+                      "some-prefix-12345",
+                      "some-prefix"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "sign": {
@@ -95,24 +135,11 @@ spec:
                 }
               }
               EOF
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/fbcResults.json" << EOF
-              {
-                  "components": [
-                      {
-                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.15",
-                          "image_digests": [
-                              "sha256:6f9a420f660e73a",
-                              "sha256:6f9a420f660e73b"
-                          ]
-                      },
-                      {
-                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.16",
-                          "image_digests": [
-                              "sha256:6f9a420f660e73c"
-                          ]
-                      }
-                  ]
-              }
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/signRegistryAccess.txt" << EOF
+              prod/repo0
+              prod/repo1
+              prod/repo2
               EOF
           - name: skip-trusted-artifact-operations
             ref:
@@ -142,22 +169,24 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: sign-index-image
+        name: rh-sign-image
       params:
         - name: requester
-          value: testuser
-        - name: referenceImage
-          value: quay.io/testrepo/testimage:tag
-        - name: manifestListDigests
-          value: "sha256:6f9a420f660e73a sha256:6f9a420f660e73b"
+          value: testuser-multiple
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
         - name: dataPath
           value: $(context.pipelineRun.uid)/data.json
         - name: releasePlanAdmissionPath
           value: $(context.pipelineRun.uid)/release_plan_admission.json
-        - name: fbcResultsPath
-          value: $(context.pipelineRun.uid)/fbcResults.json
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: signRegistryAccessPath
+          value: $(context.pipelineRun.uid)/signRegistryAccess.txt
+        - name: batchLimit
+          value: 150
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -172,13 +201,11 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-        - name: pyxisSecret
-          value: test-create-pyxis-image-cert
-      runAfter:
-        - setup
       workspaces:
         - name: data
           workspace: tests-workspace
+      runAfter:
+        - setup
     - name: check-result
       workspaces:
         - name: data
@@ -186,47 +213,72 @@ spec:
       params:
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
-        - name: dataDir
-          value: $(params.dataDir)
       taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
           - name: check-result
             image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              testValues='sha256:6f9a420f660e73a sha256:6f9a420f660e73b sha256:6f9a420f660e73c'
-              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
-              internalRequestsCount=$(echo "$internalRequests" | wc -w)
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
 
-              if [ "$internalRequestsCount" != "1" ] ; then
-                echo "incorrect number of internalRequests created. Expected 1"
-                exit 1
-              fi
+              expectedReferences=()
+              expectedDigests=()
+              for((i=0; i<3; i++)); do
+                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix-12345")
+                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix-12345")
+                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix")
+                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix")
+                expectedDigests+=("sha256:000${i}")
+              done
 
-              expected_references=$(cat << EOF
-              registry.redhat.io/redhat/redhat-operator-index:v4.15
-              registry.redhat.io/redhat/redhat-operator-index:v4.15
-              registry.redhat.io/redhat/redhat-operator-index:v4.16
-              EOF
-              )
-              for internalRequest in ${internalRequests};
-              do
-                params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-
-                if [[ "$(jq -r '.references' <<< "${params}")" \
-                    != $(echo "${expected_references}" | tr '\n' ' ') ]]; then
-                  echo "reference image does not match"
-                  exit 1
-                fi
-
-                manifest_digests=$(jq -r '.manifest_digests' <<< "${params}")
-
-                if [[ ! "$testValues " = "${manifest_digests}" ]]; then
-                  echo "manifest_digest does not match"
-                  exit 1
-                fi
+              foundReferences=()
+              foundDigests=()
+              for((ir=0; ir<irsLength; ir++)); do
+                params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
+                refsValue=$(jq -r '.references' <<< "${params}")
+                manifestDigests=$(jq -r '.manifest_digests' <<< "${params}")
+                for ref in $refsValue; do
+                  foundReferences+=("${ref}")
+                done
+                for digest in $manifestDigests; do
+                  foundDigests+=("${digest}")
+                done
 
                 if [ "$(jq -r '.config_map_name' <<< "${params}")" != "signing-config-map" ]
                 then
@@ -234,19 +286,31 @@ spec:
                   exit 1
                 fi
 
-                if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
-                then
-                  echo "requester does not match"
-                  exit 1
-                fi
-
                 if [ "$(jq -r '.pipeline_image' <<< "${params}")" != \
-                   "quay.io/redhat-isv/operator-pipelines-images:released" ]
+                  "quay.io/redhat-isv/operator-pipelines-images:released" ]
                 then
                   echo "pipeline_image does not match"
                   exit 1
                 fi
               done
+
+              differenceReferences=$(echo "${expectedReferences[@]}" "${foundReferences[@]}" | tr ' ' '\n' | \
+                sort | uniq -u)
+              differenceDigests=$(echo "${expectedDigests[@]}" "${foundDigests[@]}" | tr ' ' '\n' | sort | uniq -u)
+
+              if [ -n "${differenceReferences}" ] ; then
+                echo "error: references expected compared to found do not match"
+                echo ""
+                echo "${differenceReferences}"
+                exit 1
+              fi
+              if [ -n "${differenceDigests}" ] ; then
+                echo "error: digests expected compared to found do not match"
+                echo ""
+                echo "${differenceDigests}"
+                exit 1
+              fi
+
       runAfter:
         - run-task
   finally:
@@ -254,7 +318,7 @@ spec:
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
               #!/usr/bin/env bash
               set -eux
