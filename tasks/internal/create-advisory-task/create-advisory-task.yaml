@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-advisory-task
   labels:
-    app.kubernetes.io/version: "0.12.0"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -142,10 +142,63 @@ spec:
           # This also cds into the git repo
           git_clone_and_checkout --repository "$GIT_REPO" --revision "$REPO_BRANCH"
 
-          # Inject signing key into ADVISORY_JSON
+          CONTENT_IMAGES=$(jq -c '.content.images // []' <<< "$ADVISORY_JSON" )
+
+          # Use ISO 8601 format in UTC/Zulu time, e.g. 2024-03-06T17:27:38Z
+          SHIP_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          YEAR=${SHIP_DATE%%-*} # derive the year from the ship date
+          # Define advisory directory
+          ADVISORY_BASE_DIR="data/advisories/$(params.origin)"
+          echo "Checking advisories in directory: ${ADVISORY_BASE_DIR}"
+
+          # Check existing advisories across ALL years
+          EXISTING_ADVISORIES=$(
+            find "${ADVISORY_BASE_DIR}" -mindepth 2 -type d -printf "%T@ %p\n" |  # year/advisory dir with modified time
+            sort -nr |                                                            # sort by latest modified first
+            cut -d' ' -f2- |                                                      # remove the timestamp, keep only path
+            sed "s|^${ADVISORY_BASE_DIR}/||"                                      # keeping year/advisory format
+          )
+
+          if [[ -z "$EXISTING_ADVISORIES" ]]; then
+              echo "No existing advisories found."
+          fi
+
+          for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
+              ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
+              EXISTING_CONTENT=$(yq -o=json '.spec.content.images // []' "${ADVISORY_FILE}")
+
+              echo "Processing advisory: ${ADVISORY_FILE}"
+              echo "Existing images in advisory: $EXISTING_CONTENT"
+
+              # Update CONTENT_IMAGES by removing images that already exist in the advisory
+              CONTENT_IMAGES=$(echo "$CONTENT_IMAGES" | jq --argjson existing "$EXISTING_CONTENT" '
+                map(select(
+                  .containerImage as $ci |
+                  .tags as $tags |
+                  .repository as $repo |
+                  ($existing | map(select(
+                    .containerImage == $ci and .tags == $tags and .repository == $repo
+                  )) | length == 0)
+                ))')
+
+              echo "Remaining images after filtering: $CONTENT_IMAGES"
+          done
+
+          # If after filtering, no images are left, then we can exit early
+          if jq -e 'length == 0' <<< "$CONTENT_IMAGES" >/dev/null; then
+              echo "Matching advisory exists: ${ADVISORY_FILE}. Skipping creation."
+              ADVISORY_URL="${GIT_REPO//\.git/}/-/blob/main/${ADVISORY_FILE}"
+              echo -n "Success" > "$(results.result.path)"
+              echo -n "${ADVISORY_URL}" > "$(results.advisory_url.path)"
+              exit 0
+          fi
+
+          NEW_ADVISORY_JSON=$(echo "$ADVISORY_JSON" | jq --argjson new_images "$CONTENT_IMAGES" \
+            '.content.images = $new_images')
+
           signingKey=$(kubectl get configmap "$(params.config_map_name)" -o jsonpath="{.data.SIG_KEY_NAME}")
           advisoryJsonWithKey=$(jq -c --arg key "$signingKey" \
-            '.content.images[] += {"signingKey": $key}' <<< "$ADVISORY_JSON")
+            '.content.images[] += {"signingKey": $key}' <<< "$NEW_ADVISORY_JSON")
 
           # write keytab to file
           echo -n "${SERVICE_ACCOUNT_KEYTAB}" | base64 --decode > /tmp/keytab
@@ -161,9 +214,6 @@ spec:
           ID=$(curl --retry 3 --negotiate -u : "${ERRATA_API}/advisory/reserve_live_id" -XPOST | jq -r '.live_id')
           ADVISORY_NUM=$(printf "%04d" "$ID")
 
-          # Use ISO 8601 format in UTC/Zulu time, e.g. 2024-03-06T17:27:38Z
-          SHIP_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          YEAR=${SHIP_DATE%%-*} # derive the year from the ship date
           # group advisories by <origin workspace>/year
           ADVISORY_DIR="data/advisories/$(params.origin)/${YEAR}/${ADVISORY_NUM}"
           mkdir -p "${ADVISORY_DIR}"

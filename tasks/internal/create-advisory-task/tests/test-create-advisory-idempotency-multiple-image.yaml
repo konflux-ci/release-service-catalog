@@ -1,0 +1,77 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-idempotency-multiple-image
+spec:
+  description: |
+    Verifies the idempotency behavior of the advisory creation process when multiple container images are provided
+    in the advisory_json. This test supplies three images (alpha123, beta123, gamma123), of which
+    alpha123 and beta123 are already present in existing advisories(Mock scenraio).
+    The task is expected to recognize these and only create a new advisory for the remaining image (gamma123).
+    The test passes if only the unmatched image is included in the resulting advisory and the advisory URL matches the
+    expected value.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: create-advisory-task
+      params:
+        - name: advisory_json
+          value: >-
+            {"product_id":123,"product_name":"Red Hat Product","product_version":"1.2.3","product_stream":"tp1",
+            "cpe":"cpe:/a:example:product:el8","type":"RHSA","synopsis":"test synopsis","topic":"test topic",
+            "description":"test description","solution":"test solution","references":["https://docs.example.com/notes"],
+            "content":{"images":[{"containerImage":"quay.io/example/release@sha256:alpha123",
+            "repository":"example-stream/release","tags":["v1.0", "latest"],"architecture":"amd64",
+            "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8","cves":{"fixed":{
+            "CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}},{"containerImage":"quay.io/example/release@sha256:beta123",
+            "repository":"example-stream/release","tags":["v2.0", "stable"],"architecture":"amd64",
+            "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8","cves":{"fixed":{
+            "CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}},{"containerImage":"quay.io/example/release@sha256:gamma123",
+            "repository":"rhosp16-rhel8/openstack","tags":["v3.0", "stable"],"architecture":"amd64",
+            "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8","cves":{"fixed":{
+            "CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}}]}}
+        - name: origin
+          value: dev-tenant
+        - name: application
+          value: "test-app"
+        - name: config_map_name
+          value: "create-advisory-test-cm"
+        - name: advisory_secret_name
+          value: "create-advisory-secret"
+        - name: errata_secret_name
+          value: "create-advisory-errata-secret"
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+    - name: check-result
+      params:
+        - name: advisory-url
+          value: $(tasks.run-task.results.advisory_url)
+        - name: result-status
+          value: $(tasks.run-task.results.result)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: advisory-url
+            type: string
+          - name: result-status
+            type: string
+        steps:
+          - name: verify-idempotency
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              EXPECTED_URL="https://gitlab.com/org/repo/-/blob/main/data/advisories/dev-tenant/2024/1234/advisory.yaml"
+
+              if [[ "$(params.result-status)" != "Success" ]]; then
+                  echo "Task did not succeed. Status: $(params.result-status)"
+                  exit 1
+              fi
+
+              if [[ "$(params.advisory-url)" != "$EXPECTED_URL" ]]; then
+                  echo "Unexpected advisory URL: $(params.advisory-url)"
+                  exit 1
+              fi
