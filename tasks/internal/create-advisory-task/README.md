@@ -16,6 +16,9 @@ internal request. The success/failure is handled in the task creating the intern
 | errata_secret_name             | The name of the secret that contains the errata service account metadata                               | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 
+## Changes in 1.0.0
+* Make create advisory task idempotent
+
 ## Changes in 0.12.0
 * Updated logging
   * Use a STDERR_FILE and tail it into the `result` task result so that the calling task has better

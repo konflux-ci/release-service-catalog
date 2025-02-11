@@ -17,6 +17,54 @@ function git() {
   fi
 }
 
+function find() {
+  echo "Mock find called with: $*" >&2
+
+  if echo "$*" | grep -q "${ADVISORY_BASE_DIR}"; then
+    echo "${ADVISORY_BASE_DIR}/2025/1602/advisory.yaml"  # Contains image-beta
+    echo "${ADVISORY_BASE_DIR}/2025/1601/advisory.yaml"  # Contains image-alpha
+    echo "${ADVISORY_BASE_DIR}/2024/1452/advisory.yaml"
+    echo "${ADVISORY_BASE_DIR}/2024/1442/advisory.yaml"
+  else
+    echo "Error: Unexpected find command: $*" >&2
+    exit 1
+  fi
+}
+
+function cat() {
+  echo "Mock cat called with: $*" >&2
+
+  if [[ -z "$1" ]]; then
+    echo "Error: Empty file path in cat command" >&2
+    exit 1
+  fi
+
+  advisory_path="$1"
+  advisory_year=$(echo "$advisory_path" | awk -F'/' '{print $(NF-2)}')  # Extract Year
+  advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')   # Extract Advisory Number
+
+  echo "Returning advisory for ${advisory_year}/${advisory_num}" >&2
+
+  case "$advisory_num" in
+    1601)
+      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"release-manager-alpha","containerImage":"quay.io/example/release@sha256:alpha123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v1.0","latest"]}]}}}'
+    ;;
+    1602)
+      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"release-manager-beta","containerImage":"quay.io/example/release@sha256:beta123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v2.0","stable"]}]}}}'
+    ;;
+    1442)
+      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:abde","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["v1.0","latest"]}]}}}'
+    ;;
+    1452)
+      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:lmnop","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["latest"]}]}}}'
+    ;;
+    *)
+      echo "Error: Unexpected advisory number $advisory_num" >&2
+      exit 1
+    ;;
+  esac
+}
+
 function glab() {
   echo "Mock glab called with: $*"
 
