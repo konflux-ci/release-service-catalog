@@ -1,0 +1,98 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-push-rpm-params
+spec:
+  description: |
+    Test the collect-push-rpm-params task.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              set -eux
+
+              cat > "$(workspaces.data.path)"/data.json << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test",
+                      "pushSourceContainer": false,
+                      "repository": "quay.io/test/test"
+                    },
+                    {
+                      "name": "test-foo",
+                      "pushSourceContainer": false,
+                      "repository": "quay.io/test/test-foo"
+                    }
+                  ]
+                },
+                "pushOptions": {
+                  "koji_cmd": "koji",
+                  "koji_env": "stage",
+                  "koji_tags": [
+                    "test-rpm"
+                  ],
+                  "pushKeytab": {
+                    "name": "test.keytab",
+                    "principal": "test@test.com",
+                    "secret": "test-secrets"
+                  },
+                  "pushPipelineImage": "test-image"
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: collect-push-rpm-params
+      params:
+        - name: dataPath
+          value: "$(workspaces.data.path)/data.json"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: pushSecret
+          value: $(tasks.run-task.results.secret)
+        - name: pipelineImage
+          value: $(tasks.run-task.results.pipelineImage)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: pushSecret
+            type: string
+          - name: pipelineImage
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              set -eux
+
+              SECRET="$(params.pushSecret)"
+              IMAGE="$(params.pipelineImage)"
+
+              if [ "$SECRET" != "test-secrets" ] || [ "$IMAGE" != "test-image" ]; then
+                echo "Error: Test fetching secrets failed!"
+                exit 1
+              fi
+      runAfter:
+        - run-task

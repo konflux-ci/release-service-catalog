@@ -1,0 +1,155 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-rpm-to-koji
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: push-koji
+spec:
+  params:
+    - name: snapshotPath
+      type: string
+      description: |
+        Path to the JSON file of the mapped Snapshot spec in the data workspace.
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace.
+    - name: pushSecret
+      type: string
+      description: |
+        The secret that is used for login koji instance.
+    - name: subdirectory
+      type: string
+      description: |
+        The pipeline specific directory.
+    - name: pipelineImage
+      type: string
+      description: |
+        The image url with koji, kinit installed for running the push-rpm-to-koji task,
+        please make sure you have such image or you build this image first.
+  steps:
+    - name: push-rpm-to-koji
+      # The pipelineImage will be fetching from get-secrets task with koji installed there
+      image: "$(params.pipelineImage)"
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        SNAPSHOT_SPEC_FILE="$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        DATA_FILE="$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+
+        PRINCIPAL=$(jq -r '.pushOptions.pushKeytab.principal' "${DATA_FILE}")
+        KEYTAB_FILE=$(jq -r '.pushOptions.pushKeytab.name' "${DATA_FILE}")
+        KOJI_CMD=$(jq -r '.pushOptions.koji_cmd' "${DATA_FILE}")
+        KOJI_TAGS=$(jq -r '.pushOptions.koji_tags  | join(" ")' "${DATA_FILE}")
+
+        # Fetch the component list from data.pushOptions.components by default, if there is no such list
+        # fetch from data.mapping.components.
+        RELEASE_COMPONENTS=$(jq -r '
+            if .pushOptions.components then
+                .pushOptions.components[]
+            else
+                empty
+            end' "${DATA_FILE}")
+        if [ -z "$RELEASE_COMPONENTS" ]; then
+            RELEASE_COMPONENTS=$(jq -r '.mapping.components[].name' "$DATA_FILE")
+        fi
+
+        KRB5CCNAME=FILE:/tmp/krb5cc_"$(id -u)"
+        export KRB5CCNAME
+
+        cd "$(params.subdirectory)"
+
+        # The secrets are base64 when it is mounted as remote secrets otherwise we can directly use.
+        if [ -f /tmp/secret/base64_keytab ]; then
+            base64 -d /tmp/secret/base64_keytab > ./"$KEYTAB_FILE"
+        else
+            cp /tmp/secret/"$KEYTAB_FILE" ./"$KEYTAB_FILE"
+        fi
+
+        TRIES=10
+        while [ $TRIES -gt 0 ] ; do
+            if kinit -kt ./"$KEYTAB_FILE" "$PRINCIPAL"; then
+                break
+            fi
+            TRIES=$((TRIES - 1))
+        done
+
+        USER_NAME=$(echo "$PRINCIPAL" | cut -d'@' -f1)
+
+        # Test the koji connection
+        $KOJI_CMD hello
+
+        printf 'Start task "%s" for Application "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+          containerImage=$(jq -r '.containerImage' <<< "$component")
+          componentName=$(jq -r '.name' <<< "$component")
+
+          # Use printf to join the array elements and grep to check for the presence of the variable
+          if ! printf "%s\n" "${RELEASE_COMPONENTS[@]}" | grep -q -x "$componentName"; then
+              printf "Skip the component %s as it is not in the release list.\n" "$componentName"
+              continue
+          fi
+
+          mkdir temp && cd temp
+
+          # The login serviceaccount should have the dockerconfig to pull the images
+          oras pull "$containerImage"
+
+          SRPM=$(ls ./*.src.rpm)
+          PACKAGE_NVR=$(basename "$SRPM" .src.rpm)
+
+          if $KOJI_CMD buildinfo "$PACKAGE_NVR" >/dev/null 2>&1;  then
+              printf "Skip import %s into BREW as it's exist ...\n" "$PACKAGE_NVR"
+              cd .. && rm -rf temp
+              continue
+          fi
+
+          printf "Import rpm %s with tags $KOJI_TAGS ...\n" "$PACKAGE_NVR"
+
+          $KOJI_CMD import-cg cg_import.json "$(pwd)"
+
+          PACKAGE_NAME=$(jq -r '.build.name' cg_import.json)
+
+          for BREW_TAG in $KOJI_TAGS; do
+              if ! $KOJI_CMD list-pkgs --tag "$BREW_TAG" | grep "$PACKAGE_NAME" >/dev/null 2>&1;  then
+                  $KOJI_CMD --force add-pkg "$BREW_TAG" "$PACKAGE_NAME" --owner "$USER_NAME"
+              fi
+              $KOJI_CMD tag-build "$BREW_TAG" "$PACKAGE_NVR"
+          done
+
+          # Clean up to handle next component
+          cd .. && rm -rf temp
+        done
+
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+      workingDir: $(workspaces.data.path)
+      volumeMounts:
+        - mountPath: /tmp/secret
+          name: secret-volume
+          readOnly: true
+  volumes:
+    - name: secret-volume
+      secret:
+        secretName: $(params.pushSecret)
+  workspaces:
+    - name: data
