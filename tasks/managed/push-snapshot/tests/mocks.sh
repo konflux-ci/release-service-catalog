@@ -36,9 +36,10 @@ function cosign() {
 function skopeo() {
   echo Mock skopeo called with: $* >&2
   echo $* >> "$(workspaces.data.path)"/mock_skopeo.txt
-
-  if [[ "$*" == "inspect --raw docker://"* ]]
-  then
+  if [[ "$*" == "inspect --raw docker://reg.io/test@sha256:abcdefg" ]]; then
+    echo '{"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [{"platform":{"os":"linux","architecture":"amd64"}}, {"platform":{"os":"linux","architecture":"ppc64le"}}]}'
+    return
+  elif [[ "$*" == "inspect --raw docker://"* ]]; then
     echo '{"mediaType": "my_media_type"}'
     return
   fi
@@ -49,8 +50,8 @@ function skopeo() {
 }
 
 function get-image-architectures() {
-    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
-    echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+  echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+  echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
 }
 
 function select-oci-auth() {
@@ -59,9 +60,20 @@ function select-oci-auth() {
 
 function oras() {
   echo $* >> "$(workspaces.data.path)"/mock_oras.txt
-  if [[ "$*" == "resolve --registry-config "*" "* ]]
-  then
-    if [[ "$4" == *skip-image*.src || "$4" == *skip-image*-source ]]; then
+  if [[ "$*" == "resolve --registry-config "*" "* ]]; then
+    if [[ "$*" =~ "--platform" && "$4" =~ ".src" ]]; then
+      echo "Error: .src images should not use --platform" >&2
+      exit 1
+    fi
+    if [[ "$4" == "reg.io/test@sha256:abcdefg" ]]; then
+      echo "sha256:abcdefg"
+    elif [[ "$4" == "reg.io/test:sha256-abcdefg.src" ]]; then
+      echo "sha256:abcdefg"
+    elif [[ "$4" == "prod.io/loc:sha256-abcdefg.src" ]]; then
+      echo "sha256:abcdefg"
+    elif [[ "$4" == "prod.io/loc:multi-tag-source" ]]; then
+      echo "sha256:abcdefg"
+    elif [[ "$4" == *skip-image*.src || "$4" == *skip-image*-source ]]; then
       echo "sha256:000000"
     elif [[ "$4" == *skip-image* ]]; then
       echo "sha256:111111"
