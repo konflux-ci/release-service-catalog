@@ -19,23 +19,34 @@ function oras() {
         exit 1
     elif [[ "$*" == "pull --registry-config"* ]]; then
         echo "Mocking pulling files"
-        touch binary-windows-amd64.zip
-        touch binary-darwin-amd64.tar.gz
-        touch binary-linux-amd64.tar.gz
+        if [[ "$4" =~ "ghijkl67890" ]]; then
+            touch testproduct2-binary-windows-amd64.zip
+            touch testproduct2-binary-darwin-amd64.tar.gz
+            touch testproduct2-binary-linux-amd64.tar.gz
+        fi
+        touch testproduct-binary-windows-amd64.zip
+        touch testproduct-binary-darwin-amd64.tar.gz
+        touch testproduct-binary-linux-amd64.tar.gz
     elif [[ "$*" =~ pull.* ]]; then
         echo Simulating oras pull
         mkdir -p windows linux macos
-        touch windows/binary-windows-amd64.exe
-        touch linux/binary-linux-amd64
-        touch macos/binary-darwin-amd64
+        touch windows/testproduct-binary-windows-amd64.exe
+        touch linux/testproduct-binary-linux-amd64
+        touch macos/testproduct-binary-darwin-amd64
+        # when testing with multiple components
+        if [ -f "/shared/artifacts/linux/testproduct2-binary-linux-amd64" ]; then
+            touch windows/testproduct2-binary-windows-amd64.exe
+            touch linux/testproduct2-binary-linux-amd64
+            touch macos/testproduct2-binary-darwin-amd64
+        fi
     fi
-    touch fail_gzip.raw.gz
+    touch testproduct-fail_gzip.raw.gz
 }
 
 # We aren't going to pull real files that can be unzipped, so just remove the .gz suffix on them
 function ziputil() {
     echo Mock a compressing tool with: $*
-    if [ "$2" == "fail_gzip.raw.gz" ] ; then
+    if [[ "$2" =~ "fail_gzip.raw.gz" ]] ; then
         echo gzip failed >&2
         exit 1
     fi

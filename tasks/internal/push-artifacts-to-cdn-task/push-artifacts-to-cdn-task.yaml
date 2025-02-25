@@ -146,7 +146,8 @@ spec:
                 echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
                   > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -167,11 +168,11 @@ spec:
         process_component() { # Expected argument is [component json]
             COMPONENT=$1
             PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}") \
-                  || (echo "Missing containerImage for component." && exit 1 )
+                  || (echo "Missing containerImage for component." >&2 && exit 1 )
 
             DESTINATION="${DISK_IMAGE_DIR}/$(jq -er '.staged.destination' <<< "${COMPONENT}")/FILES" \
               || (echo "Missing staged.destination value for component. This should be an existing pulp repo. \
-                  Failing" && exit 1)
+                  Failing" >&2 && exit 1)
             mkdir -p "${DESTINATION}"
             DOWNLOAD_DIR=$(mktemp -d)
             cd "$DOWNLOAD_DIR"
@@ -184,9 +185,9 @@ spec:
             for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
                 FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
                 SOURCE=$(jq -er '.source' <<< "$FILE") \
-                  || (echo "Missing staged.files.source for component." && exit 1 )
+                  || (echo "Missing staged.files.source for component." >&2 && exit 1 )
                 FILENAME=$(jq -er '.filename' <<< "$FILE") \
-                  || (echo "Missing staged.files.filename for component." && exit 1 )
+                  || (echo "Missing staged.files.filename for component." >&2 && exit 1 )
                 # The .qcow2 images are not zipped
                 if [ -f "${SOURCE}.gz" ] ; then
                     gzip -d "${SOURCE}.gz"
@@ -260,7 +261,8 @@ spec:
                 echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
                   > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -408,7 +410,8 @@ spec:
                 echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
                   > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -545,7 +548,8 @@ spec:
                 echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
                   > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -677,7 +681,8 @@ spec:
                 echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
                   > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -773,6 +778,77 @@ spec:
         "${SIGNED_DIR}/sha256sum.txt.gpg"
 
         mv "$SHA_SUM_PATH" "${SIGNED_DIR}/sha256sum.txt"
+
+    - name: compress-artifacts
+      image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+      env:
+        - name: "SNAPSHOT_JSON"
+          value: "$(params.snapshot_json)"
+      script: |
+        #!/usr/bin/env bash
+        set -eu
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        # trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        CONTENT_DIR=/shared/artifacts
+        COMPRESSED_DIR="$CONTENT_DIR/compressed"
+
+        function compress_components {
+          mkdir -p "$COMPRESSED_DIR"
+          COMPONENT_JSON="$1"
+          NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT_JSON}")
+          for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
+            FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
+            SOURCE=$(jq -er '.source' <<< "$FILE") \
+              || (echo "Missing staged.files.source for component." && exit 1 )
+            BINARY=$(jq -er '.binary' <<< "$FILE")
+            case "${SOURCE}" in
+              (*darwin*)
+                tar -czf "${COMPRESSED_DIR}/${SOURCE}" -r "macos/${BINARY}"
+                ;;
+              (*linux*)
+                tar -czf "${COMPRESSED_DIR}/${SOURCE}" -r "linux/${BINARY}"
+                ;;
+              (*windows*)
+                zip -r "${COMPRESSED_DIR}/${SOURCE}" "windows/${BINARY}"
+                ;;
+            esac
+          done
+        }
+
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)) ; do
+            COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+            compress_components "$COMPONENT" 2> "$STDERR_FILE"
+        done
+
     - name: push-artifacts
       image: quay.io/konflux-ci/release-service-utils:7835e32b1974f956a6c942e24adbc79705cab12e
       volumeMounts:
@@ -857,7 +933,8 @@ spec:
             else
                 echo "$0: ERROR '$command' failed at line $line - exited with status $err" > "$(results.result.path)"
                 if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" | tee -a "$(results.result.path)"
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
                 fi
             fi
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
@@ -887,7 +964,7 @@ spec:
         echo "$UDC_KEY" > "$UDCACHE_KEY"
         set -x
 
-        DISK_IMAGE_DIR="/shared/artifacts/signed"
+        DISK_IMAGE_DIR="/shared/artifacts/compressed"
         export DISK_IMAGE_DIR
 
         process_component_for_developer_portal() { # Expected argument are [component json], [content_directory]
@@ -957,6 +1034,7 @@ spec:
               '.payload.files[.payload.files | length] =
               {"filename": $filename, "relative_path": $path, "version": $version}' <<< "$STAGED_JSON")
         done < <(find * -type f -print0)
+        set -x
 
         echo "$STAGED_JSON" | yq -P -I 4 > staged.yaml
 
@@ -977,6 +1055,5 @@ spec:
         NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
         for ((i = 0; i < NUM_COMPONENTS; i++)) ; do
             COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            # eventually the function does not redirect the error to stderr, so looking for all output
             process_component_for_developer_portal "$COMPONENT" "${component_destinations[$i]}" 2> "$STDERR_FILE"
         done
