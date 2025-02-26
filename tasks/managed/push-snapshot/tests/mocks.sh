@@ -72,7 +72,7 @@ function oras() {
       echo "sha256:abcd"
     elif [[ "$4" == "reg.io/test:sha256-abcd.src" ]]; then
       echo "sha256:xyz"
-    elif [[ "$4" == "prod.io/loc:sha256-xyz.src" ]]; then
+    elif [[ "$4" == "prod.io/loc:sha256-abcd.src" ]]; then
       echo "sha256:xyz"
     elif [[ "$4" == "prod.io/loc:multi-tag-source" ]]; then
       echo "sha256:xyz"
@@ -87,6 +87,8 @@ function oras() {
     fi
     return
   else
-    echo Mock oras called with: $*; echo Error: Unexpected call; exit 1
+    echo Mock oras called with: $*
+    echo Error: Unexpected call
+    exit 1
   fi
 }
