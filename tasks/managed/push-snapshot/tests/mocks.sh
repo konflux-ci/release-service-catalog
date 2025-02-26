@@ -4,9 +4,14 @@ set -eux
 function cosign() {
   echo Mock cosign called with: $*
   echo $* >> "$(workspaces.data.path)"/mock_cosign.txt
-  if [[ "$*" == "copy -f registry.io/retry-image:tag "*":"* ]]; then
-    if [[ "$(wc -l < "$(workspaces.data.path)/mock_cosign.txt")" -le 3 ]]; then
-      echo Expected cosign call failure for retry test; return 1
+
+  # mock cosign failing the first 3x for the retry test
+  if [[ "$*" == "copy -f registry.io/retry-image:tag "*":"* ]]
+  then
+    if [[ "$(wc -l < "$(workspaces.data.path)/mock_cosign.txt")" -le 3 ]]
+    then
+      echo Expected cosign call failure for retry test
+      return 1
     fi
   fi
 
@@ -36,7 +41,10 @@ function skopeo() {
     echo '{"mediaType": "my_media_type"}'
     return
   fi
-  echo Error: Unexpected call; exit 1
+
+  # If neither of the above matched, it's an unexpected call
+  echo Error: Unexpected call
+  exit 1
 }
 
 function get-image-architectures() {
@@ -60,14 +68,14 @@ function oras() {
       echo "Error: .src images should not use --platform" >&2
       exit 1
     fi
-    if [[ "$4" == "registry.io/multiarch-test@sha256:xyz789" ]]; then
-      echo "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
-    elif [[ "$4" == "registry.io/multiarch-test:sha256-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.src" ]]; then
-      echo "sha256:0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba"
-    elif [[ "$4" == "prod-registry.io/prod-location:sha256-1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.src" ]]; then
-      echo "sha256:0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba"
+    if [[ "$4" == "registry.io/multiarch-test@sha256:abcd" ]]; then
+      echo "sha256:abcd"
+    elif [[ "$4" == "registry.io/multiarch-test:sha256-abcd.src" ]]; then
+      echo "sha256:xyz"
+    elif [[ "$4" == "prod-registry.io/prod-location:sha256-xyz.src" ]]; then
+      echo "sha256:xyz"
     elif [[ "$4" == "prod-registry.io/prod-location:multi-tag-source" ]]; then
-      echo "sha256:0987654321fedcba0987654321fedcba0987654321fedcba0987654321fedcba"
+      echo "sha256:xyz"
     elif [[ "$4" == *skip-image*.src || "$4" == *skip-image*-source ]]; then
       echo "sha256:000000"
     elif [[ "$4" == *skip-image* ]]; then
