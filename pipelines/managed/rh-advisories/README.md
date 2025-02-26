@@ -23,6 +23,10 @@ the rh-push-to-registry-redhat-io pipeline.
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
 
+## Changes in 1.11.1
+* Task `embargo-check` is set to run after `check-data-keys` as it will inject the `public` key to each issue,
+  which isn't in the schema
+
 ## Changes in 1.11.0
 * Add new task `close-advisory-issues` to close all issues listed in the releaseNotes after the advisory is published
 

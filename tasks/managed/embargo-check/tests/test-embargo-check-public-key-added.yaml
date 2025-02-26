@@ -1,0 +1,113 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-embargo-check-rh-issue-public-key-added
+spec:
+  description: |
+    Test for embargo-check with 4 issues. One is not from issues.redhat.com so should have no
+    public key added. Two are private and should have the key added with false (one because
+    it has a security field, one because it can only be seen with authenticated curl). The final
+    one is public because it can be seen without authentication. Ensure the public keys are all
+    properly added.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "releaseNotes": {
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "PUBLIC-1",
+                        "source": "issues.redhat.com"
+                      },
+                      {
+                        "id": "PRIVATE-1",
+                        "source": "issues.redhat.com"
+                      },
+                      {
+                        "id": "PRIVATE-2",
+                        "source": "issues.redhat.com"
+                      },
+                      {
+                        "id": "12345",
+                        "source": "bugzilla.redhat.com"
+                      }
+                    ]
+                  },
+                  "content": {
+                    "images": [
+                      {
+                        "component": "my-component",
+                        "architecture": "x86_64",
+                        "containerImage": "registry.io/org/repo",
+                        "cves": {
+                          "fixed": {
+                            "CVE-123": {
+                              "packages": []
+                            }
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: embargo-check
+      params:
+        - name: dataPath
+          value: data.json
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              test "$(jq -r '.releaseNotes.issues.fixed[] | select(.id=="PUBLIC-1") | .public' \
+                "$(workspaces.data.path)/data.json")" == true
+
+              test "$(jq -r '.releaseNotes.issues.fixed[] | select(.id=="PRIVATE-1") | .public' \
+                "$(workspaces.data.path)/data.json")" == false
+
+              test "$(jq -r '.releaseNotes.issues.fixed[] | select(.id=="PRIVATE-2") | .public' \
+                "$(workspaces.data.path)/data.json")" == false
+
+              test "$(jq -r '.releaseNotes.issues.fixed[] | select(.id=="12345") | has("public")' \
+                "$(workspaces.data.path)/data.json")" == false
+      runAfter:
+        - run-task

@@ -5,6 +5,9 @@ by server using curl and checks the CVEs via an InternalRequest. If any issue do
 the task will fail. The task will also fail if a Jira issue listed is for a component that does not exist in the
 releaseNotes.content.images section or if said component does not list the CVE from the issue.
 
+Finally, the task will inject the `public` key to each issue listed for `issues.redhat.com`. This is a boolean value that is set
+based on the issues visibility
+
 ## Parameters
 
 | Name                     | Description                                                                               | Optional | Default value |
@@ -14,6 +17,10 @@ releaseNotes.content.images section or if said component does not list the CVE f
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -             |
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
+
+## Changes in 1.1.0
+* The task injects the `public` key to each issue for the `issues.redhat.com` server based on if the issue is
+  publicly visible
 
 ## Changes in 1.0.0
 * Authentication is added to checking issues in issues.redhat.com

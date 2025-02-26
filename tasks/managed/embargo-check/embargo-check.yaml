@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: embargo-check
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "1.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -99,14 +99,31 @@ spec:
             fi
             set -x
 
-            # Perform additional checks only for Vulnerability issues for issues.redhat.com
+            # Perform additional checks only for issues on issues.redhat.com
             if [ "$server" != "issues.redhat.com" ] ; then
                 continue
             fi
+
+            # Public should be true if and only if the security field doesn't exist and the issue is accessible
+            # without authentication
+            public=false
+
+            if ! "$(jq '.fields | has("security")' <<< "$OUTPUT")" ; then
+                if curl -o /dev/null --retry 3 --fail "${API_URL}" ; then
+                    public=true
+                fi
+            fi
+
+            # Inject public key
+            jq --argjson i "$i" --argjson public $public '.releaseNotes.issues.fixed[$i].public = $public' \
+                "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
+
+            # Perform cve specific checks only if the type is Vulnerability
             ISSUE_TYPE=$(jq -r '.fields.issuetype.name' <<< "$OUTPUT")
             if [ "$ISSUE_TYPE" != "Vulnerability" ] ; then
                 continue
             fi
+
             CVE_ID=$(jq -r --arg field "$CVE_FIELD" '.fields[$field]' <<< "$OUTPUT")
             COMPONENT_NAME=$(jq -r --arg field "$COMPONENT_FIELD" '.fields[$field]' <<< "$OUTPUT")
             if ! COMPONENT_IN_RELEASE_NOTES="$(jq -ec --arg name "$COMPONENT_NAME" \

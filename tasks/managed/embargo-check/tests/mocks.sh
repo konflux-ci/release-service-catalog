@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -x
 
 # mocks to be injected into task step scripts
 function curl() {
@@ -20,10 +20,23 @@ function curl() {
     exit 1
   elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/FEATURE-123" ]] # Not a Vulnerability
   then
-    echo '{"fields":{"issuetype":{"name":"Feature"}}}'
+    echo '{"fields":{"issuetype":{"name":"Feature"},"security":"a"}}'
   elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/CVE-123" ]] # Vulnerability
   then
-    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-123","customfield_12324752":"my-component"}}'
+    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-123","customfield_12324752":"my-component","security":"a"}}'
+  elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PUBLIC-1" ]] # Public: no security field, works without auth
+  then
+    echo '{"fields":{"foo":"bar"}}'
+  elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PRIVATE-1" ]] # Private: no security field, works with auth but not without
+  then
+    if [[ "$*" == *"Authorization: Bearer"* ]] ; then
+      :
+    else
+      return 1
+    fi
+  elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PRIVATE-2" ]] # Private: has security field
+  then
+    echo '{"fields":{"security":"bar"}}'
   else
     echo Error: Unexpected call
     exit 1
