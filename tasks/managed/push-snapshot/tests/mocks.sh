@@ -34,7 +34,7 @@ function cosign() {
 function skopeo() {
   echo Mock skopeo called with: $* >&2
   echo $* >> "$(workspaces.data.path)"/mock_skopeo.txt
-  if [[ "$*" == "inspect --raw docker://registry.io/multiarch-test@sha256:xyz789" ]]; then
+  if [[ "$*" == "inspect --raw docker://reg.io/test@sha256:abcd" ]]; then
     echo '{"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [{"platform":{"os":"linux","architecture":"arm64"}}, {"platform":{"os":"linux","architecture":"amd64"}}]}'
     return
   elif [[ "$*" == "inspect --raw docker://"* ]]; then
@@ -48,8 +48,8 @@ function skopeo() {
 }
 
 function get-image-architectures() {
-  if [[ "$1" == "registry.io/multiarch-test@sha256:xyz789" ]]; then
-    echo '{"platform":{"architecture": "arm64", "os": "linux"}, "digest": "xyz789"}'
+  if [[ "$1" == "reg.io/test@sha256:abcd" ]]; then
+    echo '{"platform":{"architecture": "arm64", "os": "linux"}, "digest": "abcd"}'
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "deadbeef"}'
   else
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
@@ -68,13 +68,13 @@ function oras() {
       echo "Error: .src images should not use --platform" >&2
       exit 1
     fi
-    if [[ "$4" == "registry.io/multiarch-test@sha256:abcd" ]]; then
+    if [[ "$4" == "reg.io/test@sha256:abcd" ]]; then
       echo "sha256:abcd"
-    elif [[ "$4" == "registry.io/multiarch-test:sha256-abcd.src" ]]; then
+    elif [[ "$4" == "reg.io/test:sha256-abcd.src" ]]; then
       echo "sha256:xyz"
-    elif [[ "$4" == "prod-registry.io/prod-location:sha256-xyz.src" ]]; then
+    elif [[ "$4" == "prod.io/loc:sha256-xyz.src" ]]; then
       echo "sha256:xyz"
-    elif [[ "$4" == "prod-registry.io/prod-location:multi-tag-source" ]]; then
+    elif [[ "$4" == "prod.io/loc:multi-tag-source" ]]; then
       echo "sha256:xyz"
     elif [[ "$4" == *skip-image*.src || "$4" == *skip-image*-source ]]; then
       echo "sha256:000000"
@@ -87,8 +87,6 @@ function oras() {
     fi
     return
   else
-    echo Mock oras called with: $*
-    echo Error: Unexpected call
-    exit 1
+    echo Mock oras called with: $*; echo Error: Unexpected call; exit 1
   fi
 }
