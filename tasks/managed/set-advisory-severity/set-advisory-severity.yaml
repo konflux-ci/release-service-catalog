@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: set-advisory-severity
   labels:
-    app.kubernetes.io/version: "0.1.1"
+    app.kubernetes.io/version: "0.1.2"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -46,13 +46,22 @@ spec:
             exit 1
         fi
 
-        if [[ "$(jq -r '.releaseNotes.type' "${DATA_FILE}")" != "RHSA" ]] ; then
+        advisoryType=$(jq -r '.releaseNotes.type' "${DATA_FILE}")
+        if [[ "$advisoryType" != "RHSA" ]] ; then
             echo "Advisory is not of type RHSA. Not setting severity"
             if [ "$(jq '.releaseNotes | has("severity")' "${DATA_FILE}")" == "true" ] ; then
               echo "User provided severity key for non RHSA advisory. Removing it"
               jq 'del(.releaseNotes.severity)' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
             fi
             exit 0
+        fi
+
+        # Ensure RHSA is only used if CVEs are provided
+        NUM_CVES=$(jq '[.releaseNotes.content.images[]?.cves.fixed // [] | length] | add' "${DATA_FILE}")
+        if [[ "$advisoryType" == "RHSA" ]] && [[ "$NUM_CVES" -eq 0 ]] ; then
+            echo "Provided advisory type is RHSA, but no fixed CVEs were listed"
+            echo "RHSA should only be used if CVEs are fixed in the advisory. Failing..."
+            exit 1
         fi
 
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
