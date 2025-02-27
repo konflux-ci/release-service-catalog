@@ -12,3 +12,6 @@ impact from all of the CVEs is returned as a task result.
 |--------------------------------|-------------------------------------------------------|----------|---------------|
 | releaseNotesImages             | Json array of image specific details for the advisory | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task         | No       | -             |
+
+## Changes in 0.1.1
+* Fix bug regarding the jq query that determines the number of images
