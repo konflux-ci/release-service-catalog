@@ -29,6 +29,11 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 4.2.0
+* The pipeline is called via git resolver now instead of cluster resolver
+  * This was done by changing from `-r` to `--pipeline` in the `internal-request`/`internal-pipelinerun` call
+  * The base image was updated to include this new functionality
+
 ## Changes in 4.1.1
 * Increase `requestTimeout` value to 30 minutes
   * The internal-request/internal-pipeline is set to a timeout of 30 minutes, but the internal-request/internal-pipeline script
