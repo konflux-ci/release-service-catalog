@@ -21,3 +21,4 @@ other three for downstream tasks to use.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                       |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                       |
+| releasePath             | Path to the release data JSON file                                                                                         | No       | -                       |

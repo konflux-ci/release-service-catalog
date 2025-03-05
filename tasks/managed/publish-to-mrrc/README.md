@@ -12,6 +12,8 @@ and use the variables in it as parameters for the MRRC publishing task.
 
 | Name                    | Description                                                                                                                | Optional | Default value           |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-------------------------|
+| caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca              |
+| caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt           |
 | mrrcParamFilePath       | path of the env file for mrrc parameters to use                                                                            | No       | -                       |
 | charonConfigFilePath    | path of the charon config file for charon to consume                                                                       | No       | -                       |
 | charonAWSSecret         | the secret name for charon aws credential file                                                                             | No       | -                       |
@@ -23,3 +25,4 @@ and use the variables in it as parameters for the MRRC publishing task.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                       |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                       |
+| charonSignCASecret      | the secret name for ca files for radas signing                                                                             | No       | -                       |
