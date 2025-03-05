@@ -78,7 +78,7 @@ EOF
       "internalRequestPipelineRunName": "${mockPipelineRunName}",
       "internalRequestTaskRunName": "${mockTaskRunName}",
       "buildState": "$status",
-      "jsonBuildInfo": "\"{\\\\\"merge_request\\\\\":\\\\\"https://g/r/-/merge_requests/18\\\\\"}\"\n"
+      "jsonBuildInfo": "{\"merge_request\":\"https://g/r/-/merge_requests/18\"}\n"
     }
   }
 }

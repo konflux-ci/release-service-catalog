@@ -46,16 +46,16 @@ function glab() {
   elif [[ "$*" == *"mr diff"* ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
     if [[ "${gitRepo}" == "replace-idempotent" ]]; then
-      echo "diff --git a/addons/my-addon2.yaml b/addons/my-addon2.yaml
---- a/addons/my-addon2.yaml
-+++ b/addons/my-addon2.yaml
+      echo "
+--- addons/my-addon2.yaml
++++ addons/my-addon2.yaml
 @@ -1,2 +1,2 @@
 -indexImage:
 +indexImage: Jack
 "
     else
-      echo "diff --git a/test/one-update.yaml b/test/one-update.yaml
-+++ b/test/one-update.yaml
+      echo "
++++ test/one-update.yaml
 @@ -1,2 +1,2 @@
 +indexImage: Jack
 "

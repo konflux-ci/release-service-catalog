@@ -16,6 +16,10 @@ replacements to a yaml file that already exists. It will attempt to create a Mer
 | tempDir                        | temp dir for cloning and updates                                                                                                                                                         | Yes      | /tmp/$(context.taskRun.uid)/file-updates |
 | internalRequestPipelineRunName | name of the PipelineRun that called this task                                                                                                                                            | No       | -                                        |
 
+
+## Changes in 1.0.1
+* Remove extra characters in the diff result
+
 ## Changes in 1.0.0
 * Add idempotent changes with some fix
   - It fixed some issue about `glab mr list` to handle anything from 0 to
