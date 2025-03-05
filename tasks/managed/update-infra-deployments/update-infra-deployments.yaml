@@ -3,7 +3,7 @@ apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   labels:
-    app.kubernetes.io/version: "1.2.1"
+    app.kubernetes.io/version: "1.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: "release"
@@ -29,14 +29,6 @@ spec:
     - name: defaultGithubAppInstallationID
       description: Default Installation ID of Github app in the organization
       default: "35269675"
-    - name: gitImage
-      description: Image reference containing the git command
-      default: >-
-        registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8:v1.8.2-8@sha256:a538c423e7a11aae6ae582a411fdb090936458075f99af4ce5add038bb6983e8
-    - name: scriptImage
-      description: Image reference for SCRIPT execution
-      default: >-
-        quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
     - name: sharedSecret
       default: infra-deployments-pr-creator
       description: secret in the namespace which contains private key for the GitHub App
@@ -49,7 +41,7 @@ spec:
       emptyDir: {}
   steps:
     - name: git-clone-infra-deployments
-      image: $(params.gitImage)
+      image: quay.io/konflux-ci/release-service-utils:0077f4af29bb55cb80fcce770dd32f2e7bba97d7
       volumeMounts:
         - name: shared-dir
           mountPath: /shared
@@ -59,7 +51,7 @@ spec:
         echo "Cloning $TARGET_GH_REPO"
         git clone "https://github.com/${TARGET_GH_REPO}.git" cloned
     - name: run-update-script
-      image: $(params.scriptImage)
+      image: quay.io/konflux-ci/release-service-utils:0077f4af29bb55cb80fcce770dd32f2e7bba97d7
       volumeMounts:
         - name: shared-dir
           mountPath: /shared
@@ -98,7 +90,7 @@ spec:
         echo "$PATCHED_SCRIPT"
         echo "$PATCHED_SCRIPT" | sh
     - name: get-diff-files
-      image: $(params.gitImage)
+      image: quay.io/konflux-ci/release-service-utils:0077f4af29bb55cb80fcce770dd32f2e7bba97d7
       volumeMounts:
         - name: shared-dir
           mountPath: /shared
@@ -108,8 +100,7 @@ spec:
         git status -s --porcelain | cut -c4- > ../updated_files.txt
     # Based on https://github.com/tektoncd/catalog/tree/main/task/github-app-token/0.2/
     - name: create-pr
-      image: >-
-       quay.io/redhat-appstudio/github-app-token@sha256:b4f2af12e9beea68055995ccdbdb86cfe1be97688c618117e5da2243dc1da18e
+      image: quay.io/konflux-ci/release-service-utils:0077f4af29bb55cb80fcce770dd32f2e7bba97d7
       volumeMounts:
         - name: infra-deployments-pr-creator
           mountPath: /secrets/deploy-key
@@ -136,9 +127,8 @@ spec:
         import sys
         import time
         import base64
-
         import requests
-        from jwcrypto import jwk, jwt
+        import subprocess
 
         EXPIRE_MINUTES_AS_SECONDS = int(os.environ.get('GITHUBAPP_TOKEN_EXPIRATION_MINUTES', 10)) * 60
         # TODO support github enteprise
@@ -171,30 +161,34 @@ spec:
         class GitHub():
             token = None
 
-            def __init__(self, private_key, app_id=None, installation_id=None):
-                if not isinstance(private_key, bytes):
-                    raise ValueError(f'"{private_key}" parameter must be byte-string')
-                self._private_key = private_key
+            def __init__(self, private_key_path, app_id=None, installation_id=None):
+                self._private_key_path = private_key_path
                 self.app_id = app_id
                 self.token = self._get_token(installation_id)
 
-            def _load_private_key(self, pem_key_bytes):
-                return jwk.JWK.from_pem(pem_key_bytes)
-
             def _app_token(self, expire_in=EXPIRE_MINUTES_AS_SECONDS):
-                key = self._load_private_key(self._private_key)
+              # based on https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/
+              # generating-a-json-web-token-jwt-for-a-github-app#example-using-bash-to-generate-a-jwt
+
                 now = int(time.time())
-                token = jwt.JWT(
-                    header={"alg": "RS256"},
-                    claims={
-                        "iat": now,
-                        "exp": now + expire_in,
-                        "iss": self.app_id
-                    },
-                    algs=["RS256"],
+
+                header_ = {"typ": "JWT", "alg": "RS256"}
+                header = base64.b64encode(json.dumps(header_).encode())
+
+                payload_ = {"iat": now, "exp": now + expire_in, "iss": self.app_id}
+                payload = base64.b64encode(json.dumps(payload_).encode())
+
+                header_payload = header + b"." + payload
+                proc = subprocess.run(
+                    ["openssl", "dgst", "-sha256", "-sign", self._private_key_path],
+                    input=header_payload,
+                    check=True,
+                    stdout=subprocess.PIPE,
                 )
-                token.make_signed_token(key)
-                return token.serialize()
+                signature = base64.b64encode(proc.stdout)
+
+                token = header_payload + b"." + signature
+                return token.decode()
 
             def _get_token(self, installation_id=None):
                 app_token = self._app_token()
@@ -326,9 +320,8 @@ spec:
                 print("No files to add to a PR. exiting...")
                 sys.exit()
 
-            with open(os.environ['GITHUBAPP_KEY_PATH'], 'rb') as key_file:
-                key = key_file.read()
-
+            key_path = os.environ.get('GITHUBAPP_KEY_PATH')
+                        
             if os.environ.get('GITHUBAPP_APP_ID'):
                 app_id = os.environ['GITHUBAPP_APP_ID']
             else:
@@ -336,7 +329,7 @@ spec:
 
             print(f"Getting user token for application_id: {app_id}")
             github_app = GitHub(
-                key,
+                private_key_path=key_path,
                 app_id=app_id,
                 installation_id=os.environ.get('GITHUBAPP_INSTALLATION_ID'))
 

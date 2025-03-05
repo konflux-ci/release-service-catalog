@@ -14,11 +14,13 @@
 | originRepo                     | URL of github repository which was built by the Pipeline                                     | false    |                                                                                                                                                  |
 | revision                       | Git reference which was built by the Pipeline                                                | false    |                                                                                                                                                  |
 | defaultTargetGHRepo            | GitHub repository of the infra-deployments code                                              | true     | redhat-appstudio/infra-deployments                                                                                                               |
-| gitImage                       | Image reference containing the git command                                                   | true     | registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8:v1.8.2-8@sha256:a538c423e7a11aae6ae582a411fdb090936458075f99af4ce5add038bb6983e8 |
-| scriptImage                    | Image reference for SCRIPT execution                                                         | true     | quay.io/mkovarik/ose-cli-git:4.11                                                                                                                |
 | sharedSecret                   | Secret in the namespace which contains private key for the GitHub App                        | true     | infra-deployments-pr-creator                                                                                                                     |
 | defaultGithubAppID             | ID of Github app used for updating PR                                                        | true     | 305606                                                                                                                                           |
 | defaultGithubAppInstallationID | Installation ID of Github app in the organization                                            | true     | 35269675                                                                                                                                         |
+
+## Changes in 1.3.0
+* Updated the base image used in this task
+  * Deprecated the `gitImage` and `scriptImage` parameters
 
 ## Changes in 1.2.1
 * Fix shellcheck/checkton linting issues in the task
