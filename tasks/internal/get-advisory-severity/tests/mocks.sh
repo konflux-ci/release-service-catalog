@@ -15,10 +15,10 @@ function curl() {
     echo '{"access": "dummy-token"}'
   elif [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-critical"* ]]
   then
-    echo '{"results": [{"impact":"CRITICAL","affects":[{"ps_component":"component","impact":""}]}]}'
+    echo '{"results": [{"impact":"CRITICAL","affects":[{"purl":"pkg:oci/kubernetes?repository_url=component&a=b","impact":""}]}]}'
   elif [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-moderate"* ]]
   then
-    echo '{"results": [{"impact":"MODERATE","affects":[{"ps_component":"component","impact":"IMPORTANT"},{"ps_component":"foo","impact":"LOW"}]}]}'
+    echo '{"results": [{"impact":"MODERATE","affects":[{"purl":"pkg:oci/kubernetes?repository_url=foo&a=b","impact":"LOW"},{"purl":"pkg:oci/kubernetes?repository_url=component&a=b","impact":"IMPORTANT"},{"purl":"","impact":"LOW"}]}]}'
   else
     echo Error: Unexpected call
     exit 1
