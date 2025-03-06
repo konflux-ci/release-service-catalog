@@ -18,7 +18,7 @@ This task supports variable expansion in tag values from the mapping. The curren
 * "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
 * "{{ git_short_sha }}" -> The git sha reduced to 7 characters
 * "{{ digest_sha }}" -> The image digest of the respective component
-* "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the   
+* "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the
   repository and generates the next sequential tag (e.g., if the highest tag is v1.0.0-2, it will generate v1.0.0-3)
 
 You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
@@ -30,6 +30,11 @@ You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of im
 | snapshotPath      | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to | No       | -             |
 | dataPath          | Path to the JSON string of the merged data to use in the data workspace                      | No       | -             |
 | failOnEmptyResult | Fail the task if the resulting snapshot contains zero components                             | Yes      | false         |
+
+## Changes in 1.9.1
+* Bump the utils image used in this task
+  * The `get-image-architectures` script now uses `set -e` so that it fails
+    if a `skopeo` or `oras` call fails
 
 ## Changes in 1.9.0
 * support defaults for `contentGateway`

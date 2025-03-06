@@ -50,6 +50,9 @@ function get-image-architectures() {
   if [[ "$*" =~ registry.io/multi-arch-image.?@sha256:mydigest.? ]]; then
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
     echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+  elif [[ "$1" = registry.io/fail-get-image-architectures@sha256:mydigest ]]; then
+    echo "Simulating get-image-architectures failure" >&2
+    return 1
   else
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
   fi

@@ -12,6 +12,11 @@ path to a file containing data used in component SBOM generation.
 | dataPath     | Path to the JSON string of the merged data to update                 | No       | -             |
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 
+## Changes in 3.0.2
+* Bump the utils image used in this task
+  * The `get-image-architectures` script now uses `set -e` so that it fails
+    if a `skopeo` or `oras` call fails
+
 ## Changes in 3.0.1
 * If type is RHBA or RHEA, the task will ensure the `references` key exists (although it will be empty)
 
@@ -35,10 +40,10 @@ path to a file containing data used in component SBOM generation.
 * Add unique tag info to purl
 
 ## Changes in 2.2.0
-* Updated to use the `rh-registry-repo` key from the snapshot JSON for constructing 
-  the image repository path, instead of relying on the data field. This change 
+* Updated to use the `rh-registry-repo` key from the snapshot JSON for constructing
+  the image repository path, instead of relying on the data field. This change
   ensures that the task correctly references the internal Red Hat registry format.
-* Removed the use of the `translate-delivery-repo` script as the task now directly 
+* Removed the use of the `translate-delivery-repo` script as the task now directly
   accesses the `rh-registry-repo` value from the snapshot JSON.
 
 ## Changes in 2.1.0

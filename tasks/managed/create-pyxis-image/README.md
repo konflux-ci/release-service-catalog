@@ -19,6 +19,13 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                                                                                                                                                                                                                                                                                                   | No       | -             |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace                                                                                                                                                                                                                                                                                                                                     | No       |               |
 
+## Changes in 3.8.1
+* Bump the utils image used in this task
+  * The `get-image-architectures` script now uses `set -e` so that it fails
+    if a `skopeo` or `oras` call fails
+* Modify the task script to make it fail if `get-image-architectures` fails
+  and add a test for that
+
 ## Changes in 3.8.0
 * Bump the utils image used in this task
   * Clair-wrapper is now ready to work with the changes introduced previously and
