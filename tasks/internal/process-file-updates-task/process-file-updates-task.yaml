@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: process-file-updates-task
   labels:
-    app.kubernetes.io/version: "1.0.1"
+    app.kubernetes.io/version: "1.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -220,6 +220,7 @@ spec:
               REPLACEMENTS_PERFORMED=$((REPLACEMENTS_PERFORMED + 1))
             done
           fi
+          git add "${targetFile}"
         done
 
         if [ -n "${replacementsUpdateError}" ]; then
@@ -241,7 +242,7 @@ spec:
                 | tee "$(results.fileUpdatesInfo.path)"
                 echo -n "Failed" |tee "$(results.fileUpdatesState.path)"
             else
-                echo "nothing need change" \
+                echo "nothing needs change" \
                     | tee -a "$(results.fileUpdatesInfo.path)"
                 echo -n "Success" |tee "$(results.fileUpdatesState.path)"
             fi
@@ -251,23 +252,15 @@ spec:
         fi
 
         echo -e "\n*** START LOCAL CHANGES ***\n"
-        echo -e "\n*** Result from git diff ***\n"
-        # compare the differences between the working directory and the staging area 
-        git diff | tee "${TEMP}"/tempMRFile.diff
-
-        echo -e "\n*** Result from git diff --cache ***\n"
+        echo -e "\n*** Result from git diff --cached ***\n"
         # compare the differences between the staging area and the latest commit
         git diff --cached | tee "${TEMP}"/tempMRFile-cached.diff
 
-        if [[ -s "${TEMP}"/tempMRFile.diff ]]; then
-            # replacements exist 
-            # It's to deal with the lines like "@@ -N1,N2 +N3,N4 @@", 
-            # but it's possible to meet a line like "@@ -4,7 +4,7 @@ $schema: /app/app-settings.yml".
-            awk '/^@@/ {match($0, /@@ ([^@]+) @@/, arr); print arr[1]}' "${TEMP}"/tempMRFile.diff |\
-               tee "${TEMP}"/lineFile
-        elif [[ ! -s "${TEMP}"/tempMRFile-cached.diff ]]; then
-           # only seed exists and the file with the same content is there already 
-           echo "the seeding file already exists" \
+        echo -e "\n*** END LOCAL CHANGES ***\n"
+
+        if [[ ! -s "${TEMP}"/tempMRFile-cached.diff ]]; then
+           # nothing needs to change, the MR is merged 
+           echo "nothing needs change" \
                | tee -a "$(results.fileUpdatesInfo.path)"
            echo -n "Success" |tee "$(results.fileUpdatesState.path)"
            exit 0
@@ -279,7 +272,7 @@ spec:
         while true; do
             mrPage=$(glab mr list -R "${UPSTREAM_REPO}" --search "Konflux release" \
                 --per-page 100 --page $page | grep "^!" || true)
-            # add "$mrPagei" == '' check for unit testing
+            # add "$mrPage" == '' check for unit testing
             if [ -z "$mrPage" ] || [ "$mrPage" == '' ] ; then
                 break
             fi
@@ -290,42 +283,16 @@ spec:
         # Remove trailing newline
         openMRList=$(echo "$openMRList" | sed '/^$/d')
 
-        if [ -n "$openMRList" ]; then        
+        if [ -n "$openMRList" ]; then
             while IFS= read -r oneItem; do
                 mrNum=$(echo "$oneItem" | cut -f1 | tr -d '!')
-                foundMR=false
-                glab mr diff "${mrNum}" --repo "${UPSTREAM_REPO}" > "${TEMP}"/oneMR.diff 
+                git fetch origin merge-requests/"${mrNum}"/head:mr_"${mrNum}"
 
-                if [[ ! -s "${TEMP}"/lineFile ]]; then
-                    # only seed exists and no replacements  
-                    grep '^[+][^+]' "${TEMP}"/oneMR.diff | sed -E 's/^[+]//' | tee "${TEMP}/mrFile"
+                # compare if the cached content and the content in MR are the same 
+                git diff --cached mr_"${mrNum}" | tee "${TEMP}"/final.diff 
 
-                    # compare if the contents and the updated file names are the same 
-                    if  diff -q "${TEMP}"/mrFile "${targetFile}" > /dev/null; then
-                        grep "^diff --git" "${TEMP}"/oneMR.diff | tee "${TEMP}"/tmpFile
-                        while read -r line ; do
-                            changedFileName=$(echo "$line" | awk '{sub(/^b\//, "", $NF); print $NF}')
-                            if [[ "${changedFileName}" != "${targetFile}" ]]; then
-                                continue
-                            fi
-                            foundMR=true
-                            break
-                        done < "${TEMP}"/tmpFile
-                    fi
-                else
-                    # replacements exist
-                    grep '^[-+@]' "${TEMP}"/oneMR.diff | sed -E 's/^[@]//; s/@@.*//' | tee "${TEMP}/mrFile"
-                    # remove "a/" in  "--- a/dir/file" and "b/" in "+++ b/dir/file" 
-                    grep '^[-+@]' "${TEMP}"/tempMRFile.diff | sed -E 's/^[@]//; s/@@.*//' | \
-                        sed -E 's/^(---|\+\+\+) [ab]\//\1 /' | tee "${TEMP}/tmpFile"
-                    if diff -q "${TEMP}"/mrFile "${TEMP}"/tmpFile > /dev/null; then
-                        foundMR=true
-                    fi
-                fi
-                # if all the lines are matched, the MR is the same one
-                # it should exit 0 if the same MR exists 
-                if [[ "$foundMR" == true ]]; then
-                    echo "there is an existing MR with the same updates in the repo"
+                if [[ ! -s "${TEMP}"/final.diff ]] ; then
+                    echo "There is an existing MR with the same updates in the repo"
                     echo "{\"merge_request\":\"${UPSTREAM_REPO}/-/merge_requests/${mrNum}\"}" \
                         | tee -a "$(results.fileUpdatesInfo.path)" 
                     echo -n "Success" | tee "$(results.fileUpdatesState.path)"
@@ -333,7 +300,6 @@ spec:
                 fi
             done <<< "$openMRList"
         fi
-        echo -e "\n*** END LOCAL CHANGES ***\n"
 
         WORKING_BRANCH=$(uuidgen |awk '{print substr($1, 1, 8)}')
         git_commit_and_push --branch "$WORKING_BRANCH" --message "fileUpdates changes"

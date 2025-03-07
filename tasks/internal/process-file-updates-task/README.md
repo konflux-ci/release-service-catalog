@@ -17,6 +17,10 @@ replacements to a yaml file that already exists. It will attempt to create a Mer
 | internalRequestPipelineRunName | name of the PipelineRun that called this task                                                                                                                                            | No       | -                                        |
 
 
+## Changes in 1.1.0
+* Use `git add` to stage modified files and compare the staged content with opened MRs
+  to check if an MR already exists with the same updates in the repo. 
+
 ## Changes in 1.0.1
 * Remove extra characters in the diff result
 

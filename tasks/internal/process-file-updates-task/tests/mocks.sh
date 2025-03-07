@@ -3,6 +3,13 @@ set -eux
 
 # mocks to be injected into task step scripts
 function git() {
+  if [[ "$*" == "diff --cached mr_"* ]]; then
+    echo -n '' 
+    exit 0
+  elif [[ "$*" == "diff --cached" ]]; then
+    /usr/bin/git "$@"
+    exit 0
+  fi
   echo "git $*"
   if [[ "$*" == *"clone"* ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
@@ -28,18 +35,15 @@ function git() {
   if [[ "$*" == "config"* ]]; then
     /usr/bin/git "$@"
   fi
-  if [[ "$*" == "diff"* ]]; then
-    /usr/bin/git "$@"
-  fi
 }
 
 function glab() {
   if [[ "$*" == *"mr create"* ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
-    echo "/merge_request/1"
+    echo "https://some.gitlab/test/one-update.git/-/merge_request/1"
   elif [[ "$*" == *"mr list"* ]]; then
-    if [[ "$*" == *"page 1" ]]; then
-      echo '!1'
+    if [[ "$*" == *"page 1" ]] && [[ "${gitRepo}" == "replace-idempotent" ]]; then
+      	echo '!1'
     else
       echo ''
     fi
