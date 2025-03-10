@@ -1,0 +1,58 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-sbom-to-s3
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+  params:
+    - name: retryAWSSecretName
+      description: Name of the Secret containing AWS credentials for retry mechanism.
+    - name: retryS3Bucket
+      description: Name of the S3 bucket for the retry mechanism.
+    - name: sbomPath
+      description: Full path to the SBOM to be pushed to S3.
+  workspaces:
+    - name: data
+  volumes:
+    - name: aws-secret
+      secret:
+        secretName: $(params.retryAWSSecretName)
+  steps:
+    - name: push-to-s3
+      image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+      volumeMounts:
+        - name: aws-secret
+          mountPath: /secrets/
+      script: |
+        #!/usr/bin/env bash
+        set -o pipefail -o nounset
+
+        aws_access_key_id="$(cat /secrets/atlas-aws-access-key-id)"
+        aws_secret_access_key="$(cat /secrets/atlas-aws-secret-access-key)"
+
+        # strip supported version suffix
+        sbom_path="$(params.sbomPath)"
+        to_upload="${sbom_path%.supported_version}"
+        cp "${sbom_path}" "${to_upload}"
+
+        region="us-east-1"
+        bucket="$(params.retryS3Bucket)"
+
+        echo "Pushing "${to_upload}" to S3."
+        curl -X PUT \
+          --silent --show-error --fail-with-body --retry 5 \
+          --user "${aws_access_key_id}:${aws_secret_access_key}" \
+          --aws-sigv4 "aws:amz:${region}:s3" \
+          --upload-file "${to_upload}" \
+          "https://${bucket}.s3.${region}.amazonaws.com"
+
+        if [[ $? != 0 ]]; then
+           >&2 echo "ERROR: Failed to push SBOM to S3 bucket."
+          exit 1
+        fi

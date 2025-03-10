@@ -1,0 +1,71 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-sbom-to-s3
+spec:
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(workspaces.data.path)/workdir/"
+              cd "$(workspaces.data.path)/workdir/"
+              touch "sbom.json.supported_version"
+
+    - name: run-task
+      taskRef:
+        name: push-sbom-to-s3
+      params:
+        - name: retryAWSSecretName
+          value: atlas-test-aws-secret
+        - name: retryS3Bucket
+          value: "bucket"
+        - name: sbomPath
+          value: "/workspace/data/workdir/sbom.json.supported_version"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              workdir="$(workspaces.data.path)/workdir"
+
+              if [ "$(wc -l < "$workdir/mock_curl.txt")" != 1 ]; then
+                echo "TEST FAILED: curl was not called."
+                cat "$workdir/mock_curl.txt"
+                exit 1
+              fi
+
+              if ! grep -q -- '--upload-file /workspace/data/workdir/sbom.json' "$workdir/mock_curl.txt"; then
+                echo "TEST FAILED: Correct file not in curl call."
+                cat "$workdir/mock_curl.txt"
+                exit 1
+              fi
