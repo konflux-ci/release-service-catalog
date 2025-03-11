@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: upload-sbom-to-atlas
   labels:
-    app.kubernetes.io/version: "0.2.1"
+    app.kubernetes.io/version: "0.2.2"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -50,6 +50,11 @@ spec:
         to Atlas. If the SBOM is already in this version or lower,
         it will be uploaded as is.
       type: string
+  results:
+    - name: failedSbomDir
+      type: string
+      description: |
+        Path to the directory in the data workspace with SBOMs that failed to upload.
   workspaces:
     - name: data
   volumes:
@@ -178,6 +183,7 @@ spec:
 
         sbomsDir="$(workspaces.data.path)/$(params.sbomDir)"
         workdir="$(workspaces.data.path)/workdir"
+        failedSbomDir="$(mktemp -p "$(workspaces.data.path)")"
 
         shopt -s nullglob
         sboms_to_upload=("$workdir"/*.json)
@@ -223,6 +229,11 @@ spec:
           bombasticApiUrl=$(params.bombasticApiUrl)
           echo "Uploading SBOM to $bombasticApiUrl (with id=$sbom_id)"
 
+          handle_atlas_failure () {
+            >&2 echo "WARNING: SBOM upload of "$1" to Atlas has failed! Upload will be retried later."
+            cp "$1" "${failedSbomDir}"
+          }
+
           curl -X PUT "${curl_opts[@]}" \
             --retry-max-time "$retry_max_time" \
             -H "authorization: Bearer $access_token" \
@@ -230,6 +241,7 @@ spec:
             -H "content-type: application/json" \
             --data "@$supported_version_of_sbom" \
             "$bombasticApiUrl/api/v1/sbom?id=$sbom_id" \
-            || echo "SBOM upload to Atlas has failed!"
-
+            || handle_atlas_failure "$supported_version_of_sbom"
         done
+
+        echo -n "${failedSbomDir}" > "$(results.failedSbomDir.path)"
