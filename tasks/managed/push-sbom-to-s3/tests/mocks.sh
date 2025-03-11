@@ -5,6 +5,6 @@ set -eux
 curl() {
   # Output the call to stderr
   echo "Mock curl called with:" "$@" >&2
-  workdir="$(workspaces.data.path)/workdir"
-  echo "$@" > "$workdir/mock_curl.txt"
+  workdir="$(workspaces.data.path)"
+  echo "$@" >> "$workdir/mock_curl.txt"
 }
