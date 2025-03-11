@@ -13,6 +13,11 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | caTrustConfigMapName | The name of the ConfigMap to read CA bundle data from                     | Yes      | trusted-ca    |
 | caTrustConfigMapKey  | The name of the key in the ConfigMap that contains the CA bundle data     | Yes      | ca-bundle.crt |
 
+## Changes in 6.5.0
+* Bump the utils image used in this task
+  * The `select-oci-auth` script now supports docker.io
+* Add support for docker.io
+
 ## Changes in 6.4.4
 * Bump the utils image used in this task
   * The `get-image-architectures` script now uses `set -e` so that it fails
