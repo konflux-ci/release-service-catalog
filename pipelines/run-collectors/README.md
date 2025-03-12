@@ -14,5 +14,8 @@ save the required resources to the workspace, execute the collectors, then updat
 | taskGitUrl             | The url to the git repo where the release-service-catalog tasks to be used are stored                             | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision        | The revision in the taskGitUrl repo to be used                                                                    | No       | -                                                         |
 
+## Changes in 0.2.1
+* Reference correctly the collectors tasks
+
 ## Changes in 0.2.0
 * Stop passing releasePlan and releasePlanAdmission and pass instead a reference to a resource
