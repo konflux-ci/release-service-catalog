@@ -1,0 +1,121 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-snapshot-parallel
+spec:
+  description: |
+    Run the push-snapshot task with various components and tags with multiple images proccessed in parallel.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:066a63d25546239e79533b99c83ff521a045c819
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir "$(workspaces.data.path)/results"
+              cat > "$(workspaces.data.path)"/snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/parallel-image:tag1",
+                    "repository": "prod-registry.io/prod-location1",
+                    "tags": [
+                      "tag1-12345",
+                      "tag2-zyxw"
+                    ],
+                    "pushSourceContainer": false
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/parallel-image:tag2",
+                    "repository": "prod-registry.io/prod-location2",
+                    "tags": [
+                      "some-cool-tag"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(workspaces.data.path)"/data.json << EOF
+              {
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": true
+                  }
+                }
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: push-snapshot
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: concurrentLimit
+          value: "5"
+        - name: retries
+          value: 0
+        - name: resultsDirPath
+          value: results
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter: 
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:066a63d25546239e79533b99c83ff521a045c819
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              # Validate mock call counts first
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_cosign.txt")" != 5 ]; then
+                echo Error: cosign was expected to be called 5 times.
+                cat "$(workspaces.data.path)/mock_cosign.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_skopeo.txt")" != 2 ]; then
+                echo Error: skopeo was expected to be called 2 times.
+                cat "$(workspaces.data.path)/mock_skopeo.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_oras.txt")" != 8 ]; then
+                echo Error: oras was expected to be called 8 times.
+                cat "$(workspaces.data.path)/mock_oras.txt"
+                exit 1
+              fi
+
+              if ! grep -q '5' "$(workspaces.data.path)"/*.count; then
+                echo "Error: Expected to see 5 parallel runs of push_image at some point."
+                echo "Actual counts:"
+                cat "$(workspaces.data.path)"/*.count
+                exit 1
+              fi
+      runAfter:
+        - run-task

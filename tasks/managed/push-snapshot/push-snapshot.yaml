@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-snapshot
   labels:
-    app.kubernetes.io/version: "6.5.0"
+    app.kubernetes.io/version: "6.6.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -21,6 +21,10 @@ spec:
     - name: resultsDirPath
       description: Path to the results directory in the data workspace
       type: string
+    - name: concurrentLimit
+      description: The maximum number of images to be proccessed concurrently
+      type: string
+      default: "10"
     - name: retries
       description: Retry copy N times.
       type: string
@@ -91,8 +95,7 @@ spec:
             printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
               "$2" "$3"
           fi
-          RESULTS_JSON=$(jq --arg name "$2" --arg url "$4:$5" '.images |= map(select(.name==$name).urls +=
-            [$url])' <<< "$RESULTS_JSON")
+          jq -n --arg name "$2" --arg url "$4:$5" '{name: $name, url: $url}' > "$TMP_RESULTS_DIR/$2-$5.json"
         }
 
         SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
@@ -117,6 +120,21 @@ spec:
         RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/push-snapshot-results.json"
         RESULTS_JSON="{\"images\":[]}"
         SOURCE_AUTH_FILE=$(mktemp)
+
+        RUNNING_JOBS="\j" # A Bash param for number of jobs running
+        CONCURRENT_LIMIT=$(params.concurrentLimit)
+        REQUEST_COUNT=0
+        SUCCESS=true
+
+        # Wait for a slot to open up in the concurrent limit
+        wait_for_slot () {
+          while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+            wait -n || SUCCESS=false
+          done
+        }
+
+        # Create a temporary directory to store the results of each push
+        TMP_RESULTS_DIR=$(mktemp -d)
 
         defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' "$DATA_FILE")
 
@@ -183,24 +201,55 @@ spec:
             fi
             # Push the source image with the source tag here. The source image will be
             # pushed with the provided tags below in the loop
+            wait_for_slot
             push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-              "${repository}" "${source_tag}" ""
+              "${repository}" "${source_tag}" "" > "$TMP_RESULTS_DIR/${name}-${source_tag}.out" 2>&1 &
+            ((++REQUEST_COUNT))
+            echo "Request Count: $REQUEST_COUNT"
           fi
 
           for tag in $(jq -r '.[]' <<< "$imageTags") ; do
+            wait_for_slot
             # Push the container image
             push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" \
-            "$platform"
+            "$platform" > "$TMP_RESULTS_DIR/${name}-${tag}.out" 2>&1 &
+            ((++REQUEST_COUNT))
+            echo "Request Count: $REQUEST_COUNT"
 
             # This variable will only exist if the above logic determined the source container should
             # be pushed for this component
             if [ -n "${source_container_digest-}" ] ; then
+              wait_for_slot
               push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${tag}-source" ""
+                "${repository}" "${tag}-source" "" > "$TMP_RESULTS_DIR/${name}-${tag}-source.out" 2>&1 &
+              ((++REQUEST_COUNT))
+              echo "Request Count: $REQUEST_COUNT"
             fi
           done
         done
-        echo -n "${RESULTS_JSON}" | tee "$RESULTS_FILE"
+
+        echo "Waiting for all jobs to complete...."
+        while (( ${RUNNING_JOBS@P} > 0 )); do
+          wait -n || SUCCESS=false 
+        done
+
+        echo "Printing outputs for each push image"
+        for file in "$TMP_RESULTS_DIR"/*.out; do
+          echo "=== $(basename "${file}" .out) ==="
+          cat "$file"
+          echo
+        done
+
+        if [ "$SUCCESS" != true ]; then
+            echo "One or more jobs failed. Please check the logs above for details."
+            exit 1
+        fi
+
+        PUSHES=$(jq -s . "$TMP_RESULTS_DIR"/*.json)
+        jq --argjson PUSHES "$PUSHES" '
+          reduce $PUSHES[] as $p (.; (.images[] | select(.name == $p.name).urls) += [$p.url])
+        ' <<< "$RESULTS_JSON" | tee "$RESULTS_FILE"
+        
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
       volumeMounts:
         - name: trusted-ca
