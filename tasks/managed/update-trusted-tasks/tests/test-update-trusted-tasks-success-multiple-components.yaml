@@ -1,0 +1,119 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-trusted-tasks-success-several-components
+spec:
+  description: |
+    Run the update-trusted-tasks task with several components
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir "$(workspaces.data.path)/results"
+              cat > "$(workspaces.data.path)/snapshot.json" << EOF
+              {
+                "application": "tasks",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/example/echo-v01@sha256:abcde",
+                    "name": "echo-v01",
+                    "source": {
+                      "git": {
+                        "context": "task/echo/0.1",
+                        "revision": "abcde",
+                        "url": "https://example.com"
+                      }
+                    },
+                    "repository": "quay.io/notexist/task-echo-v01",
+                    "tags": [
+                      "0.1"
+                    ]
+                  },
+                  {
+                    "containerImage": "quay.io/example/echo-v02@sha256:abcde",
+                    "name": "echo-v02",
+                    "source": {
+                      "git": {
+                        "context": "task/echo/0.2",
+                        "revision": "abcde",
+                        "url": "https://example.com"
+                      }
+                    },
+                    "repository": "quay.io/exists/task-echo-v02",
+                    "tags": [
+                      "0.2"
+                    ]
+                  },
+                  {
+                    "containerImage": "quay.io/example/echo-v03@sha256:abcde",
+                    "name": "echo-v03",
+                    "source": {
+                      "git": {
+                        "context": "task/echo/0.3",
+                        "revision": "abcde",
+                        "url": "https://example.com"
+                      }
+                    },
+                    "repository": "quay.io/exists/task-echo",
+                    "tags": [
+                      "0.3"
+                    ]
+                  }                                    
+                ]
+              }
+              EOF
+
+    - name: run-task
+      taskRef:
+        name: update-trusted-tasks
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_skopeo.txt")" != 3 ]; then
+                echo Error: skopeo was expected to be called 1 times. Actual calls:
+                cat "$(workspaces.data.path)/mock_skopeo.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(workspaces.data.path)/mock_ec.txt")" != 3 ]; then
+                echo Error: ec was expected to be called 1 time. Actual calls:
+                cat "$(workspaces.data.path)/mock_ec.txt"
+                exit 1
+              fi
+
+      runAfter:
+        - run-task

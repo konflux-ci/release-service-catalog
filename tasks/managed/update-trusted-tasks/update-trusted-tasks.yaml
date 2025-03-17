@@ -1,0 +1,91 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-trusted-tasks
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton task to update trusted-tasks list bundles.
+    Once a task is released as a bundle, the list of trusted-tasks should be 
+    updated with the new task.
+    If an OCI artifact named data-acceptable-bundles is already in place we will use
+    it as an input and append it, else we will create a new artifact
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+  workspaces:
+    - name: data
+      description: The workspace where the snapshot json reside
+  steps:
+    - name: update-trusted-tasks
+      image: quay.io/konflux-ci/appstudio-utils@sha256:0901e46d9a41d0c564b0efab092f37cd187bd8b4ff2455ec84539ceb8b08f3ea
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+        
+        SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        TAG="latest"
+
+        # check if snapshot exsits
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was found."
+            exit 1
+        fi
+
+        # Extract the application from the snapshot
+        application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+
+        # Get the number of components
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+
+        printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+            # extract the component from the snapshot 
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+
+            # Extract the repository from the snapshot
+            repository=$(jq -r '.repository' <<< "$component")
+
+            # The data-acceptable-bundles repo should reside in the same org in the registry.
+            # Fetch the repository and replace the repo with data-acceptable-bundles
+            # for example: quay.io/myorg/myrepo -> quay.io/myorg/data-acceptable-bundles
+            ACCEPTABLE_BUNDLES=$(echo "${repository}" | awk -F'/' '{$NF="data-acceptable-bundles"; print $0}' OFS='/')
+
+            # Extract the image sha
+            sha=$(jq -r '.containerImage' <<< "$component" | awk -F'@' '{print "@" $2}')
+            
+            # Get the number of tags from the component
+            NUM_TAGS=$(jq '.tags | length' <<< "$component")
+
+            # update the tasks list OCI artifact for each tag in the component
+            for ((j = 0; j < NUM_TAGS; j++))
+            do
+                imageTag=$(jq -c -r --argjson j "$j" '.tags[$j]' <<< "$component")
+                
+                set +e
+                # Check if ACCEPTABLE_BUNDLES OCI artifact has a latest tag
+                skopeo list-tags docker://"${ACCEPTABLE_BUNDLES}" | jq -r '.Tags[]' | grep "^${TAG}$" &> /dev/null
+                RESULT=$?
+                set -e
+
+                # If it has a latest tag, use it as an --input for the ec track bundle command
+                if [ $RESULT -eq 0 ]; then
+                    echo "${ACCEPTABLE_BUNDLES}:${TAG} exists - using it as an input"
+                    ec track bundle --bundle "${repository}:${imageTag}${sha}" \
+                    --input oci:"${ACCEPTABLE_BUNDLES}:${TAG}" --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
+
+                # Else - Do not use it as an --input
+                else
+                    echo "${ACCEPTABLE_BUNDLES}:${TAG} does not exist"
+                    ec track bundle --bundle "${repository}:${imageTag}@${sha}" \
+                    --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
+                fi        
+            done
+        done
