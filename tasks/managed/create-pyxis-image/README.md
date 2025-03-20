@@ -19,6 +19,12 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | snapshotPath | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                                                                                                                                                                                                                                                                                                   | No       | -             |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace                                                                                                                                                                                                                                                                                                                                     | No       |               |
 
+## Changes in 3.8.3
+* Bump the utils image used in this task
+  * Fix an error if there are no tags for a repository in an existing
+    ContainerImage object in Pyxis
+    * The previous fix didn't work
+
 ## Changes in 3.8.2
 * Bump the utils image used in this task
   * Fix an error if there are no tags for a repository in an existing
