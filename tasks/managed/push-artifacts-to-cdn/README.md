@@ -11,3 +11,7 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | dataPath                 | Path to data JSON in the data workspace                                                   | No       | -             |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -             |
 | resultsDirPath           | Path to results directory in the data workspace                                           | No       | -             |
+
+ ## Changes in 0.0.2
+ * release-service-utils image is bumped
+ * task now creates InternalRequests using the Git Ref of the internal pipeline instead of the cluster pipeline name
