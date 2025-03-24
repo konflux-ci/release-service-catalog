@@ -2,10 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-collect-data-with-data
+  name: test-collect-data-with-data-overriding-collectors
 spec:
   description: |
-    Run the collect-data task and verify that data task result is accurate.
+    Run the collect-data task with collectors and verify that
+    data from resources override the collectors data.
   workspaces:
     - name: tests-workspace
   tasks:
@@ -28,11 +29,21 @@ spec:
                 snapshot: foo
                 releasePlan: foo
                 data:
-                  rkey: rvalue
-                  foo: shouldGetOverwritten
+                  releaseNotes:
+                    issues:
+                      fixed:
+                        - id: "BAR-1234"
+                          source: "issues.redhat.com"
               EOF
               kubectl apply -f release
-
+              
+              collectors='
+                {"collectors":{"managed":[{"foo":{"cves":[{"key":"FOO-3444","component":"my-component"}]}},
+                {"bar":{"issues":{"fixed":[{"id":"FOO-1234","source":"issues.redhat.com"}]}}}],
+                "tenant":[{"foo":{"cves":[{"key":"FOO-4333","component":"my-component"}]}}]}}
+              '
+              kubectl patch Release release-with-data-sample --type=merge --subresource status --patch "status: $collectors"
+              
               cat > releaseplan << EOF
               apiVersion: appstudio.redhat.com/v1alpha1
               kind: ReleasePlan
@@ -42,9 +53,6 @@ spec:
               spec:
                 application: foo
                 target: foo
-                data:
-                  foo: bar
-                  one: one
               EOF
               kubectl apply -f releaseplan
 
@@ -58,13 +66,6 @@ spec:
                 applications:
                   - foo
                 origin: foo
-                data:
-                  singleComponentMode: true
-                  one:
-                    two: three
-                    four:
-                      - five
-                      - six
                 policy: foo
                 pipeline:
                   pipelineRef:
@@ -146,11 +147,9 @@ spec:
 
               echo Test that data result was set properly
               test "$(cat "$(workspaces.data.path)/$(params.data)")" \
-               == '{"foo":"bar","rkey":"rvalue","one":{"four":["five","six"],"two":"three"},"singleComponentMode":true}'
-              
-              echo Test that the singleComponentMode result was properly set
-              test "$(params.singleComponentMode)" == "true"  
-
+               == "$(echo '{"releaseNotes":{"cves":[{"component":"my-component","key":"FOO-3444"},
+                  {"component":"my-component","key":"FOO-4333"}],
+                  "issues":{"fixed":[{"id":"BAR-1234","source":"issues.redhat.com"}]}}}' | jq -cr)"
   finally:
     - name: cleanup
       taskSpec:

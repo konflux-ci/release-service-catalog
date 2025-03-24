@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: collect-data
   labels:
-    app.kubernetes.io/version: "4.5.3"
+    app.kubernetes.io/version: "5.5.3"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -125,7 +125,20 @@ spec:
         echo -e "\nFetching fbcFragment"
         jq -cr '.components[0].containerImage' < "$(workspaces.data.path)/$SNAPSHOTSPEC_PATH" | tr -d "\n" \
           | tee "$(results.fbcFragment.path)"
-
+  
+        echo -e "\nGenerating collectors data"
+        collectors=$(get-resource "release" "${RELEASE}" "{.status.collectors}")
+        collectors_result=$(echo "$collectors" | jq -cr '
+          def extract(key):
+            [ .managed[]?, .tenant[]? ]
+            | map(.[]? | select(type == "object" and has(key)) | .[key] // [])
+            | flatten;
+      
+          { cves: extract("cves"), issues: extract("issues") }
+          | with_entries(select(.value != []))
+          | if length > 0 then { releaseNotes: . } else {} end
+        ')
+        
         echo -e "\nFetching merged data json"
         release_result=$(get-resource "release" "${RELEASE}" "{.spec.data}")
 
@@ -134,10 +147,13 @@ spec:
         release_plan_admission_result=$(get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
             "{.spec.data}")
 
-        # Merge Release and ReleasePlan keys. ReleasePlan has higher priority
-        merged_output=$(merge-json "$release_result" "$release_plan_result")
+        # Merge collectors and Release keys. Release has higher priority
+        merged_output=$(merge-json "$collectors_result" "$release_result")
+        
+        # Merge now with ReleasePlan keys. ReleasePlan has higher priority
+        merged_output=$(merge-json "$merged_output" "$release_plan_result")
 
-        # Merge now with ReleasePlanAdmission keys. ReleasePlanAdmission has higher priority
+        # Finally merge with ReleasePlanAdmission keys. ReleasePlanAdmission has higher priority
         merged_output=$(merge-json "$merged_output" "$release_plan_admission_result")
 
         DATA_PATH="$(params.subdirectory)/data.json"
