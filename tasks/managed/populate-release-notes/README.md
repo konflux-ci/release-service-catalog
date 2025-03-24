@@ -12,6 +12,9 @@ path to a file containing data used in component SBOM generation.
 | dataPath     | Path to the JSON string of the merged data to update                 | No       | -             |
 | snapshotPath | Path to the JSON string of the mapped Snapshot in the data workspace | No       | -             |
 
+## Changes in 3.0.3
+* This task now overrides the releaseNotes.type field to `RHSA` if CVEs are provided
+
 ## Changes in 3.0.2
 * Bump the utils image used in this task
   * The `get-image-architectures` script now uses `set -e` so that it fails

@@ -20,6 +20,10 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -                           |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -                           |
 
+## Changes in 5.1.1
+* This task no longer changes the type to RHSA if CVEs are provided
+  * It will be done in `populate-release-notes` instead
+
 ## Changes in 5.1.0
 * Echo the internalRequestPipelineRunName and internalRequestTaskRunName in the log to help with debugging
 
