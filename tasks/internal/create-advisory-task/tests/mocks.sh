@@ -21,10 +21,12 @@ function find() {
   echo "Mock find called with: $*" >&2
 
   if echo "$*" | grep -q "${ADVISORY_BASE_DIR}"; then
-    echo "${ADVISORY_BASE_DIR}/2025/1602/advisory.yaml"  # Contains image-beta
-    echo "${ADVISORY_BASE_DIR}/2025/1601/advisory.yaml"  # Contains image-alpha
-    echo "${ADVISORY_BASE_DIR}/2024/1452/advisory.yaml"
-    echo "${ADVISORY_BASE_DIR}/2024/1442/advisory.yaml"
+    # Simulate directories with timestamps
+    echo "1712012345.0 ${ADVISORY_BASE_DIR}/2025/1602"  # Contains image-beta
+    echo "1712012344.0 ${ADVISORY_BASE_DIR}/2025/1601"  # Contains image-alpha
+    echo "1708012343.0 ${ADVISORY_BASE_DIR}/2024/1452"
+    echo "1704012342.0 ${ADVISORY_BASE_DIR}/2024/1442"
+
   else
     echo "Error: Unexpected find command: $*" >&2
     exit 1
