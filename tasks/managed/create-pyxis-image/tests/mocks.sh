@@ -20,7 +20,7 @@ function create_container_image() {
 function cleanup_tags() {
   echo $* >> $(workspaces.data.path)/mock_cleanup_tags.txt
 
-  if [[ "$*" != "--verbose --retry --pyxis-graphql-api https://graphql-pyxis.preprod.api.redhat.com/graphql/ "00?? ]]
+  if [[ "$*" != "--verbose --retry --pyxis-graphql-api https://graphql-pyxis.preprod.api.redhat.com/graphql/ --repository "*" "00?? ]]
   then
     echo Error: Unexpected call
     echo Mock cleanup_tags called with: $*
