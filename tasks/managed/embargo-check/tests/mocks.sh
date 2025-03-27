@@ -2,17 +2,17 @@
 set -x
 
 # mocks to be injected into task step scripts
-function curl() {
+function curl-with-retry() {
   echo Mock curl called with: $* >&2
   echo $* >> $(workspaces.data.path)/mock_curl.txt
 
-  if [[ "$*" == "--retry 3 --fail https://jira.atlassian.com/rest/api/2/issue/ISSUE-123" ]]
+  if [[ "$*" == "--retry 3 https://jira.atlassian.com/rest/api/2/issue/ISSUE-123" ]]
   then
     :
-  elif [[ "$*" == "--retry 3 --fail https://bugzilla.redhat.com/rest/bug/12345" ]]
+  elif [[ "$*" == "--retry 3 https://bugzilla.redhat.com/rest/bug/12345" ]]
   then
     :
-  elif [[ "$*" == "--retry 3 --fail https://jira.atlassian.com/rest/api/2/issue/EMBARGOED-987" ]]
+  elif [[ "$*" == "--retry 3 https://jira.atlassian.com/rest/api/2/issue/EMBARGOED-987" ]]
   then
     exit 1
   elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/MISSINGRH-123" ]]

@@ -2,7 +2,7 @@
 set -eux
 
 # mocks to be injected into task step scripts
-function curl() {
+function curl-with-retry() {
   echo Mock curl called with: $* >&2
   echo $* >> $(workspaces.data.path)/mock_curl.txt
 

@@ -12,3 +12,7 @@ Issues in other servers will be skipped without the task failing.
 |-------------|-------------------------------------------------------------------------------------------|----------|---------------|
 | dataPath    | Path to data JSON in the data workspace                                                   | No       | -             |
 | advisoryUrl | The url of the advisory the issues were fixed in. This is added in a comment on the issue | No       | -             |
+
+## Changes in 0.1.1
+* Deal with Jira API rate limiting using a new `curl-with-retry` script from utils image
+  * Bump the utils image to a version containing the new script
