@@ -33,37 +33,41 @@ function find() {
   fi
 }
 
-function cat() {
-  echo "Mock cat called with: $*" >&2
+function yq() {
+  echo "Mock yq called with: $*" >&2
 
-  if [[ -z "$1" ]]; then
-    echo "Error: Empty file path in cat command" >&2
+  # Match yq command that reads the advisory file
+  if [[ "$*" == *".spec.content.images"* && -f "$3" ]]; then
+    advisory_path="$3"
+  elif [[ "$*" == *".spec.content.images"* && -f "$2" ]]; then
+    advisory_path="$2"
+  else
+    echo "Error: Unexpected yq call: $*" >&2
     exit 1
   fi
 
-  advisory_path="$1"
-  advisory_year=$(echo "$advisory_path" | awk -F'/' '{print $(NF-2)}')  # Extract Year
-  advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')   # Extract Advisory Number
+  advisory_year=$(echo "$advisory_path" | awk -F'/' '{print $(NF-2)}')
+  advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
 
-  echo "Returning advisory for ${advisory_year}/${advisory_num}" >&2
+  echo "Returning advisory content for ${advisory_year}/${advisory_num}" >&2
 
   case "$advisory_num" in
     1601)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"release-manager-alpha","containerImage":"quay.io/example/release@sha256:alpha123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v1.0","latest"]}]}}}'
-    ;;
+      echo '[{"architecture":"amd64","component":"release-manager-alpha","containerImage":"quay.io/example/release@sha256:alpha123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v1.0","latest"]}]'
+      ;;
     1602)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"release-manager-beta","containerImage":"quay.io/example/release@sha256:beta123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v2.0","stable"]}]}}}'
-    ;;
+      echo '[{"architecture":"amd64","component":"release-manager-beta","containerImage":"quay.io/example/release@sha256:beta123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v2.0","stable"]}]'
+      ;;
     1442)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:abde","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["v1.0","latest"]}]}}}'
-    ;;
+      echo '[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:abde","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["v1.0","latest"]}]'
+      ;;
     1452)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:lmnop","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["latest"]}]}}}'
-    ;;
+      echo '[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:lmnop","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["latest"]}]'
+      ;;
     *)
       echo "Error: Unexpected advisory number $advisory_num" >&2
       exit 1
-    ;;
+      ;;
   esac
 }
 
