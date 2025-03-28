@@ -49,16 +49,16 @@ function yq() {
 
   case "$advisory_num" in
     1601)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"release-manager-alpha","containerImage":"quay.io/example/release@sha256:alpha123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v1.0","latest"]}]}}}'
+      echo '[{"architecture":"amd64","component":"release-manager-alpha","containerImage":"quay.io/example/release@sha256:alpha123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v1.0","latest"]}]'
       ;;
     1602)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"release-manager-beta","containerImage":"quay.io/example/release@sha256:beta123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v2.0","stable"]}]}}}'
+      echo '[{"architecture":"amd64","component":"release-manager-beta","containerImage":"quay.io/example/release@sha256:beta123","repository":"example-stream/release","signingKey":"example-sign-key","tags":["v2.0","stable"]}]'
       ;;
     1442)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:abde","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["v1.0","latest"]}]}}}'
+      echo '[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:abde","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["v1.0","latest"]}]'
       ;;
     1452)
-      echo '{"spec":{"content":{"images":[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:lmnop","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["latest"]}]}}}'
+      echo '[{"architecture":"amd64","component":"foo-foo-manager-1-15","containerImage":"quay.io/example/openstack@sha256:lmnop","repository":"quay.io/example/openstack","signingKey":"example-sign-key","tags":["latest"]}]'
       ;;
     *)
       echo "Error: Unexpected advisory number $advisory_num" >&2
