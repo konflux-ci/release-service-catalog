@@ -36,13 +36,10 @@ function find() {
 function yq() {
   echo "Mock yq called with: $*" >&2
 
-  # Match yq command that reads the advisory file
-  if [[ "$*" == *".spec.content.images"* && -f "$3" ]]; then
-    advisory_path="$3"
-  elif [[ "$*" == *".spec.content.images"* && -f "$2" ]]; then
-    advisory_path="$2"
-  else
-    echo "Error: Unexpected yq call: $*" >&2
+  # Extract the advisory file path from the last argument
+  advisory_path="${@: -1}"  # This grabs the last argument
+  if [[ ! -f "$advisory_path" ]]; then
+    echo "Error: advisory path not found or not a file: $advisory_path" >&2
     exit 1
   fi
 
