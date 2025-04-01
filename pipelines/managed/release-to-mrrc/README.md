@@ -1,6 +1,6 @@
 # release-to-mrrc pipeline
 
-Tekton release pipeline to release maven artifacts extracted from the maven repository zip built through Middleware prodcut in Konflux. The artifacts will be released to maven.repository.redhat.com.
+Tekton release pipeline to release maven artifacts extracted from the maven repository zip built through Middleware product in Konflux. The artifacts will be released to maven.repository.redhat.com.
 
 ## Parameters
 

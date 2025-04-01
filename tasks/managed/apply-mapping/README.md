@@ -1,8 +1,8 @@
 # apply-mapping
 
-Tekton task to apply a mapping to an Snapshot.
+Tekton task to apply a mapping to a Snapshot.
 
-The purpose of this task is to merge a mapping with the components contained in an Snapshot.
+The purpose of this task is to merge a mapping with the components contained in a Snapshot.
 The mapping is expected to be present in the data field of the ReleasePlanAdmission provided in
 the `releasePlanAdmissionPath`. If the data field does not contain a `mapping` key, the original
 Snapshot is returned. If there is a `mapping` key, it is merged with the `components` key in the

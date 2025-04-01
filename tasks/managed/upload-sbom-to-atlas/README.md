@@ -1,5 +1,5 @@
 # upload-sbom-to-atlas
-Tekton task is gathering SBOM data form working directory, converting it to supported version if needed and uploading it to Atlas.
+Tekton task is gathering SBOM data from working directory, converting it to supported version if needed and uploading it to Atlas.
 Supports both CycloneDX and SPDX format.
 
 ## Parameters

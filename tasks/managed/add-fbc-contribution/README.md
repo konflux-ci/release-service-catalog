@@ -1,6 +1,6 @@
 # add-fbc-contribution
 
-Task to create a internalrequest to add fbc contributions to index images
+Task to create an internalrequest to add fbc contributions to index images
 
 ## Parameters
 
