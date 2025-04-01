@@ -20,6 +20,10 @@ Tekton Pipeline to push disk images to a cdn using pulp
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                  | Yes | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                         | No       | -               |
 
+## Changes in 1.5.0
+* Update the pipeline to add taskGiturl and taskGitRevison parameters to
+  push-disk-images task.
+
 ## Changes in 1.4.0
 * Update all task pathInRepo values as they are now in `tasks/managed`
 
