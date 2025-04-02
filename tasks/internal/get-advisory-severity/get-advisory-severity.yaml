@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: get-advisory-severity
   labels:
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.2.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -53,7 +53,7 @@ spec:
           value: $(params.releaseNotesImages)
       script: |
           #!/usr/bin/env bash
-          set -eo pipefail
+          set -exo pipefail
 
           STDERR_FILE=/tmp/stderr.txt
           echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
@@ -82,7 +82,9 @@ spec:
           echo -n "" > "$(results.severity.path)"
 
           # write keytab to file
+          set +x
           echo -n "${SERVICE_ACCOUNT_KEYTAB}" | base64 --decode > /tmp/keytab
+          set -x
           # workaround kinit: Invalid UID in persistent keyring name while getting default ccache
           KRB5CCNAME=$(mktemp)
           export KRB5CCNAME
@@ -120,10 +122,15 @@ spec:
                   cve=$(jq -r --argjson j "$j" '.cves.fixed | to_entries[$j].key' <<< "${image}")
                   echo "Checking CVE ${cve} for component with repository ${repository}"
                   # Get token. They are short lived, so get one for before each request
+                  set +x
                   TOKEN=$(curl --retry 3 --negotiate -u : "${OSIDB_URL}"/auth/token | jq -r '.access')
+                  CURL_URL="${OSIDB_URL}/osidb/api/v1/flaws?cve_id=${cve}&include_fields=${INCLUDE_FIELDS}"
+                  echo "Calling OSIDB API: ${CURL_URL}"
                   OUTPUT=$(curl --retry 3 -H 'Content-Type: application/json' -H "Authorization: Bearer ${TOKEN}" \
-                      "${OSIDB_URL}/osidb/api/v1/flaws?cve_id=${cve}&include_fields=${INCLUDE_FIELDS}" \
+                      "$CURL_URL" \
                       | jq '.results[0]')
+                  set -x
+                  echo "OSIDB API response: ${OUTPUT}"
                   IMPACT=$(jq -r '.impact' <<< "$OUTPUT")
                   # If there is a component specific impact, use that instead
                   # To check if it is the same component, we use the repository value and match it with the
