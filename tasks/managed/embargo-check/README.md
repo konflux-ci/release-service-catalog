@@ -18,6 +18,10 @@ based on the issues visibility
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
 
+## Changes in 1.1.2
+* Disable checking of Downstream Component Name Jira field for CVEs while we figure out
+  the right way of doing this
+
 ## Changes in 1.1.1
 * Deal with Jira API rate limiting using a new `curl-with-retry` script from utils image
   * Bump the utils image to a version containing the new script
