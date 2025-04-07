@@ -18,6 +18,12 @@ based on the issues visibility
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
 
+## Changes in 1.1.3
+* Enable CVE IDs check
+  * Previous change disabled both Downstream Component check as well as the general check the CVE ID in each
+    Jira is included in the releaseNotes field. This change enables a less strict version of the latter again.
+    * Now we check that the CVE ID is included in some item of releaseNotes.content.images
+
 ## Changes in 1.1.2
 * Disable checking of Downstream Component Name Jira field for CVEs while we figure out
   the right way of doing this

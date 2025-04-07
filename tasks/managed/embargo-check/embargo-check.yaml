@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: embargo-check
   labels:
-    app.kubernetes.io/version: "1.1.2"
+    app.kubernetes.io/version: "1.1.3"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -72,10 +72,7 @@ spec:
 
         # It is expected for the custom field ids to remain stable, but to get them, you can do:
         # curl -H "Authorization: Bearer $ACCESS_TOKEN" https://issues.redhat.com/rest/api/2/field
-        # Disable the Jira CVE checks temporarily while we figure out what's the proper way of doing this
-        # See https://issues.redhat.com/browse/RELEASE-1512
-        # CVE_FIELD="customfield_12324749"
-        # COMPONENT_FIELD="customfield_12324752"
+        CVE_FIELD="customfield_12324749"
 
         RC=0
 
@@ -120,32 +117,21 @@ spec:
             jq --argjson i "$i" --argjson public $public '.releaseNotes.issues.fixed[$i].public = $public' \
                 "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
 
-            # Perform cve specific checks only if the type is Vulnerability
+            # Perform cve id check only if the type is Vulnerability
             ISSUE_TYPE=$(jq -r '.fields.issuetype.name' <<< "$OUTPUT")
             if [ "$ISSUE_TYPE" != "Vulnerability" ] ; then
                 continue
             fi
 
-            # Disable the two checks below temporarily while we figure out what's the proper way of doing this
-            # See https://issues.redhat.com/browse/RELEASE-1512
-
-            # CVE_ID=$(jq -r --arg field "$CVE_FIELD" '.fields[$field]' <<< "$OUTPUT")
-            # COMPONENT_NAME=$(jq -r --arg field "$COMPONENT_FIELD" '.fields[$field]' <<< "$OUTPUT")
-            # if ! COMPONENT_IN_RELEASE_NOTES="$(jq -ec --arg name "$COMPONENT_NAME" \
-            #   '.releaseNotes.content.images[] | select(.component==$name)' "$DATA_FILE")"; then
-            #     echo -n "Error: Issue $issue lists 'Downstream Component Name' $COMPONENT_NAME but that"
-            #     echo " component does not appear in releaseNotes.content.images. Failing"
-            #     RC=1
-            #     continue
-            # fi
-
-            # if [ "$(jq --arg CVE "$CVE_ID" '.cves.fixed | has($CVE)' <<< "$COMPONENT_IN_RELEASE_NOTES")" != "true" ]
-            # then
-            #     echo -n "Error: Issue $issue lists 'Downstream Component Name' $COMPONENT_NAME and 'CVE ID' $CVE_ID"
-            #     echo " but that CVE is not present in the releaseNotes.content.images section for that component."
-            #     RC=1
-            #     continue
-            # fi
+            CVE_ID=$(jq -r --arg field "$CVE_FIELD" '.fields[$field]' <<< "$OUTPUT")
+            if [ "$(jq --arg CVE "$CVE_ID" \
+              '.releaseNotes.content.images | map(.cves.fixed | has($CVE)) | any' \
+              < "$DATA_FILE")" != "true" ]; then
+                echo "Error: Issue $issue lists 'CVE ID' $CVE_ID" \
+                  "but that CVE is not present in the releaseNotes.content.images section for any image."
+                RC=1
+                continue
+            fi
 
         done
 

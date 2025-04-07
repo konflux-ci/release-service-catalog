@@ -21,7 +21,7 @@ function curl-with-retry() {
   elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/FEATURE-123" ]] # Not a Vulnerability
   then
     echo '{"fields":{"issuetype":{"name":"Feature"},"security":"a"}}'
-  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/CVE-123" ]] # Vulnerability
+  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/VULN-123" ]] # Vulnerability
   then
     echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-123","customfield_12324752":"my-component","security":"a"}}'
   elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PUBLIC-1" ]] # Public: no security field, works without auth
