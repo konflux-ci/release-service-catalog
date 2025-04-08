@@ -18,6 +18,10 @@ based on the issues visibility
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
 
+## Changes in 1.1.4
+* Use a temp file for `internal-request` result instead of a fixed file in the workspace to reduce risk
+  of interference with other tasks
+
 ## Changes in 1.1.3
 * Enable CVE IDs check
   * Previous change disabled both Downstream Component check as well as the general check the CVE ID in each

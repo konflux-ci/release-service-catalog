@@ -25,6 +25,10 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 2.4.2
+* Use a temp file for `internal-request` result instead of a fixed file in the workspace to reduce risk
+  of interference with other tasks
+
 ## Changes in 2.4.1
 * Fix shellcheck/checkton linting issues in the task and tests
 
