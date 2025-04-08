@@ -6,9 +6,11 @@ yq -o json <<< '
 items:
 - id: 1
   distribution_scope: "stage"
+  from_index: "registry-proxy-stage.engineering.redhat.com/rh-osbs/iib-pub:v4.17"
   fbc_fragment: "registry.io/image0@sha256:0000"
   internal_index_image_copy: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:1"
   index_image_resolved: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000"
+  index_image: "registry-proxy-stage.engineering.redhat.com/rh-osbs/iib-pub:v4.17"
   logs:
     url: "https://fakeiib.host/api/v1/builds/1/logs"
   request_type: "fbc-operations"

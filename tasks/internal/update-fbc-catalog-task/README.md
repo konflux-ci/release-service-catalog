@@ -14,6 +14,10 @@ Tekton task to submit a IIB build request to add/update a fbc-fragment to an ind
 | hotfix                  | Whether this build is a hotfix build                                         | Yes      | "false"       |
 | stagedIndex             | Whether this build is for a staged index build                               | Yes      | "false"       |
 
+## Changes in 1.1.1
+* adds equality check of `from_index` and `index_image` in `check_previous_build()`
+  to determine if the build was a prod or a staging build
+
 ## Changes in 1.1.0
 * adds new parameter `publishingCredentials`
 
