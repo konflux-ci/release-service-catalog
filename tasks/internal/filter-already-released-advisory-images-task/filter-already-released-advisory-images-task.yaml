@@ -1,0 +1,152 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-already-released-advisory-images-task
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    Filters out images from a snapshot if they are already published in an advisory
+    stored in the GitLab advisory repo. Returns a list of component names
+    that still need to be released (i.e., not found in any advisory). 
+  params:
+    - name: snapshot_json
+      type: string
+      description: String containing a JSON representation of the snapshot spec
+    - name: origin
+      description: The origin workspace for the release CR
+      type: string
+    - name: advisory_secret_name
+      description: Name of the secret containing advisory metadata
+      type: string
+    - name: internalRequestPipelineRunName
+      description: Name of the PipelineRun that requested this task
+      type: string
+  results:
+    - name: result
+      description: Success or error message
+    - name: internalRequestPipelineRunName
+      description: The name of the InternalRequest PipelineRun
+    - name: internalRequestTaskRunName
+      description: The name of the InternalRequest TaskRun
+    - name: unreleased_components
+      description: List of components that still need to be released
+  steps:
+    - name: filter-images
+      image: quay.io/konflux-ci/release-service-utils:0b2f257d7a5c2a881c36c23f8ae3cd5e89db593a
+      env:
+        - name: GITLAB_HOST
+          valueFrom:
+            secretKeyRef:
+              name: $(params.advisory_secret_name)
+              key: gitlab_host
+        - name: ACCESS_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: $(params.advisory_secret_name)
+              key: gitlab_access_token
+        - name: GIT_REPO
+          valueFrom:
+            secretKeyRef:
+              name: $(params.advisory_secret_name)
+              key: git_repo
+        - name: GIT_AUTHOR_NAME
+          valueFrom:
+            secretKeyRef:
+              name: $(params.advisory_secret_name)
+              key: git_author_name
+        - name: GIT_AUTHOR_EMAIL
+          valueFrom:
+            secretKeyRef:
+              name: $(params.advisory_secret_name)
+              key: git_author_email
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
+      script: |
+        #!/usr/bin/env bash
+        set -eo pipefail
+
+        STDERR_FILE=/tmp/stderr.txt
+        echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
+        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
+
+        exitfunc() {
+          local err=$1
+          local line=$2
+          local cmd=$3
+          if [ "$err" -eq 0 ]; then
+            echo -n "Success" > "$(results.result.path)"
+          else
+            echo -n "$0: ERROR '$cmd' failed at line $line - exited with status $err" > "$(results.result.path)"
+            if [ -f "$STDERR_FILE" ]; then tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"; fi
+          fi
+          exit 0
+        }
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        ORIGIN="$(params.origin)"
+        ADVISORY_BASE_DIR="data/advisories/${ORIGIN}"
+
+        cd /tmp
+
+        echo "Cloning $GIT_REPO..."
+        git clone "$GIT_REPO" repo
+        cd repo
+
+        echo "Checking existing advisories in ${ADVISORY_BASE_DIR}..."
+        EXISTING_ADVISORIES=""
+        if [ -d "${ADVISORY_BASE_DIR}" ]; then
+          EXISTING_ADVISORIES=$(
+            find "${ADVISORY_BASE_DIR}" -mindepth 2 -type d -printf "%T@ %p\n" |
+            sort -nr | cut -d' ' -f2- | sed "s|^${ADVISORY_BASE_DIR}/||"
+          )
+        fi
+
+        CONTENT_IMAGES=$(jq -c '.components' <<< "$SNAPSHOT_JSON")
+
+        if [[ -z "$EXISTING_ADVISORIES" ]]; then
+          echo "No existing advisories found. No components have been released yet."
+          UNRELEASED_COMPONENTS=$(jq -c '[.[].name]' <<< "$CONTENT_IMAGES")
+          echo -n "$UNRELEASED_COMPONENTS" > "$(results.unreleased_components.path)"
+          echo -n "Success" > "$(results.result.path)"
+          exit 0
+        fi
+
+        for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
+          ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
+          EXISTING_CONTENT=$(yq -o=json '.spec.content.images // []' "$ADVISORY_FILE")
+
+          echo "Comparing against: $ADVISORY_FILE"
+
+          CONTENT_IMAGES=$(echo "$CONTENT_IMAGES" | jq --argjson existing "$EXISTING_CONTENT" '
+            map(select(
+              .containerImage as $ci |
+              .tags as $tags |
+              .repository as $repo |
+              ($existing | map(select(
+                .containerImage == $ci and .tags == $tags and .repository == $repo
+              )) | length == 0)
+            ))')
+
+          # If after filtering, no images are left, then we can exit early
+          if jq -e 'length == 0' <<< "$CONTENT_IMAGES" >/dev/null; then
+            echo "All images in the snapshot have already been released in advisories. Stopping pipeline."
+            echo -n "[]" > "$(results.unreleased_components.path)"
+            echo -n "Success" > "$(results.result.path)"
+            exit 0
+          fi
+        done
+
+        ORIGINAL_COUNT=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        NEW_COUNT=$(jq 'length' <<< "$CONTENT_IMAGES")
+        echo "Filtered out $((ORIGINAL_COUNT - NEW_COUNT)) image(s) already in advisories"
+        echo "Remaining unpublished images: $CONTENT_IMAGES"
+
+        # Output the list of component names that still need to be released
+        UNRELEASED_COMPONENTS=$(jq -c '[.[].name]' <<< "$CONTENT_IMAGES")
+        echo -n "$UNRELEASED_COMPONENTS" > "$(results.unreleased_components.path)"
+        echo -n "Success" > "$(results.result.path)"

@@ -1,0 +1,307 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-already-released-advisory-images
+spec:
+  description: |
+    Run the filter-already-released-advisory-images managed task and validate it creates an InternalRequest correctly.
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+            - name: DEBUG
+              value: $(params.trustedArtifactsDebug)
+        steps:
+          - name: create-inputs
+            image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" <<EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlanAdmission",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "applications": ["app"],
+                  "origin": "dev"
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" <<EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "old-component",
+                    "repository": "quay.io/redhat-pending/repo",
+                    "containerImage": "quay.io/redhat-pending/repo@sha256:abc123"
+                  },
+                  {
+                    "name": "new-component",
+                    "repository": "quay.io/redhat-pending/repo2",
+                    "containerImage": "quay.io/redhat-pending/repo2@sha256:def456"
+                  }
+                ]
+              }
+              EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: filter-already-released-advisory-images
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
+        - name: releasePlanAdmissionPath
+          value: "$(context.pipelineRun.uid)/test_release_plan_admission.json"
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: synchronously
+          value: "false"
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)/$(context.pipelineRun.uid)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: result
+            type: string
+          - name: skip_release
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify
+            image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              # Count the number of InternalRequests
+              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
+              
+              # Check if the number of InternalRequests is as expected
+              if [ "$requestsCount" -ne 1 ]; then
+                echo "Unexpected number of InternalRequests. Expected: 1, Found: $requestsCount"
+                exit 1
+              fi
+
+              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+
+              # Check if the 'pipelineRef' field contains the correct pipeline path
+              expected_pipeline="pipelines/internal/filter-already-released-advisory-images/filter-already-released-advisory-images.yaml"
+              pipeline_ref=$(echo "$internalRequest" | jq -r '.spec.pipeline.pipelineRef.params[2].value')
+              if [[ "$pipeline_ref" != "$expected_pipeline" ]]; then
+                echo "InternalRequest doesn't contain the correct pipeline path"
+                exit 1
+              fi
+
+              # Check the snapshot_json parameter
+              snapshotJson=$(echo "$internalRequest" | jq -r '.spec.params.snapshot_json')
+              if [ "$(jq -r '.application' <<< "$snapshotJson")" != "myapp" ]; then
+                echo "InternalRequest has the wrong application in snapshot_json"
+                exit 1
+              fi
+
+              # Check the origin parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.origin' )" != "dev" ]; then
+                echo "InternalRequest has the wrong origin parameter"
+                exit 1
+              fi
+
+              # Check the advisory_secret_name parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.advisory_secret_name' )" != \
+                "create-advisory-stage-secret" ]; then
+                echo "InternalRequest has the wrong advisory_secret_name parameter"
+                exit 1
+              fi
+
+              # Check the taskGitUrl parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.taskGitUrl' )" != "http://localhost" ]; then
+                echo "InternalRequest has the wrong taskGitUrl parameter"
+                exit 1
+              fi
+
+              # Check the taskGitRevision parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.taskGitRevision' )" != "main" ]; then
+                echo "InternalRequest has the wrong taskGitRevision parameter"
+                exit 1
+              fi
+
+              # Check that the filtered snapshot contains only the new component
+              base_dir="$(params.dataDir)/$(context.pipelineRun.uid)/results"
+              results_file="$base_dir/filter-already-released-advisory-images-results.json"
+              filteredSnapshot=$(jq -r '.filtered_snapshot' "$results_file")
+              if [ "$(jq -r '.components | length' <<< "$filteredSnapshot")" != "1" ]; then
+                echo "Filtered snapshot should contain only one component"
+                exit 1
+              fi
+              if [ "$(jq -r '.components[0].name' <<< "$filteredSnapshot")" != "new-component" ]; then
+                echo "Filtered snapshot should contain only the new component"
+                exit 1
+              fi
+
+              # Check that skip_release is set to false
+              if [ "$(params.skip_release)" != "false" ]; then
+                echo "skip_release should be false when some components are not released"
+                exit 1
+              fi
+
+              # Check that the result was properly set
+              if [ "$(params.result)" != "Success" ]; then
+                echo "Task failed: $(params.result)"
+                exit 1
+              fi
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: skip_release
+          value: $(tasks.run-task.results.skip_release)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: "$(params.dataDir)"
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests --all

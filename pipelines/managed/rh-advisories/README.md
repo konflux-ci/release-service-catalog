@@ -28,6 +28,16 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.1.0
+* Add new task `filter-already-released-advisory-images` to filter out images that have already been released in advisories
+  * Task is placed after `apply-mapping` and before `verify-conforma`
+  * Overwrites the original snapshot file in place with the filtered snapshot (subsequent tasks continue to use the same snapshot path)
+  * Makes the pipeline idempotent by preventing validation failures for already released images
+  * When all images in a snapshot are already released in advisories, the pipeline will:
+    - Detect this condition early in the process
+    - Skip all subsequent release tasks (advisory creation, image signing, etc.)
+  * `filter-already-released-advisory-images`: Filters out already released images from the snapshot and sets a `skip_release` result. If all images are already released, this result is used to skip unnecessary pipeline steps (validation, signing, advisory creation, etc.) to avoid redundant work and potential validation failures.
+
 ## Changes in 2.0.8
 * The `update-component-sbom` and `create-product-sbom` tasks are refactored to
   use the new SBOM generation workflow. They no longer depend on

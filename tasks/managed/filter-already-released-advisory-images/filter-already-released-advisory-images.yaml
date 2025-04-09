@@ -1,0 +1,309 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-already-released-advisory-images
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    Managed Tekton task that filters out already-released images from a snapshot
+    via an InternalRequest.
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+    - name: releasePlanAdmissionPath
+      type: string
+      description: Path to the JSON string of the ReleasePlanAdmission in the data workspace
+    - name: resultsDirPath
+      type: string
+      description: Path to the results directory in the data workspace
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: $(workspaces.data.path)
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: Git revision to use for internal task
+    - name: pipelineRunUid
+      type: string
+      description: UID of the current pipelineRun
+    - name: synchronously
+      type: string
+      description: Whether to wait for the InternalRequest completion
+      default: "true"
+    - name: subdirectory
+      description: Subdirectory inside the workspace to be used
+      type: string
+      default: ""
+  workspaces:
+    - name: data
+      description: Workspace to mount internal request outputs
+  results:
+    - name: result
+      description: Success or failure result
+    - name: skip_release
+      description: Whether to skip release tasks (true if all components are already released)
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: skip-trusted-artifact-operations
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+    - name: use-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: run-script
+      image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+      script: |
+        #!/bin/bash
+        set -x
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "$SNAPSHOT_FILE" ]; then
+            echo "No valid snapshot file was provided at $SNAPSHOT_FILE"
+            exit 1
+        fi
+        snapshot=$(jq -c '.' "$SNAPSHOT_FILE")
+        if [ -z "$snapshot" ]; then
+            echo "Failed to read snapshot file"
+            exit 1
+        fi
+
+        RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
+        if [ ! -f "$RPA_FILE" ]; then
+            echo "No valid ReleasePlanAdmission file was provided at $RPA_FILE"
+            exit 1
+        fi
+        origin=$(jq -r '.spec.origin' "$RPA_FILE")
+        if [ -z "$origin" ]; then
+            echo "Failed to read origin from ReleasePlanAdmission"
+            exit 1
+        fi
+
+        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+        # Determine advisory_secret_name based on repositories in snapshot
+        pending_repositories=$(jq -r '.components[] | select(.repository |
+          test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/")) |
+          .repository' "$SNAPSHOT_FILE")
+        prod_repositories=$(jq -r '.components[] | select(.repository |
+          test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/")) |        
+          .repository' "$SNAPSHOT_FILE")
+        orphan_repositories=$(jq -r '.components[] |
+          select(.repository |
+            test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/") | not) |
+          select(.repository |
+            test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/") | not) |
+          .repository' "$SNAPSHOT_FILE")
+        foundPendingRepositories=false
+        [ -n "${pending_repositories}" ] && foundPendingRepositories=true
+        foundProdRepositories=false
+        [ -n "${prod_repositories}" ] && foundProdRepositories=true
+        foundOrphanRepositories=false
+        [ -n "${orphan_repositories}" ] && foundOrphanRepositories=true
+
+        echo "Repository status:"
+        echo "- Pending repositories: ${foundPendingRepositories}"
+        echo "- Production repositories: ${foundProdRepositories}"
+        echo "- Orphan repositories: ${foundOrphanRepositories}"
+
+        if [ "${foundPendingRepositories}" == "true" ] && [ "${foundProdRepositories}" == "true" ]; then
+          echo "Error: cannot publish to both redhat-pending and redhat-prod repositories"
+          exit 1
+        fi
+
+        if [ "${foundPendingRepositories}" == "false" ] && [ "${foundProdRepositories}" == "false" ]; then
+          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+          exit 1
+        fi
+
+        if [ "${foundOrphanRepositories}" == "true" ]; then
+          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+          exit 1
+        fi
+
+        # Select the correct secret name
+        advisorySecretName="create-advisory-prod-secret"
+        if [ "${foundPendingRepositories}" == "true" ]; then
+          advisorySecretName="create-advisory-stage-secret"
+        fi
+
+        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/filter-already-released-advisory-images-results.json"
+        IR_FILE="$(params.dataDir)/$(context.task.name)/ir-result.txt"
+        mkdir -p "$(dirname "$IR_FILE")"
+
+        echo "Creating internal request for filtering already-released advisory images..."
+        # Because of the tee, this will always succeed
+        internal-request --pipeline "filter-already-released-advisory-images" \
+                         -p snapshot_json="$snapshot" \
+                         -p origin="$origin" \
+                         -p advisory_secret_name="$advisorySecretName" \
+                         -p internalRequestPipelineRunName="$(params.pipelineRunUid)" \
+                         -p taskGitUrl="$(params.taskGitUrl)" \
+                         -p taskGitRevision="$(params.taskGitRevision)" \
+                         -s "$(params.synchronously)" \
+                         -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
+                         | tee "$IR_FILE"
+
+        internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_FILE")
+        echo "Internal request created: ${internalRequest}"
+
+        echo "Internal request status:"
+        kubectl get internalrequest "${internalRequest}" -o json | jq .
+
+        results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
+        if [ -z "$results" ]; then
+          echo "No results found in internal request. Status:"
+          kubectl get internalrequest "${internalRequest}" -o yaml
+          exit 1
+        fi
+
+        internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
+        internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
+        echo "Internal request details:"
+        echo "- Pipeline run: ${internalRequestPipelineRunName}"
+        echo "- Task run: ${internalRequestTaskRunName}"
+
+        if [[ "$(echo "$results" | jq -r '.result')" == "Success" ]]; then
+          echo "Image filtering successful"
+          
+          # Get the unreleased components list
+          UNRELEASED_COMPONENTS=$(echo "$results" | jq -r '.unreleased_components // "[]"')
+          if [ -z "$UNRELEASED_COMPONENTS" ]; then
+            echo "No unreleased components list found in results. Results:"
+            echo "$results"
+            exit 1
+          fi
+
+          # Filter the original snapshot using the unreleased components list
+          FILTERED_SNAPSHOT=$(jq --argjson unreleased "$UNRELEASED_COMPONENTS" '
+            .components = (
+              .components | map(
+                select(
+                  .name as $name | ($unreleased | contains([$name]))
+                )
+              )
+            )
+          ' <<< "$snapshot")
+
+          # Check if the filtered snapshot has any components
+          if jq -e '.components | length == 0' <<< "$FILTERED_SNAPSHOT"; then
+            echo "All images in the snapshot have already been released in advisories. Stopping pipeline."
+            SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
+            echo "$FILTERED_SNAPSHOT" > "$SNAPSHOT_PATH"
+            echo -n "Success" > "$(results.result.path)"
+            echo -n "true" > "$(results.skip_release.path)"
+            jq -n --arg snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
+            exit 0
+          fi
+
+          SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
+          echo "$FILTERED_SNAPSHOT" > "$SNAPSHOT_PATH"
+          echo -n "Success" > "$(results.result.path)"
+          echo -n "false" > "$(results.skip_release.path)"
+          jq -n --arg snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
+        else
+          echo "Filtering failed. Results:"
+          echo "$results"
+          exit 1
+        fi
+    - name: create-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
+    - name: patch-source-data-artifact-result
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
