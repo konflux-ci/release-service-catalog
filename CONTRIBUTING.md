@@ -98,18 +98,6 @@ Before a pull request can be merged:
 * The CI has to pass successfully
 * Every comment has to be addressed and resolved
 
-#### Pull Requests Only Updating the [internal Directory](internal)
-
-If the files changed for a pull request only contains things in the [internal](internal) directory, the E2E testing is irrelevant.
-This is because these resources need to be deployed to the staging cluster in order for E2E to use them, and we do not deploy resources from pull requests to that cluster.
-So, in this case, E2E tests are irrelevant and should be ignored.
-
-#### Pull Requests Updating the [internal Directory](internal) and Other Files
-
-If a pull request is updating both internal resources as well as other resources, the pull request should be split into two: one for the internal resources, one for the rest.
-The reason for this is that the internal resource pull request should be merged first. Then, the new resources will be present on the staging cluster. This allows the second
-pull request, with the other changes, to properly execute E2E with the aforementioned internal changes present on the staging cluster.
-
 ### Image References
 
 Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/konflux-ci/release-service-utils).
@@ -358,12 +346,3 @@ This check shows itself as the `Linters / checkton (pull_request)` check on the 
 If it fails and you click details, the tool does a pretty good job of highlighting the failures and telling you how to fix them.
 
 We strive to have all of our tekton resources abide by shellcheck, so this check is mandatory for pull requests submitted to this repo.
-
-### Symlinks (internal dir changes only)
-
-This repository contains [one directory](internal/resources) for all tekton resources inside of the internal directory.
-
-This is so that we can point ArgoCD at it and have both the tasks and pipelines deployed to the cluster (but not the test files).
-
-If you submit a change that either adds or removes a pipeline from the [internal pipelines directory](internal/pipelines) or a task from the [internal tasks directory](internal/tasks),
-your pull request must also add or remove a sym link from the [internal resources directory](internal/resources).
