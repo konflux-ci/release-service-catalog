@@ -65,7 +65,7 @@ function set_ir_status() {
       "internalRequestPipelineRunName": "${mockPipelineRunName}",
       "internalRequestTaskRunName": "${mockTaskRunName}",
       "buildState": "$status",
-      "jsonBuildInfo": "{\"error\":\"unknown error\",\"str\":\"unknown error\"}\n"
+      "jsonBuildInfo": "\\\\\"{\\\\\"error\\\\\":\\\\\"unknown error\\\\\",\\\\\"str\\\\\":\\\\\"unknown error\\\\\"}\"\n"
     }
   }
 }
@@ -78,7 +78,7 @@ EOF
       "internalRequestPipelineRunName": "${mockPipelineRunName}",
       "internalRequestTaskRunName": "${mockTaskRunName}",
       "buildState": "$status",
-      "jsonBuildInfo": "{\"merge_request\":\"https://g/r/-/merge_requests/18\"}\n"
+      "jsonBuildInfo": "\"{\\\\\"merge_request\\\\\":\\\\\"https://g/r/-/merge_requests/18\\\\\"}\"\n"
     }
   }
 }

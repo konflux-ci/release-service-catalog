@@ -17,6 +17,10 @@ the field `spec.data.fileUpdates` in the ReleasePlanAdmission resource.
 | taskGitUrl         | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -                        |
 | taskGitRevision    | The revision in the taskGitUrl repo to be used                                            | No       | -                        |
 
+## Changes in 3.0.2
+* Fix processing of IR result `jsonBuildInfo`
+  * `fromjson` needs to be applied twice before we get to the actual json
+
 ## Changes in 3.0.0
 * Added taskGiturl and taskGitRevision parameters to be passed to the internalRequest
 * The pipeline is called via git resolver now instead of cluster resolver
