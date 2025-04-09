@@ -1,0 +1,131 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-already-released-advisory-no-snapshot
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Run the filter-already-released-advisory-images task with no Snapshot and verify it fails as expected.
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored.
+    - name: ociArtifactExpiresAfter
+      type: string
+      default: "1d"
+    - name: orasOptions
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      type: string
+      default: ""
+    - name: dataDir
+      type: string
+      description: The location where data will be stored.
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+            - name: DEBUG
+              value: $(params.trustedArtifactsDebug)
+        steps:
+          - name: create-missing-snapshot-inputs
+            image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" <<EOF
+              {
+                "spec": {
+                  "origin": "dev"
+                }
+              }
+              EOF
+              # Note: No snapshot file created
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+
+    - name: run-task
+      taskRef:
+        name: filter-already-released-advisory-images
+      runAfter:
+        - setup
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/missing_snapshot.json"
+        - name: releasePlanAdmissionPath
+          value: "$(context.pipelineRun.uid)/test_release_plan_admission.json"
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: synchronously
+          value: "false"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)/$(context.pipelineRun.uid)"
+        - name: dataDir
+          value: $(params.dataDir)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
