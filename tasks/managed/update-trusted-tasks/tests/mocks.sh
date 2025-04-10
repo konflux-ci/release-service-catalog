@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -eux
 
 # mocks to be injected into task step scripts
