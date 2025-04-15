@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: embargo-check
   labels:
-    app.kubernetes.io/version: "2.0.0"
+    app.kubernetes.io/version: "2.0.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -120,6 +120,7 @@ spec:
               key: token
       script: |
         #!/usr/bin/env bash
+        set -x
 
         SUPPORTED_ISSUE_TRACKERS='{
             "Jira": {
@@ -151,9 +152,6 @@ spec:
 
         NUM_ISSUES=$(jq -cr '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
         for ((i = 0; i < NUM_ISSUES; i++)); do
-            # We set +x before the curl call and then capture the exit code. That can lead to breaking out of the
-            # current loop iteration or continuing on, so let's set -x at the beginning of each iteration
-            set -x
             issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
             server=$(jq -r '.source' <<< "$issue")
             API=$(jq -r '.[] | select(.servers[] | contains("'"$server"'")) | .api' <<< "$SUPPORTED_ISSUE_TRACKERS")
@@ -164,12 +162,13 @@ spec:
                 AUTH_ARGS=(-H "Authorization: Bearer $ACCESS_TOKEN")
             fi
             OUTPUT=$(curl-with-retry --retry 3 "${AUTH_ARGS[@]}" "${API_URL}")
-            if [ $? -ne 0 ] ; then
+            CURL_RC=$?
+            set -x
+            if [ "$CURL_RC" -ne 0 ] ; then
                 echo "Error: ${issue} is not visible. Assuming it is embargoed and stopping pipelineRun execution."
                 RC=1
                 continue
             fi
-            set -x
 
             # Perform additional checks only for issues on issues.redhat.com
             if [ "$server" != "issues.redhat.com" ] ; then
@@ -213,6 +212,7 @@ spec:
       image: quay.io/konflux-ci/release-service-utils:10bd7e4323de6ace107bbed1fe40613f21684b01
       script: |
         #!/usr/bin/env bash
+        set -x
 
         DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
@@ -222,7 +222,7 @@ spec:
 
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        CVES=$(jq -r '.releaseNotes.content.images[].cves.fixed
+        CVES=$(jq -r '.releaseNotes.content.images[] | select(.cves.fixed) | .cves.fixed
             | to_entries[] | .key' "${DATA_FILE}" | sort -u | tr "\n" " ")
 
         if [[ ${CVES} == "" ]] ; then
