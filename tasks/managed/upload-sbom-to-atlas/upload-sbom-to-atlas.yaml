@@ -4,17 +4,21 @@ kind: Task
 metadata:
   name: upload-sbom-to-atlas
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
-  description: |-
-    Tekton task for uploading a SBOM file to Atlas.
+  description: >-
+    This task recursively scans for CycloneDX and SPDX SBOMs in a specified
+    directory, converts them to supported versions if needed, and uploads them
+    to the Atlas service. It includes a retry mechanism that saves failed
+    uploads to an S3 bucket, so that the upload can be retried by another
+    service (Bombino).
   params:
     - name: sbomDir
       description: >-
-        Directory containing SBOM files. The task will search for CycloneDX JSON
+        Directory containing SBOM files. The task will search for JSON
         SBOMs recursively in this directory and upload them all to Atlas.
         The path is relative to the 'data' workspace.
       type: string
@@ -86,6 +90,10 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: retryAWSSecretName
+      description: Name of the Secret containing AWS credentials for retry mechanism.
+    - name: retryS3Bucket
+      description: Name of the S3 bucket for the retry mechanism.
   workspaces:
     - name: data
   results:
@@ -96,6 +104,9 @@ spec:
     - name: atlas-secret
       secret:
         secretName: $(params.atlasSecretName)
+    - name: aws-secret
+      secret:
+        secretName: $(params.retryAWSSecretName)
     - name: workdir
       emptyDir: {}
   stepTemplate:
@@ -268,6 +279,11 @@ spec:
         mkdir -p "${workdir}"
         mkdir -p "${sbomsDir}"
 
+        failedSbomDir="$(params.dataDir)/$(params.subdirectory)/failed-sboms"
+        # make sure the directory wasn't created in a previous run of this task
+        rm -rf "$failedSbomDir"
+        mkdir -p "$failedSbomDir"
+
         shopt -s nullglob
         sboms_to_upload=("$workdir"/*.json)
 
@@ -312,6 +328,11 @@ spec:
           bombasticApiUrl=$(params.bombasticApiUrl)
           echo "Uploading SBOM to $bombasticApiUrl (with id=$sbom_id)"
 
+          handle_atlas_failure () {
+            >&2 echo "WARNING: SBOM upload of $1 to Atlas has failed! Upload will be retried later."
+            cp "$1" "${failedSbomDir}"
+          }
+
           curl -X PUT "${curl_opts[@]}" \
             --retry-max-time "$retry_max_time" \
             -H "authorization: Bearer $access_token" \
@@ -319,8 +340,59 @@ spec:
             -H "content-type: application/json" \
             --data "@$supported_version_of_sbom" \
             "$bombasticApiUrl/api/v1/sbom?id=$sbom_id" \
-            || echo "SBOM upload to Atlas has failed!"
+            || handle_atlas_failure "$supported_version_of_sbom"
 
+          # In the stage environment (and e2e tests), retry the push of all
+          # SBOMs to test functionality of the retry mechanism.
+          if [[ "$(params.atlasSecretName)" = "atlas-staging-sso-secret" ]]; then
+            cp "$supported_version_of_sbom" "${failedSbomDir}"
+          fi
+        done
+
+    - name: push-to-s3
+      image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+      volumeMounts:
+        - name: aws-secret
+          mountPath: /secrets
+      script: |
+        #!/usr/bin/env bash
+        set -o pipefail -o nounset
+
+        aws_access_key_id="$(cat /secrets/atlas-aws-access-key-id)"
+        aws_secret_access_key="$(cat /secrets/atlas-aws-secret-access-key)"
+
+        sbomDir="$(params.dataDir)/$(params.subdirectory)/failed-sboms"
+        echo "$(find "$sbomDir" -type f | wc -l) SBOMs to upload to S3."
+
+        region="us-east-1"
+        bucket="$(params.retryS3Bucket)"
+
+        shopt -s nullglob
+        for sbom in "$sbomDir"/*; do
+          # strip supported version suffix
+          to_upload="${sbom%.supported_version}"
+          cp "${sbom}" "${to_upload}"
+
+          # we don't want the full path in S3
+          s3_filename=$(basename "$to_upload")
+
+          resource="/${bucket}/${s3_filename}"
+          content_type="application/json"
+          date_value=$(date -R)
+          to_sign="PUT\n\n${content_type}\n${date_value}\n${resource}"
+          signature=$(echo -en "${to_sign}" | openssl sha1 -hmac "${aws_secret_access_key}" -binary | base64)
+
+          echo "Pushing $to_upload to S3."
+          if ! curl -X PUT --upload-file "${to_upload}" \
+              --silent --show-error --fail-with-body --retry 5 \
+              -H "Host: ${bucket}.s3.${region}.amazonaws.com" \
+              -H "Date: ${date_value}" \
+              -H "Content-Type: ${content_type}" \
+              -H "Authorization: AWS ${aws_access_key_id}:${signature}" \
+              "https://${bucket}.s3.${region}.amazonaws.com/${s3_filename}"; then
+            >&2 echo "ERROR: Failed to push SBOM to S3 bucket."
+            exit 1
+          fi
         done
     - name: create-trusted-artifact
       ref:

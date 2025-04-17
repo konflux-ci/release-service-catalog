@@ -32,6 +32,9 @@ the rh-push-to-registry-redhat-io pipeline.
 * Update all tasks that now support trusted artifacts to specify the taskGit* parameters for the step action resolvers
 * Align workspace name with changes in the apply-mapping task
 
+## Changes in 1.12.1
+* Add params to `upload-product-sbom` and `upload-component-sbom` to upload failed SBOMs to S3.
+
 ## Changes in 1.12.0
 * Add new parameter `verify_ec_task_git_revision` needed for consuming the verify-conforma task
   via git resolver
