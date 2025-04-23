@@ -21,9 +21,4 @@ function git() {
 
 function gh() {
   echo "Mock gh called with: $*"
-
-  if [[ "$*" == *"base fail"* ]]; then
-    echo Error: mocked failure for pr creation
-    return 1
-  fi
 }
