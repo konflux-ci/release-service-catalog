@@ -101,7 +101,6 @@ if [ "${PROMOTION_TYPE}" == development-to-staging ]; then
 elif [ "${PROMOTION_TYPE}" == staging-to-production ]; then
     SOURCE_BRANCH=staging
     TARGET_BRANCH=production
-    SRE_DUPLICATE_BRANCH=stable
 else
     echo "Invalid promotion type. Only 'development-to-staging' and 'staging-to-production' are allowed"
     print_help
@@ -155,9 +154,6 @@ fi
 
 git checkout $SOURCE_BRANCH
 git push origin $SOURCE_BRANCH:$TARGET_BRANCH
-if [ -v SRE_DUPLICATE_BRANCH ] ; then
-    git push origin $SOURCE_BRANCH:$SRE_DUPLICATE_BRANCH
-fi
 
 cd -
 rm -rf ${tmpDir}
