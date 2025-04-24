@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-rpm-to-koji
   labels:
-    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/version: "0.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: push-koji
@@ -29,23 +29,27 @@ spec:
     - name: pipelineImage
       type: string
       description: |
-        The image url with koji, kinit installed for running the push-rpm-to-koji task,
-        please make sure you have such image or you build this image first.
+        The image url with koji (1.34 or higher), jq and kinit installed for
+        running the push-rpm-to-koji task, please make sure you have such image
+        or you build this image first.
   steps:
     - name: push-rpm-to-koji
       # The pipelineImage will be fetching from get-secrets task with koji installed there
       image: "$(params.pipelineImage)"
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(workspaces.data.path)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(workspaces.data.path)/$(params.dataPath)
       script: |
         #!/usr/bin/env bash
         set -eux
 
-        SNAPSHOT_SPEC_FILE="$(params.snapshotPath)"
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
             echo "No valid snapshot file was provided."
             exit 1
         fi
 
-        DATA_FILE="$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No data JSON was provided."
             exit 1
@@ -54,10 +58,15 @@ spec:
         APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
 
-        PRINCIPAL=$(jq -r '.pushOptions.pushKeytab.principal' "${DATA_FILE}")
-        KEYTAB_FILE=$(jq -r '.pushOptions.pushKeytab.name' "${DATA_FILE}")
-        KOJI_CMD=$(jq -r '.pushOptions.koji_cmd' "${DATA_FILE}")
-        KOJI_TAGS=$(jq -r '.pushOptions.koji_tags  | join(" ")' "${DATA_FILE}")
+        PRINCIPAL=$(jq --exit-status -r '.pushOptions.pushKeytab.principal' "${DATA_FILE}")
+        KEYTAB_FILE=$(jq --exit-status -r '.pushOptions.pushKeytab.name' "${DATA_FILE}")
+        KOJI_PROFILE=$(jq --exit-status -r '.pushOptions.koji_profile' "${DATA_FILE}")
+        KOJI_TAGS=$(jq --exit-status -r '.pushOptions.koji_tags // [] | join(" ")' "${DATA_FILE}")
+        KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft' "${DATA_FILE}")
+
+        koji-cmd() {
+            koji --profile="$KOJI_PROFILE" "$@"
+        }
 
         # Fetch the component list from data.pushOptions.components by default, if there is no such list
         # fetch from data.mapping.components.
@@ -94,7 +103,7 @@ spec:
         USER_NAME=$(echo "$PRINCIPAL" | cut -d'@' -f1)
 
         # Test the koji connection
-        $KOJI_CMD hello
+        koji-cmd hello
 
         printf 'Start task "%s" for Application "%s"\n\n' "$(context.task.name)" "$APPLICATION"
 
@@ -118,23 +127,49 @@ spec:
           SRPM=$(ls ./*.src.rpm)
           PACKAGE_NVR=$(basename "$SRPM" .src.rpm)
 
-          if $KOJI_CMD buildinfo "$PACKAGE_NVR" >/dev/null 2>&1;  then
-              printf "Skip import %s into BREW as it's exist ...\n" "$PACKAGE_NVR"
-              cd .. && rm -rf temp
-              continue
+          if [[ "$KOJI_IMPORT_DRAFT" == "false" ]]; then
+              if koji-cmd buildinfo "$PACKAGE_NVR" >/dev/null 2>&1;  then
+                  printf "Skip import %s into BREW as it's exist ...\n" "$PACKAGE_NVR"
+                  cd .. && rm -rf temp
+                  continue
+              fi
+              draft="false"
+              draft_flag=""
+          else
+              draft="true"
+              draft_flag="--draft"
           fi
 
           printf "Import rpm %s with tags $KOJI_TAGS ...\n" "$PACKAGE_NVR"
 
-          $KOJI_CMD import-cg cg_import.json "$(pwd)"
+          # Reserve build ID and import build (as draft by default)
+          build_name=$(jq -r '.build.name' cg_import.json)
+          build_version=$(jq -r '.build.version' cg_import.json)
+          build_release=$(jq -r '.build.release' cg_import.json)
+          import_build_data=$(cat <<EOD
+              {
+                "name": "$build_name",
+                "version": "$build_version",
+                "release": "$build_release",
+                "draft": "$draft"
+              }
+        EOD
+          )
+          buildinfo=$(koji-cmd call --json CGInitBuild '"konflux"' "$import_build_data")
+          build_id=$(jq -r '.build_id' <<< "$buildinfo")
+          token=$(jq -r '.token' <<< "$buildinfo")
 
-          PACKAGE_NAME=$(jq -r '.build.name' cg_import.json)
+          if ! koji-cmd import-cg $draft_flag cg_import.json --token="$token" --build-id="$build_id" .; then
+              echo "ERROR: Import failed"
+              koji-cmd call --json CGRefundBuild '"konflux"' "$build_id" "\"$token\""
+              exit 1
+          fi
 
           for BREW_TAG in $KOJI_TAGS; do
-              if ! $KOJI_CMD list-pkgs --tag "$BREW_TAG" | grep "$PACKAGE_NAME" >/dev/null 2>&1;  then
-                  $KOJI_CMD --force add-pkg "$BREW_TAG" "$PACKAGE_NAME" --owner "$USER_NAME"
+              if ! koji-cmd list-pkgs --tag "$BREW_TAG" --package "$build_name" >/dev/null 2>&1;  then
+                  koji-cmd --force add-pkg "$BREW_TAG" "$build_name" --owner "$USER_NAME"
               fi
-              $KOJI_CMD tag-build "$BREW_TAG" "$PACKAGE_NVR"
+              koji-cmd tag-build "$BREW_TAG" "$build_id"
           done
 
           # Clean up to handle next component
