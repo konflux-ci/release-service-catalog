@@ -28,6 +28,10 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.0.4
+* Don't allow the `upload-product-sbom` task to fail anymore.
+  * The issue should be resolved by curl retrying on all errors.
+
 ## Changes in 2.0.3
 * Correct missing severity in advisory due to incorrect sourceDataArtifact
 

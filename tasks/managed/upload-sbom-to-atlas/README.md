@@ -33,6 +33,9 @@ lower, they are uploaded as-is.
 | taskGitUrl                | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                                                                            |
 | taskGitRevision           | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                                                                            |
 
+## Changes in 2.0.1
+* Force curl to retry on all errors in S3 push.
+
 ## Changes in 2.0.0
 * Add a step that pushes SBOMs to S3 if they failed to be pushed to Atlas.
 * Add non-optional parameters to facilitate the S3 push.
