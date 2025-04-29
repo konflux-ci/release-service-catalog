@@ -7,6 +7,7 @@ Tekton Pipeline to push artifacts to CDN and/or Dev Portal
 | Name            | Description                                                                            | Optional    | Default value                                              |
 |-----------------|----------------------------------------------------------------------------------------|-------------|------------------------------------------------------------|
 | snapshot_json   | String containing a JSON representation of the snapshot spec                           | No          | -                                                          |
+| author          | Author taken from Release to be used for checksum signing                              | No          | -                                                          |
 | exodusGwSecret  | Env specific secret containing the Exodus Gateway configs                              | No          | -                                                          |
 | exodusGwEnv     | Environment to use in the Exodus Gateway. Options are [live, pre]                      | No          | -                                                          |
 | pulpSecret      | Env specific secret containing the rhsm-pulp credentials                               | No          | -                                                          |
@@ -15,3 +16,7 @@ Tekton Pipeline to push artifacts to CDN and/or Dev Portal
 | cgwSecret       | Env specific secret containing the content gateway credentials                         | No          | -                                                          |
 | taskGitUrl      | The url to the git repo where the release-service-catalog tasks to be used are stored  | Yes         | https://github.com/konflux-ci/release-service-catalog.git  |
 | taskGitRevision | The revision in the taskGitUrl repo to be used                                         | No          | -                                                          |
+
+## Changes in 1.0.0
+* Add new required parameter `author`. This was already required by the task inside the pipeline, so the pipeline
+  did not work before this
