@@ -28,6 +28,11 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.0.2
+* Temporarily allow the `close-advisory-issues` task to fail
+  * Until https://issues.redhat.com/browse/KONFLUX-7489 is fixed
+  * The task fails if the transition scheme is unexpected
+
 ## Changes in 2.0.1
 * Temporarily allow the `upload-product-sbom` task to fail
   * The upload to S3 started giving us 503 errors. It will be investigated in ISV-5887
