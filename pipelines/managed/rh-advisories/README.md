@@ -28,6 +28,11 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.0.8
+* The `update-component-sbom` and `create-product-sbom` tasks are refactored to
+  use the new SBOM generation workflow. They no longer depend on
+  `push-rpm-data-to-pyxis` and `populate-release-notes`.
+
 ## Changes in 2.0.7
 * Target for SBOM upload has been changed from Atlas v1 to Atlas v2.
 

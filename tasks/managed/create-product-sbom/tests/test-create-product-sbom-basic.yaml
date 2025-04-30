@@ -54,34 +54,6 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup
-            image: quay.io/konflux-ci/release-service-utils:3a1280476a414c7a1538b2db846bcd1fb59176fd
-            script: |
-              #!/usr/bin/env sh
-              set -eux
-
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)"/data.json << EOF
-              {
-                "releaseNotes": {
-                  "product_name": "Red Hat Openstack Product",
-                  "product_version": "123",
-                  "cpe": "cpe:/a:example:openstack:el8",
-                  "content": {
-                    "images": [
-                      {
-                        "component": "test-component-1",
-                        "purl": "test-component-1-purl-1"
-                      },
-                      {
-                        "component": "test-component-2",
-                        "purl": "test-component-2-purl-1"
-                      }
-                    ]
-                  }
-                }
-              }
-              EOF
           - name: skip-trusted-artifact-operations
             ref:
               name: skip-trusted-artifact-operations
@@ -112,8 +84,12 @@ spec:
       taskRef:
         name: create-product-sbom
       params:
-        - name: dataJsonPath
-          value: "$(context.pipelineRun.uid)/data.json"
+        - name: dataPath
+          value: "data.json"
+        - name: snapshotSpec
+          value: "snapshot_spec.json"
+        - name: sbomPath
+          value: "sboms"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -139,7 +115,7 @@ spec:
           workspace: tests-workspace
       params:
         - name: sbomDir
-          value: $(tasks.run-task.results.productSBOMPath)
+          value: $(tasks.run-task.results.sbomPath)
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
@@ -186,43 +162,16 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:3a1280476a414c7a1538b2db846bcd1fb59176fd
+            image: quay.io/konflux-ci/release-service-utils:991c2db1fe04f2fddd940605b5383a17692eb4a5
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              cp "$(params.dataDir)/$(params.sbomDir)/Red-Hat-Openstack-Product-123.json" sbom.json
+              if [ "$(wc -l < "$(params.dataDir)/mock_create.txt")" != 1 ]; then
+                echo Error: create_product_sbom was expected to be called 1 time. Actual calls:
+                cat "$(params.dataDir)/mock_update.txt"
+                exit 1
+              fi
 
-              test "$(jq -r '.name' sbom.json)" == "Red Hat Openstack Product 123"
-
-              # Check product SPDX package and relationship
-              test "$(jq -r '.packages[0].SPDXID' sbom.json)" == "SPDXRef-product"
-              test "$(jq -r '.packages[0].name' sbom.json)" == "Red Hat Openstack Product"
-              test "$(jq -r '.packages[0].versionInfo' sbom.json)" == "123"
-              test "$(jq -r '.packages[0].externalRefs[0].referenceLocator' sbom.json)" == \
-                "cpe:/a:example:openstack:el8"
-
-              test "$(jq -r '.relationships[0].relationshipType' sbom.json)" == "DESCRIBES"
-              test "$(jq -r '.relationships[0].relatedSpdxElement' sbom.json)" == "SPDXRef-product"
-
-              # Check component SPDX packages and relationships
-              # Component 1
-              test "$(jq -r '.packages[1].name' sbom.json)" == "test-component-1"
-              test "$(jq -r '.packages[1].externalRefs[0].referenceLocator' sbom.json)" == \
-                "test-component-1-purl-1"
-
-              test "$(jq -r '.relationships[1].relationshipType' sbom.json)" == "PACKAGE_OF"
-              test "$(jq -r '.relationships[1].spdxElementId' sbom.json)" == "SPDXRef-component-0"
-
-              # Component 2
-              test "$(jq -r '.packages[2].name' sbom.json)" == "test-component-2"
-              test "$(jq -r '.packages[2].externalRefs[0].referenceLocator' sbom.json)" == \
-                "test-component-2-purl-1"
-
-              test "$(jq -r '.relationships[2].relationshipType' sbom.json)" == "PACKAGE_OF"
-              test "$(jq -r '.relationships[2].spdxElementId' sbom.json)" == "SPDXRef-component-1"
-
-              test "$(jq -r '.packages | length' sbom.json)" == 3
-              test "$(jq -r '.relationships | length' sbom.json)" == 3
       runAfter:
         - run-task

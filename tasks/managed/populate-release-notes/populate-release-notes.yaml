@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: populate-release-notes
   labels:
-    app.kubernetes.io/version: "4.1.0"
+    app.kubernetes.io/version: "5.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -54,8 +54,6 @@ spec:
       description: The contentType of the release artifact. One of [image|binary]
       default: "image"
   results:
-    - name: sbomDataPath
-      description: Path to data used in the component SBOM creation in the data workspace
     - description: Produced trusted data artifact
       name: sourceDataArtifact
       type: string
@@ -131,12 +129,6 @@ spec:
 
         UNIQUE_TAG_REGEX="(rhel-)?v?[0-9]+\.[0-9]+(\.[0-9]+)?-[0-9]{8,}"
 
-        # Initialize the SBOM data result
-        relativeDir=$(dirname "$(params.dataPath)")
-        sbomDataPath="$(params.dataDir)/${relativeDir}/sbom_data.json"
-        echo -n "${relativeDir}/sbom_data.json" > "$(results.sbomDataPath.path)"
-        cp "${DATA_FILE}" "${sbomDataPath}"
-
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
         for ((i = 0; i < NUM_COMPONENTS; i++))
         do
@@ -170,7 +162,6 @@ spec:
             do
                 arch=$(jq -r .platform.architecture <<< "${arch_json}")
                 digest=$(jq -r .digest <<< "${arch_json}")
-                multiarch=$(jq -r .multiarch <<< "${arch_json}")
                 containerImage="${deliveryRepo}@${digest}"
                 # purl should be pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo
                 purl="pkg:oci/${deliveryRepo##*/}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
@@ -206,25 +197,6 @@ spec:
                 # Inject JSON into data.json
                 jq --argjson image "$jsonString" '.releaseNotes.content.images += [$image]' "${DATA_FILE}" > \
                     /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-
-                # Inject SBOM-related data into an SBOM data file
-                sbomJsonString=$(jq -cn \
-                    --arg component "$name" \
-                    --arg arch "$arch" \
-                    --arg containerImage "$containerImage" \
-                    --arg purl "$purl" \
-                    --arg repository "$deliveryRepo" \
-                    --arg multiarch "$multiarch" \
-                    --arg imageSha "$sha" \
-                    --argjson tags "$tags" \
-                    '{"architecture": $arch, "containerImage": $containerImage, "purl": $purl,
-                    "multiarch": $multiarch, "imageSha": $imageSha, "repository": $repository,
-                    "tags": $tags, "component": $component}')
-
-                jq --argjson image "$sbomJsonString" \
-                    '.images = (.images // []) + [$image]' \
-                    "${sbomDataPath}" > \
-                    /tmp/sbomData.tmp && mv /tmp/sbomData.tmp "${sbomDataPath}"
             done
         done
     - name: populate-release-notes-binaries

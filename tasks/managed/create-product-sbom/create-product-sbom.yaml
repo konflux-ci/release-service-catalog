@@ -4,17 +4,24 @@ kind: Task
 metadata:
   name: create-product-sbom
   labels:
-    app.kubernetes.io/version: "1.0.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-    Create product-level SBOM from release notes.
+    Create product-level SBOM from mapped snapshot spec and release notes.
   params:
-    - name: dataJsonPath
+    - name: dataPath
       description: Relative path to the JSON data file in the workspace.
       type: string
+    - name: snapshotSpec
+      type: string
+      description: Path to the mapped snapshot spec.
+    - name: sbomPath
+      description: Path to store the updated SBOMs to.
+      type: string
+      default: "sboms"
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
       type: string
@@ -50,7 +57,7 @@ spec:
     - name: data
       description: Workspace to save the product-level SBOM to.
   results:
-    - name: productSBOMPath
+    - name: sbomPath
       description: >-
         Relative path to the directory containing the created product-level SBOM
         in the data workspace.
@@ -103,36 +110,20 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: create-sbom
-      image: quay.io/konflux-ci/release-service-utils:3a1280476a414c7a1538b2db846bcd1fb59176fd
+      image: quay.io/konflux-ci/release-service-utils:991c2db1fe04f2fddd940605b5383a17692eb4a5
       script: |
         #!/usr/bin/env bash
         set -eux
 
-        # the SBOM is first created in a temporary file, because the name of the
-        # final SBOM depends on its contents; namely the product name and
-        # version
-        tmp_sbom="$(mktemp)"
-        create_product_sbom --data-path "$(params.dataDir)/$(params.dataJsonPath)" \
-          --output-path "$tmp_sbom"
+        sbom_path="$(params.dataDir)/$(params.sbomPath)"
+        mkdir -p "$sbom_path"
 
-        product_name="$(jq -r '.packages[0].name' "$tmp_sbom")"
-        product_version="$(jq -r '.packages[0].versionInfo' "$tmp_sbom")"
+        create_product_sbom \
+          --data-path "$(params.dataDir)/$(params.dataPath)" \
+          --snapshot-path "$(params.dataDir)/$(params.snapshotSpec)" \
+          --output-path "$sbom_path"
 
-        # replace whitespace with dashes
-        normalized_name="$(echo -n "${product_name}" | tr '[:space:]' '-')"
-
-        sbom_dir="product-sboms"
-        # the combination of name + version is later used as an ID in Atlas
-        sbom_path="${sbom_dir}/${normalized_name}-${product_version}.json"
-
-        # takes into account the subdirectory of the data.json if any
-        subdir_sbom_path="$(dirname "$(params.dataJsonPath)")/${sbom_path}"
-
-        output_path=$(params.dataDir)/${subdir_sbom_path}
-        mkdir -p "$(dirname "$output_path")"
-        mv "$tmp_sbom" "$output_path"
-
-        echo -n "$(dirname "$subdir_sbom_path")" > "$(results.productSBOMPath.path)"
+        echo -n "$(params.sbomPath)" > "$(results.sbomPath.path)"
     - name: create-trusted-artifact
       ref:
         resolver: "git"

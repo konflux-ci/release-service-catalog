@@ -2,8 +2,7 @@
 
 Tekton task to populate fields of the releaseNotes  key in the data.json
 file. It will update the data.json in place so that downstream tasks relying on
-the releaseNotes data can use it. Additionally, it outputs a result with the
-path to a file containing data used in component SBOM generation.
+the releaseNotes data can use it.
 
 ## Parameters
 
@@ -20,6 +19,10 @@ path to a file containing data used in component SBOM generation.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+
+## Changes in 5.0.0
+* This task no longer generates data for SBOM purposes.
+  * The `sbomDataPath` result is removed.
 
 ## Changes in 4.1.0
 * This task takes a new optional parameter 'contentType'
