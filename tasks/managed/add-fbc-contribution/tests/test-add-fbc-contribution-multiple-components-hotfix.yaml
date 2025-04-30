@@ -2,9 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-add-fbc-contribution
+  name: test-add-fbc-contribution-multiple-components-hotfix
 spec:
-  description: Test creating a internal request for the IIB pipeline
+  description: >
+    Tests running the add-fbc-contribution when the snapshot has multi-components and the FBC data
+    is for a hotfix fbc catalog
   workspaces:
     - name: tests-workspace
   tasks:
@@ -33,6 +35,13 @@ spec:
                     "repository": "prod-registry.io/prod-location0",
                     "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12",
                     "ocpVersion": "v4.12"
+                  },
+                  {
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1@sha256:0000",
+                    "repository": "prod-registry.io/prod-location0",
+                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.13",
+                    "ocpVersion": "v4.13"
                   }
                 ]
               }
@@ -43,7 +52,9 @@ spec:
                 "fbc": {
                   "fbcPublishingCredentials": "test-fbc-publishing-credentials",
                   "buildTimeoutSeconds": 420,
-                  "requestTimeoutSeconds": 120
+                  "hotfix": true,
+                  "issueId": "bz123456",
+                  "buildTimeoutSeconds": 420
                 }
               }
               EOF
@@ -110,64 +121,70 @@ spec:
               set -eux
 
               RESULTS_FILE="$(workspaces.data.path)/$(params.internalRequestResultsFile)"
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                tac | tail -1)"
+              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
+                | xargs)"
 
-              internalRequest=$(echo "${internalRequest}" | xargs)
-              requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-              serviceAccount="$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.serviceAccount}")"
+              i=0
+              for internalRequest in $internalRequests; do
+                requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
 
-              if [ "${serviceAccount}" != "release-service-account" ]; then
-                echo "service account does not match"
-              fi
+                TS=1696946200 # ts set in the mocked `date`
+                if [ "$(jq -r '.components[0].target_index' "$RESULTS_FILE")" != \
+                  "quay.io/scoheb/fbc-target-index-testing:v4.12-bz123456-${TS}" ]; then
+                  echo "targetIndex #1 does not match"
+                  exit 1
+                fi
+                if [ "$(jq -r '.components[1].target_index' "$RESULTS_FILE")" != \
+                  "quay.io/scoheb/fbc-target-index-testing:v4.13-bz123456-${TS}" ]; then
+                  echo "targetIndex #2 does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.index_image.target_index' "$RESULTS_FILE")" != \
-                "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
-                echo "targetIndex does not match"
-                exit 1
-              fi
+                fromIndex="quay.io/scoheb/fbc-index-testing:latest"
+                if [ "$(jq -r '.fromIndex' <<< "${requestParams}")" != "${fromIndex}" ]; then
+                  echo "fromIndex does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.fromIndex' <<< "${requestParams}")" != "quay.io/scoheb/fbc-index-testing:latest" ]; then
-                echo "fromIndex does not match"
-                exit 1
-              fi
+                if [ "$(jq -r '.buildTimeoutSeconds' <<< "${requestParams}")" != "420" ]
+                then
+                  echo "buildTimeoutSeconds does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.buildTimeoutSeconds' <<< "${requestParams}")" != "420" ]
-              then
-                echo "buildTimeoutSeconds does not match"
-                exit 1
-              fi
+                if [ "$(jq -r '.fbcFragment' <<< "${requestParams}")" != "registry.io/image${i}@sha256:0000" ]
+                then
+                  echo "fbcFragment does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.fbcFragment' <<< "${requestParams}")" != "registry.io/image0@sha256:0000" ]
-              then
-                echo "fbcFragment does not match"
-                exit 1
-              fi
+                if [ "$(jq -r '.taskGitUrl' <<< "${requestParams}")" != "http://localhost" ]; then
+                  echo "taskGitUrl image does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.taskGitUrl' <<< "${requestParams}")" != "http://localhost" ]; then
-                echo "taskGitUrl image does not match"
-                exit 1
-              fi
+                if [ "$(jq -r '.taskGitRevision' <<< "${requestParams}")" != "main" ]; then
+                  echo "taskGitRevision image does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.taskGitRevision' <<< "${requestParams}")" != "main" ]; then
-                echo "taskGitRevision image does not match"
-                exit 1
-              fi
+                if [ "$(params.mustPublishIndexImage)" != "false" ]; then
+                  echo "Unexpected value for mustPublishIndexImage: $(params.mustPublishIndexImage)"
+                  exit 1
+                fi
 
-              if [ "$(params.mustPublishIndexImage)" != "false" ]; then
-                echo "Unexpected value for mustPublishIndexImage: $(params.mustPublishIndexImage)"
-                exit 1
-              fi
+                if [ "$(params.isFbcOptIn)" != "true" ]; then
+                  echo "Unexpected value for fbc_opt_in: $(params.isFbcOptIn)"
+                  exit 1
+                fi
 
-              if [ "$(params.isFbcOptIn)" != "true" ]; then
-                echo "Unexpected value for fbc_opt_in: $(params.isFbcOptIn)"
-                exit 1
-              fi
-
-              if [ "$(wc -w <<< "$(params.indexImageDigests)")" -ne 2 ]; then
-                echo "indexImageDigest should contain 2 images: $(params.indexImageDigests)"
-                exit 1
-              fi
+                num_images="$(wc -w <<< "$(jq -r '.components[].image_digests[]' "$RESULTS_FILE")")"
+                if [ "$num_images" -ne 4 ]; then
+                  echo "Unexpected value for number of image digests: $num_images"
+                  exit 1
+                fi
+                i=$(( i+1 ))
+              done
       runAfter:
         - run-task
   finally:

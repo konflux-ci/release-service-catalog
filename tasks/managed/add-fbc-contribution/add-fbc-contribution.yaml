@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: add-fbc-contribution
   labels:
-    app.kubernetes.io/version: "4.0.2"
+    app.kubernetes.io/version: "4.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -49,6 +49,8 @@ spec:
       description: The targetIndex used in this request
     - name: requestResultsFile
       description: Internal Request results file
+    - name: internalRequestResultsFile
+      description: Additional Internal Request results file
     - name: requestMessage
       description: Internal Request message
     - name: requestReason
@@ -66,13 +68,18 @@ spec:
         #
         set -eo pipefail
 
-        SNAPSHOT_PATH=$(workspaces.data.path)/$(params.snapshotPath)
-        RESULTS_FILE="$(workspaces.data.path)/$(params.resultsDirPath)/add-fbc-contribution-results.json"
+        SNAPSHOT_PATH="$(workspaces.data.path)/$(params.snapshotPath)"
         DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No valid data file was provided."
             exit 1
         fi
+
+        # adding a new result as modifying the current one used breaks e2e for single component.
+        # to be handled in RELEASE-1640.
+        RESULTS_FILE="$(params.resultsDirPath)/internal-requests-results.json"
+        echo -n "$RESULTS_FILE" > "$(results.internalRequestResultsFile.path)"
+        RESULTS_FILE=$(workspaces.data.path)/${RESULTS_FILE}
 
         echo -n "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json" > "$(results.requestResultsFile.path)"
 
@@ -90,7 +97,6 @@ spec:
             '.fbc.buildTimeoutSeconds // $build_timeout_seconds' "${DATA_FILE}")
         request_timeout_seconds=$(jq -r --arg request_timeout_seconds ${default_request_timeout_seconds} \
             '.fbc.requestTimeoutSeconds // $request_timeout_seconds' "${DATA_FILE}")
-        fbc_fragment=$(jq -cr '.components[0].containerImage' "${SNAPSHOT_PATH}")
         internal_request_service_account=$(jq -r '.fbc.internalRequestServiceAccount // "release-service-account"' \
             "${DATA_FILE}")
 
@@ -130,72 +136,152 @@ spec:
           target_index="${target_index}-${product_name}-${product_version}-${timestamp}"
         fi
 
+        # to keep compatibility with current single component mode
         echo -n "$timestamp" > "$(results.buildTimestamp.path)"
         echo -n "$target_index" > "$(results.requestTargetIndex.path)"
         jq -n --arg target_index "$target_index" \
-         '{"index_image": {"target_index": $target_index}}' | tee "$RESULTS_FILE"
+          '{"index_image": {"target_index": $target_index}, "components": []}' \
+          | tee "$RESULTS_FILE"
 
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        # The internal-request script will create the InternalRequest and wait until it finishes to get its status
-        # If it fails (Failed, Rejected or Timed out) the script will exit and display the reason.
-        echo "Creating InternalRequest to add FBC contribution to index image:"
-        internal-request --pipeline "update-fbc-catalog" \
-            -p fromIndex="$(params.fromIndex)" \
-            -p targetIndex="${target_index}" \
-            -p fbcFragment="${fbc_fragment}" \
-            -p iibServiceAccountSecret="${iib_service_account_secret}" \
-            -p publishingCredentials="${publishing_credentials}" \
-            -p buildTimeoutSeconds="${build_timeout_seconds}" \
-            -p buildTags="${build_tags}" \
-            -p addArches="${add_arches}" \
-            -p hotfix="${hotfix}" \
-            -p stagedIndex="${staged_index}" \
-            -p taskGitUrl="$(params.taskGitUrl)" \
-            -p taskGitRevision="$(params.taskGitRevision)" \
-            --service-account "${internal_request_service_account}" \
-            -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
-            -t "${request_timeout_seconds}" |tee "$(workspaces.data.path)"/ir-"$(context.taskRun.uid)"-output.log
+        LENGTH=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
+        for((i=0; i<LENGTH; i++)); do
+          ocp_version=$(jq -cr --argjson i "$i" '.components[$i].ocpVersion' "${SNAPSHOT_PATH}")
+          fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
 
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-          "$(workspaces.data.path)"/ir-"$(context.taskRun.uid)"-output.log)
-        echo "done (${internalRequest})"
+          # the target_index is modified when the pipelinerun is a for `hotfix` or a `pre-GA` release
+          target_index=$(jq -cr --argjson i "$i" '.components[$i].updatedTargetIndex' "${SNAPSHOT_PATH}")
+          if [ "${hotfix}" = "true" ]; then
+            issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
+            if [ -z "${issue_id}" ]; then
+              echo "Hotfix releases requires the issue id set in the 'fbc.issueId' key of the ReleasePlanAdmission " \
+                   "spec.data field"
+              exit 1
+            fi
+            target_index="${target_index}-${issue_id}-${timestamp}"
+          elif [ "${pre_ga}" = "true" ]; then
+            if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
+              echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the " \
+                   "ReleasePlanAdmission spec.data field"
+              exit 1
+            fi
+            target_index="${target_index}-${product_name}-${product_version}-${timestamp}"
+          fi
 
-        # Fetching InternalRequest status and populating results
-        results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
-        echo "${results}" > "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json"
+          echo "Processing fragment: ${fbc_fragment}:"
+          # The internal-request script will create the InternalRequest and wait until it finishes to get its status
+          # If it fails (Failed, Rejected or Timed out) the script will exit and display the reason.
+          echo "Creating InternalRequest to add FBC contribution to index image:"
+          internal-request --pipeline "update-fbc-catalog" \
+              -p fromIndex="$(params.fromIndex)" \
+              -p targetIndex="${target_index}" \
+              -p fbcFragment="${fbc_fragment}" \
+              -p iibServiceAccountSecret="${iib_service_account_secret}" \
+              -p publishingCredentials="${publishing_credentials}" \
+              -p buildTimeoutSeconds="${build_timeout_seconds}" \
+              -p buildTags="${build_tags}" \
+              -p addArches="${add_arches}" \
+              -p hotfix="${hotfix}" \
+              -p stagedIndex="${staged_index}" \
+              -p taskGitUrl="$(params.taskGitUrl)" \
+              -p taskGitRevision="$(params.taskGitRevision)" \
+              --service-account "${internal_request_service_account}" \
+              -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
+              -t "${request_timeout_seconds}" |tee "$(workspaces.data.path)"/ir-"$(context.taskRun.uid)"-output.log
 
-        conditions=$(kubectl get internalrequest "${internalRequest}" \
-          -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
+          internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+            "$(workspaces.data.path)"/ir-"$(context.taskRun.uid)"-output.log)
+          echo "done (${internalRequest})"
 
-        jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.sign_index_image' |tr -d "\n" \
+          # Fetching InternalRequest status and populating results
+          results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
+          echo "${results}" > "$(workspaces.data.path)/ir-$(context.taskRun.uid)-result.json"
+
+          completion_time="$(jq -r '.jsonBuildInfo | fromjson | .updated' <<< "${results}")"
+
+          # construct the results json
+          build_results=$(jq \
+            --arg fragment "$fbc_fragment" \
+            --arg target_index "$target_index" \
+            --arg ocp_version "$ocp_version" \
+            --arg completion_time "$completion_time" \
+          '{ 
+            "fbc_fragment": $fragment,
+            "target_index": $target_index,
+            "ocp_version": $ocp_version,
+            "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
+            "completion_time": $completion_time,
+            "iibLog": .iibLog
+          }' <<< "${results}")
+
+          # updates the file in place with the new results
+          export build_results
+          yq -i '.components += [ env(build_results) ]' "$RESULTS_FILE"
+
+          mustSignIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
+            | jq -r '.sign_index_image' |tr -d "\n")
+          mustPublishIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
+            | jq -r '.publish_index_image' |tr -d "\n")
+          fbc_opt_in=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -cr '.fbc_opt_in')
+
+          # Store the results in Tekton's results files
+          echo -en "${mustPublishIndexImage}" | tee "$(results.mustPublishIndexImage.path)"
+          echo -en "${mustSignIndexImage}" | tee "$(results.mustSignIndexImage.path)"
+          echo -en "${fbc_opt_in}" | tee "$(results.isFbcOptIn.path)"
+
+          # this results below should be depracated
+          conditions=$(kubectl get internalrequest "${internalRequest}" \
+            -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
+          jq '.reason // "Unset"'  <<< "${conditions}" | tee "$(results.requestReason.path)"
+          jq '.message // "Unset"' <<< "${conditions}" | tee "$(results.requestMessage.path)"
+          jq -r '.indexImageDigests' <<< "${results}" |  tee "$(results.indexImageDigests.path)"
+
+          # the following ones are used to help debugging in case of failure
+          jq -r '.iibLog' <<< "${results}"
+          RC="$(jq -r '.exitCode' <<< "${results}")"
+
+          # Summarize what happened for the human user. Although the continuation of the pipeline will depend on all
+          # components having the same flag values, we should display them to help the user to understand which of the
+          # component might be misconfigured.
+          if [ "$mustPublishIndexImage" = "true" ]; then
+            echo "Index image will be published."
+          elif [ "$fbc_opt_in" = "false" ]; then
+            echo "Index image will not be published because fbc_opt_in is set to false in Pyxis."
+            echo "If this is the first time you are releasing, make sure you request fbc_opt_in in Pyxis."
+          elif [ "${staged_index}" = "true" ]; then
+            echo "Index image will not be published because this is a staging release."
+          else
+            echo "Index image will not be published for an unspecified reason."
+          fi
+
+          if [ "$RC" -ne 0 ]; then
+            echo "The fragment failed to be processed, check which fragment and its log link above " \
+                 "to understand the reason"
+            exit "$RC"
+          fi
+        done
+
+        # the flags of all components should match. A single unmatching flag should stop signing and publishing.
+        fbcPipelineFlags=$(jq -r '.genericResult | fromjson' <<< "${results}" |jq --slurp  '. | unique')
+        if [ "$(jq -r 'length' <<< "${fbcPipelineFlags}")" == 1 ]; then
+          jq -r '.[].sign_index_image' <<< "${fbcPipelineFlags}" | tr -d "\n" \
             | tee "$(results.mustSignIndexImage.path)"
-
-        mustPublishIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.publish_index_image')
-        fbc_opt_in=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -r '.fbc_opt_in')
-
-        # Store the results in Tekton's results files
-        echo -n "${mustPublishIndexImage}" | tee "$(results.mustPublishIndexImage.path)"
-        echo -n "${fbc_opt_in}" | tee "$(results.isFbcOptIn.path)"
-
-        jq '.reason // "Unset"'  <<< "${conditions}" | tee "$(results.requestReason.path)"
-        jq '.message // "Unset"' <<< "${conditions}" | tee "$(results.requestMessage.path)"
-
-        jq -r '.indexImageDigests' <<< "${results}" |  tee "$(results.indexImageDigests.path)"
-
-        jq -r '.iibLog' <<< "${results}"
-        RC="$(jq -r '.exitCode' <<< "${results}")"
-
-        # Summarize what happened for the human user.
-        if [ "$mustPublishIndexImage" = "true" ]; then
-          echo "Index image will be published."
-        elif [ "$fbc_opt_in" = "false" ]; then
-          echo "Index image will not be published because fbc_opt_in is set to false in Pyxis."
-          echo "If this is the first time you are releasing, make sure you request fbc_opt_in in Pyxis."
-        elif [ "${staged_index}" = "true" ]; then
-          echo "Index image will not be published because this is a staging release."
+          jq -r '.[].publish_index_image' <<< "${fbcPipelineFlags}" | tr -d "\n" \
+            | tee "$(results.mustPublishIndexImage.path)"
+          jq -r '.[].fbc_opt_in' <<< "${fbcPipelineFlags}" | tr -d "\n" | tee "$(results.isFbcOptIn.path)"
         else
-          echo "Index image will not be published for an unspecified reason."
+          echo -en "false" | tee "$(results.mustSignIndexImage.path)"
+          echo -en "false" | tee "$(results.mustPublishIndexImage.path)"
+          echo -en "false" | tee "$(results.isFbcOptIn.path)"
         fi
 
-        exit "$RC"
+        # if there are multiple components but they are for the same ocp version, only a single index_image needs
+        # to be signed/published.
+        VERSIONS_COUNT="$(jq -r '[ .components[].ocp_version ] | unique | length' "$RESULTS_FILE")"
+        if [[ "$LENGTH" -gt 1 && "$VERSIONS_COUNT" == 1 ]]; then
+          # keep only the most up to date build index_image
+          RESULTS_TEMP_FILE="/tmp/results-temp.json"
+          jq -r  '.components = [ .components | sort_by(.updated) | last ]' "$RESULTS_FILE" > "$RESULTS_TEMP_FILE"
+          mv "$RESULTS_TEMP_FILE" "$RESULTS_FILE"
+        fi
