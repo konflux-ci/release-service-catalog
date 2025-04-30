@@ -4,15 +4,17 @@ Creates an InternalRequest to sign a base64 encoded blob
 
 ## Parameters
 
-| Name                 | Description                                                                               | Optional | Default value         |
-|----------------------|-------------------------------------------------------------------------------------------|----------|-----------------------|
-| dataPath             | Path to the JSON string of the merged data to use in the data workspace                   | No       | -                     |
-| referenceImage       | The image to be signed                                                                    | No       | -                     |
-| manifestDigestImage  | Manifest Digest Image used to extract the SHA                                             | Yes      | ""                    |
-| requester            | Name of the user that requested the signing, for auditing purposes                        | No       | -                     |
-| requestTimeout       | InternalRequest timeout                                                                   | Yes      | 180                   |
-| binariesPath         | The directory inside the workspace where the binaries are stored                          | Yes      | binaries              |
-| pipelineRunUid       | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -                     |
+| Name                 | Description                                                                                           | Optional | Default value         |
+|----------------------|-------------------------------------------------------------------------------------------------------|----------|-----------------------|
+| dataPath             | Path to the JSON string of the merged data to use in the data workspace                               | No       | -                     |
+| referenceImage       | The image to be signed                                                                                | No       | -                     |
+| manifestDigestImage  | Manifest Digest Image used to extract the SHA                                                         | Yes      | ""                    |
+| requester            | Name of the user that requested the signing, for auditing purposes                                    | No       | -                     |
+| requestTimeout       | InternalRequest timeout                                                                               | Yes      | 180                   |
+| binariesPath         | The directory inside the workspace where the binaries are stored                                      | Yes      | binaries              |
+| pipelineRunUid       | The uid of the current pipelineRun. Used as a label value when creating internal requests             | No       | -                     |
+| taskGitUrl           | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored | No       | -                     |
+| taskGitRevision      | The revision in the taskGitUrl repo to be used                                                        | No       | -                     |  
 
 ## Signing data parameters
 
@@ -24,6 +26,12 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 2.5.0
+* The pipeline is called via git resolver now instead of cluster resolver
+  * This was done by changing from `-r` to `--pipeline` in the `internal-request` call
+  * The base image was updated to include this new functionality
+  * New parameters `taskGitUrl` and `taskGitRevision` added to enable the git resolver
 
 ## Changes in 2.4.2
 * Use a temp file for `internal-request` result instead of a fixed file in the workspace to reduce risk

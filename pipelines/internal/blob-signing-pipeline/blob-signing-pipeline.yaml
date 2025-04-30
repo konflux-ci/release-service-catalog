@@ -1,0 +1,93 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: blob-signing-pipeline
+  labels:
+    app.kubernetes.io/version: "0.1.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Tekton pipeline for simple signing
+  params:
+    - name: pipeline_image
+      description: An image with CLI tools needed for the signing.
+      default: quay.io/redhat-isv/operator-pipelines-images:9ea90b42456fcdf66edf4b15c0c0487ba5fa3ee3
+    - name: blob
+      description: Blob that needs to be signed.
+    - name: requester
+      description: Name of the user that requested the signing, for auditing purposes
+      type: string
+    - name: config_map_name
+      description: A config map name with configuration
+      default: hacbs-signing-pipeline-config
+      type: string
+    - name: taskGitUrl
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+      type: string
+    - name: taskGitRevision
+      description: The revision in the taskGitUrl repo to be used
+      type: string
+  workspaces:
+    - name: pipeline
+  results:
+    - name: signed_payload
+      value: "$(tasks.request-signature.results.signed_payload)"
+  tasks:
+    - name: collect-simple-signing-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/internal/collect-simple-signing-params/collect-simple-signing-params.yaml
+      params:
+        - name: config_map_name
+          value: $(params.config_map_name)
+    - name: request-signature
+      taskRef:
+        resolver: "bundles"
+        params:
+          - name: bundle
+            value: quay.io/redhat-isv/tkn-signing-bundle:7059415075
+          - name: name
+            value: request-signature-blob
+          - name: kind
+            value: task
+      params:
+        - name: pipeline_image
+          value: "$(params.pipeline_image)"
+        - name: blob
+          value: "$(params.blob)"
+        - name: requester
+          value: $(params.requester)
+        - name: sig_key_id
+          value: $(tasks.collect-simple-signing-params.results.sig_key_id)
+        - name: sig_key_name
+          value: $(tasks.collect-simple-signing-params.results.sig_key_name)
+        - name: umb_ssl_cert_secret_name
+          value: $(tasks.collect-simple-signing-params.results.umb_ssl_cert_secret_name)
+        - name: umb_ssl_cert_secret_key
+          value: $(tasks.collect-simple-signing-params.results.umb_ssl_cert_file_name)
+        - name: umb_ssl_key_secret_key
+          value: $(tasks.collect-simple-signing-params.results.umb_ssl_key_file_name)
+        - name: umb_client_name
+          value: $(tasks.collect-simple-signing-params.results.umb_client_name)
+        - name: umb_listen_topic
+          value: $(tasks.collect-simple-signing-params.results.umb_listen_topic)
+        - name: umb_publish_topic
+          value: $(tasks.collect-simple-signing-params.results.umb_publish_topic)
+        - name: umb_url
+          value: $(tasks.collect-simple-signing-params.results.umb_url)
+      workspaces:
+        - name: source
+          workspace: pipeline
+          subPath: signing
+      runAfter:
+        - collect-simple-signing-params
