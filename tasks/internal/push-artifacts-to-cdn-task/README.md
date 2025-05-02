@@ -28,6 +28,9 @@ Tekton task to push artifacts to CDN and optionally Dev Portal with optional sig
 | cgwHostname           | The hostname of the content-gateway to publish the metadata to    | Yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret             | Env specific secret containing the content gateway credentials    | No       | -                                                        |
 
+## Changes in 1.0.1
+* Base64 decode keytab used for interacting with the checksum signing host (ETERA)
+
 ## Changes in 1.0.0
 * Add steps for signing: `push-unsigned-using-oras`, `sign-mac-binaries`, `sign-windows-binaries`, `generate-checksums`
   * The code was copied and adapted from the `sign-binaries` managed task
