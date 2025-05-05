@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-advisory-task
   labels:
-    app.kubernetes.io/version: "1.1.3"
+    app.kubernetes.io/version: "1.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -208,19 +208,23 @@ spec:
           advisoryJsonWithKey=$(jq -c --arg key "$signingKey" \
             '.content.images[] += {"signingKey": $key}' <<< "$NEW_ADVISORY_JSON")
 
-          # write keytab to file
-          echo -n "${SERVICE_ACCOUNT_KEYTAB}" | base64 --decode > /tmp/keytab
-          # workaround kinit: Invalid UID in persistent keyring name while getting default ccache
-          KRB5CCNAME=$(mktemp)
-          export KRB5CCNAME
-          # see https://stackoverflow.com/a/12308187
-          KRB5_CONFIG=$(mktemp)
-          export KRB5_CONFIG
-          export KRB5_TRACE=/dev/stderr
-          sed '/\[libdefaults\]/a\    dns_canonicalize_hostname = false' /etc/krb5.conf > "${KRB5_CONFIG}"
-          kinit "${SERVICE_ACCOUNT_NAME}" -k -t /tmp/keytab
-          ID=$(curl --retry 3 --negotiate -u : "${ERRATA_API}/advisory/reserve_live_id" -XPOST | jq -r '.live_id')
-          ADVISORY_NUM=$(printf "%04d" "$ID")
+          LIVE_ID=$(jq -r '.live_id' <<< "$ADVISORY_JSON" )
+          if [[ "$LIVE_ID" == null ]]; then
+            # write keytab to file
+            echo -n "${SERVICE_ACCOUNT_KEYTAB}" | base64 --decode > /tmp/keytab
+            # workaround kinit: Invalid UID in persistent keyring name while getting default ccache
+            KRB5CCNAME=$(mktemp)
+            export KRB5CCNAME
+            # see https://stackoverflow.com/a/12308187
+            KRB5_CONFIG=$(mktemp)
+            export KRB5_CONFIG
+            export KRB5_TRACE=/dev/stderr
+            sed '/\[libdefaults\]/a\    dns_canonicalize_hostname = false' /etc/krb5.conf > "${KRB5_CONFIG}"
+            kinit "${SERVICE_ACCOUNT_NAME}" -k -t /tmp/keytab
+            REQUEST_URL="${ERRATA_API}/advisory/reserve_live_id"
+            LIVE_ID=$(curl --retry 3 --negotiate -u : "${REQUEST_URL}" -XPOST | jq -r '.live_id')
+          fi
+          ADVISORY_NUM=$(printf "%04d" "$LIVE_ID")
 
           # group advisories by <origin workspace>/year
           ADVISORY_DIR="data/advisories/$(params.origin)/${YEAR}/${ADVISORY_NUM}"

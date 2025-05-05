@@ -16,6 +16,10 @@ internal request. The success/failure is handled in the task creating the intern
 | errata_secret_name             | The name of the secret that contains the errata service account metadata                               | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 
+## Changes in 1.2.0
+* Allow setting of custom advisory live id
+  * If `live_id` is set in the advisory json, use that instead of requesting one from Errata Tool API
+
 ## Changes in 1.1.3
 * Change the `advisory_url` result to use link to customer portal instead of git repo
 
