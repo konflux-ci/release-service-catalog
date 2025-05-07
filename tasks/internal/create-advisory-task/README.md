@@ -16,6 +16,10 @@ internal request. The success/failure is handled in the task creating the intern
 | errata_secret_name             | The name of the secret that contains the errata service account metadata                               | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 
+## Changes in 1.3.1
+* Update base image
+  * New base image contains a new version of the advisory apply template.
+
 ## Changes in 1.3.0
 * Add check for advisory id before creating the advisory
   * This will make sure there isn't an existing advisory with the same year and live id in the repo
