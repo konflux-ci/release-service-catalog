@@ -9,32 +9,22 @@ function git() {
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
     mkdir -p "$gitRepo"/schema
     echo '{"$schema": "http://json-schema.org/draft-07/schema#","type": "object", "properties":{}}' > "$gitRepo"/schema/advisory.json
-    mkdir -p "$gitRepo"/data/advisories/dev-tenant
+
+    mkdir -p "$gitRepo"/data/advisories/dev-tenant/2025/1602
+    mkdir -p "$gitRepo"/data/advisories/dev-tenant/2025/1601
+    mkdir -p "$gitRepo"/data/advisories/dev-tenant/2024/1452
+    mkdir -p "$gitRepo"/data/advisories/dev-tenant/2024/1442
+
+    touch -d "@1712012345" "$gitRepo"/data/advisories/dev-tenant/2025/1602
+    touch -d "@1712012344" "$gitRepo"/data/advisories/dev-tenant/2024/1452
+    touch -d "@1708012343" "$gitRepo"/data/advisories/dev-tenant/2025/1602
+    touch -d "@1704012342" "$gitRepo"/data/advisories/dev-tenant/2024/1442
+
   elif [[ "$*" == *"failing-tenant"* ]]; then
     echo "Mocking failing git command" && false
   else
     # Mock the other git functions to pass
     : # no-op - do nothing
-  fi
-}
-
-function find() {
-  echo "Mock find called with: $*" >&2
-
-  if echo "$*" | grep -q "not-existing-origin"; then
-    echo "Error: Unexpected call for not existing origin"
-    exit 1
-  fi
-
-  if echo "$*" | grep -q "${ADVISORY_BASE_DIR}"; then
-    # Simulate directories with timestamps
-    echo "1712012345.0 ${ADVISORY_BASE_DIR}/2025/1602"  # Contains image-beta
-    echo "1712012344.0 ${ADVISORY_BASE_DIR}/2025/1601"  # Contains image-alpha
-    echo "1708012343.0 ${ADVISORY_BASE_DIR}/2024/1452"
-    echo "1704012342.0 ${ADVISORY_BASE_DIR}/2024/1442"
-  else
-    echo "Error: Unexpected find command: $*" >&2
-    exit 1
   fi
 }
 
