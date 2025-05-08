@@ -10,3 +10,4 @@ If it is already in place, it will be used as an input to which the results will
 | Name       | Description                                                             | Optional | Default value |
 |------------|-------------------------------------------------------------------------|----------|---------------|
 | snapshotPath   | Path to the JSON string of the Snapshot spec in the data workspace | No       | -             |
+| homeDir   | Value for the HOME environment variable. | Yes       | -             |
