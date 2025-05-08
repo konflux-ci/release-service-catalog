@@ -3,7 +3,7 @@
 Tekton task to check if any issues or CVEs in the releaseNotes key of the data.json are embargoed. It checks the issues
 by server using curl and checks the CVEs via an InternalRequest. If any issue does not exist or any CVE is embargoed,
 the task will fail. The task will also fail if a Jira issue listed is for a component that does not exist in the
-releaseNotes.content.images section or if said component does not list the CVE from the issue.
+releaseNotes.content.[images|artifacts] section or if said component does not list the CVE from the issue.
 
 Finally, the task will inject the `public` key to each issue listed for `issues.redhat.com`. This is a boolean value that is set
 based on the issues visibility
@@ -23,6 +23,8 @@ based on the issues visibility
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+## Changes in 2.1.0
+* Handle content types of artifacts with releaseNotes.content.artifacts
 
 ## Changes in 2.0.5
 * Improve logging of errors

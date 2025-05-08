@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: embargo-check
   labels:
-    app.kubernetes.io/version: "2.0.5"
+    app.kubernetes.io/version: "2.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -197,12 +197,22 @@ spec:
                 continue
             fi
 
+            if jq -e '.releaseNotes.content.images' "$DATA_FILE" > /dev/null; then
+                CONTENT_TYPE=".releaseNotes.content.images"
+            elif jq -e '.releaseNotes.content.artifacts' "$DATA_FILE" > /dev/null; then
+                CONTENT_TYPE=".releaseNotes.content.artifacts"
+            else
+                echo "No content found under releaseNotes.content.images or .artifacts;"
+                continue
+            fi
+
             CVE_ID=$(jq -r --arg field "$CVE_FIELD" '.fields[$field]' <<< "$OUTPUT")
+
             if [ "$(jq --arg CVE "$CVE_ID" \
-              '.releaseNotes.content.images | map(.cves.fixed | has($CVE)) | any' \
+              "$CONTENT_TYPE"' | map(.cves.fixed | has($CVE)) | any' \
               < "$DATA_FILE")" != "true" ]; then
                 echo "Error: Issue $issue lists 'CVE ID' $CVE_ID" \
-                  "but that CVE is not present in the releaseNotes.content.images section for any image." \
+                  "but that CVE is not present in the releaseNotes.content section for any image or artifact." \
                   "This is likely due to CVE $CVE_ID not being provided in the releaseNotes.cves part of" \
                   "your Release object." \
                   | tee -a /tmp/errors.txt
@@ -231,7 +241,15 @@ spec:
 
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        CVES=$(jq -r '.releaseNotes.content.images[] | select(.cves.fixed) | .cves.fixed
+        if jq -e '.releaseNotes.content.images' "$DATA_FILE" > /dev/null; then
+            CONTENT_TYPE=".releaseNotes.content.images"
+        elif jq -e '.releaseNotes.content.artifacts' "$DATA_FILE" > /dev/null; then
+            CONTENT_TYPE=".releaseNotes.content.artifacts"
+        else
+            echo "No content found under releaseNotes.content.images or .artifacts;"
+        fi
+
+        CVES=$(jq -r "$CONTENT_TYPE"'[] | select(.cves.fixed) | .cves.fixed
             | to_entries[] | .key' "${DATA_FILE}" | sort -u | tr "\n" " ")
 
         if [[ ${CVES} == "" ]] ; then
