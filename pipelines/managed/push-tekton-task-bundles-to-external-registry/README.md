@@ -20,6 +20,9 @@ Tekton pipeline to release tekton tasks bundles to an external registry and upda
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
 
+## Changes in 0.4.0
+Update the `update-trusted-tasks` task to run after the `make-repo-public` task
+
 ## Changes in 0.3.0
 * Update all tasks that now support trusted artifacts to specify the taskGit* parameters for the step action resolvers
 * Align workspace name with changes in the apply-mapping task
