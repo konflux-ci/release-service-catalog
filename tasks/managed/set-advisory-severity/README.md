@@ -1,7 +1,8 @@
 # set-advisory-severity
 
 Tekton task to set the severity level in the releaseNotes key of the data.json. It will use an InternalRequest to query
-OSIDB for each CVE present. If the type is not RHSA, no action will be performed.
+OSIDB for each CVE present. If the type is not RHSA, no action will be performed. This check is only performed for
+images and not for generic artifact types like binaries or disk images.
 
 ## Parameters
 
@@ -18,6 +19,9 @@ OSIDB for each CVE present. If the type is not RHSA, no action will be performed
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+
+## Changes in 1.0.3
+* Skip severity setting for generic artifact types
 
 ## Changes in 1.0.2
 * Improve logging of `internal-request`
