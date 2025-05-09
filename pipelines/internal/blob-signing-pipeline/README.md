@@ -12,3 +12,7 @@ Tekton pipeline for signing base64 blobs
 | config_map_name | A config map name with configuration                                                  | Yes      | hacbs-signing-pipeline-config                                                         |
 | taskGitUrl      | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes      | https://github.com/konflux-ci/release-service-catalog.git                             |
 | taskGitRevision | The revision in the taskGitUrl repo to be used                                        | No       | -                                                                                     |
+
+## Changes in 0.1.1
+* Update incorrect parameter name to request-signature
+  * `umb_ssl_cert_secret_name` replaced with `umb_ssl_secret_name`
