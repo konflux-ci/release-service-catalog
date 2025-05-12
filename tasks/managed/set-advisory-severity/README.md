@@ -19,6 +19,10 @@ OSIDB for each CVE present. If the type is not RHSA, no action will be performed
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 1.0.2
+* Improve logging of `internal-request`
+  * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful
+
 ## Changes in 1.0.1
 * Update the requestTimeout default value to 45 mins
 

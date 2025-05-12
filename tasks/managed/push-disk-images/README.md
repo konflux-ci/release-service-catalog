@@ -14,6 +14,10 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
 
+## Changes in 0.4.2
+* Improve logging of `internal-request`
+  * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful
+
 ## Changes in 0.4.1
 * Use a temp file for `internal-request` result instead of a fixed file in the workspace to reduce risk
   of interference with other tasks

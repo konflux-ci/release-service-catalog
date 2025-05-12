@@ -24,6 +24,10 @@ based on the issues visibility
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 2.0.3
+* Improve logging of `internal-request`
+  * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful
+
 ## Changes in 2.0.2
 * Modify wording for error message if CVE not listed in any releaseNotes image
 

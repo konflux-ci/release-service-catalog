@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -x
+set -xo pipefail
 
 # mocks to be injected into task step scripts
 function curl-with-retry() {
