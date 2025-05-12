@@ -9,7 +9,7 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | snapshotPath            | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                  | No       | -                       |
 | dataPath                | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                       |
 | resultsDirPath          | Path to results directory in the data workspace                                                                            | No       | -                       |
-| retries                 | Retry copy N times                                                                                                         | Yes      | 0                       |
+| retries                 | Retry copy N times                                                                                                         | Yes      | 3                       |
 | concurrentLimit         | The maximum number of images to be proccessed concurrently                                                                 | Yes      | 10                      |
 | caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca              |
 | caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt           |
@@ -21,6 +21,9 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+
+## Changes in 7.1.0
+* Increase default number of retries from 0 to 3.
 
 ## Changes in 7.0.1
 * Fix a bug in parallel processing of pushes
