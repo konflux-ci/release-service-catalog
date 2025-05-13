@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: embargo-check
   labels:
-    app.kubernetes.io/version: "2.0.4"
+    app.kubernetes.io/version: "2.0.5"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -165,7 +165,8 @@ spec:
             CURL_RC=$?
             set -x
             if [ "$CURL_RC" -ne 0 ] ; then
-                echo "Error: ${issue} is not visible. Assuming it is embargoed and stopping pipelineRun execution."
+                echo "Error: ${issue} is not visible. Assuming it is embargoed and stopping pipelineRun execution." \
+                    | tee -a /tmp/errors.txt
                 RC=1
                 continue
             fi
@@ -180,6 +181,7 @@ spec:
             public=false
 
             if ! "$(jq '.fields | has("security")' <<< "$OUTPUT")" ; then
+                echo "Checking if the issue is public - if not, curl will fail with error 401"
                 if curl-with-retry --retry 3 "${API_URL}" > /dev/null; then
                     public=true
                 fi
@@ -202,13 +204,18 @@ spec:
                 echo "Error: Issue $issue lists 'CVE ID' $CVE_ID" \
                   "but that CVE is not present in the releaseNotes.content.images section for any image." \
                   "This is likely due to CVE $CVE_ID not being provided in the releaseNotes.cves part of" \
-                  "your Release object."
+                  "your Release object." \
+                  | tee -a /tmp/errors.txt
                 RC=1
                 continue
             fi
 
         done
 
+        if [ "$RC" -ne 0 ] ; then
+            echo "Errors were found in the embargo check:"
+            cat /tmp/errors.txt
+        fi
         exit $RC
     - name: check-cves
       image: quay.io/konflux-ci/release-service-utils:10bd7e4323de6ace107bbed1fe40613f21684b01

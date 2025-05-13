@@ -24,6 +24,12 @@ based on the issues visibility
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 2.0.5
+* Improve logging of errors
+  * Print all the errors at the end of the script, so it's clear why the task failed
+  * Add an echo explaining that we're checking if the issue is public - the unauthenticated
+    curl call can fail and throw users off.
+
 ## Changes in 2.0.4
 * Update default requestTimeout from 3 mins to 45 mins
 
