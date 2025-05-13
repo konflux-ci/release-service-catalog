@@ -24,6 +24,9 @@ based on the issues visibility
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 2.0.2
+* Modify wording for error message if CVE not listed in any releaseNotes image
+
 ## Changes in 2.0.1
 * Fix processing of releaseNotes.content.images in situations where some images have no CVEs
   * A `jq` query would previously fail on it
