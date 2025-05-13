@@ -16,8 +16,11 @@ Tekton task that collects cosign options from the data file.
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 1.1.0
+* Added compute resource limits
+
 ## Changes in 1.0.0
 * This task now supports Trusted artifacts
 
 ## Changes in 0.1.1
-  * Fix linting issues in this task
+* Fix linting issues in this task
