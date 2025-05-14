@@ -13,7 +13,7 @@ based on the issues visibility
 | Name                    | Description                                                                                                                | Optional | Default value           |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-------------------------|
 | dataPath                | Path to data JSON in the data workspace                                                                                    | No       | -                       |
-| requestTimeout          | InternalRequest timeout                                                                                                    | Yes      | 180                     |
+| requestTimeout          | InternalRequest timeout                                                                                                    | Yes      | 2700                    |
 | pipelineRunUid          | The uid of the current pipelineRun. Used as a label value when creating internal requests                                  | No       | -                       |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                   |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                      |
@@ -23,6 +23,9 @@ based on the issues visibility
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+
+## Changes in 2.0.4
+* Update default requestTimeout from 3 mins to 45 mins
 
 ## Changes in 2.0.3
 * Improve logging of `internal-request`
