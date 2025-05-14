@@ -14,7 +14,7 @@ Creates an InternalRequest to sign a base64 encoded blob
 | binariesPath         | The directory inside the workspace where the binaries are stored                                      | Yes      | binaries              |
 | pipelineRunUid       | The uid of the current pipelineRun. Used as a label value when creating internal requests             | No       | -                     |
 | taskGitUrl           | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored | No       | -                     |
-| taskGitRevision      | The revision in the taskGitUrl repo to be used                                                        | No       | -                     |  
+| taskGitRevision      | The revision in the taskGitUrl repo to be used                                                        | No       | -                     |
 
 ## Signing data parameters
 
@@ -26,6 +26,10 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 2.5.1
+* Improve logging of `internal-request`
+  * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful
 
 ## Changes in 2.5.0
 * The pipeline is called via git resolver now instead of cluster resolver

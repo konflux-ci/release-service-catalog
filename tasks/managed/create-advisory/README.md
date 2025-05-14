@@ -26,6 +26,10 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
 
+## Changes in 6.1.2
+* Improve logging of `internal-request`
+  * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful
+
 ## Changes in 6.1.1
 * Add gitlab advisory internal url to results
 
