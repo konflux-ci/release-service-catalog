@@ -29,6 +29,9 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 4.2.1
+* The default serviceAccount is changed from `appstudio-pipeline` to `release-service-account`
+
 ## Changes in 4.2.0
 * The pipeline is called via git resolver now instead of cluster resolver
   * This was done by changing from `-r` to `--pipeline` in the `internal-request`/`internal-pipelinerun` call

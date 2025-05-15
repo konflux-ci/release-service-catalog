@@ -17,10 +17,13 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | resultsDirPath           | Path to results directory in the data workspace                                           | No       | -             |
 | requestTimeout           | Request timeout                                                                           | Yes      | 86400         |
 
+## Changes in 1.0.1
+* The default serviceAccount is changed from `appstudio-pipeline` to `release-service-account`
+
 ## Changes in 1.0.0
 * `releasePath` parameter added
   * Author is extracted from the Release.Status and passed to the internalRequest
 
- ## Changes in 0.0.2
- * release-service-utils image is bumped
- * task now creates InternalRequests using the Git Ref of the internal pipeline instead of the cluster pipeline name
+## Changes in 0.0.2
+* release-service-utils image is bumped
+* task now creates InternalRequests using the Git Ref of the internal pipeline instead of the cluster pipeline name
