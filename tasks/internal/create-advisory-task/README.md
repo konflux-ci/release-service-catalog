@@ -16,6 +16,10 @@ internal request. The success/failure is handled in the task creating the intern
 | errata_secret_name             | The name of the secret that contains the errata service account metadata                               | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 
+## Changes in 1.3.4
+* Update base image
+  * New base image contains a new version of the advisory template that re-adds the public field for issues.
+
 ## Changes in 1.3.3
 * Fix handling of long argument list with `jq`
   * When a large number of objects was in the list, `jq` would fail with `Argument list too long`
