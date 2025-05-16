@@ -9,6 +9,7 @@ Tekton task to push artifacts to CDN and optionally Dev Portal with optional sig
 | snapshot_json         | String containing a JSON representation of the snapshot spec      | No       | -                                                        |
 | concurrentLimit       | The maximum number of images to be pulled at once                 | Yes      | 3                                                        |
 | author                | Author taken from Release to be used for checksum signing         | No       | -                                                        |
+| signingKeyName        | Signing key name to be used for checksum signing                  | No       | -                                                        |
 | quayUrl               | quay URL of the repo where content will be shared                 | Yes      | quay.io/konflux-artifacts                                |
 | quaySecret            | Secret to interact with Quay                                      | Yes      | quay-credentials                                         |
 | windowsCredentials    | Secret to interact with the Windows signing host                  | Yes      | windows-credentials                                      |
@@ -27,6 +28,9 @@ Tekton task to push artifacts to CDN and optionally Dev Portal with optional sig
 | udcacheSecret         | Env specific secret containing the udcache credentials            | No       | -                                                        |
 | cgwHostname           | The hostname of the content-gateway to publish the metadata to    | Yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret             | Env specific secret containing the content gateway credentials    | No       | -                                                        |
+
+## Changes in 2.0.0
+* Add new required parameter `signingKeyName`. This is used for checksum signing
 
 ## Changes in 1.0.1
 * Base64 decode keytab used for interacting with the checksum signing host (ETERA)

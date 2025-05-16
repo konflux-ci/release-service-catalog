@@ -43,5 +43,20 @@ cat > "/tmp/push-artifacts-to-cdn.json" << EOF
 EOF
 kubectl create -f /tmp/push-artifacts-to-cdn.json
 
+cat > "/tmp/configmap.json" << EOF
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "test-config-map",
+    "namespace": "default"
+  },
+  "data": {
+    "SIG_KEY_ID": "testKey"
+  }
+}
+EOF
+kubectl apply -f /tmp/configmap.json
+
 # Add mocks to the beginning of task step script
 yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' "$TASK_PATH"
