@@ -13,11 +13,11 @@ lower, they are uploaded as-is.
 
 ## Parameters
 | Name                      | Description                                                                                                                | Optional | Default value                                                                 |
-|---------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-------------------------------------------------------------------------------|
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------------- |
 | sbomDir                   | Directory containing SBOM files relative to the data workspace.                                                            | No       | None                                                                          |
 | httpRetries               | Max HTTP retry count.                                                                                                      | Yes      | 3                                                                             |
 | atlasSecretName           | Name of the Secret containing SSO auth credentials for Atlas.                                                              | Yes      | atlas-prod-sso-secret                                                         |
-| bombasticApiUrl           | URL of the BOMbastic API host of Atlas.                                                                                    | Yes      | https://sbom.atlas.devshift.net                                               |
+| ATLAS_API_URL             | URL of the Atlas API host.                                                                                                 | Yes      | https://atlas.release.devshift.net                                            |
 | ssoTokenUrl               | URL of the SSO token issuer.                                                                                               | Yes      | https://auth.redhat.com/auth/realms/EmployeeIDP/protocol/openid-connect/token |
 | supportedCycloneDxVersion | Maximum supported CycloneDX version.                                                                                       | Yes      | 1.4                                                                           |
 | supportedSpdxVersion      | Maximum supported SPDX version.                                                                                            | Yes      | 2.3                                                                           |
@@ -32,6 +32,11 @@ lower, they are uploaded as-is.
 | dataDir                   | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path)                                                       |
 | taskGitUrl                | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                                                                            |
 | taskGitRevision           | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                                                                            |
+
+## Changes in 2.1.0
+* Deprecate the Atlas v1 API in favor of v2.
+* A param `bombasticApiUrl` was renamed to `atlasApiUrl`.
+* Atlas uploads routes are now pointing to the v2 API.
 
 ## Changes in 2.0.1
 * Force curl to retry on all errors in S3 push.

@@ -28,6 +28,9 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.0.7
+* Target for SBOM upload has been changed from Atlas v1 to Atlas v2.
+
 ## Changes in 2.0.6
 * set-advisory-severity should use the artifacts from embargo-check
 

@@ -10,7 +10,8 @@ curl() {
 
   # Throw a failure (which should be caught) for Atlas API calls in the curl fail test
   params="$*"
-  if [[ "$params" =~ "https://sbom.atlas.devshift.net/api/v1/sbom?id=spdx_minimal_curl_fail_2_3" ]]; then
+  # A command uploading the "spdx_minimal_curl_fail_2_3" SBOM to Atlas should fail
+  if [[ "$params" =~ "https://atlas.release.devshift.net/api/v2/sbom" && "$params" =~ "spdx_minimal_curl_fail_2_3" ]]; then
     return 1
   fi
 }
