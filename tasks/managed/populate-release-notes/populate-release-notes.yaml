@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: populate-release-notes
   labels:
-    app.kubernetes.io/version: "4.0.0"
+    app.kubernetes.io/version: "4.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -49,6 +49,10 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: contentType
+      type: string
+      description: The contentType of the release artifact. One of [image|binary]
+      default: "image"
   results:
     - name: sbomDataPath
       description: Path to data used in the component SBOM creation in the data workspace
@@ -109,6 +113,10 @@ spec:
         #!/usr/bin/env bash
         set -ex
 
+        if [ "$(params.contentType)" == "binary" ]; then
+            echo "Content type is binary. Skipping image-specific release note generation."
+            exit 0
+        fi
         DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No data JSON was provided."
@@ -219,6 +227,82 @@ spec:
                     /tmp/sbomData.tmp && mv /tmp/sbomData.tmp "${sbomDataPath}"
             done
         done
+    - name: populate-release-notes-binaries
+      image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        if [ "$(params.contentType)" != "binary" ]; then
+            echo "Not binary content. Skipping binary-specific logic."
+            exit 0
+        fi
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
+            name=$(jq -r '.name' <<< "$component")
+
+            # Construct CVE json
+            CVEsJson='{"cves":{"fixed":{}}}'
+            CVES=$(jq -c '[.releaseNotes.cves[]? | select(.component=="'"$name"'")]' "${DATA_FILE}")
+            NUM_CVES=$(jq 'length' <<< "$CVES")
+            for ((j = 0; j < NUM_CVES; j++)); do
+                cve=$(jq -c --argjson j "$j" '.[$j]' <<< "$CVES")
+                cveJson=$(jq -n \
+                    --arg id "$(jq -r '.key' <<< "$cve")" \
+                    --argjson packages "$(jq -c '.packages // []' <<< "$cve")" \
+                    '{($id): {"packages": $packages}}')
+                CVEsJson=$(jq --argjson cve "$cveJson" '.cves.fixed += $cve' <<< "$CVEsJson")
+            done
+
+            # Get the number of files for this component
+            FILES_LENGTH=$(jq --arg name "$name" \
+              '[.mapping.components[]
+                | select(.name == $name)
+                | .files
+                | length][0]' "$DATA_FILE")
+
+            for ((k = 0; k < FILES_LENGTH; k++)); do
+                file=$(jq -c --arg name "$name" --argjson k "$k" \
+                    '.mapping.components[]
+                      | select(.name == $name)
+                      | .files[$k]' "$DATA_FILE")
+                arch=$(jq -r '.arch' <<< "$file")
+                os=$(jq -r '.os' <<< "$file")
+
+                # This will be filled in with a later task after signing so we have an accurate checksum
+                purl="placeholder"
+
+                jsonString=$(jq -cn \
+                  --arg component "$name" \
+                  --arg arch "$arch" \
+                  --arg os "$os" \
+                  --arg purl "$purl" \
+                  '{"architecture": $arch, "os": $os, "purl": $purl, "component": $component}')
+
+                if [ "$(jq '.cves.fixed | length' <<< "$CVEsJson")" -gt 0 ]; then
+                    jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< "$jsonString")
+                fi
+
+                jq --argjson content "$jsonString" '.releaseNotes.content.artifacts += [$content]' "${DATA_FILE}" > \
+                    /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
+            done
+        done
+
     - name: populate-release-notes-type-and-references
       image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
       script: |
