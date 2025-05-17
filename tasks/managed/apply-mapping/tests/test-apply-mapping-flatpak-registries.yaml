@@ -1,0 +1,310 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-flatpak-registries
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot.spec json containing some flatpak registry components.
+    Verify that the resulting json contains the expected transformations.
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "repository": "quay.io/rh-flatpaks-prod/product-name----image1"
+                    },
+                    {
+                      "name": "comp2",
+                      "repository": "flatpaks.registry.redhat.io/product-name/image2"
+                    },
+                    {
+                      "name": "comp3",
+                      "repository": "quay.io/rh-flatpaks-stage/product-name----image3"
+                    },
+                    {
+                      "name": "comp4",
+                      "repository": "flatpaks.stage.registry.redhat.io/product-name/image4"
+                    }
+                  ]
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "imageurl1@sha256:123456",
+                    "source": {
+                      "git": {
+                        "revision": "myrev",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "imageurl2@sha256:789012",
+                    "source": {
+                      "git": {
+                        "revision": "myrev2",
+                        "url": "myurl2"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "imageurl3@sha256:345678",
+                    "source": {
+                      "git": {
+                        "revision": "myrev3",
+                        "url": "myurl3"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp4",
+                    "containerImage": "imageurl4@sha256:456789",
+                    "source": {
+                      "git": {
+                        "revision": "myrev4",
+                        "url": "myurl4"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/test_data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:66e4e23bb327e5f8447b13bec8b13c7ff6a81999
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Test for comp1
+              echo Test that SNAPSHOT contains component comp1
+              test "$(jq -r '[ .components[] | select(.name=="comp1") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" -eq 1
+
+              echo Test that rh-registry-repo for comp1 is correctly set
+              test "$(jq -r '.components[] | select(.name=="comp1") | ."rh-registry-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == \
+                flatpaks.registry.redhat.io/product-name/image1
+
+              echo Test that registry-access-repo for comp1 is correctly undefined.
+              test "$(jq -r '.components[] | select(.name=="comp1") | ."registry-access-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == ''
+
+              # Test for comp2
+              echo Test that SNAPSHOT contains component comp2
+              test "$(jq -r '[ .components[] | select(.name=="comp2") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" -eq 1
+
+              echo Test that quay.io repository for comp2 is as it was
+              test "$(jq -r '.components[] | select(.name=="comp2") | ."rh-registry-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == \
+                flatpaks.registry.redhat.io/product-name/image2
+
+              echo Test that quay.io repository for comp2 is correctly set
+              test "$(jq -r '.components[] | select(.name=="comp2") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == \
+                quay.io/rh-flatpaks-prod/product-name----image2
+
+              echo Test that registry-access-repo for comp2 is correctly undefined
+              test "$(jq -r '.components[] | select(.name=="comp2") | ."registry-access-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == ''
+
+              # Test for comp3
+              echo Test that SNAPSHOT contains component comp3
+              test "$(jq -r '[ .components[] | select(.name=="comp3") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" -eq 1
+
+              echo Test that rh-registry-repo for comp3 is correctly set
+              test "$(jq -r '.components[] | select(.name=="comp3") | ."rh-registry-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == \
+                flatpaks.registry.stage.redhat.io/product-name/image3
+
+              echo Test that registry-access-repo for comp3 is correctly undefined
+              test "$(jq -r '.components[] | select(.name=="comp3") | ."registry-access-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == ''
+
+              # Test for comp4
+              echo Test that SNAPSHOT contains component comp4
+              test "$(jq -r '[ .components[] | select(.name=="comp4") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" -eq 1
+
+              echo Test that quay.io repository for comp4 is as it was
+              test "$(jq -r '.components[] | select(.name=="comp4") | ."rh-registry-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == \
+                flatpaks.stage.registry.redhat.io/product-name/image4
+
+              echo Test that quay.io repository for comp4 is correctly set
+              test "$(jq -r '.components[] | select(.name=="comp4") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == \
+                quay.io/rh-flatpaks-stage/product-name----image4
+
+              echo Test that registry-access-repo for comp4 is correctly undefined
+              test "$(jq -r '.components[] | select(.name=="comp4") | ."registry-access-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")" == ''
