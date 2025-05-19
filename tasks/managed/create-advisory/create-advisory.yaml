@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-advisory
   labels:
-    app.kubernetes.io/version: "6.1.3"
+    app.kubernetes.io/version: "7.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -64,6 +64,17 @@ spec:
       description: The location where data will be stored
       type: string
       default: $(workspaces.data.path)
+    - name: cgwHostname
+      type: string
+      description: >
+        The hostname of the content-gateway to publish the metadata to
+      default: https://developers.redhat.com/content-gateway/rest/admin
+    - name: cgwSecret
+      type: string
+      description: >
+        The kubernetes secret to use to authenticate to content-gateway.
+        It needs to contain two keys: username and token
+      default: publish-to-cgw-secret
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
@@ -126,6 +137,110 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: update-purl
+      image: quay.io/distribution_relengs/publish-to-dev-portal-test-image:purl
+      env:
+        - name: CGW_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: $(params.cgwSecret)
+              key: username
+        - name: CGW_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: $(params.cgwSecret)
+              key: token
+        - name: CGW_HOST
+          value: $(params.cgwHostname)
+      script: |
+        #!/bin/bash
+        set -exo pipefail
+
+        # This step fetches the filenames that were previously uploaded to CGW earlier in this pipeline and uses
+        # them to generate the PURL field with downloadURL and checksum.
+        # This step is intended for generic artifacts only and is skipped for images.
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+
+        # Try to extract the first contentType if it exists
+        content_type=$(jq -r '.mapping.components[]?.contentGateway?.contentType // empty' "$DATA_FILE" | head -n1)
+
+        # If no contentType is found, then we are not dealing with a generic type and can skip this step
+        if [ -z "$content_type" ]; then
+          echo "content type is not a generic artifact, skipping this"
+          exit 0
+        fi
+
+        COMPONENTS=$(jq -c '.mapping.components[] | select(.contentGateway)' "$DATA_FILE")
+
+        UPDATED_ENTRIES=()
+
+        while IFS= read -r component; do
+            PRODUCT_CODE=$(jq -r '.contentGateway.productCode' <<< "$component")
+            VERSION_NAME=$(jq -r '.contentGateway.productVersionName' <<< "$component")
+            COMPONENT_NAME=$(jq -r '.name' <<< "$component")
+
+            # fetch the downloadURLs inside the loop because the files are organized by component
+            echo "Fetching download URLs for $PRODUCT_CODE $VERSION_NAME..."
+            URLS_JSON=$(python3 /home/utils/get_cgw_download_urls.py --product "$PRODUCT_CODE" \
+              --version "$VERSION_NAME")
+
+            # Create a map of basename -> full download URL
+            declare -A FILE_URL_MAP
+            while IFS= read -r url; do
+                BASENAME=$(basename "$url")
+                FILE_URL_MAP["$BASENAME"]="$url"
+            done <<< "$URLS_JSON"
+
+            # Error if any declared file is missing from the CGW response
+            #   If a file is listed in the RPA to be released to CGW, but isn't returned from our API call
+            #   then we probably should exit as that shouldn't happen.
+            for declared_file in $(jq -r '.staged.files[].source' <<< "$component"); do
+              declared_basename=$(basename "$declared_file")
+              if [[ -z "${FILE_URL_MAP[$declared_basename]}" ]]; then
+                echo "Warning: staged file '$declared_basename' (from $COMPONENT_NAME) was not returned by CGW" >&2
+                exit 1
+              fi
+            done
+
+            # Get all advisory entries that match this component
+            MATCHING_ENTRIES=$(jq -c --arg name "$COMPONENT_NAME" \
+              '.releaseNotes.content.artifacts[] | select(.component == $name)' "$DATA_FILE")
+
+            if [ -z "$MATCHING_ENTRIES" ]; then
+              echo "Warning: no RPA CGW filename matches found for component: $COMPONENT_NAME" >&2
+              continue
+            fi
+
+            while IFS= read -r entry; do
+                ARCH=$(jq -r '.architecture' <<< "$entry")
+                OS=$(jq -r '.os' <<< "$entry")
+
+                FILENAME=$(jq -r --arg arch "$ARCH" --arg os "$OS" \
+                  '.staged.files[] | select(.arch == $arch and .os == $os) | .source' <<< "$component")
+
+                FILENAME_BASENAME=$(basename "$FILENAME")
+                URL="https://access.cdn.redhat.com${FILE_URL_MAP[$FILENAME_BASENAME]}"
+
+                if [ -n "$URL" ]; then
+                  PURL="pkg:generic/$COMPONENT_NAME@$VERSION_NAME?download_url=$URL"
+                else
+                  echo "Warning: No download URL found for $FILENAME"
+                  PURL="MISSING"
+                  # Should we fail here?
+                fi
+
+                UPDATED_ENTRY=$(jq --arg purl "$PURL" '.purl = $purl' <<< "$entry")
+                UPDATED_ENTRIES+=("$UPDATED_ENTRY")
+            done <<< "$MATCHING_ENTRIES"
+
+        done <<< "$COMPONENTS"
+
+        # Merge updated advisory entries back into releaseNotes.content.artifacts in the DATA_FILE
+        ENTRIES_JOINED=$(IFS=,; echo "${UPDATED_ENTRIES[*]}")
+        jq --argjson updated "[$ENTRIES_JOINED]" '
+          .releaseNotes.content.artifacts = $updated
+        ' "$DATA_FILE" > /tmp/data.tmp && mv /tmp/data.tmp "$DATA_FILE"
     - name: run-script
       image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
       script: |
@@ -163,13 +278,28 @@ spec:
           advisoryType="$DEFAULT_ADVISORY_TYPE"
         fi
 
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+
+        content_type=$(jq -r '.mapping.components[]?.contentGateway?.contentType // empty' "$DATA_FILE" | head -n1)
+        if [ -z "$content_type" ]; then
+          content_type="image"
+        fi
+
+        if [ "$content_type" = "binary" ] || [ "$content_type" = "generic" ]; then
+          content_path=".content.artifacts"
+        else
+          content_path=".content.images"
+        fi
+
         if ! [[ "$advisoryType" =~ ^(RHSA|RHBA|RHEA)$ ]]; then
             echo "Error: advisory type must be one of RHSA, RHBA or RHEA"
             exit 1
         fi
 
         # Ensure RHSA is only used if CVEs are provided
-        NUM_CVES=$(jq '[.content.images[]?.cves.fixed // [] | length] | add' <<< "$advisoryData")
+
+        NUM_CVES=$(jq "[${content_path}[]?.cves.fixed // [] | length] | add" <<< "$advisoryData")
+
         if [[ "$advisoryType" == "RHSA" ]] && [[ "$NUM_CVES" -eq 0 ]] ; then
             echo "Provided advisory type is RHSA, but no fixed CVEs were listed"
             echo "RHSA should only be used if CVEs are fixed in the advisory. Failing..."
@@ -181,64 +311,87 @@ spec:
         # only 2 gitlab instances are permitted...prod and staging
         # these are their secret names
         #
+
         prodSecretName="create-advisory-prod-secret"
         prodErrataSecretName="errata-prod-service-account"
         stagingSecretName="create-advisory-stage-secret"
         stagingErrataSecretName="errata-stage-service-account"
-        #
-        # detect which one to use based on repositories specified
-        #
-        pending_repositories=$(jq -r '.components[] | select(.repository |
-          contains("quay.io/redhat-pending/")) |
-          .repository' "$(params.dataDir)/$(params.snapshotPath)")
-        prod_repositories=$(jq -r '.components[] | select(.repository | contains("quay.io/redhat-prod/")) |
-          .repository' "$(params.dataDir)/$(params.snapshotPath)")
-        orphan_repositories=$(jq -r '.components[] | select(.repository | contains("quay.io/redhat-prod/") |
-          not) | select(.repository | contains("quay.io/redhat-pending/") | not) |
-          .repository' "$(params.dataDir)/$(params.snapshotPath)")
 
-        foundPendingRepositories=false
-        if [ -n "${pending_repositories}" ]; then
-          foundPendingRepositories=true
-        fi
+        if [ "$content_type" = "image" ]; then
 
-        foundProdRepositories=false
-        if [ -n "${prod_repositories}" ]; then
-          foundProdRepositories=true
-        fi
+          #
+          # detect which one to use based on repositories specified
+          #
+          pending_repositories=$(jq -r '.components[] | select(.repository |
+            contains("quay.io/redhat-pending/")) |
+            .repository' "$(params.dataDir)/$(params.snapshotPath)")
+          prod_repositories=$(jq -r '.components[] | select(.repository | contains("quay.io/redhat-prod/")) |
+            .repository' "$(params.dataDir)/$(params.snapshotPath)")
+          orphan_repositories=$(jq -r '.components[] | select(.repository | contains("quay.io/redhat-prod/") |
+            not) | select(.repository | contains("quay.io/redhat-pending/") | not) |
+            .repository' "$(params.dataDir)/$(params.snapshotPath)")
 
-        foundOrphanRepositories=false
-        if [ -n "${orphan_repositories}" ]; then
-          foundOrphanRepositories=true
-        fi
+          foundPendingRepositories=false
+          if [ -n "${pending_repositories}" ]; then
+            foundPendingRepositories=true
+          fi
 
-        echo "foundPendingRepositories: ${foundPendingRepositories}"
-        echo "foundProdRepositories: ${foundProdRepositories}"
-        echo "foundOrphanRepositories: ${foundOrphanRepositories}"
+          foundProdRepositories=false
+          if [ -n "${prod_repositories}" ]; then
+            foundProdRepositories=true
+          fi
 
-        if [ "${foundPendingRepositories}" == "true" ] && [ "${foundProdRepositories}" == "true" ]; then
-          echo "Error: cannot publish to both redhat-pending and redhat-prod repositories"
-          exit 1
-        fi
+          foundOrphanRepositories=false
+          if [ -n "${orphan_repositories}" ]; then
+            foundOrphanRepositories=true
+          fi
 
-        if [ "${foundPendingRepositories}" == "false" ] && [ "${foundProdRepositories}" == "false" ]; then
-          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
-          exit 1
-        fi
+          echo "foundPendingRepositories: ${foundPendingRepositories}"
+          echo "foundProdRepositories: ${foundProdRepositories}"
+          echo "foundOrphanRepositories: ${foundOrphanRepositories}"
 
-        if [ "${foundOrphanRepositories}" == "true" ]; then
-          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
-          exit 1
-        fi
+          if [ "${foundPendingRepositories}" == "true" ] && [ "${foundProdRepositories}" == "true" ]; then
+            echo "Error: cannot publish to both redhat-pending and redhat-prod repositories"
+            exit 1
+          fi
 
-        # at this point, one of foundPendingRepositories or foundProdRepositories
-        # is true.
-        #
-        advisorySecretName="${prodSecretName}"
-        errataSecretName="${prodErrataSecretName}"
-        if [ "${foundPendingRepositories}" == "true" ]; then
-          advisorySecretName="${stagingSecretName}"
-          errataSecretName="${stagingErrataSecretName}"
+          if [ "${foundPendingRepositories}" == "false" ] && [ "${foundProdRepositories}" == "false" ]; then
+            echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+            exit 1
+          fi
+
+          if [ "${foundOrphanRepositories}" == "true" ]; then
+            echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
+            exit 1
+          fi
+
+          # at this point, one of foundPendingRepositories or foundProdRepositories
+          # is true.
+
+          advisorySecretName="${prodSecretName}"
+          errataSecretName="${prodErrataSecretName}"
+          if [ "${foundPendingRepositories}" == "true" ]; then
+            advisorySecretName="${stagingSecretName}"
+            errataSecretName="${stagingErrataSecretName}"
+          fi
+        else
+          # Continue using the POC and staging credentials until CLDX-225
+          # is complete and stakeholders are ready to ingest these advisories
+          prodSecretName="create-advisory-poc-secret"
+          prodErrataSecretName="errata-stage-service-account"
+          stagingSecretName="create-advisory-poc-secret"
+          stagingErrataSecretName="errata-stage-service-account"
+
+          DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+          INTENTION=$(jq -r '.intention' "$DATA_FILE")
+
+          if [[ "$INTENTION" == "production" ]]; then
+            advisorySecretName="$prodSecretName"
+            errataSecretName="$prodErrataSecretName"
+          elif [[ "$INTENTION" == "staging" ]]; then
+            advisorySecretName="$stagingSecretName"
+            errataSecretName="$stagingErrataSecretName"
+          fi
         fi
 
         IR_FILE="$(params.dataDir)/$(context.task.name)/ir-result.txt"
@@ -250,6 +403,7 @@ spec:
                          -p origin="${origin}" \
                          -p advisory_json="${advisoryData}" \
                          -p config_map_name="${configMapName}" \
+                         -p contentType="${content_type}" \
                          -p advisory_secret_name="${advisorySecretName}" \
                          -p errata_secret_name="${errataSecretName}" \
                          -p taskGitUrl="$(params.taskGitUrl)" \

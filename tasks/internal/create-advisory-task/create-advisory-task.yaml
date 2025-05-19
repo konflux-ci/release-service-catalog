@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: create-advisory-task
   labels:
-    app.kubernetes.io/version: "1.4.0"
+    app.kubernetes.io/version: "2.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -40,6 +40,10 @@ spec:
     - name: internalRequestPipelineRunName
       type: string
       description: Name of the PipelineRun that called this task
+    - name: contentType
+      type: string
+      description: The contentType of the release artifact. One of [image|binary|generic]
+      default: "image"
   results:
     - name: result
       description: Success if the task succeeds, the error otherwise
@@ -153,8 +157,19 @@ spec:
           # This also cds into the git repo
           git_clone_and_checkout --repository "$GIT_REPO" --revision "$REPO_BRANCH"
 
-          CONTENT_IMAGES=/tmp/content_images.json
-          jq -c '.content.images // []' <<< "$ADVISORY_JSON" > "$CONTENT_IMAGES"
+          if [ "$(params.contentType)" = "image" ]; then
+            echo "Content type is image."
+            spec_content_type=".content.images"
+          elif [ "$(params.contentType)" == "binary" ] || [ "$(params.contentType)" == "generic" ]; then
+            echo "Content type is generic artifact."
+            spec_content_type=".content.artifacts"
+          else
+            echo "Unsupported contentType: $(params.contentType)"| tee -a "$STDERR_FILE"
+            echo "Exiting." | tee -a "$STDERR_FILE"
+            exit 1
+          fi
+          CONTENT_FILE=/tmp/content.json
+          jq -c "${spec_content_type} // []" <<< "$ADVISORY_JSON" > "$CONTENT_FILE"
 
           # Use ISO 8601 format in UTC/Zulu time, e.g. 2024-03-06T17:27:38Z
           SHIP_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -182,29 +197,39 @@ spec:
           EXISTING_CONTENT=/tmp/existing_content.json
           for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
               ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
-              yq -o=json '.spec.content.images // []' "${ADVISORY_FILE}" > "$EXISTING_CONTENT"
+              yq -o=json ".spec${spec_content_type} // []" "${ADVISORY_FILE}" > "$EXISTING_CONTENT"
 
               echo "Processing advisory: ${ADVISORY_FILE}"
-              echo "Existing images in advisory: "
+              echo "Existing content in advisory: "
               cat "$EXISTING_CONTENT"
 
-              # Update CONTENT_IMAGES by removing images that already exist in the advisory
-              jq --argfile existing "$EXISTING_CONTENT" '
-                map(select(
-                  .containerImage as $ci |
-                  .tags as $tags |
-                  .repository as $repo |
-                  ($existing | map(select(
-                    .containerImage == $ci and .tags == $tags and .repository == $repo
-                  )) | length == 0)
-                ))' "$CONTENT_IMAGES" > /tmp/content_images_filtered.json
-              mv /tmp/content_images_filtered.json "$CONTENT_IMAGES"
+              # Update CONTENT by removing entries that already exist in the advisory
+              if [ "$(params.contentType)" == "generic" ]; then
+                # Use purl as unique key for generic artifacts
+                jq --argfile existing "$EXISTING_CONTENT" '
+                  map(select(
+                    .purl as $p |
+                    ($existing | map(select(.purl == $p)) | length == 0)
+                  ))' "$CONTENT_FILE" > /tmp/content_filtered.json
+              else
+                jq --argfile existing "$EXISTING_CONTENT" '
+                  map(select(
+                    .containerImage as $ci |
+                    .tags as $tags |
+                    .repository as $repo |
+                    ($existing | map(select(
+                      .containerImage == $ci and .tags == $tags and .repository == $repo
+                    )) | length == 0)
+                  ))' "$CONTENT_FILE" > /tmp/content_filtered.json
+              fi
 
-              echo "Remaining images after filtering:"
-              cat "$CONTENT_IMAGES"
+              mv /tmp/content_filtered.json "$CONTENT_FILE"
 
-              # If after filtering, no images are left, then we can exit early
-              if jq -e 'length == 0' "$CONTENT_IMAGES" >/dev/null; then
+              echo "Remaining entries after filtering:"
+              cat "$CONTENT_FILE"
+
+              # If after filtering, no entries are left, then we can exit early
+              if jq -e 'length == 0' "$CONTENT_FILE" >/dev/null; then
                   echo "Matching advisory exists: ${ADVISORY_FILE}. Skipping creation."
                   ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${ADVISORY_FILE}"
                   ADVISORY_TYPE=$(yq -r '.spec.type' "${ADVISORY_FILE}")
@@ -216,12 +241,12 @@ spec:
               fi
           done
 
-          NEW_ADVISORY_JSON=$(echo "$ADVISORY_JSON" | jq --argfile new_images "$CONTENT_IMAGES" \
-            '.content.images = $new_images')
+          NEW_ADVISORY_JSON=$(echo "$ADVISORY_JSON" | jq --argfile new_content "$CONTENT_FILE" \
+            "${spec_content_type} = \$new_content")
 
           signingKey=$(kubectl get configmap "$(params.config_map_name)" -o jsonpath="{.data.SIG_KEY_NAME}")
           advisoryJsonWithKey=$(jq -c --arg key "$signingKey" \
-            '.content.images[] += {"signingKey": $key}' <<< "$NEW_ADVISORY_JSON")
+            "${spec_content_type}[] += {\"signingKey\": \$key}" <<< "$NEW_ADVISORY_JSON")
 
           LIVE_ID=$(jq -r '.live_id' <<< "$ADVISORY_JSON" )
           if [[ "$LIVE_ID" == null ]]; then
