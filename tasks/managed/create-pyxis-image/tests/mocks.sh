@@ -64,10 +64,7 @@ function select-oci-auth() {
 
 function oras() {
   echo $* >> $(params.dataDir)/mock_oras.txt
-  if [[ "$*" == "manifest fetch --registry-config"*.dockerfile ]]
-  then
-    echo '{"layers": [{"annotations": {"org.opencontainers.image.title": "Dockerfile.custom"}}]}'
-  elif [[ "$*" == "blob fetch --registry-config"*"/tmp/oras-blob-fetch-beef.gz"* ]]
+  if [[ "$*" == "blob fetch --registry-config"*"/tmp/oras-blob-fetch-beef.gz"* ]]
   then
     echo -n 'H4sIAAAAAAAAA0vKzEssqlRISSxJVEjPTy1WyEgtSgUAXVhZVxUAAAA=' | base64 -d > /tmp/oras-blob-fetch-beef.gz
   elif [[ "$*" == "blob fetch --registry-config"*"/tmp/oras-blob-fetch-pork.gz"* ]]
@@ -89,7 +86,7 @@ function oras() {
   elif [[ "$*" == "pull --registry-config"*":sha256-"*.dockerfile* ]]
   then
     echo Mock oras called with: $*
-    echo mydocker > $6/Dockerfile.custom
+    echo mydocker > $6/Dockerfile
   else
     echo Mock oras called with: $*
     echo Error: Unexpected call
