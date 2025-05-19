@@ -2,9 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-sign-index-image-with-pullspec-rewrite
+  name: test-sign-index-image-multicomponent
 spec:
-  description: Test creating a internal request to sign an image
+  description: |
+    Test creating a internal request to sign an image.
+    In this scenario there will be multiple index images to sign.
   workspaces:
     - name: tests-workspace
   tasks:
@@ -59,9 +61,16 @@ spec:
               {
                   "components": [
                       {
-                          "target_index": "quay.io/redhat/redhat----testimage:tag",
+                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.15",
                           "imageDigests": [
+                              "sha256:6f9a420f660e73a",
                               "sha256:6f9a420f660e73b"
+                          ]
+                      },
+                      {
+                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.16",
+                          "imageDigests": [
+                              "sha256:6f9a420f660e73c"
                           ]
                       }
                   ]
@@ -74,9 +83,9 @@ spec:
         - name: requester
           value: testuser
         - name: referenceImage
-          value: quay.io/redhat/redhat----testimage:tag
+          value: quay.io/testrepo/testimage:tag
         - name: manifestListDigests
-          value: "sha256:6f9a420f660e73b"
+          value: "sha256:6f9a420f660e73a sha256:6f9a420f660e73b"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: taskGitUrl
@@ -106,38 +115,50 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
-                -o custom-columns=":metadata.name")"
-              params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
+              testValues='sha256:6f9a420f660e73a sha256:6f9a420f660e73b sha256:6f9a420f660e73c'
+              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
+              internalRequestsCount=$(echo "$internalRequests" | wc -w)
 
-              if [ "$(jq -r '.reference' <<< "${params}")" != "registry.redhat.io/redhat/testimage:tag" ]; then
-                echo "reference image does not match"
+              if [ "$internalRequestsCount" != "3" ] ; then
+                echo "incorrect number of internalRequests created. Expected 3"
                 exit 1
               fi
 
-              if [ "$(jq -r '.manifest_digest' <<< "${params}")" != "sha256:6f9a420f660e73b" ]; then
-                echo "manifest_digest does not match"
-                exit 1
-              fi
+              for internalRequest in ${internalRequests};
+              do
+                params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
 
-              if [ "$(jq -r '.config_map_name' <<< "${params}")" != "signing-config-map" ]
-              then
-                echo "config_map_name does not match"
-                exit 1
-              fi
+                if [[ "$(jq -r '.reference' <<< "${params}")" \
+                    != "registry.redhat.io/redhat/redhat-operator-index:v4.1"[56] ]]; then
+                  echo "reference image does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
-              then
-                echo "requester does not match"
-                exit 1
-              fi
+                manifest_digest=$(jq -r '.manifest_digest' <<< "${params}")
+                if [[ ! " $testValues " =~ [[:space:]]${manifest_digest}[[:space:]] ]]; then
+                  echo "manifest_digest does not match"
+                  exit 1
+                fi
 
-              if [ "$(jq -r '.pipeline_image' <<< "${params}")" != \
-                 "quay.io/redhat-isv/operator-pipelines-images:released" ]
-              then
-                echo "pipeline_image does not match"
-                exit 1
-              fi
+                if [ "$(jq -r '.config_map_name' <<< "${params}")" != "signing-config-map" ]
+                then
+                  echo "config_map_name does not match"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
+                then
+                  echo "requester does not match"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.pipeline_image' <<< "${params}")" != \
+                   "quay.io/redhat-isv/operator-pipelines-images:released" ]
+                then
+                  echo "pipeline_image does not match"
+                  exit 1
+                fi
+              done
       runAfter:
         - run-task
   finally:

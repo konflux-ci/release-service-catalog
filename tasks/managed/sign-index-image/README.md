@@ -4,17 +4,19 @@ Creates an InternalRequest to sign an index image
 
 ## Parameters
 
-| Name                     | Description                                                                               | Optional | Default value  |
-|--------------------------|-------------------------------------------------------------------------------------------|----------|----------------|
-| dataPath                 | Path to the JSON string of the merged data to use in the data workspace                   | No       | -              |
-| releasePlanAdmissionPath | Path to the JSON string of the releasePlanAdmission in the data workspace                 | No       | -              |
-| referenceImage           | The image to be signed                                                                    | No       | -              |
-| manifestListDigests      | The manifest digests for each arch in manifest list                                       | No       | -              |
-| requester                | Name of the user that requested the signing, for auditing purposes                        | No       | -              |
-| requestTimeout           | InternalRequest timeout                                                                   | Yes      | 1800           |
-| pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -              |
-| taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -              |
-| taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -              |
+| Name                     | Description                                                                               | Optional | Default value |
+| ------------------------ | ----------------------------------------------------------------------------------------- | -------- | ------------- |
+| dataPath                 | Path to the JSON string of the merged data to use in the data workspace                   | No       | -             |
+| releasePlanAdmissionPath | Path to the JSON string of the releasePlanAdmission in the data workspace                 | No       | -             |
+| referenceImage           | The image to be signed                                                                    | No       | -             |
+| manifestListDigests      | The manifest digests for each arch in manifest list                                       | No       | -             |
+| requester                | Name of the user that requested the signing, for auditing purposes                        | No       | -             |
+| requestTimeout           | InternalRequest timeout                                                                   | Yes      | 1800          |
+| pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests | No       | -             |
+| taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
+| taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
+| fbcResultsPath           | Path to the JSON file in the data workspace containing fbc results                        | No       | -             |
+| concurrentLimit          | The maximum number of concurrent signing requests                                         | Yes      | 16            |
 
 ## Signing data parameters
 
@@ -28,6 +30,11 @@ data:
         pipelineImage: <image pullspec>
         configMapName: <configmap name>
 ```
+
+## Changes in 4.3.0
+* Add support for multicomponent releases
+  * The new mandatory task parameter `fbcResultsPath` points to a file with images and manifest digests to sign
+  * Signing is processed in parallel - up to `concurrentLimit` of signing requests at a time
 
 ## Changes in 4.2.1
 * The default serviceAccount is changed from `appstudio-pipeline` to `release-service-account`

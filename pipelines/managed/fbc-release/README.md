@@ -20,6 +20,9 @@ Tekton release pipeline to interact with FBC Pipeline
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                                      | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                             | No       | -                                                         |
 
+## Changes in 4.6.0
+* Add new `fbcResultsPath` parameter for `sign-index-image`. This is to support multicomponent releases
+
 ## Changes in 4.5.0
 * Add `prepare-fbc-release` task to the Pipeline, which adds new information required by `add-fbc-contribution` to
   build multiple components
