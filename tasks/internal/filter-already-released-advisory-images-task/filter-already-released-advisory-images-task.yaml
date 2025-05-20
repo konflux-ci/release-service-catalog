@@ -11,7 +11,8 @@ metadata:
 spec:
   description: |
     Filters out images from a snapshot if they are already published in an advisory
-    stored in the GitLab advisory repo. Result is a cleaned snapshot JSON string.
+    stored in the GitLab advisory repo. Returns a list of components that have already
+    been released in advisories.
   params:
     - name: snapshot_json
       type: string
@@ -28,12 +29,12 @@ spec:
   results:
     - name: result
       description: Success or error message
-    - name: filtered_snapshot
-      description: The filtered snapshot JSON (with unpublished images only)
     - name: internalRequestPipelineRunName
-      description: Name of the PipelineRun that requested this task
+      description: The name of the InternalRequest PipelineRun
     - name: internalRequestTaskRunName
-      description: Name of this Task Run to be made available to caller
+      description: The name of the InternalRequest TaskRun
+    - name: released_components
+      description: List of released components
   steps:
     - name: filter-images
       image: quay.io/konflux-ci/release-service-utils:0b2f257d7a5c2a881c36c23f8ae3cd5e89db593a
@@ -106,8 +107,8 @@ spec:
         fi
 
         if [[ -z "$EXISTING_ADVISORIES" ]]; then
-          echo "No existing advisories found. Returning original snapshot."
-          echo -n "$SNAPSHOT_JSON" > "$(results.filtered_snapshot.path)"
+          echo "No existing advisories found. No components have been released yet."
+          echo -n "[]" > "$(results.released_components.path)"
           echo -n "Success" > "$(results.result.path)"
           exit 0
         fi
@@ -133,9 +134,10 @@ spec:
           # If after filtering, no images are left, then we can exit early
           if jq -e 'length == 0' <<< "$CONTENT_IMAGES" >/dev/null; then
             echo "All images in the snapshot have already been released in advisories. Stopping pipeline."
-            echo -n "All images have already been released in advisories" > "$(results.result.path)"
-            FILTERED_SNAPSHOT=$(jq '.components = []' <<< "$SNAPSHOT_JSON")
-            echo -n "$FILTERED_SNAPSHOT" > "$(results.filtered_snapshot.path)"
+            echo -n "Success" > "$(results.result.path)"
+            # Return all component names as released
+            RELEASED_COMPONENTS=$(jq -r '.components[].name' <<< "$SNAPSHOT_JSON" | jq -R -s -c 'split("\n")[:-1]')
+            echo -n "$RELEASED_COMPONENTS" > "$(results.released_components.path)"
             exit 0
           fi
         done
@@ -145,7 +147,7 @@ spec:
         echo "Filtered out $((ORIGINAL_COUNT - NEW_COUNT)) image(s) already in advisories"
         echo "Remaining unpublished images: $CONTENT_IMAGES"
 
-        FILTERED_SNAPSHOT=$(jq --argjson images "$CONTENT_IMAGES" '.components = $images' <<< "$SNAPSHOT_JSON")
-
-        echo -n "$FILTERED_SNAPSHOT" > "$(results.filtered_snapshot.path)"
+        # Get list of released components (components that are not in CONTENT_IMAGES)
+        RELEASED_COMPONENTS=$(jq -r '.components[].name' <<< "$SNAPSHOT_JSON" | jq -R -s -c 'split("\n")[:-1]' | jq --argjson remaining "$CONTENT_IMAGES" 'map(select(. as $name | ($remaining | map(.name) | contains([$name]) | not)))')
+        echo -n "$RELEASED_COMPONENTS" > "$(results.released_components.path)"
         echo -n "Success" > "$(results.result.path)"
