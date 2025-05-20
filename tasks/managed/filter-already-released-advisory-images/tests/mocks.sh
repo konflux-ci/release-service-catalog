@@ -9,7 +9,7 @@ function kubectl() {
   then
     echo '{
       "result": "Success",
-      "filtered_snapshot": "{\"application\":\"myapp\",\"components\":[{\"name\":\"new-component\",\"repository\":\"quay.io/redhat-pending/repo2\",\"containerImage\":\"quay.io/redhat-pending/repo2@sha256:def456\"}]}",
+      "released_components": ["old-component"],
       "internalRequestPipelineRunName": "test-pipeline-run",
       "internalRequestTaskRunName": "test-task-run"
     }'
