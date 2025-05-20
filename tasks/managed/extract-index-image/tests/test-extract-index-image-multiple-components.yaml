@@ -2,9 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-publish-index-image
+  name: test-extract-index-image-multiple-components
 spec:
-  description: Test creating a internal request to publish an image
+  description: |
+    Run the extract-index-image task and verify the proper index image values are reported
+    as task results, but when the snapshot has multiple components.
   workspaces:
     - name: tests-workspace
   params:
@@ -54,20 +56,49 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
               #!/usr/bin/env sh
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/file.json" << EOF
               {
-                "fbc": {
-                  "publishingCredentials": "test-credentials"
+                "jsonBuildInfo": {
+                  "arches": [
+                    "amd64",
+                    "arm64",
+                    "ppc64le",
+                    "s390x"
+                  ],
+                  "batch": 1234,
+                  "batch_annotations": null,
+                  "binary_image": "registry.redhat.io/openshift4/ose-operator-registry:v4.12",
+                  "binary_image_resolved": "registry.redhat.io/openshift4/ose-operator-registry@sha256:abcdefghijkl",
+                  "build_tags": [],
+                  "distribution_scope": "stage",
+                  "fbc_fragment": "quay.io/stage/dev/application/component@sha256:abcdefghijklm",
+                  "fbc_fragment_resolved": "quay.io/stage/dev/application/component@sha256:abcdefghijklm",
+                  "from_index": "redhat.com/rh/iib:v4.12",
+                  "from_index_resolved": "redhat.com/rh/iib@sha256:abcdefghijklmn",
+                  "id": 01,
+                  "index_image": "redhat.com/rh-stage/iib:01",
+                  "index_image_resolved": "redhat.com/rh-stage/iib@sha256:abcdefghijk",
+                  "internal_index_image_copy": "redhat.com/rh-stage/iib:01",
+                  "internal_index_image_copy_resolved": "redhat.com/rh-stage/iib@sha256:abcdefghijk",
+                  "logs": {
+                    "expiration": "2023-12-10T15:07:59.823273Z",
+                    "url": "https:redhat.com/api/v1/builds/01/logs"
+                  },
+                  "request_type": "fbc-operations",
+                  "state": "complete",
+                  "state_reason": "The FBC fragment was successfully added in the index image",
+                  "updated": "2023-09-11T15:07:59.823273Z",
+                  "user": "user@REDHAT.COM"
                 }
               }
               EOF
-              cat > "$(params.dataDir)/internal-requests-results.json" << EOF
+              cat > "$(params.dataDir)/internal-request-results.json" << EOF
               {
                 "index_image": {
                   "target_index": "quay.io/scoheb/fbc-target-index-testing:v4.12"
@@ -82,6 +113,19 @@ spec:
                     "image_digests": [
                       "quay.io/a",
                       "quay.io/b"
+                    ],
+                    "completion_time": "2023-03-06T16:39:11.314092Z",
+                    "iibLog": "Dummy IIB Log"
+                  },
+                  {
+                    "fbc_fragment": "registry.io/image0@sha256:0000",
+                    "target_index": "quay.io/scoheb/fbc-target-index-testing:v4.12",
+                    "ocp_version": "v4.12",
+                    "index_image": "redhat.com/rh-stage/iib:02",
+                    "index_image_resolved": "redhat.com/rh-stage/iib@sha256:1234567890",
+                    "image_digests": [
+                      "quay.io/c",
+                      "quay.io/d"
                     ],
                     "completion_time": "2023-03-06T16:39:11.314092Z",
                     "iibLog": "Dummy IIB Log"
@@ -117,22 +161,14 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: publish-index-image
+        name: extract-index-image
       params:
-        - name: sourceIndex
-          value: "quay.io/test/sourceIndex:tag"
-        - name: targetIndex
-          value: "quay.io/test/targetIndex:tag"
-        - name: buildTimestamp
-          value: 11111111111
+        - name: inputDataFile
+          value: $(params.dataDir)/$(context.pipelineRun.uid)/file.json
+        - name: resultsDirPath
+          value: $(context.pipelineRun.uid)/results
         - name: internalRequestResultsFile
-          value: "internal-requests-results.json"
-        - name: retries
-          value: 2
-        - name: pipelineRunUid
-          value: $(context.pipelineRun.uid)
-        - name: dataPath
-          value: $(context.pipelineRun.uid)/data.json
+          value: "internal-request-results.json"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -157,16 +193,31 @@ spec:
         - name: data
           workspace: tests-workspace
       params:
+        - name: indexImage
+          value: $(tasks.run-task.results.indexImage)
+        - name: indexImageResolved
+          value: $(tasks.run-task.results.indexImageResolved)
+        - name: internalRequestResultsFile
+          value: "internal-request-results.json"
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
       runAfter:
         - run-task
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
         workspaces:
           - name: data
         params:
+          - name: indexImage
+            type: string
+          - name: indexImageResolved
+            type: string
+          - name: internalRequestResultsFile
+            type: string
           - name: sourceDataArtifact
             type: string
           - name: dataDir
@@ -203,72 +254,48 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              internalRequests=$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
-              -o json | jq '.items')
+              # testing the compatibility
+              images=$(tr -s "\n" " " <<< "$(params.indexImage)")
+              resolvedImages=$(tr -s "\n" " " <<< "$(params.indexImageResolved)")
 
-              irIndex=$(jq '. | length' <<< "${internalRequests}")
-              if [ "${irIndex}" -ne 2 ]; then
-                  echo "Too many internalrequests found. Should be 2"
-                  exit 1
+              index_image1=$(awk '{print $1}' <<< "$images")
+              index_image2=$(awk '{print $2}' <<< "$images")
+
+              index_image_resolved1=$(awk '{print $1}' <<< "$resolvedImages")
+              index_image_resolved2=$(awk '{print $2}' <<< "$resolvedImages")
+
+              echo Test the indexImage result was properly set
+              test "$index_image1" == "redhat.com/rh-stage/iib:01"
+              test "$index_image2" == "redhat.com/rh-stage/iib:02"
+
+              echo Test the indexImageResolved result was properly set
+              test "$index_image_resolved1" == "redhat.com/rh-stage/iib@sha256:abcdefghijk"
+              test "$index_image_resolved2" == "redhat.com/rh-stage/iib@sha256:1234567890"
+
+              # testing new format
+              resultsFile="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              if [ "$(jq -r '.components[0].index_image' "$resultsFile")" != "redhat.com/rh-stage/iib:01" ]; then
+                echo "Index image #0 does not match"
               fi
-              for((i=0; i<irIndex; i++)); do
+              if [ "$(jq -r '.components[1].index_image' "$resultsFile")" != "redhat.com/rh-stage/iib:02" ]; then
+                echo "Index image #1 does not match"
+              fi
 
-                  pipeline=$(jq -r ".[$i] | .spec.pipeline.pipelineRef.params[2].value" <<< "${internalRequests}")
-                  params=$(jq -r ".[$i] | .spec.params" <<< "${internalRequests}")
+              indexImageResolved="$(jq -r '.components[0].index_image_resolved' "$resultsFile")"
+              if [ "$indexImageResolved" != "redhat.com/rh-stage/iib@sha256:abcdefghijk" ]; then
+                echo "Index image resolved #1 does not match"
+                exit 1
+              fi
 
-                  if [ "$pipeline" != \
-                    "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
-                    echo "pipeline does not match"
-                    exit 1
-                  fi
-
-                  if [ "$(jq -r '.retries' <<< "${params}")" != "2" ]; then
-                    echo "number of retries does not match"
-                    exit 1
-                  fi
-
-                  if [ "$(jq -r '.sourceIndex' <<< "${params}")" != "redhat.com/rh-stage/iib@sha256:abcdefghijk" ]; then
-                    echo "sourceIndex image does not match"
-                    exit 1
-                  fi
-
-                  targetIndex=$(jq -r '.targetIndex' <<< "${params}")
-                  if [ $i = 0 ]; then
-                      if [ "$targetIndex" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
-                        echo "targetIndex image does not match"
-                        exit 1
-                      fi
-                  else
-                      expectedTargetIndex="quay.io/scoheb/fbc-target-index-testing:v4.12-2023-03-06T16:39:11.314092Z"
-                      if [ "$targetIndex" != "$expectedTargetIndex" ]; then
-                        echo "targetIndex image does not match"
-                        exit 1
-                      fi
-                  fi
-
-                  if [ "$(jq -r '.taskGitUrl' <<< "${params}")" != "http://localhost" ]; then
-                    echo "taskGitUrl image does not match"
-                    exit 1 
-                  fi
-
-                  if [ "$(jq -r '.taskGitRevision' <<< "${params}")" != "main" ]; then
-                    echo "taskGitRevision image does not match"
-                    exit 1 
-                  fi
-              done
-  finally:
-    - name: cleanup
-      taskSpec:
-        steps:
-          - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
-            script: |
-              #!/usr/bin/env sh
-              set -eux
-
-              kubectl delete internalrequests --all
+              indexImageResolved="$(jq -r '.components[1].index_image_resolved' "$resultsFile")"
+              if [ "$indexImageResolved" != "redhat.com/rh-stage/iib@sha256:1234567890" ]; then
+                echo "Index image resolved #0 does not match"
+                exit 1
+              fi
+      runAfter:
+        - run-task

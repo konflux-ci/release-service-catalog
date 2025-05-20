@@ -34,7 +34,7 @@ function set_ir_status() {
 {
   "status": {
     "results": {
-      "jsonBuildInfo": "{\"updated\":\"2023-03-06T16:39:11.314092Z\"}",
+      "jsonBuildInfo": "{\"updated\":\"2024-03-06T16:39:11.314092Z\", \"index_image\": \"redhat.com/rh-stage/iib:01\", \"index_image_resolved\": \"redhat.com/rh-stage/iib@sha256:abcdefghijk\"}",
       "indexImageDigests": "quay.io/a quay.io/b",
       "genericResult": "{\"fbc_opt_in\":\"true\",\"publish_index_image\":\"false\",\"sign_index_image\":\"false\"}",
       "iibLog": "Dummy IIB Log",

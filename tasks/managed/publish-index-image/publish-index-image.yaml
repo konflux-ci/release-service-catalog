@@ -4,13 +4,13 @@ kind: Task
 metadata:
   name: publish-index-image
   labels:
-    app.kubernetes.io/version: "5.1.0"
+    app.kubernetes.io/version: "5.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-      Publish a built FBC index image using skopeo
+    Publish a built FBC index image using skopeo
   params:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
@@ -21,6 +21,9 @@ spec:
     - name: targetIndex
       type: string
       description: Pullspec to push the image to
+    - name: internalRequestResultsFile
+      type: string
+      description: File containing the results of the build
     - name: retries
       type: string
       default: "0"
@@ -143,30 +146,42 @@ spec:
         credentials=$(jq -r '.fbc.publishingCredentials' "$DATA_FILE")
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        publishingImages=("$(params.targetIndex)")
-        # only publish the extra timestamp-based tag if the targetIndex does not have it already
-        if [[ ! "$(params.targetIndex)" =~ .*$(params.buildTimestamp)$ ]]; then
-          publishingImages+=("$(params.targetIndex)-$(params.buildTimestamp)")
-        fi
+        LENGTH="$(jq -r '.components | length' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
+        for((i=0; i<LENGTH; i++)); do
+          targetIndex=$(jq -r --argjson i "$i" \
+            '.components[$i].target_index' "$(params.dataDir)/$(params.internalRequestResultsFile)")
 
-        for((i=0; i<${#publishingImages[@]}; i++ )); do
-            echo "=== Creating internal request to publish image:"
-            echo ""
-            echo "- from: $(params.sourceIndex)"
-            echo "- to: ${publishingImages[$i]}"
+          sourceIndex=$(jq -r  --argjson i "$i" \
+            '.components[$i].index_image_resolved' "$(params.dataDir)/$(params.internalRequestResultsFile)")
 
-            internal-request --pipeline "${request}" \
-                -p sourceIndex="$(params.sourceIndex)" \
-                -p targetIndex="${publishingImages[$i]}" \
-                -p publishingCredentials="${credentials}" \
-                -p retries="$(params.retries)" \
-                -p taskGitUrl="$(params.taskGitUrl)" \
-                -p taskGitRevision="$(params.taskGitRevision)" \
-                -t "$(params.requestTimeout)" \
-                -l ${pipelinerun_label}="$(params.pipelineRunUid)"
-            echo "=== done"
-            echo ""
-            echo ""
+          buildTimestamp=$(jq -r --argjson i "$i" '.components[$i].completion_time' \
+            "$(params.dataDir)/$(params.internalRequestResultsFile)")
+
+          publishingImages=("$targetIndex")
+          # only publish the extra timestamp-based tag if the targetIndex does not have it already
+          if [[ ! "$targetIndex" =~ .*"$buildTimestamp"$ ]]; then
+            publishingImages+=("${targetIndex}-${buildTimestamp}")
+          fi
+
+          for((x=0; x<${#publishingImages[@]}; x++ )); do
+              echo "=== Creating internal request to publish image:"
+              echo ""
+              echo "- from: ${sourceIndex}"
+              echo "- to: ${publishingImages[$i]}"
+
+              internal-request --pipeline "${request}" \
+                  -p sourceIndex="${sourceIndex}" \
+                  -p targetIndex="${publishingImages[$x]}" \
+                  -p publishingCredentials="${credentials}" \
+                  -p retries="$(params.retries)" \
+                  -p taskGitUrl="$(params.taskGitUrl)" \
+                  -p taskGitRevision="$(params.taskGitRevision)" \
+                  -t "$(params.requestTimeout)" \
+                  -l ${pipelinerun_label}="$(params.pipelineRunUid)"
+              echo "=== done"
+              echo ""
+              echo ""
+          done
         done
     - name: create-trusted-artifact
       ref:

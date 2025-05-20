@@ -21,6 +21,9 @@ Task to create an internalrequest to add fbc contributions to index images
 | taskGitUrl                | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No         | ""                      |
 | taskGitRevision           | The revision in the taskGitUrl repo to be used                                                                             | No         | ""                      |
 
+## Changes in 5.0.1
+* The task now saves the `index_image` and `index_image_resolved` key/values in the results file.
+
 ## Changes in 5.0.0
 * This task now supports Trusted artifacts
 
