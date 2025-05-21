@@ -59,24 +59,36 @@ spec:
                 "artifacts": {},
                 "components": [
                   {
-                    "containerImage": "quay.io/redhat-user-workloads/rhel-on-konflux-tenant/rpms/libecpg@sha256:a0716693185df6bdbca56f601ef1ec57284ba1baba7e3ffc63b6cf579449d813",
-                    "name": "libecpg",
+                    "containerImage": "quay.io/test/test@sha256:12345",
+                    "name": "test",
                     "source": {
                       "git": {
                         "revision": "32c8f78c26e5831a87aa865ea80452fadbb3a95e",
-                        "url": "https://gitlab.cee.redhat.com/rhel-on-konflux/rpms/libecpg"
+                        "url": "https://gitlab.example.com/rpms/test"
                       }
                     }
                   },
                   {
-                    "containerImage": "quay.io/redhat-user-workloads/rhel-on-konflux-tenant/rpms/libecpg@sha256:0949ed74321eea45f97e81bcd1ed3dafd6fda7a026898908391ec5033424c931",
-                    "name": "libecpg-playground",
+                    "containerImage": "quay.io/test/test-foo@sha256:12345",
+                    "name": "test-foo",
                     "source": {
                       "git": {
                         "context": "./",
                         "dockerfileUrl": "Containerfile",
-                        "revision": "4dcab0885b76c0373ca411359a9a88db53e7320b",
-                        "url": "https://gitlab.cee.redhat.com/rhel-on-konflux/rpms/libecpg-playground"
+                        "revision": "12345",
+                        "url": "https://gitlab.example.com/rpms/test-foo"
+                      }
+                    }
+                  },
+                  {
+                    "containerImage": "quay.io/test/test-bar@sha256:12345",
+                    "name": "test-bar",
+                    "source": {
+                      "git": {
+                        "context": "./",
+                        "dockerfileUrl": "Containerfile",
+                        "revision": "12345",
+                        "url": "https://gitlab.example.com/rpms/test-bar"
                       }
                     }
                   }
@@ -102,3 +114,110 @@ spec:
           workspace: tests-workspace
       runAfter:
         - setup
+
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            workingDir: $(workspaces.data.path)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              exit_code=0
+
+              function assert_cmd_called_with() {
+                  calls_file="$(workspaces.data.path)/${1}_calls.txt"
+                  if ! grep -q "^$*$" "$calls_file"; then
+                      echo "Command call not found:"
+                      echo "  $*"
+                      echo "Actual calls:"
+                      sed 's/^/  /' "$calls_file"
+                      return 1
+                  fi
+              }
+
+              function assert_cmd_calls_count() {
+                  expected_count=$1
+                  shift
+                  calls_file="$(workspaces.data.path)/${1}_calls.txt"
+                  actual_count=$(grep -c "^$*" "$calls_file")
+                  if [[ "$expected_count" != "$actual_count" ]]; then
+                      echo "Expected $expected_count calls, but the actual number is $actual_count"
+                      echo "Matching calls:"
+                      grep "^$*" "$calls_file" | sed 's/^/  /'
+                      echo "Non-matching calls:"
+                      grep --invert-match "^$*" "$calls_file" | sed 's/^/  /'
+                      return 1
+                  fi
+              }
+
+              function test_import() {
+                  if assert_cmd_called_with koji --profile=koji import-cg \
+                        --draft "cg_import\.json" --token=mock-token --build-id=12345 "\."
+                  then
+                      echo "TEST PASSED: Koji build was imported as draft."
+                  else
+                      echo "TEST FAILED: Koji build was not imported as draft."
+                      exit_code=1
+                  fi
+              }
+
+              function test_tag() {
+                  tag=$1
+                  if assert_cmd_called_with koji --profile=koji call tagBuild "$tag" 12345; then
+                      echo "TEST PASSED: Koji build was tagged with $tag."
+                  else
+                      echo "TEST FAILED: Koji build was not tagged with $tag."
+                      exit_code=1
+                  fi
+              }
+
+              function test_oras_pull() {
+                  image=$1
+                  if assert_cmd_called_with oras pull "$image"; then
+                      echo "TEST PASSED: Image was pulled: $image"
+                  else
+                      echo "TEST FAILED: Image was not pulled: $image"
+                      exit_code=1
+                  fi
+              }
+
+              function test_kinit() {
+                  if assert_cmd_called_with kinit -kt "\./test.keytab" "test@test\.com"; then
+                      echo "TEST PASSED: kinit was called."
+                  else
+                      echo "TEST PASSED: kinit was not called."
+                      exit_code=1
+                  fi
+              }
+
+              function test_cmd_count() {
+                  count=$1
+                  shift
+                  if assert_cmd_calls_count "$count" "$@"; then
+                      echo "TEST PASSED: \"$*\" was called exactly $count times."
+                  else
+                      echo "TEST FAILED: \"$*\" was not called exactly $count times."
+                      exit_code=1
+                  fi
+              }
+
+              test_import
+              test_tag test-rpm
+              test_tag mock-target-draft
+              test_oras_pull quay.io/test/test@sha256:12345
+              test_oras_pull quay.io/test/test-foo@sha256:12345
+              test_cmd_count 2 oras pull
+              test_cmd_count 3 kinit -kt
+              test_kinit
+
+              exit $exit_code
