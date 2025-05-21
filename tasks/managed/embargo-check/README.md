@@ -23,6 +23,11 @@ based on the issues visibility
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+
+## Changes in 2.1.1
+* Undo changes introduced in 2.0.3
+  * Early failure prevents pasting of internal pipelineRun or taskRun
+
 ## Changes in 2.1.0
 * Handle content types of artifacts with releaseNotes.content.artifacts
 

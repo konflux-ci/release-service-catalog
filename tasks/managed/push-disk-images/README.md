@@ -14,6 +14,10 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks to be used are stored     | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                            | No       | -             |
 
+## Changes in 0.4.3
+* Undo changes introduced in 0.4.2
+  * Early failure prevents pasting of internal pipelineRun or taskRun
+
 ## Changes in 0.4.2
 * Improve logging of `internal-request`
   * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful

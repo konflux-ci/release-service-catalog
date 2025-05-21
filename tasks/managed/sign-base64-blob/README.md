@@ -27,6 +27,10 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 2.5.2
+* Undo changes introduced in 2.5.1
+  * Early failure prevents pasting of internal pipelineRun or taskRun
+
 ## Changes in 2.5.1
 * Improve logging of `internal-request`
   * Previously we would just swallow the output and if it failed for any reason, the log wouldn't have anything useful
