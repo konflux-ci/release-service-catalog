@@ -88,14 +88,14 @@ function pulp_push_wrapper() {
     fi
 }
 
-function developer_portal_wrapper() {
-  echo Mock developer_portal_wrapper called with: $*
+function publish_to_cgw_wrapper() {
+  echo "Mock publish_to_cgw_wrapper called with: $*"
 
-  /home/developer-portal-wrapper/developer_portal_wrapper "$@" --dry-run
+  /home/publish-to-cgw-wrapper/publish_to_cgw_wrapper "$@" --dry_run
 
-  if ! [[ "$?" -eq 0 ]]; then
-      echo Unexpected call to developer_portal_wrapper
-      exit 1
+  if [[ "$?" -ne 0 ]]; then
+    echo "Unexpected failure in publish_to_cgw_wrapper dry-run"
+    exit 1
   fi
 }
 

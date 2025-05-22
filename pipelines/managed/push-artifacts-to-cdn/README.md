@@ -21,6 +21,9 @@ It uses InternalRequests so that it can be run on both public and private cluste
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                               | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                      | No       | -                                                         |
 
+## Changes in 0.3.0
+* Makes `staged` and `files` required by updating `check-data-keys`.
+
 ## Changes in 0.2.1
 * Required parameter `releasePath` is now passed to the `push-artifacts-to-cdn` task
 

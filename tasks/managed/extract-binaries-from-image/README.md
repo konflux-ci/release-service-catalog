@@ -25,6 +25,10 @@ passed.
 | taskGitUrl                 | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision            | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
 
+## Changes in 3.1.0
+* Updated to use `data.mapping.components[].name`
+* Removed support for `data.contentGateway`
+
 ## Changes in 3.0.0
 * This task now supports Trusted artifacts
 

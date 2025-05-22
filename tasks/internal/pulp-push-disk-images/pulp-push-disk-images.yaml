@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: pulp-push-disk-images
   labels:
-    app.kubernetes.io/version: "0.2.3"
+    app.kubernetes.io/version: "0.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -42,7 +42,7 @@ spec:
       description: Success if the task succeeds, the error otherwise
   steps:
     - name: pull-and-push-images
-      image: quay.io/konflux-ci/release-service-utils:597145c2cbcff9e99e1c62169eccab003e68c157
+      image: quay.io/sconroykonflux/release-service-utils:27    # Update RSU Image
       env:
         - name: EXODUS_CERT
           valueFrom:
@@ -172,11 +172,13 @@ spec:
             AUTH_FILE=$(mktemp)
             select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
             oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
-            NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
+            NUM_MAPPED_FILES=$(jq '.files | length' <<< "${COMPONENT}")
             for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
-                FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
-                SOURCE=$(jq -er '.source' <<< "$FILE")
-                FILENAME=$(jq -er '.filename' <<< "$FILE")
+                FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT")
+                SOURCE=$(jq -er '.source' <<< "$FILE") \
+                  || (echo "Missing .files[].source for component." && exit 1 )
+                FILENAME=$(jq -er '.filename' <<< "$FILE") \
+                  || (echo "Missing .files[].filename for component." && exit 1 )
                 # The .qcow2 images are not zipped
                 if [ -f "${SOURCE}.gz" ] ; then
                     gzip -d "${SOURCE}.gz"
@@ -192,34 +194,6 @@ spec:
                 fi
                 mv "$SOURCE" "${DESTINATION_FILE}" || echo "didn't find mapped file: ${SOURCE}"
             done
-
-        }
-
-        process_component_for_developer_portal() { # Expected argument are [component json], [content_directory]
-          COMPONENT=$1
-
-          productName="$(jq -er '.contentGateway.productName' <<< "${COMPONENT}")" \
-            || (echo "Missing contentGateway.productName value for component. This should be an existing product \
-                  in the Developer Portal. Failing" && exit 1)
-
-          productCode="$(jq -er '.contentGateway.productCode' <<< "${COMPONENT}")" \
-            || (echo "Missing contentGateway.productCode value for component. This should be an existing product \
-                  in the Developer Portal. Failing" && exit 1)
-
-          productVersionName="$(jq -er '.contentGateway.productVersionName' <<< "${COMPONENT}")" \
-            || (echo "Missing contentGateway.productVersionName value for component. This should be an existing \
-                  product in the Developer Portal. Failing" && exit 1)
-
-          filePrefix="$(jq -er '.contentGateway.filePrefix' <<< "${COMPONENT}")" \
-            || (echo "Missing contentGateway.filePrefix value for component. This should be the prefix for files to \
-                  upload to the Developer Portal. Failing" && exit 1)
-
-          developer_portal_wrapper --debug --product-name "${productName}" \
-            --product-code "${productCode}" \
-            --product-version-name "${productVersionName}" \
-            --cgw-hostname "$(params.cgwHostname)" \
-            --content-directory "$2" \
-            --file-prefix "${filePrefix}"
 
         }
 
@@ -270,17 +244,28 @@ spec:
           2> "$STDERR_FILE"
 
         relative_paths=$(echo "$STAGED_JSON" | jq -erc .payload.files[].relative_path)
-        component_destinations=()
-        for path in $relative_paths:
-        do
-          parent_dir=$(dirname "$path")
-          component_destinations+=("${DISK_IMAGE_DIR}/$parent_dir")
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+
+        i=0
+        for path in $relative_paths; do
+          [[ $i -ge $NUM_COMPONENTS ]] && break  # stop once we've processed all components
+          component_destination="${DISK_IMAGE_DIR}/$(dirname "$path")"
+          
+          SNAPSHOT_JSON=$(
+            jq --argjson i "$i" --arg dir "$component_destination" '
+              .components[$i] |=
+                if .contentGateway? then
+                  .contentGateway.contentDir = $dir
+                else
+                  .
+                end
+            ' <<<"$SNAPSHOT_JSON"
+          )
+          ((++i))
         done
 
         ## Process Files for Developer Portal / CGW
-        ##
-        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
-        for ((i = 0; i < NUM_COMPONENTS; i++)) ; do
-            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            process_component_for_developer_portal "$COMPONENT" "${component_destinations[$i]}"  2> "$STDERR_FILE"
-        done
+        publish_to_cgw_wrapper \
+          --cgw_host "$(params.cgwHostname)" \
+          --data_json "$SNAPSHOT_JSON" \
+          2> "$STDERR_FILE"
