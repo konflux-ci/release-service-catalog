@@ -17,10 +17,6 @@ passed.
 | subdirectory        | Subdirectory inside the workspace to be used for storing the binaries      | Yes      | ""            |
 | dataPath            | Path to the JSON string of the merged data to use in the data workspace    | No       | -             |
 
-## Changes in 2.1.4
-* Updated to use `data.mapping.components[0].contentGateway` and removed support
-  for `data.contentGateway`
-
 ## Changes in 2.1.3
 * Add comprobation to only extract from the layer with the releases directory
 

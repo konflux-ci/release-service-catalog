@@ -14,10 +14,6 @@ Tekton task to publish content to Red Hat's Developer portal using content-gatew
 | cgwHostname | The hostname of the content-gateway to publish the metadata to  | yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret   | The kubernetes secret to use to authenticate to content-gateway | yes      | publish-to-cgw-secret |
 
-## Changes in 1.0.1
-* Updated to use `data.mapping.components[0].contentGateway` and removed support
-  for `data.contentGateway` by bumping the base image used in this task
-  
 ## Changes in 1.0.0
 * Make the task idempotent by checking if files are
   already present in the product name and version.
