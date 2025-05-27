@@ -33,6 +33,11 @@ the rh-push-to-registry-redhat-io pipeline.
   * Task is placed after `apply-mapping` and before `verify-conforma`
   * Updates subsequent tasks to use the filtered snapshot
   * Makes the pipeline idempotent by preventing validation failures for already released images
+  * When all images in a snapshot are already released in advisories, the pipeline will:
+    - Detect this condition early in the process
+    - Skip all subsequent release tasks (advisory creation, image signing, etc.)
+    - Complete successfully without doing unnecessary work
+    This makes the pipeline more efficient by avoiding redundant operations and potential validation failures.
 
 ## Changes in 2.0.8
 * The `update-component-sbom` and `create-product-sbom` tasks are refactored to
