@@ -9,7 +9,7 @@ function kubectl() {
   then
     echo '{
       "result": "Success",
-      "released_components": ["old-component"],
+      "unreleased_components": ["new-component"],
       "internalRequestPipelineRunName": "test-pipeline-run",
       "internalRequestTaskRunName": "test-task-run"
     }'
