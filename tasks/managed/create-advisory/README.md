@@ -27,6 +27,11 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | dataDir                  | The location where data will be stored                                                                                     | Yes       | $(workspaces.data.path) |
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
+
+## Changes in 7.0.1
+* Update data source for update-purl step
+  * reads from files instead of staged.files
+
 ## Changes in 7.0.0
 * Add support for generic content type advisories
 
