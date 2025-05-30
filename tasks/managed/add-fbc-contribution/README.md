@@ -15,6 +15,9 @@ Task to create an internalrequest to add fbc contributions to index images
 | taskGitUrl                        | The url to the git repo where the release-service-catalog tasks to be used are stored     | No                      | -             |
 | taskGitRevision                   | The revision in the taskGitUrl repo to be used                                            | No                      | -             |
 
+## Changes in 4.0.3
+* The task now adds an extra note to its output message when fbc_opt_in is not set
+
 ## Changes in 4.0.2
 * The task now reads the `internalRequestServiceAccount` key from the ReleasePlanAdmission data field and passes it to
 the `internal-request` script, to set the SA that will be used to run IR's pipelinerun.
