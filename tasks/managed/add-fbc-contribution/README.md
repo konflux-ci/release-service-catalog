@@ -15,6 +15,9 @@ Task to create an internalrequest to add fbc contributions to index images
 | taskGitUrl                        | The url to the git repo where the release-service-catalog tasks to be used are stored     | No                      | -             |
 | taskGitRevision                   | The revision in the taskGitUrl repo to be used                                            | No                      | -             |
 
+## Changes in 4.2.0
+* Added compute resource limits
+
 ## Changes in 4.1.0
 * The task now supports snapshots with multi-components on it. In addition, image digests are now saved in a result file
   instead of the pipeline results, as they might eventually overflow if the image list is too long.
