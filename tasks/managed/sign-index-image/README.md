@@ -31,6 +31,9 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 4.4.0
+* Added compute resource limits
+
 ## Changes in 4.3.0
 * Add support for multicomponent releases
   * The new mandatory task parameter `fbcResultsPath` points to a file with images and manifest digests to sign

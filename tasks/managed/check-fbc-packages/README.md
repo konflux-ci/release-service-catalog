@@ -9,6 +9,9 @@ Task to check that the packages being shipped in an fbc contribution are in the 
 | snapshotPath   | Path to the JSON string of the mapped Snapshot spec in the data workspace | No       | -             |
 | dataPath       | Path to the JSON string of the merged data to use in the data workspace   | No       | -             |
 
+## Changes in 0.5.0
+* Added compute resource limits
+
 ## Changes in 0.4.1
 * fix linting issues in check-fbc-package task
 

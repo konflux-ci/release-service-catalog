@@ -34,6 +34,9 @@ should not be present in the Release data section).
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | Yes       | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | Yes       | production                                                |
 
+## Changes in 6.3.0
+* Added compute resource limits
+
 ## Changes in 6.2.0
 * No longer collect and emit the result `fbcFragment`
 * This has been delegated to the task that requires it.
