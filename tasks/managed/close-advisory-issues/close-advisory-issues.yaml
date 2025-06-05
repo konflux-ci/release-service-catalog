@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: close-advisory-issues
   labels:
-    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/version: "1.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -144,8 +144,6 @@ spec:
             exit 1
         fi
 
-        RC=0
-
         NUM_ISSUES=$(jq -cr '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
         for ((i = 0; i < NUM_ISSUES; i++)); do
             issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
@@ -170,25 +168,31 @@ spec:
             fi
 
             echo "Closing issue $issue"
+            CLOSE_COMMENT="Fixed in Konflux Advisory $(params.advisoryUrl)"
+            CLOSING_RC=0
             # Get the Closed transition id. This varies per Jira project
             if ! CLOSED_ID="$(curl-with-retry "${CURL_ARGS[@]}" "${API_URL}/transitions" \
-              | jq -r '.transitions[] | select(.name=="Closed") | .id')"; then
-                echo "Error: failed to fetch the closed state id for issue $issue."
-                RC=1
-                continue
-            fi
-
+              | jq -er '.transitions[] | select(.name=="Closed") | .id')"; then
+                echo "Warning: failed to fetch the closed state id for issue $issue. We most likely do not have" \
+                  "permission to close it. Will try to add a comment instead."
+                CLOSING_RC=1
             # Close the issue
-            CLOSE_COMMENT="Fixed in Konflux Advisory $(params.advisoryUrl)"
-            if ! curl-with-retry "${CURL_ARGS[@]}" -XPOST --data \
+            elif ! curl-with-retry "${CURL_ARGS[@]}" -XPOST --data \
               '{"transition":{"id":"'"$CLOSED_ID"'"},"update":{"comment":[{"add":{"body":"'"$CLOSE_COMMENT"'"}}]}}' \
               -H "Content-Type: application/json" "${API_URL}/transitions"; then
-                echo "Error: failed to close issue $issue."
-                RC=1
+                echo "Warning: failed to close issue $issue. Will try to add a comment instead."
+                CLOSING_RC=1
+            fi
+
+            if [ "$CLOSING_RC" -ne 0 ] ; then
+                # Try to add the comment even if closing failed
+                if ! curl-with-retry "${CURL_ARGS[@]}" -XPOST --data \
+                  '{"body":"'"$CLOSE_COMMENT"'"}' \
+                  -H "Content-Type: application/json" "${API_URL}/comment"; then
+                    echo "Warning: failed to add comment to issue $issue."
+                fi
             fi
         done
-
-        exit $RC
     - name: create-trusted-artifact
       ref:
         resolver: "git"
