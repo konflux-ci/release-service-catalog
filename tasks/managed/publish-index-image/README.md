@@ -22,6 +22,9 @@ Publish a built FBC index image using skopeo
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 5.1.0
+* Added compute resource limits
+
 ## Changes in 5.0.0
 * This task now supports Trusted artifacts
 

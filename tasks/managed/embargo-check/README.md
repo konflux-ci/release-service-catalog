@@ -24,6 +24,9 @@ based on the issues visibility
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 2.2.0
+* Added compute resource limits
+
 ## Changes in 2.1.2
 * Bump the utils image to allow 201 and other 2xx codes in `curl-with-retry` script
 
