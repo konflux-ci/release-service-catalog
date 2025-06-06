@@ -28,6 +28,10 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.1.1
+* Updated SBOM upload functionality - conversion is no longer needed because Atlas V2 supports all SBOM versions
+* SBOMs are now uploaded as-is to Atlas for both component and product uploads
+
 ## Changes in 2.1.0
 * Add new task `filter-already-released-advisory-images` to filter out images that have already been released in advisories
   * Task is placed after `apply-mapping` and before `verify-conforma`
