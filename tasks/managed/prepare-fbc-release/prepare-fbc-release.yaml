@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: prepare-fbc-release
   labels:
-    app.kubernetes.io/version: "1.4.0"
+    app.kubernetes.io/version: "1.4.1"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -89,8 +89,27 @@ spec:
             # which includes the OCP version, formatted as "registry:version".
             # Example: "registry.redhat.io/openshift4/ose-operator-registry:v4.12"
             # The script then isolates the version part (e.g., "v4.12") from this string.
-            ocpVersion=$(skopeo inspect --raw docker://"$containerImage" \
-                | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2)
+            image_metadata=$(skopeo inspect --raw "docker://${containerImage}")
+            media_type=$(jq -r .mediaType <<< "${image_metadata}")
+
+            # multiplatform images will not contain the base name with the OCP version, so it should fetch
+            # the manifest image
+            if [[ "$media_type" != "application/vnd.oci.image.index.v1+json" ]]; then
+                ocpVersion=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
+                  | cut -d: -f2 | sed 's/"//g')
+            else
+              # image is an index of multiplatform components
+              arch_json=$(get-image-architectures "${containerImage}")
+
+              # it is not required to loop all images as they are all built for the same OCP version
+              manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
+
+              # replace the image sha with the manifests's one
+              fbc_fragment="${containerImage%@*}@${manifest_image_sha}"
+
+              ocpVersion=$(skopeo inspect --raw docker://"${fbc_fragment}" \
+                  | jq '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+            fi
 
             # Check if the version matches the pattern
             if ! [[ "$ocpVersion" =~ $pattern ]]; then
@@ -102,11 +121,12 @@ spec:
             updatedFromIndex=$(replace_tag "$fromIndex" "$ocpVersion")
             updatedTargetIndex=$(replace_tag "$targetIndex" "$ocpVersion")
 
-            # if {{OCP_VERSION}} is not set, the original targetIndex will be kept but its ocp version should
+            # if {{OCP_VERSION}} is not set, the original Index will be kept but its ocp version should
             # match base image version.
-            for index in "${updatedFromIndex}" "${updatedTargetIndex}"; do
-              validateOCPVersion "${index}" "${ocpVersion}"
-            done
+            validateOCPVersion "${updatedFromIndex}" "${ocpVersion}"
+            if [ -n "${updatedTargetIndex}" ]; then
+              validateOCPVersion "${updatedTargetIndex}" "${ocpVersion}"
+            fi
 
             # Print updated values
             echo "Component: $componentName"
@@ -115,11 +135,13 @@ spec:
             echo "Updated targetIndex for $componentName: $updatedTargetIndex"
             echo
 
+            TEMP="/tmp/temp.json"
             # Apply each update directly
             jq ".components[$i].ocpVersion |= \"$ocpVersion\"" \
-              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
             jq ".components[$i].updatedFromIndex |= \"$updatedFromIndex\"" \
-              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
             jq ".components[$i].updatedTargetIndex |= \"$updatedTargetIndex\"" \
-              "$SNAPSHOT_PATH" > temp.json && mv temp.json "$SNAPSHOT_PATH"
+              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
+
         done

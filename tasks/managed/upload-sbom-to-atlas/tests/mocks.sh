@@ -10,8 +10,13 @@ curl() {
 
   # Throw a failure (which should be caught) for Atlas API calls in the curl fail test
   params="$*"
-  # A command uploading the "spdx_minimal_curl_fail_2_3" SBOM to Atlas should fail
-  if [[ "$params" =~ "https://atlas.release.devshift.net/api/v2/sbom" && "$params" =~ "spdx_minimal_curl_fail_2_3" ]]; then
+  # Return success for SSO token requests and S3 uploads, but fail for Atlas API calls
+  if [[ "$params" =~ "https://auth.redhat.com/auth/realms/EmployeeIDP/protocol/openid-connect/token" ]]; then
+    echo '{"access_token":"fake_token","expires_in":3600}'
+    return 0
+  elif [[ "$params" =~ "AWS" ]]; then
+    return 0
+  else
     return 1
   fi
 }

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -eux
+
+# Mock git
+function git() {
+  echo "Mock git called with: $*"
+
+  if [[ "$*" == *"clone"* ]]; then
+    gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
+    mkdir -p "$gitRepo"/schema
+    echo '{"$schema": "http://json-schema.org/draft-07/schema#", "type": "object", "properties": {}}' > "$gitRepo"/schema/advisory.json
+    mkdir -p "$gitRepo"/data/advisories/test-origin
+  elif [[ "$*" == *"failing-origin"* ]]; then
+    echo "Mocking failing git command" && false
+  else
+    : # no-op for other git commands
+  fi
+}
+
+# Mock find
+function find() {
+  echo "Mock find called with: $*" >&2
+
+  if echo "$*" | grep -q "not-existing-origin"; then
+    # Simulate missing advisory directory
+    return 0
+  fi
+
+  if echo "$*" | grep -q "${ADVISORY_BASE_DIR}"; then
+    echo "1712012345.0 ${ADVISORY_BASE_DIR}/2025/1602"
+    echo "1712012344.0 ${ADVISORY_BASE_DIR}/2025/1601"
+    echo "1708012343.0 ${ADVISORY_BASE_DIR}/2024/1452"
+    echo "1704012342.0 ${ADVISORY_BASE_DIR}/2024/1442"
+  else
+    echo "Error: Unexpected find command: $*" >&2
+    exit 1
+  fi
+}
+
+# Mock yq
+function yq() {
+  echo "Mock yq called with: $*" >&2
+
+  if [[ -z "$3" ]]; then
+    echo "Error: Empty file path in yq command" >&2
+    exit 1
+  fi
+
+  advisory_path="$3"
+  advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
+
+  if [[ "$2" == ".spec.content.images // []" ]]; then
+    case "$advisory_num" in
+      1601)
+        echo '[{"containerImage":"quay.io/test/released-image:1.0.0","tags":["v1.0"],"repository":"quay.io/test"}]'
+        ;;
+      1602)
+        echo '[{"containerImage":"quay.io/test/other-image:1.0.0","tags":["stable"],"repository":"quay.io/test"}]'
+        ;;
+      1452)
+        echo '[{"containerImage":"quay.io/test/legacy-image:2.0.0","tags":["old"],"repository":"quay.io/legacy"}]'
+        ;;
+      1442)
+        echo '[{"containerImage":"quay.io/test/conflict-image:3.1.4","tags":["conflict", "v3"],"repository":"quay.io/test-conflict"}]'
+        ;;
+      *)
+        echo "Error: Unexpected advisory number $advisory_num" >&2
+        exit 1
+        ;;
+    esac
+  else
+    echo "Error: Unexpected yq query: $2" >&2
+    exit 1
+  fi
+}

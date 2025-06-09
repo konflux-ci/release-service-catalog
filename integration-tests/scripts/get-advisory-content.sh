@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
+
 #
 # Summary:
 #   Fetches the content of an advisory OCI (Open Container Initiative) artifact.
-#   It achieves this by creating a Tekton TaskRun in a specified Kubernetes
-#   managed namespace. The TaskRun uses a predefined task from a release-service-catalog
+#   It achieves this by creating a Tekton PipelineRun in a specified Kubernetes
+#   managed namespace. The PipelineRun uses a predefined pipeline from a release-service-catalog
 #   to retrieve the artifact based on an advisory URL. The script then waits for
-#   the TaskRun to complete and extracts the artifact content to a specified output directory.
+#   the PipelineRun to complete and extracts the artifact content to a specified output directory.
 #
 # Parameters:
-#   $1: managed_namespace   - The Kubernetes namespace where the TaskRun will be created
+#   $1: managed_namespace   - The Kubernetes namespace where the PipelineRun will be created
 #                             and executed.
 #   $2: managed_sa_name     - The name of the Kubernetes ServiceAccount to be used by
-#                             the TaskRun in the managed_namespace.
+#                             the PipelineRun in the managed_namespace.
 #   $3: advisory_url        - The URL of the advisory OCI artifact to fetch.
 #   $4: output_dir          - The local directory where the fetched artifact content
 #                             will be extracted.
@@ -28,7 +29,7 @@
 #
 # Dependencies:
 #   kubectl, jq, mktemp, uuidgen (or a command that provides similar functionality like 'uuid'),
-#   oras (for fetching OCI artifacts), tkn (optional, for displaying TaskRun logs, fallback provided).
+#   oras (for fetching OCI artifacts), tkn (optional, for displaying PipelineRun logs, fallback provided).
 
 set -eo pipefail
 
@@ -88,35 +89,34 @@ setup_env() {
   kubectl config set-context --current --namespace="${managed_namespace}"
 }
 
-# Function to create and apply TaskRun YAML
-create_and_apply_taskrun() {
+# Function to create and apply PipelineRun YAML
+create_and_apply_pipelinerun() {
   local managed_sa_name_param=$1
   local advisory_url_param=$2
   local pipelinerun_label_param=$3
   local uuid_param=$4
 
-  local taskrunYaml
-  taskrunYaml=$(mktemp)
-  cat > "${taskrunYaml}" << EOF
+  local pipelinerunYaml
+  pipelinerunYaml=$(mktemp)
+  cat > "${pipelinerunYaml}" << EOF
 ---
 apiVersion: tekton.dev/v1
-kind: TaskRun
+kind: PipelineRun
 metadata:
   generateName: request-advisory-oci-artifact-
   labels:
     ${pipelinerun_label_param}: ${uuid_param}
 spec:
-  serviceAccountName: ${managed_sa_name_param}
+  taskRunTemplate:
+    serviceAccountName: ${managed_sa_name_param}
   params:
     - name: advisory_url
       value: ${advisory_url_param}
-    - name: pipelineRunUid
-      value: ${uuid_param}
     - name: taskGitUrl
       value: ${RELEASE_CATALOG_GIT_URL}
     - name: taskGitRevision
       value: ${RELEASE_CATALOG_GIT_REVISION}
-  taskRef:
+  pipelineRef:
     resolver: "git"
     params:
       - name: url
@@ -124,49 +124,49 @@ spec:
       - name: revision
         value: ${RELEASE_CATALOG_GIT_REVISION}
       - name: pathInRepo
-        value: tasks/internal/request-advisory-oci-artifact/request-advisory-oci-artifact.yaml
+        value: pipelines/internal/request-advisory-oci-artifact/request-advisory-oci-artifact.yaml
 EOF
 
-  kubectl create -f "${taskrunYaml}" > /dev/null 2> /dev/null
-  rm "${taskrunYaml}" # Clean up temp file
+  kubectl create -f "${pipelinerunYaml}" > /dev/null 2> /dev/null
+  rm "${pipelinerunYaml}" # Clean up temp file
 
-  # Return the TaskRun name
-  kubectl get tr -l "${pipelinerun_label_param}=${uuid_param}" -n "${managed_namespace}" --no-headers 2> /dev/null | awk '{print $1}'
+  # Return the PipelineRun name
+  kubectl get pr -l "${pipelinerun_label_param}=${uuid_param}" -n "${managed_namespace}" --no-headers 2> /dev/null | awk '{print $1}'
 }
 
-# Function to wait for TaskRun completion
-wait_for_taskrun() {
-  local taskrun_name_param=$1
+# Function to wait for PipelineRun completion
+wait_for_pipelinerun() {
+  local pipelinerun_name_param=$1
   local managed_namespace_param=$2
 
   echo ""
-  echo -n "Waiting for TaskRun '${taskrun_name_param}' to complete: "
+  echo -n "Waiting for PipelineRun '${pipelinerun_name_param}' to complete: "
   local completed=""
   while [ -z "${completed}" ]; do
     sleep 1
-    local tr_json
-    tr_json=$(kubectl get "tr/${taskrun_name_param}" -n "${managed_namespace_param}" -ojson 2>/dev/null || true)
-    if [ -z "$tr_json" ]; then
-        echo -n "?" # TaskRun not found yet or disappeared
+    local plr_json
+    plr_json=$(kubectl get "pr/${pipelinerun_name_param}" -n "${managed_namespace_param}" -ojson 2>/dev/null || true)
+    if [ -z "$plr_json" ]; then
+        echo -n "?" # PipelineRun not found yet or disappeared
         continue
     fi
 
-    local tr_status
-    tr_status=$(jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' <<< "${tr_json}")
+    local plr_status
+    plr_status=$(jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' <<< "${plr_json}")
 
-    if [ "$tr_status" == "True" ]; then
+    if [ "$plr_status" == "True" ]; then
       completed="Success"
-    elif [ "$tr_status" == "False" ]; then
-      local tr_reason
-      tr_reason=$(jq -r '.status.conditions[]? | select(.type=="Succeeded") | .reason' <<< "${tr_json}")
-      if [ "$tr_reason" == "Failed" ] || [ "$tr_reason" == "TaskRunValidationFailed" ] || [ "$tr_reason" == "TaskRunResolveGitFailed" ] || [ "$tr_reason" == "TaskRunImagePullFailed" ]; then # Added more failure reasons
+    elif [ "$plr_status" == "False" ]; then
+      local plr_reason
+      plr_reason=$(jq -r '.status.conditions[]? | select(.type=="Succeeded") | .reason' <<< "${plr_json}")
+      if [ "$plr_reason" == "Failed" ] || [ "$plr_reason" == "PipelineValidationFailed" ] || [ "$plr_reason" == "InvalidPipelineResultReference" ] ; then # Added more failure reasons
         echo ""
-        echo "🔴 FAILED. Reason: ${tr_reason}. See logs:"
+        echo "🔴 FAILED. Reason: ${plr_reason}. See logs:"
         # Using 'tkn' if available, otherwise fallback or just suggest kubectl logs
         if command -v tkn &> /dev/null; then
-            tkn tr logs "$taskrun_name_param" -f --timestamps -n "${managed_namespace_param}"
+            tkn pr logs "$pipelinerun_name_param" -f --timestamps -n "${managed_namespace_param}"
         else
-            echo "tkn command not found. Use 'kubectl logs -n ${managed_namespace_param} -f pod/<pod-name-associated-with-taskrun-${taskrun_name_param}>' to check logs."
+            echo "tkn command not found. Use 'kubectl logs -n ${managed_namespace_param} -f pod/<pod-name-associated-with-pipelinerun-${pipelinerun_name_param}>' to check logs."
         fi
         exit 1 # Exit directly from the function, or return a status and check in main
       else
@@ -182,15 +182,15 @@ wait_for_taskrun() {
 
 # Function to fetch and extract OCI artifact
 fetch_and_extract_artifact() {
-  local taskrun_name_param=$1
+  local pipelinerun_name_param=$1
   local managed_namespace_param=$2
   local output_dir_param=$3
 
   local uri
-  uri=$(kubectl get "tr/${taskrun_name_param}" -n "${managed_namespace_param}" -ojson | jq -r '.status.results[]? | select(.name == "advisory-oci-artifact") | .value')
+  uri=$(kubectl get "pr/${pipelinerun_name_param}" -n "${managed_namespace_param}" -ojson | jq -r '.status.results[]? | select(.name == "advisory-oci-artifact") | .value')
 
   if [ -z "$uri" ] || [ "$uri" == "null" ]; then
-      error_exit "Could not retrieve advisory-oci-artifact URI from TaskRun ${taskrun_name_param}"
+      error_exit "Could not retrieve advisory-oci-artifact URI from PipelineRun ${pipelinerun_name_param}"
   fi
 
   local oci_artifact="${uri#*:}" # Assuming the URI might have a scheme like "oci:"
@@ -227,16 +227,16 @@ main() {
   local uuid
   uuid=$(uuidgen) # Using uuidgen for better compatibility if 'uuid' command isn't 'uuidgen'
 
-  local taskrun_name
-  taskrun_name=$(create_and_apply_taskrun "$managed_sa_name" "$advisory_url" "$pipelinerun_label" "$uuid")
+  local pipelinerun_name
+  pipelinerun_name=$(create_and_apply_pipelinerun "$managed_sa_name" "$advisory_url" "$pipelinerun_label" "$uuid")
 
-  if [ -z "$taskrun_name" ]; then
-      error_exit "Failed to create or find TaskRun."
+  if [ -z "$pipelinerun_name" ]; then
+      error_exit "Failed to create or find PipelineRun."
   fi
-  echo "✅️ Found TaskRun: ${taskrun_name}"
+  echo "✅️ Found PipelineRun: ${pipelinerun_name}"
 
-  wait_for_taskrun "$taskrun_name" "$managed_namespace"
-  fetch_and_extract_artifact "$taskrun_name" "$managed_namespace" "$output_dir"
+  wait_for_pipelinerun "$pipelinerun_name" "$managed_namespace"
+  fetch_and_extract_artifact "$pipelinerun_name" "$managed_namespace" "$output_dir"
 
   echo "✅️ Script completed successfully."
 }

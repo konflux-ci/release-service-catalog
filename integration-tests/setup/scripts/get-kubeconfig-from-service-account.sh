@@ -1,5 +1,5 @@
 # Update these to match your environment
-SERVICE_ACCOUNT_NAME=e2e-test-service-account
+SERVICE_ACCOUNT_NAME=e2e-test-sa
 SERVICE_ACCOUNT_SECRET_NAME=e2e-test-service-account-secret
 CONTEXT=$(kubectl config current-context)
 NAMESPACE=dev-release-team-tenant

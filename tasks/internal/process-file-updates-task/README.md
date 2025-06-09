@@ -17,6 +17,9 @@ replacements to a yaml file that already exists. It will attempt to create a Mer
 | internalRequestPipelineRunName | name of the PipelineRun that called this task                                                                                                                                            | No       | -                                        |
 
 
+## Changes in 1.2.0
+* Added compute resource limits
+
 ## Changes in 1.1.1
 * Fix formatting of json saved as `fileUpdatesInfo`
   * The result had one too many levels of escaping when being read in run-file-updates

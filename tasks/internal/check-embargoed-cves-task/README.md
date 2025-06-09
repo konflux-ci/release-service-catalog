@@ -9,3 +9,6 @@ internal request. The success/failure is handled in the task creating the intern
 | Name | Description                                                                                | Optional | Default value |
 |------|--------------------------------------------------------------------------------------------|----------|---------------|
 | cves | String containing a space separated list of CVEs to check (e.g. 'CVE-123 CVE-234 CVE-345') | No       | -             |
+
+## Changes in 0.2.0
+* Added compute resource limits

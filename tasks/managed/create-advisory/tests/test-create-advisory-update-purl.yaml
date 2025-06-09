@@ -1,0 +1,405 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-update-purl
+spec:
+  description: |
+    Assert that the update purl step can process the downloadURLs from CGW and generate
+    the purl field for the releaseNotes
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlanAdmission",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "applications": [
+                    "app"
+                  ],
+                  "policy": "policy",
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "github.com"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipeline.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "sa"
+                  },
+                  "origin": "dev"
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
+              {
+                "application": "OpenShift",
+                "components": [
+                  {
+                    "name": "helm",
+                    "repository": "quay.io/redhat-prod/repo"
+                  },
+                  {
+                    "name": "odo",
+                    "repository": "quay.io/redhat-prod/repo"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+                {
+                  "mapping": {
+                    "components": [
+                      {
+                        "name": "helm",
+                        "staged": {
+                          "destination": "placeholder-destination",
+                          "version": "1.5.0",
+                          "files": [
+                            {
+                              "filename": "helm-windows",
+                              "source": "/releases/helm-windows-amd64.exe.zip",
+                              "arch": "amd64",
+                              "os": "windows"
+                            },
+                            {
+                              "filename": "helm-linux",
+                              "source": "helm-linux-amd64.tar.gz",
+                              "arch": "amd64",
+                              "os": "linux"
+                            }
+                          ]
+                        },
+                        "contentGateway": {
+                          "contentType": "binary",
+                          "productName": "helm",
+                          "productCode": "helm",
+                          "productVersionName": "1.5.0",
+                          "filePrefix": "helm"
+                        }
+                      },
+                      {
+                        "name": "odo",
+                        "staged": {
+                          "destination": "placeholder-destination",
+                          "version": "v3.16.1",
+                          "files": [
+                            {
+                              "filename": "odo-linux",
+                              "source": "odo-linux-amd64.tar.gz",
+                              "arch": "amd64",
+                              "os": "linux"
+                            }
+                          ]
+                        },
+                        "contentGateway": {
+                          "contentType": "binary",
+                          "productName": "odo",
+                          "productCode": "odo",
+                          "productVersionName": "v3.16.1",
+                          "filePrefix": "odo"
+                        }
+                      }
+                    ]
+                  },
+                "releaseNotes": {
+                  "content": {
+                    "artifacts": [
+                      { "architecture": "amd64",
+                        "component": "helm",
+                        "os": "windows",
+                        "containerImage": "foo",
+                        "purl": "placeholder"
+                      },
+                      { "architecture": "amd64",
+                        "component": "helm",
+                        "os": "linux",
+                        "containerImage": "foo",
+                        "purl": "placeholder"
+                      },
+                      { "architecture": "amd64",
+                        "component": "odo",
+                        "os": "linux",
+                        "containerImage": "foo",
+                        "purl": "placeholder"
+                      }
+                    ]
+                  }
+                },
+                "sign": {
+                  "configMapName": "cm"
+                }
+              }
+              EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: run-task
+      taskRef:
+        name: create-advisory
+      params:
+        - name: releasePlanAdmissionPath
+          value: "$(context.pipelineRun.uid)/test_release_plan_admission.json"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: synchronously
+          value: "false"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)/$(context.pipelineRun.uid)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: "contentType"
+          value: "binary"
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: "$(params.dataDir)"
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              # Count the number of InternalRequests
+              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
+
+              # Check if the number of InternalRequests is as expected
+              if [ "$requestsCount" -ne 1 ]; then
+                echo "Unexpected number of InternalRequests. Expected: 1, Found: $requestsCount"
+                exit 1
+              fi
+
+              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+
+              # Check if the 'pipelineRef' field contains the 'create-advisory' pipeline
+              if [[ "$(echo "$internalRequest" | jq -r '.spec.pipeline.pipelineRef.params[2].value' )" != \
+              "pipelines/internal/create-advisory"* ]]; then
+                echo "InternalRequest doesn't contain 'create-advisory' in 'pipeline' field"
+                exit 1
+              fi
+
+              advisoryJson=$(echo "$internalRequest" | jq -r '.spec.params.advisory_json')
+
+              # Parse advisory_json content
+              artifacts=$(echo "$advisoryJson" | jq -c '.content.artifacts')
+
+              # Ensure there are exactly two artifacts
+              artifactCount=$(echo "$artifacts" | jq 'length')
+              if [ "$artifactCount" -ne 3 ]; then
+                echo "Expected exactly 2 artifacts in advisory_json, but found $artifactCount"
+                echo "$artifacts" | jq
+                exit 1
+              fi
+
+              # Assert the three expected PURLs are exactly what's present
+              baseUrl="https://access.cdn.redhat.com/content/origin/files"
+
+              printf -v helmWindowsPath "%s%s" \
+                "sha256/38/38fb333e0c359824a451631e127247d0db44f1ac1de5b9b4d31bd5bb6ec9/" \
+                "helm-windows-amd64.exe.zip"
+
+              printf -v helmLinuxPath "%s%s" \
+                "sha256/d3/d305ee5018571f2aca631da5faf4c87eb5ceced40ec59d134b7d2dd166b82bc6/" \
+                "helm-linux-amd64.tar.gz"
+
+              printf -v odoLinuxPath "%s%s" \
+                "sha256/e5/e539bb37a2084d381562ed8808f3dca3dc918e1c4917d94e5357f2e97185b415/" \
+                "odo-linux-amd64.tar.gz"
+
+              expectedHelmWindowsPurl="pkg:generic/helm@1.5.0?download_url=${baseUrl}/${helmWindowsPath}"
+              expectedHelmLinuxPurl="pkg:generic/helm@1.5.0?download_url=${baseUrl}/${helmLinuxPath}"
+              expectedOdoLinuxPurl="pkg:generic/odo@v3.16.1?download_url=${baseUrl}/${odoLinuxPath}"
+
+              helmWindowsPurl=$(
+                echo "$artifacts" | jq -r '.[] | select(.component == "helm" and .os == "windows") | .purl')
+              helmLinuxPurl=$(
+                echo "$artifacts" | jq -r '.[] | select(.component == "helm" and .os == "linux") | .purl')
+              odoLinuxPurl=$(
+                echo "$artifacts" | jq -r '.[] | select(.component == "odo" and .os == "linux") | .purl')
+
+              if [ "$helmWindowsPurl" != "$expectedHelmWindowsPurl" ]; then
+                echo "Unexpected PURL for Helm Windows artifact"
+                exit 1
+              fi
+
+              if [ "$helmLinuxPurl" != "$expectedHelmLinuxPurl" ]; then
+                echo "Unexpected PURL for Helm Linux artifact"
+                exit 1
+              fi
+
+              if [ "$odoLinuxPurl" != "$expectedOdoLinuxPurl" ]; then
+                echo "Unexpected PURL for Odo Linux artifact"
+                exit 1
+              fi
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests --all

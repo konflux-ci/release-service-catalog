@@ -20,3 +20,6 @@ Tekton pipeline to push rpms into the koji instance.
 | enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes      | pipeline_intention=release                                |
 | enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 8h0m0s                                                    |
 | enterpriseContractWorkerCount   | Number of parallel workers for policy evaluation                                                                                   | Yes      | 4                                                         |
+
+## Changes in 0.2.0
+* Avoid importing to Koji if enterprise contract verification fails

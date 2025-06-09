@@ -7,7 +7,7 @@
 * `ServiceAccount` `Secrets` cannot be managed via Tenants Config, so we have to create the `Secret` manually in order to obtain a token:
 
 ```shell
-oc create -f integration-tests/setup/resources/tenant/service_account_token.yaml
+kubectl create -f integration-tests/setup/resources/tenant/service_account_token.yaml
 ```
 
 # e2e setup for Konflux RH01 Production

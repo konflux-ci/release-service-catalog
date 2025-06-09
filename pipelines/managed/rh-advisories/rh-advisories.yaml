@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: rh-advisories
   labels:
-    app.kubernetes.io/version: "2.0.8"
+    app.kubernetes.io/version: "2.1.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -247,8 +247,52 @@ spec:
           workspace: release-workspace
       runAfter:
         - reduce-snapshot
+    - name: filter-already-released-advisory-images
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/filter-already-released-advisory-images/filter-already-released-advisory-images.yaml
+      params:
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: releasePlanAdmissionPath
+          value: "$(tasks.collect-data.results.releasePlanAdmission)"
+        - name: resultsDirPath
+          value: "$(tasks.collect-data.results.resultsDir)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: subdirectory
+          value: "$(tasks.collect-data.results.subdirectory)"
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - apply-mapping
     - name: verify-conforma
       timeout: "4h00m0s"
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -277,12 +321,16 @@ spec:
         - name: WORKERS
           value: $(params.enterpriseContractWorkerCount)
         - name: SOURCE_DATA_ARTIFACT
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: TRUSTED_ARTIFACTS_DEBUG
           value: "$(params.trustedArtifactsDebug)"
       runAfter:
-        - apply-mapping
+        - filter-already-released-advisory-images
     - name: populate-release-notes
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
@@ -291,7 +339,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -310,11 +358,15 @@ spec:
             value: tasks/managed/populate-release-notes/populate-release-notes.yaml
         resolver: git
       runAfter:
-        - apply-mapping
+        - filter-already-released-advisory-images
       workspaces:
         - name: data
           workspace: release-workspace
     - name: embargo-check
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
@@ -348,6 +400,10 @@ spec:
         - check-data-keys
         - populate-release-notes
     - name: set-advisory-severity
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
@@ -381,6 +437,10 @@ spec:
         - populate-release-notes
         - embargo-check
     - name: collect-cosign-params
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -416,6 +476,9 @@ spec:
         - input: $(tasks.collect-cosign-params.results.cosign-secret-name)
           operator: notin
           values: [""]
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -457,6 +520,9 @@ spec:
         - input: "$(tasks.apply-mapping.results.mapped)"
           operator: in
           values: ["true"]
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -476,7 +542,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -491,6 +557,10 @@ spec:
       runAfter:
         - rh-sign-image
     - name: collect-pyxis-params
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -522,6 +592,10 @@ spec:
         - collect-data
     - name: rh-sign-image
       timeout: "6h00m0s"
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       retries: 3
       taskRef:
         resolver: "git"
@@ -574,6 +648,10 @@ spec:
         - publish-pyxis-repository
         - extract-requester-from-release
     - name: create-pyxis-image
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       retries: 5
       taskRef:
         resolver: "git"
@@ -613,6 +691,10 @@ spec:
       runAfter:
         - push-snapshot
     - name: publish-pyxis-repository
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       retries: 5
       taskRef:
         resolver: "git"
@@ -637,7 +719,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -653,6 +735,10 @@ spec:
         - collect-pyxis-params
         - apply-mapping
     - name: push-rpm-data-to-pyxis
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       retries: 5
       taskRef:
         resolver: "git"
@@ -694,6 +780,9 @@ spec:
         - input: "$(tasks.collect-atlas-params.results.secretName)"
           operator: notin
           values: [""]
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         params:
           - name: url
@@ -712,7 +801,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: subdirectory
           value: $(tasks.collect-data.results.subdirectory)
         - name: dataDir
@@ -733,6 +822,9 @@ spec:
         - input: "$(tasks.collect-atlas-params.results.secretName)"
           operator: notin
           values: [""]
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: sbomDir
           value: "$(tasks.update-component-sbom.results.sbomPath)"
@@ -775,6 +867,10 @@ spec:
       runAfter:
         - update-component-sbom
     - name: run-file-updates
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: fileUpdatesPath
           value: $(tasks.collect-data.results.data)
@@ -789,7 +885,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -814,6 +910,10 @@ spec:
         - name: data
           workspace: release-workspace
     - name: check-data-keys
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
@@ -852,6 +952,10 @@ spec:
       runAfter:
         - populate-release-notes
     - name: collect-atlas-params
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -886,6 +990,9 @@ spec:
         - input: "$(tasks.collect-atlas-params.results.secretName)"
           operator: notin
           values: [""]
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
@@ -894,7 +1001,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -925,6 +1032,9 @@ spec:
         - input: "$(tasks.collect-atlas-params.results.secretName)"
           operator: notin
           values: [""]
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: sbomDir
           value: "$(tasks.create-product-sbom.results.sbomPath)"
@@ -967,6 +1077,10 @@ spec:
       runAfter:
         - create-product-sbom
     - name: create-advisory
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       retries: 5
       params:
         - name: releasePlanAdmissionPath
@@ -1012,6 +1126,10 @@ spec:
         - rh-sign-image-cosign
         - set-advisory-severity
     - name: close-advisory-issues
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       onError: continue  # until https://issues.redhat.com/browse/KONFLUX-7489 is fixed
       params:
         - name: dataPath
@@ -1045,6 +1163,10 @@ spec:
       runAfter:
         - create-advisory
     - name: update-cr-status
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: resource
           value: $(params.release)

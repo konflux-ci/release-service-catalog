@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-rpm-to-koji
   labels:
-    app.kubernetes.io/version: "0.2.0"
+    app.kubernetes.io/version: "0.3.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: push-koji
@@ -43,7 +43,7 @@ spec:
           value: $(workspaces.data.path)/$(params.dataPath)
       script: |
         #!/usr/bin/env bash
-        set -eux
+        set -euxo pipefail
 
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
             echo "No valid snapshot file was provided."
@@ -140,7 +140,26 @@ spec:
               draft_flag="--draft"
           fi
 
-          printf "Import rpm %s with tags $KOJI_TAGS ...\n" "$PACKAGE_NVR"
+          # Get Koji build target from the RPM image annotation to tag the
+          # imported build later.
+          koji_target=$(
+            oras manifest fetch "$containerImage" |
+              jq --exit-status -r '.annotations."koji.build-target"'
+          )
+          if [ -z "$koji_target" ]; then
+              echo "ERROR: No Koji build target found in the container image annotations."
+              exit 1
+          fi
+          # For draft builds, remove "-candidate" tag suffix if present and
+          # append "-draft".
+          if [[ "$draft" == "true" && "$koji_target" != *-draft ]]; then
+              koji_tag=${koji_target%-candidate}-draft
+          else
+              koji_tag=${koji_target}
+          fi
+          KOJI_TAGS="$koji_tag $KOJI_TAGS"
+
+          printf "Import rpm %s with tags %s ...\n" "$PACKAGE_NVR" "$KOJI_TAGS"
 
           # Reserve build ID and import build (as draft by default)
           build_name=$(jq -r '.build.name' cg_import.json)
@@ -156,8 +175,8 @@ spec:
         EOD
           )
           buildinfo=$(koji-cmd call --json CGInitBuild '"konflux"' "$import_build_data")
-          build_id=$(jq -r '.build_id' <<< "$buildinfo")
-          token=$(jq -r '.token' <<< "$buildinfo")
+          build_id=$(jq --exit-status -r '.build_id' <<< "$buildinfo")
+          token=$(jq --exit-status -r '.token' <<< "$buildinfo")
 
           if ! koji-cmd import-cg $draft_flag cg_import.json --token="$token" --build-id="$build_id" .; then
               echo "ERROR: Import failed"
@@ -165,11 +184,11 @@ spec:
               exit 1
           fi
 
-          for BREW_TAG in $KOJI_TAGS; do
-              if ! koji-cmd list-pkgs --tag "$BREW_TAG" --package "$build_name" >/dev/null 2>&1;  then
-                  koji-cmd --force add-pkg "$BREW_TAG" "$build_name" --owner "$USER_NAME"
+          for tag in $KOJI_TAGS; do
+              if ! koji-cmd list-pkgs --tag "$tag" --package "$build_name" >/dev/null 2>&1;  then
+                  koji-cmd --force add-pkg "$tag" "$build_name" --owner "$USER_NAME"
               fi
-              koji-cmd tag-build "$BREW_TAG" "$build_id"
+              koji-cmd call tagBuild "$tag" "$build_id"
           done
 
           # Clean up to handle next component

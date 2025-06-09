@@ -4,10 +4,12 @@ Tekton task to collect OCP version tag from FBC fragment using `skopeo inspect`.
 
 ## Parameters
 
-| Name        | Description           | Optional | Default value |
-|-------------|-----------------------|----------|---------------|
-| fbcFragment | A FBC container Image | No       | -             |
+| Name          | Description                                                                | Optional | Default value |
+|---------------|----------------------------------------------------------------------------|----------|---------------|
+| snapshotPath  | Path to the JSON string of the mapped Snapshot spec in the data workspace  | No       | -             | 
 
+## Changes in 1.0.0
+* Using new parameter, snapshotPath, obtain the fbcFragment directly.
 
 ## Changes in 0.5.2
 * Bump the utils image used in this task

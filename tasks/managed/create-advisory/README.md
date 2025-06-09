@@ -15,6 +15,8 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | dataPath                 | Path to data JSON in the data workspace                                                                                    | No        | -                       |
 | resultsDirPath           | Path to results directory in the data workspace                                                                            | No        | -                       |
 | request                  | Type of request to be created                                                                                              | Yes       | create-advisory         |
+| cgwHostname              | The hostname of the content-gateway to publish the metadata to                                                             | Yes       |https://developers.redhat.com/content-gateway/rest/admin |
+| cgwSecret                | The kubernetes secret to use to authenticate to content-gateway. It needs to contain two keys: username and token          | Yes       | publish-to-cgw-secret   |
 | synchronously            | Whether the task should wait for InternalRequests to complete                                                              | Yes       | true                    |
 | pipelineRunUid           | The uid of the current pipelineRun. Used as a label value when creating internal requests                                  | No        | -                       |
 | ociStorage               | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes       | empty                   |
@@ -25,6 +27,8 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | dataDir                  | The location where data will be stored                                                                                     | Yes       | $(workspaces.data.path) |
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
+## Changes in 7.0.0
+* Add support for generic content type advisories
 
 ## Changes in 6.1.3
 * Undo changes in 6.1.2

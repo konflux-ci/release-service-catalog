@@ -34,6 +34,8 @@ function set_ir_status() {
 {
   "status": {
     "results": {
+      "jsonBuildInfo": "{\"updated\":\"2023-03-06T16:39:11.314092Z\"}",
+      "indexImageDigests": "quay.io/a quay.io/b",
       "genericResult": "{\"fbc_opt_in\":\"true\",\"publish_index_image\":\"false\",\"sign_index_image\":\"false\"}",
       "iibLog": "Dummy IIB Log",
       "exitCode": "${EXITCODE}"

@@ -21,7 +21,96 @@
 #                       with the Release, extracted from the Release's labels.
 #
 # Dependencies:
-#   kubectl, jq, tkn (for fetching PipelineRun logs), oc (for fetching CONSOLEURL).
+#   kubectl, jq, tkn (for fetching PipelineRun logs).
+
+# Function that identifies a failed Tekton PipelineRun from an input JSON string
+# and describes it using 'tkn'.
+#
+# **Args**:
+#   $1 (json): JSON string with '.status.conditions[]' and a field like
+#              '.status.<type>Processing.pipelineRun' (e.g. '.status.pipelineProcessing.pipelineRun')
+#              containing "namespace/name" of the PipelineRun.
+#
+# **Deps**: jq, tkn, grep, cut, sed.
+function describeFailedPipelineRun() {
+  local json=$1
+  conditions=$(jq -r '.status.conditions[] | [.type, .status, .reason, .message] | @csv' <<< "${json}")
+  echo "${conditions}"
+
+  failedPipelineProcessing=$(grep PipelineProcessed <<< ${conditions} | grep '"False"' | cut -f1 -d, | sed 's/"//g' \
+      | sed 's/Pipeline//g' | sed 's/Processed/Processing/' | sed 's/./\L&/')
+
+  ## check if this is a collector pipeline
+  ## if so, the status is nested.
+  if [[ "${failedPipelineProcessing}" == *"ollector"* ]]; then
+    filter=".status.collectorsProcessing.${failedPipelineProcessing}.pipelineRun"
+  else
+    filter=".status.${failedPipelineProcessing}.pipelineRun"
+  fi
+  failedPipelineRun=$(jq -r "${filter}" <<< "${json}")
+
+  PLR_NAME=$(cut -f2 -d/ <<< "${failedPipelineRun}")
+  PLR_NS=$(cut -f1 -d/ <<< "${failedPipelineRun}")
+
+  diagnoseFailedPLR "${PLR_NAME}" "${PLR_NS}"
+}
+
+# Function to diagnose a failed Tekton PipelineRun
+# Arguments:
+#   $1: PipelineRun name
+#   $2: Namespace (optional, defaults to current namespace)
+function diagnoseFailedPLR() {
+    local plr_name="$1"
+    local namespace="${2:-$(kubectl config view --minify -o jsonpath='{..namespace}')}"
+
+    echo "🔍 Diagnosing PipelineRun: ${plr_name} in namespace: ${namespace}"
+
+    # Check if PipelineRun exists
+    if [ ! kubectl get pipelinerun "${plr_name}" -n "${namespace}" &>/dev/null ] ; then
+        echo "❌ PipelineRun ${plr_name} not found in namespace ${namespace}"
+        return 1
+    fi
+
+    # Get PipelineRun status
+    local status
+    status=$(kubectl get pipelinerun "${plr_name}" -n "${namespace}" -o jsonpath='{.status.conditions[0].reason}')
+    echo "📊 PipelineRun Status: ${status}"
+
+    # Get all tasks and their statuses
+    echo "📋 Task Status Summary:"
+    kubectl get pipelinerun "${plr_name}" -n "${namespace}" -o jsonpath='{range .status.taskRuns[*]}{"\n"}Task: {.taskRef.name}{"\nStatus: "}{.status.conditions[0].reason}{"\nMessage: "}{.status.conditions[0].message}{end}' | sed 's/^/  /'
+
+    # Find and show logs for failed tasks
+    echo -e "\n❌ Failed Task Details:"
+    local failed_tasks
+    failed_tasks=$(kubectl get taskruns -l tekton.dev/pipelineRun="${plr_name}" -n "${namespace}" -o jsonpath='{.items[?(@.status.conditions[0].status=="False")].metadata.name}{"\n"}')
+
+    if [ -n "${failed_tasks}" ]; then
+        while read -r taskrun_name; do
+            echo -e "\n🔍 Examining failed taskrun: ${taskrun_name}"
+
+            if [ -n "${taskrun_name}" ]; then
+                echo "📜 Last 50 lines of logs for taskrun ${taskrun_name}:"
+                tkn taskrun logs "${taskrun_name}" -n "${namespace}" 2>/dev/null | tail -n 50 | sed 's/^/  /'
+
+                echo -e "\n💡 Describe output:"
+                tkn tr desc "${taskrun_name}" -n "${namespace}"
+
+                echo -e "\n💡 Error message:"
+                kubectl get taskrun "${taskrun_name}" -n "${namespace}" -o jsonpath='{.status.conditions[0].message}' | sed 's/^/  /'
+            else
+                echo "⚠️ Could not find TaskRun for task: ${taskrun_name}"
+            fi
+        done <<< "${failed_tasks}"
+    else
+        echo "  No failed tasks found. Check overall PipelineRun status and conditions."
+    fi
+
+    # Show final conditions and reason for failure
+    echo -e "\n📝 Final PipelineRun Conditions:"
+    kubectl get pipelinerun "${plr_name}" -n "${namespace}" -o jsonpath='{range .status.conditions[*]}{"\nType: "}{.type}{"\nStatus: "}{.status}{"\nReason: "}{.reason}{"\nMessage: "}{.message}{end}' | sed 's/^/  /'
+    echo ""
+}
 
 function getPipelinerunFromStatus() { # args are json, statusSection
   json=$1
@@ -71,8 +160,11 @@ function getLogs() { # args are json, statusSection
   echo ""
   /usr/bin/tkn pr logs "${PLR_NAME}" -f --timestamps -n "${PLR_NS}"
 
-  #openshift-pipelines/configmaps/pipelines-as-code  custom-console-url
-  consoleUrl=$(oc get cm/pipelines-as-code -n openshift-pipelines -ojson | jq -r '.data."custom-console-url"')
+  # get console url from kubeconfig using the fact that the Konflux UI uses the same URL
+  # pattern as the api service URL.
+  consoleUrl=$(kubectl config view --minify --output jsonpath="{.clusters[*].cluster.server}" | sed 's/api/konflux-ui.apps/g' | sed 's/:6443//g')
+  # get rid of trailing slash
+  consoleUrl=${consoleUrl%/}
   prLogUrl="${consoleUrl}/ns/${PLR_NS}/applications/${APPLICATION}/pipelineruns/${PLR_NAME}"
 
   echo ""
@@ -90,7 +182,7 @@ if [ -z "$RELEASE_NAMESPACE" ]; then
   exit 1
 fi
 
-CONSOLEURL=$(oc get cm/pipelines-as-code -n openshift-pipelines -ojson | jq -r '.data."custom-console-url"')
+CONSOLEURL=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson | jq -r '.data."custom-console-url"')
 
 echo "======================================="
 echo "Release           : ${RELEASE_NAME}"
@@ -191,13 +283,14 @@ ${overAllStatusLine}"
     echo ""
 
     RELEASE_JSON=$(kubectl get release/${RELEASE_NAME} -n ${RELEASE_NAMESPACE} -ojson)
-    jq -r '.status.conditions[] | [.type, .status, .reason, .message] | @csv' <<< "${RELEASE_JSON}"
 
     getLogs "${RELEASE_JSON}" "collectorsProcessing?.tenantCollectorsProcessing?"
     getLogs "${RELEASE_JSON}" "collectorsProcessing?.managedCollectorsProcessing?"
     getLogs "${RELEASE_JSON}" "tenantProcessing?"
     getLogs "${RELEASE_JSON}" "managedProcessing?"
     getLogs "${RELEASE_JSON}" "finalProcessing?"
+
+    describeFailedPipelineRun "${RELEASE_JSON}"
 
     exit 1
   fi

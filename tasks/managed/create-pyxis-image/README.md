@@ -27,6 +27,12 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                                                                                                                                                                                                                                                                                                       | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                                                                                                                                                                                                                                                                                                              | No       | ""                      |
 
+## Changes in 5.0.0
+* Replace `.pyxis.skipLayers` with `.pyxis.includeLayers`
+  * We want to skip the layer details when creating images in Pyxis by default,
+    so to include it in the future, the data will need to set
+    `.pyxis.includeLayers=true` explicitly
+
 ## Changes in 4.1.0
 * Remove logic to determine dockerfile name
   * This logic was added as a temporary fix until it's fixed on build side. And now it is

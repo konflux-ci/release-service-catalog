@@ -1,0 +1,174 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-sign-index-image-multicomponent
+spec:
+  description: |
+    Test creating a internal request to sign an image.
+    In this scenario there will be multiple index images to sign.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              cat > "$(workspaces.data.path)/data.json" << EOF
+              {
+                "sign": {
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+              cat > "$(workspaces.data.path)/release_plan_admission.json" << EOF
+              {
+                "spec": {
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "https://localhost.git"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipelines/abc/abc.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "release-service-account"
+                  }
+                }
+              }
+              EOF
+              cat > "$(workspaces.data.path)/fbcResults.json" << EOF
+              {
+                  "components": [
+                      {
+                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.15",
+                          "imageDigests": [
+                              "sha256:6f9a420f660e73a",
+                              "sha256:6f9a420f660e73b"
+                          ]
+                      },
+                      {
+                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.16",
+                          "imageDigests": [
+                              "sha256:6f9a420f660e73c"
+                          ]
+                      }
+                  ]
+              }
+              EOF
+    - name: run-task
+      taskRef:
+        name: sign-index-image
+      params:
+        - name: requester
+          value: testuser
+        - name: referenceImage
+          value: quay.io/testrepo/testimage:tag
+        - name: manifestListDigests
+          value: "sha256:6f9a420f660e73a sha256:6f9a420f660e73b"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: dataPath
+          value: data.json
+        - name: releasePlanAdmissionPath
+          value: release_plan_admission.json
+        - name: fbcResultsPath
+          value: fbcResults.json
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              testValues='sha256:6f9a420f660e73a sha256:6f9a420f660e73b sha256:6f9a420f660e73c'
+              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
+              internalRequestsCount=$(echo "$internalRequests" | wc -w)
+
+              if [ "$internalRequestsCount" != "3" ] ; then
+                echo "incorrect number of internalRequests created. Expected 3"
+                exit 1
+              fi
+
+              for internalRequest in ${internalRequests};
+              do
+                params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
+
+                if [[ "$(jq -r '.reference' <<< "${params}")" \
+                    != "registry.redhat.io/redhat/redhat-operator-index:v4.1"[56] ]]; then
+                  echo "reference image does not match"
+                  exit 1
+                fi
+
+                manifest_digest=$(jq -r '.manifest_digest' <<< "${params}")
+                if [[ ! " $testValues " =~ [[:space:]]${manifest_digest}[[:space:]] ]]; then
+                  echo "manifest_digest does not match"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.config_map_name' <<< "${params}")" != "signing-config-map" ]
+                then
+                  echo "config_map_name does not match"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
+                then
+                  echo "requester does not match"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.pipeline_image' <<< "${params}")" != \
+                   "quay.io/redhat-isv/operator-pipelines-images:released" ]
+                then
+                  echo "pipeline_image does not match"
+                  exit 1
+                fi
+              done
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests --all

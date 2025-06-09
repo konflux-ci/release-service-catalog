@@ -4,17 +4,16 @@ kind: Task
 metadata:
   name: upload-sbom-to-atlas
   labels:
-    app.kubernetes.io/version: "2.1.0"
+    app.kubernetes.io/version: "3.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
     This task recursively scans for CycloneDX and SPDX SBOMs in a specified
-    directory, converts them to supported versions if needed, and uploads them
-    to the Atlas service. It includes a retry mechanism that saves failed
-    uploads to an S3 bucket, so that the upload can be retried by another
-    service (Bombino).
+    directory and uploads them to the Atlas service. It includes a retry
+    mechanism that saves failed uploads to an S3 bucket, so that the upload can
+    be retried by another service (Bombino).
   params:
     - name: sbomDir
       description: >-
@@ -37,22 +36,6 @@ spec:
     - name: ssoTokenUrl
       default: "https://auth.redhat.com/auth/realms/EmployeeIDP/protocol/openid-connect/token"
       description: URL of the SSO token issuer
-      type: string
-    - name: supportedCycloneDxVersion
-      default: "1.4"
-      description: >-
-        If the SBOM uses a higher CycloneDX version, `syft convert` in the task
-        will convert all SBOMs to this CycloneDX version before uploading them
-        to Atlas. If the SBOM is already in this version or lower,
-        it will be uploaded as is.
-      type: string
-    - name: supportedSpdxVersion
-      default: "2.3"
-      description: >-
-        If the SBOM uses a higher SPDX version, `syft convert` in the task
-        will convert all SBOMs to this SPDX version before uploading them
-        to Atlas. If the SBOM is already in this version or lower,
-        it will be uploaded as is.
       type: string
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -151,121 +134,14 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: gather-sboms
-      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
-      script: |
-        #!/usr/bin/env bash
-        set -o errexit -o pipefail -o nounset
-
-        # creating working directory
-        workdir="$(params.dataDir)/$(params.subdirectory)/workdir"
-        sbomsDir="$(params.dataDir)/$(params.sbomDir)"
-        mkdir -p "${workdir}"
-        mkdir -p "${sbomsDir}"
-
-        version_lesser_equal() {
-          local first
-          first="$(printf "%s\n%s" "$1" "$2" | sort --version-sort | head -n 1)"
-
-          if [ "$1" = "$first" ]; then
-            echo "SBOM version ($1) is supported (<= $2), will not convert"
-          else
-            echo "SBOM version ($1) is not supported, will convert to $2"
-            printf "%s" "$2" > "${sbom_path}.convert_to_version"
-          fi
-        }
-
-        echo "Looking for CycloneDX or SPDX SBOMs in $sbomsDir"
-
-        find "$sbomsDir" -type f | while read -r filepath; do
-          # Skip non-JSON files
-          file_relpath=$(realpath "$filepath" --relative-base="$sbomsDir")
-          if ! jq empty "$filepath" 2>/dev/null; then
-            echo "$file_relpath: not a valid JSON"
-            continue
-          fi
-
-          # Extract the format information using jq
-          sbom_format=$(
-            jq -r '
-              if .bomFormat == "CycloneDX" then
-                "CycloneDX"
-              else if .spdxVersion then
-                "SPDX"
-              else
-                empty
-              end end' "$filepath"
-          )
-
-          # If sbom_format is empty, it's not a valid SBOM (CycloneDX or SPDX)
-          if [ -z "$sbom_format" ]; then
-            echo "$file_relpath: not a valid SBOM (CycloneDX or SPDX)"
-            continue  # Skip further processing for non-SBOM files
-          fi
-
-          # Symlink the discovered SBOMS to $workdir so that subsequent steps
-          # don't have to look for them again.
-          sbom_path="$workdir/$(basename "$filepath")"
-          ln -s "$(realpath "$filepath")" "$sbom_path"
-
-          # Check if SBOM is CycloneDX or SPDX
-          if [ "$sbom_format" == "CycloneDX" ]; then
-            echo "Found CycloneDX SBOM: $file_relpath"
-
-            sbom_version="$(jq -r ".specVersion" "$sbom_path")"
-            supportedCycloneDxVersion=$(params.supportedCycloneDxVersion)
-            version_lesser_equal "$sbom_version" "$supportedCycloneDxVersion"
-
-            printf "%s" "cyclonedx-json" > "${sbom_path}.sbom_format"
-
-          else
-            echo "Found SPDX SBOM: $file_relpath"
-
-            sbom_version="$(jq -r '.spdxVersion | sub("SPDX-"; "")' "$sbom_path")"
-            supportedSpdxVersion=$(params.supportedSpdxVersion)
-            version_lesser_equal "$sbom_version" "$supportedSpdxVersion"
-
-            printf "%s" "spdx-json" > "${sbom_path}.sbom_format"
-
-          fi
-        done
-        echo "Found $(find "$workdir" -name "*.json" | wc -l) SBOMs"
-
-    # Needs syft, which is in a different image => has to be a separate step
-    - name: convert-sboms-if-needed
-      image: quay.io/konflux-ci/release-service-utils:80a575e7e12d32f866a6105827804f2f122cea73
-      script: |
-        #!/usr/bin/env bash
-        set -o errexit -o pipefail -o nounset
-
-        # creating working directory
-        workdir="$(params.dataDir)/$(params.subdirectory)/workdir"
-        sbomsDir="$(params.dataDir)/$(params.sbomDir)"
-        mkdir -p "${workdir}"
-        mkdir -p "${sbomsDir}"
-
-        # Return zero matches when a glob doesn't match rather than returning the glob itself
-        shopt -s nullglob
-
-        for sbom_path in "$workdir"/*.json; do
-          conversion_attr="${sbom_path}.convert_to_version"
-          sbom_format="$(cat "${sbom_path}.sbom_format")"
-
-          if [[ -f "$conversion_attr" ]]; then
-            sbom_version="$(cat "$conversion_attr")"
-            original_sbom_path="$(realpath "$sbom_path")"
-            original_sbom_relpath="$(realpath "$sbom_path" --relative-base="$sbomsDir")"
-
-            echo "Converting $original_sbom_relpath to $sbom_format $sbom_version"
-            syft convert "$original_sbom_path" -o "${sbom_format}@${sbom_version}=${sbom_path}.supported_version"
-          else
-            # Just duplicate the symlink, the original SBOM already has a supported CDX version
-            cp --no-dereference "$sbom_path" "${sbom_path}.supported_version"
-          fi
-        done
-
     - name: upload-sboms
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 10m
       volumeMounts:
         - name: atlas-secret
           mountPath: /secrets/
@@ -273,19 +149,14 @@ spec:
         #!/usr/bin/env bash
         set -o errexit -o pipefail -o nounset
 
-        # creating working directory
-        workdir="$(params.dataDir)/$(params.subdirectory)/workdir"
         sbomsDir="$(params.dataDir)/$(params.sbomDir)"
-        mkdir -p "${workdir}"
-        mkdir -p "${sbomsDir}"
-
         failedSbomDir="$(params.dataDir)/$(params.subdirectory)/failed-sboms"
         # make sure the directory wasn't created in a previous run of this task
         rm -rf "$failedSbomDir"
         mkdir -p "$failedSbomDir"
 
         shopt -s nullglob
-        sboms_to_upload=("$workdir"/*.json)
+        sboms_to_upload=("$sbomsDir"/*)
 
         if [[ "${#sboms_to_upload[@]}" -eq 0 ]]; then
           echo "No SBOMs to upload"
@@ -299,8 +170,7 @@ spec:
         sso_token="$(cat /secrets/sso_token)"
 
         for sbom_path in "${sboms_to_upload[@]}"; do
-          original_sbom_relpath="$(realpath "$sbom_path" --relative-base="$sbomsDir")"
-          echo "--- Processing $original_sbom_relpath ---"
+          echo "Processing $sbom_path"
 
           ssoTokenUrl=$(params.ssoTokenUrl)
           echo "Getting SSO token from $ssoTokenUrl"
@@ -322,11 +192,8 @@ spec:
             retry_max_time="$expires_in"
           fi
 
-          sbom_id="$(basename -s .json "$sbom_path")"
-          supported_version_of_sbom="${sbom_path}.supported_version"
-
           atlasApiUrl=$(params.atlasApiUrl)
-          echo "Uploading SBOM to $atlasApiUrl ($sbom_id)"
+          echo "Uploading SBOM $sbom_path to $atlasApiUrl"
 
           handle_atlas_failure () {
             >&2 echo "WARNING: SBOM upload of $1 to Atlas has failed! Upload will be retried later."
@@ -338,19 +205,25 @@ spec:
             -H "authorization: Bearer $access_token" \
             -H "transfer-encoding: chunked" \
             -H "content-type: application/json" \
-            --data "@$supported_version_of_sbom" \
+            --data "@$sbom_path" \
             "$atlasApiUrl/api/v2/sbom" \
-            || handle_atlas_failure "$supported_version_of_sbom"
+            || handle_atlas_failure "$sbom_path"
 
           # In the stage environment (and e2e tests), retry the push of all
           # SBOMs to test functionality of the retry mechanism.
           if [[ "$(params.atlasSecretName)" = "atlas-staging-sso-secret" ]]; then
-            cp "$supported_version_of_sbom" "${failedSbomDir}"
+            cp "$sbom_path" "${failedSbomDir}"
           fi
         done
 
     - name: push-to-s3
       image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 10m
       volumeMounts:
         - name: aws-secret
           mountPath: /secrets
@@ -369,12 +242,8 @@ spec:
 
         shopt -s nullglob
         for sbom in "$sbomDir"/*; do
-          # strip supported version suffix
-          to_upload="${sbom%.supported_version}"
-          cp "${sbom}" "${to_upload}"
-
           # we don't want the full path in S3
-          s3_filename=$(basename "$to_upload")
+          s3_filename=$(basename "$sbom")
 
           resource="/${bucket}/${s3_filename}"
           content_type="application/json"
@@ -382,8 +251,8 @@ spec:
           to_sign="PUT\n\n${content_type}\n${date_value}\n${resource}"
           signature=$(echo -en "${to_sign}" | openssl sha1 -hmac "${aws_secret_access_key}" -binary | base64)
 
-          echo "Pushing $to_upload to S3."
-          if ! curl -X PUT --upload-file "${to_upload}" \
+          echo "Pushing $sbom to S3."
+          if ! curl -X PUT --upload-file "${sbom}" \
               --silent --show-error --fail-with-body --retry 10 \
               --retry-all-errors \
               -H "Host: ${bucket}.s3.${region}.amazonaws.com" \

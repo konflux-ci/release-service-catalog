@@ -77,19 +77,26 @@ parse_options() {
 }
 
 # Function to get Build PipelineRun URL
-# Relies on global variables: oc (command), jq (command)
+# Relies on global variables: kubectl (command), jq (command)
 get_build_pipeline_run_url() { # args are ns, app, name
   local ns=$1
   local app=$2
   local name=$3
   local console_url
-  console_url=$(oc get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null | jq -r '.data."custom-console-url"' || echo "")
+
+  # get console url from kubeconfig using the fact that the Konflux UI uses the same URL
+  # pattern as the api server URL.
+  console_url=$(kubectl config view --minify --output jsonpath="{.clusters[*].cluster.server}" \
+    | sed 's/api/konflux-ui.apps/g' | sed 's/:6443//g')
+  # get rid of trailing slash
+  console_url=${console_url%/}
+
   if [ -z "$console_url" ]; then
       echo "⚠️ Warning: Could not retrieve custom-console-url. URL might be incomplete."
-      echo "oc get cm/pipelines-as-code -n openshift-pipelines -ojson" # Add command for easier debugging
+      echo "kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson" # Add command for easier debugging
       echo "${ns}/applications/${app}/pipelineruns/${name}" # Fallback or partial URL
   else
-      echo "${console_url}ns/${ns}/applications/${app}/pipelineruns/${name}"
+      echo "${console_url}/ns/${ns}/applications/${app}/pipelineruns/${name}"
   fi
 }
 
@@ -211,11 +218,11 @@ create_kubernetes_resources() {
 
     echo "Building and applying tenant resources..."
     kustomize build "${SCRIPT_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
-    kubectl apply -f "$tmpDir/tenant-resources.yaml"
+    kubectl create -f "$tmpDir/tenant-resources.yaml"
 
     echo "Building and applying managed resources..."
     kustomize build "${SCRIPT_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
-    kubectl apply -f "$tmpDir/managed-resources.yaml"
+    kubectl create -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."
     echo "Cleanup commands:"

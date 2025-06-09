@@ -10,8 +10,7 @@ This task also stores the passed resources as json files in a workspace.
 The parameters to this task are lowercase instead of camelCase because they are passed from the operator, and the
 operator passes them as lowercase.
 
-A task result is returned for each resource with the relative path to the stored JSON for it in the workspace. There is
-also a task result for the fbcFragment extracted from the snapshot's first component.
+A task result is returned for each resource with the relative path to the stored JSON for it in the workspace.
 
 Finally, the task checks that the keys from the correct resource (a key that should come from the ReleasePlanAdmission
 should not be present in the Release data section).
@@ -34,6 +33,11 @@ should not be present in the Release data section).
 | dataDir                 | The location where data will be stored                                                                                     | Yes       | $(workspaces.data.path)                                   |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | Yes       | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | Yes       | production                                                |
+
+## Changes in 6.2.0
+* No longer collect and emit the result `fbcFragment`
+* This has been delegated to the task that requires it.
+* This help reduces the occurence of https://github.com/tektoncd/pipeline/issues/4808
 
 ## Changes in 6.1.0
 * Add the new `releaseNotes.allow_custom_live_id` field to disallowed keys for
