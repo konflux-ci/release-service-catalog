@@ -27,3 +27,6 @@ The task overwrites the original mapped snapshot file in place with a filtered v
 | sourceDataArtifact       | Location of trusted artifacts used to populate the data directory                                                          | Yes       | ""                                             |
 | dataDir                  | The location where data will be stored                                                                                     | No        | $(workspaces.data.path)                        |
 | subdirectory             | Subdirectory inside the workspace to be used                                                                               | Yes       | ""                                             |
+
+## Changes in 0.2.0
+* Added compute resource limits

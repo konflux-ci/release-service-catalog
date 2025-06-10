@@ -28,6 +28,9 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
 
+## Changes in 7.1.0
+* Added compute resource limits
+
 ## Changes in 7.0.1
 * Update data source for update-purl step
   * reads from files instead of staged.files

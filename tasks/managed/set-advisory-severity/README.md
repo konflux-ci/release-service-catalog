@@ -20,6 +20,9 @@ images and not for generic artifact types like binaries or disk images.
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 1.1.0
+* Added compute resource limits
+
 ## Changes in 1.0.4
 * Undo changes introduced in 1.0.2
   * Early failure prevents pasting of internal pipelineRun or taskRun

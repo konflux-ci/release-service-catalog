@@ -27,6 +27,9 @@ data:
         configMapName: <configmap name>
 ```
 
+## Changes in 2.6.0
+* Added compute resource limits
+
 ## Changes in 2.5.2
 * Undo changes introduced in 2.5.1
   * Early failure prevents pasting of internal pipelineRun or taskRun
