@@ -11,3 +11,6 @@ Tekton task to request the advisory content from gitlab as an oci artifact.
 | pipelineRunUid   | The uid of the current pipelineRun. Used as a label value when creating internal requests             | No       | -             |  
 | taskGitUrl       | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored | No       | -             |
 | taskGitRevision  | The revision in the taskGitUrl repo to be used                                                        | No       | -             |  
+
+## Changes in 0.1.0
+* Added compute resource limits
