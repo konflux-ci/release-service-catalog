@@ -48,6 +48,10 @@ spec:
     - name: verify_ec_task_git_revision
       type: string
       description: The git revision to be used when consuming the verify-conforma task
+    - name: mobster_tasks_git_revision
+      type: string
+      description: The git revision to be used when consuming Mobster tasks for SBOM processing
+      default: 995b567655f73cbdda535f4a2ca1074a0b2504b8
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
@@ -750,7 +754,7 @@ spec:
       runAfter:
         - create-pyxis-image
         - collect-task-params
-    - name: update-component-sbom
+    - name: augment-component-sbom
       when:
         - input: "$(tasks.collect-atlas-params.results.secretName)"
           operator: notin
@@ -761,11 +765,11 @@ spec:
       taskRef:
         params:
           - name: url
-            value: $(params.taskGitUrl)
+            value: https://github.com/konflux-ci/mobster.git
           - name: revision
-            value: $(params.taskGitRevision)
+            value: $(params.mobster_tasks_git_revision)
           - name: pathInRepo
-            value: tasks/managed/update-component-sbom/update-component-sbom.yaml
+            value: tasks/augment-component-sboms-ta/0.1/augment-component-sboms-ta.yaml
         resolver: git
       workspaces:
         - name: data
@@ -773,8 +777,16 @@ spec:
       params:
         - name: snapshotSpec
           value: "$(tasks.collect-data.results.snapshotSpec)"
-        - name: releaseId
-          value: $(context.pipelineRun.uid)
+        - name: retryAWSSecretName
+          value: "$(tasks.collect-atlas-params.results.retryAWSSecretName)"
+        - name: retryS3Bucket
+          value: "$(tasks.collect-atlas-params.results.retryS3Bucket)"
+        - name: atlasSecretName
+          value: "$(tasks.collect-atlas-params.results.secretName)"
+        - name: ssoTokenUrl
+          value: "$(tasks.collect-atlas-params.results.ssoTokenUrl)"
+        - name: atlasApiUrl
+          value: "$(tasks.collect-atlas-params.results.atlasApiUrl)"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
@@ -794,7 +806,7 @@ spec:
         - apply-mapping
         - collect-atlas-params
         - push-snapshot
-    - name: upload-component-sbom
+    - name: create-product-sbom
       when:
         - input: "$(tasks.collect-atlas-params.results.secretName)"
           operator: notin
@@ -802,15 +814,27 @@ spec:
         - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
           operator: in
           values: ["false"]
+      taskRef:
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/mobster.git
+          - name: revision
+            value: $(params.mobster_tasks_git_revision)
+          - name: pathInRepo
+            value: tasks/create-product-sbom-ta/0.1/create-product-sbom-ta.yaml
+        resolver: git
+      workspaces:
+        - name: data
+          workspace: release-workspace
       params:
-        - name: dataPath
-          value: "$(tasks.collect-data.results.data)"
         - name: snapshotSpec
           value: "$(tasks.collect-data.results.snapshotSpec)"
-        - name: releaseId
-          value: $(context.pipelineRun.uid)
-        - name: sbomDir
-          value: "$(tasks.update-component-sbom.results.sbomPath)"
+        - name: releaseData
+          value: "$(tasks.collect-data.results.data)"
+        - name: retryAWSSecretName
+          value: "$(tasks.collect-atlas-params.results.retryAWSSecretName)"
+        - name: retryS3Bucket
+          value: "$(tasks.collect-atlas-params.results.retryS3Bucket)"
         - name: atlasSecretName
           value: "$(tasks.collect-atlas-params.results.secretName)"
         - name: ssoTokenUrl
@@ -820,7 +844,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.update-component-sbom.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
         - name: subdirectory
           value: $(tasks.collect-data.results.subdirectory)
         - name: dataDir
@@ -831,24 +855,11 @@ spec:
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
-        - name: retryAWSSecretName
-          value: "$(tasks.collect-atlas-params.results.retryAWSSecretName)"
-        - name: retryS3Bucket
-          value: "$(tasks.collect-atlas-params.results.retryS3Bucket)"
-      taskRef:
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/managed/upload-sbom-to-atlas/upload-sbom-to-atlas.yaml
-        resolver: git
-      workspaces:
-        - name: data
-          workspace: release-workspace
       runAfter:
-        - update-component-sbom
+        - collect-data
+        - apply-mapping
+        - collect-atlas-params
+        - push-snapshot
     - name: run-file-updates
       when:
         - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
@@ -971,99 +982,6 @@ spec:
       runAfter:
         - collect-data
         - push-snapshot
-    - name: create-product-sbom
-      when:
-        - input: "$(tasks.collect-atlas-params.results.secretName)"
-          operator: notin
-          values: [""]
-        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
-          operator: in
-          values: ["false"]
-      params:
-        - name: dataPath
-          value: "$(tasks.collect-data.results.data)"
-        - name: releaseId
-          value: $(context.pipelineRun.uid)
-        - name: snapshotSpec
-          value: "$(tasks.collect-data.results.snapshotSpec)"
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: sourceDataArtifact
-          value: "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)"
-        - name: dataDir
-          value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: "$(params.trustedArtifactsDebug)"
-        - name: taskGitUrl
-          value: "$(params.taskGitUrl)"
-        - name: taskGitRevision
-          value: "$(params.taskGitRevision)"
-      taskRef:
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/managed/create-product-sbom/create-product-sbom.yaml
-        resolver: git
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      runAfter:
-        - apply-mapping
-        - collect-data
-        - collect-atlas-params
-        - push-snapshot
-    - name: upload-product-sbom
-      when:
-        - input: "$(tasks.collect-atlas-params.results.secretName)"
-          operator: notin
-          values: [""]
-        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
-          operator: in
-          values: ["false"]
-      params:
-        - name: sbomDir
-          value: "$(tasks.create-product-sbom.results.sbomPath)"
-        - name: atlasSecretName
-          value: "$(tasks.collect-atlas-params.results.secretName)"
-        - name: ssoTokenUrl
-          value: "$(tasks.collect-atlas-params.results.ssoTokenUrl)"
-        - name: atlasApiUrl
-          value: "$(tasks.collect-atlas-params.results.atlasApiUrl)"
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: sourceDataArtifact
-          value: "$(tasks.create-product-sbom.results.sourceDataArtifact)"
-        - name: subdirectory
-          value: $(tasks.collect-data.results.subdirectory)
-        - name: dataDir
-          value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: "$(params.trustedArtifactsDebug)"
-        - name: taskGitUrl
-          value: "$(params.taskGitUrl)"
-        - name: taskGitRevision
-          value: "$(params.taskGitRevision)"
-        - name: retryAWSSecretName
-          value: "$(tasks.collect-atlas-params.results.retryAWSSecretName)"
-        - name: retryS3Bucket
-          value: "$(tasks.collect-atlas-params.results.retryS3Bucket)"
-      taskRef:
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/managed/upload-sbom-to-atlas/upload-sbom-to-atlas.yaml
-        resolver: git
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      runAfter:
-        - create-product-sbom
     - name: create-advisory
       when:
         - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
