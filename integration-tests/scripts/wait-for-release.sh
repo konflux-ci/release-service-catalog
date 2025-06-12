@@ -191,6 +191,7 @@ echo "======================================="
 RELEASE_JSON=$(kubectl get release/${RELEASE_NAME} -n ${RELEASE_NAMESPACE} -ojson)
 RELEASE_NAMESPACE=$(jq -r .metadata.namespace <<< "${RELEASE_JSON}")
 APPLICATION=$(jq -r '.metadata.labels."appstudio.openshift.io/application"' <<< "${RELEASE_JSON}")
+RELEASE_PLAN=$(jq -r '.spec.releasePlan' <<< "${RELEASE_JSON}")
 RELEASE_URL=$(getConsoleLogForRelease "${APPLICATION}" "${RELEASE_NAMESPACE}" "${RELEASE_NAME}")
 
 while true;
@@ -251,6 +252,7 @@ do
   message="
 ${overAllStatus}
   -> ${RELEASE_URL}
+Release Plan      : 📋 ${RELEASE_PLAN}
 ${overAllStatusLine}
 Tenant Collector  : ${TENANT_COLLECTOR_REASON} ${TENANT_COLLECTOR_MESSAGE} ${TENANT_COLLECTOR_PIPELINERUN}
   -> ${TENANT_COLLECTOR_PIPELINERUN_URL}
@@ -296,7 +298,7 @@ ${overAllStatusLine}"
   fi
 
   if [ "${RELEASED_STATUS}" == "\"True\"" ] && [ "${RELEASED_REASON}" == "\"Succeeded\"" ]; then
-    echo "✅ Release succeeded!"
+    echo "✅ Release for ${RELEASE_PLAN} succeeded!"
     exit 0
   fi
   sleep 5
