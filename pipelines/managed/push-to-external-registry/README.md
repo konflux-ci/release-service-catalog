@@ -13,12 +13,24 @@ Tekton pipeline to release Snapshots to an external registry.
 | snapshot                        | The namespaced name (namespace/name) of the snapshot                                                                               | No       | -                                                         |
 | enterpriseContractPolicy        | JSON representation of the policy to be applied when validating the enterprise contract                                            | No       | -                                                         |
 | enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes      | pipeline_intention=release                                |
-| enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 40m0s                                                     |
+| enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 8h0m0s                                                    |
+| enterpriseContractWorkerCount   | Number of parallel workers to use for policy evaluation.                                                                           | Yes      | 4                                                         |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                         | Yes      | true                                                      |
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                                          | No       | -                                                         |
 | verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                | No       | -                                                         |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
+
+## Changes in 5.8.0
+* add new required parameters to `collect-registry-token-secret` and
+  `make-repo-public` tasks
+
+## Changes in 5.7.0
+* Set timeout for verify-enterprise-contract task to be 4 hours.
+* Increase enterpriseContractTimeout to a large value, 8 hours.
+    * Users don't have control over this, so set it to a large value so that the pipeline timeout will kick in first,
+      if anything.
+* Add optional parameter enterpriseContractWorkerCount with default of 4
 
 ## Changes in 5.6.0
 * Update all tasks that now support trusted artifacts to specify the taskGit* parameters for the step action resolvers

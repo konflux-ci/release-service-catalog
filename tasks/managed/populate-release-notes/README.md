@@ -9,7 +9,6 @@ the releaseNotes data can use it.
 | Name                    | Description                                                                                                                | Optional | Default value           |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-------------------------|
 | dataPath                | Path to the JSON string of the merged data to update                                                                       | No       | -                       |
-| contentType             | The contentType of the release artifact. One of [image|binary]                                                             | Yes      | image                   |
 | snapshotPath            | Path to the JSON string of the mapped Snapshot in the data workspace                                                       | No       | -                       |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                   |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                      |
@@ -19,6 +18,9 @@ the releaseNotes data can use it.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
+
+## Changes in 5.2.0
+* Retrieve contentType from data file instead of parameter
 
 ## Changes in 5.1.0
 * Added compute resource limits

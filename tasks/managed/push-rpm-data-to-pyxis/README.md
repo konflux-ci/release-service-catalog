@@ -22,6 +22,9 @@ all repository_id strings found in rpm purl strings in the sboms.
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
 
+## Changes in 3.1.0
+* Added compute resource limits
+
 ## Changes in 3.0.0
 * Remove the `sbomPath` result.
 
