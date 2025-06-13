@@ -14,6 +14,9 @@ to each component, so other task can use them.
 | snapshotPath | Path to the JSON string of the Snapshot spec in the data workspace      | No       | -                  |
 | dataPath     | Path to the JSON string of the merged data to use in the data workspace | No       | -                  |
 
+## Changes in 1.5.0
+* Added compute resource limits
+
 ## Changes in 1.4.1
 * The task now support multiarchitecture images
 * Changed to use `mktemp` to generate the temporary snapshot json file

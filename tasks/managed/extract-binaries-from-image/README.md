@@ -17,6 +17,9 @@ passed.
 | subdirectory        | Subdirectory inside the workspace to be used for storing the binaries      | Yes      | ""            |
 | dataPath            | Path to the JSON string of the merged data to use in the data workspace    | No       | -             |
 
+## Changes in 2.2.0
+* Added compute resource limits
+
 ## Changes in 2.1.3
 * Add comprobation to only extract from the layer with the releases directory
 

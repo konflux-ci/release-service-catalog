@@ -27,6 +27,9 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                                                                                                                                                                                                                                                                                                       | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                                                                                                                                                                                                                                                                                                              | No       | ""                      |
 
+## Changes in 5.1.0
+* Added compute resource limits
+
 ## Changes in 5.0.0
 * Replace `.pyxis.skipLayers` with `.pyxis.includeLayers`
   * We want to skip the layer details when creating images in Pyxis by default,

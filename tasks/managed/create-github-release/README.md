@@ -15,6 +15,9 @@ a `release` dir.
 | content_directory | The directory inside the workspace to find files for release      | No       | -             |
 | resultsDirPath    | Path to results directory in the data workspace                   | No       | -             |
 
+## Changes in 2.3.0
+* Added compute resource limits
+
 ## Changes in 2.2.1
 * Fix check for existing release
   * The grep was inadequate, because it would also match for substrings. Now we'll

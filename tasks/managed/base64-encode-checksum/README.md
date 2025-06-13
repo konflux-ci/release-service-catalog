@@ -10,6 +10,9 @@ It returns as a result the blob to sign, that is the result of the base64 encode
 |----------------------|--------------------------------------------------------------------|-----------|-------------------------------------------------------|
 | binaries_dir         | Path inside the image where the binaries to extract are stored     | Yes       | "binaries"                                            |
 
+## Changes in 1.3.0
+* Added compute resource limits
+
 ## Changes in 1.2.0
 * Updated the base image used in this task
 
