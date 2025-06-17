@@ -27,6 +27,11 @@ The relative path of the pyxis.json file in the data workspace is output as a ta
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                                                                                                                                                                                                                                                                                                       | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                                                                                                                                                                                                                                                                                                              | No       | ""                      |
 
+## Changes in 5.1.1
+* Bump utils image
+  * This includes a fix to the way we cleanup tags - if we end up with empty tags,
+    we should include an empty list in the image update graphql mutation
+
 ## Changes in 5.1.0
 * Added compute resource limits
 
