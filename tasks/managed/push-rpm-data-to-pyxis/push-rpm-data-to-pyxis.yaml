@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-rpm-data-to-pyxis
   labels:
-    app.kubernetes.io/version: "3.1.0"
+    app.kubernetes.io/version: "3.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -87,6 +87,8 @@ spec:
         value: "$(params.orasOptions)"
       - name: "DEBUG"
         value: "$(params.trustedArtifactsDebug)"
+      - name: RETRIES
+        value: "3"  # Default number of retries for cosign download
   steps:
     - name: skip-trusted-artifact-operations
       ref:
@@ -147,6 +149,27 @@ spec:
         DOCKER_CONFIG="$(mktemp -d)"
         export DOCKER_CONFIG
 
+        # Function to run cosign with retries. It will pass all arguments to cosign.
+        run_cosign () {
+            attempt=0
+            backoff1=2
+            backoff2=3
+            until [ "$attempt" -gt "${RETRIES}" ] ; do # 3 retries by default
+                cosign "$@" && break
+                sleep $backoff2
+
+                # Fibbonaci backoff
+                old_backoff1=$backoff1
+                backoff1=$backoff2
+                backoff2=$((old_backoff1 + backoff2))
+                attempt=$((attempt+1))
+            done
+            if [ "$attempt" -gt "${RETRIES}" ] ; then
+              echo "Max retries exceeded."
+              exit 1
+            fi
+        }
+
         for (( i=0; i < NUM_COMPONENTS; i++ )); do
           COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${PYXIS_FILE}")
           IMAGEURL=$(jq -r '.containerImage' <<< "${COMPONENT}")
@@ -163,13 +186,13 @@ spec:
             # If digest equals arch_digest, then it's a single arch image
             if [ "$DIGEST" = "$ARCH_DIGEST" ] ; then
               echo "Fetching sbom for single arch image: $IMAGEURL to: $FILE"
-              cosign download sbom --output-file "${FILE}" "${IMAGEURL}"
+              run_cosign download sbom --output-file "${FILE}" "${IMAGEURL}"
             else
               OS=$(jq -r '.os' <<< "$PYXIS_IMAGE")
               ARCH=$(jq -r '.arch' <<< "$PYXIS_IMAGE")
               PLATFORM="${OS}/${ARCH}"
               echo "Fetching sbom for image: $IMAGEURL with platform: $PLATFORM to: $FILE"
-              cosign download sbom --output-file "${FILE}" --platform "${PLATFORM}" "${IMAGEURL}"
+              run_cosign download sbom --output-file "${FILE}" --platform "${PLATFORM}" "${IMAGEURL}"
             fi
           done
         done

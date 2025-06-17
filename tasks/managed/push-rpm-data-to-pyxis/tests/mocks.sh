@@ -7,9 +7,18 @@ function cosign() {
   echo Mock cosign called with: $*
   echo $* >> $(params.dataDir)/mock_cosign.txt
 
-  if [[ "$*" != "download sbom --output-file myImageID"[1-5]*".json imageurl"[1-5] && \
-     "$*" != "download sbom --output-file myImageID"[1-5]*".json --platform linux/"*" multiarch-"[1-5] ]]
-  then
+  if [[ "$*" == "download sbom --output-file myImageID"[1-5]*".json imageurl"[1-5] ]]; then
+    : # do nothing
+  elif [[ "$*" == "download sbom --output-file myImageID"[1-5]*".json --platform linux/"*" multiarch-"[1-5] ]]; then
+    : # do nothing
+  elif [[ "$*" == "download sbom --output-file myImageID"[1-5]*".json retryimage" ]]; then
+    if [[ "$(wc -l < "$(params.dataDir)/mock_cosign.txt")" -lt 3 ]]; then
+      echo "Error: simulated cosign download sbom failure" 1>&2
+      return 1
+    else
+      echo "Success: simulated cosign download sbom" 1>&2
+    fi
+  else
     echo Error: Unexpected call
     exit 1
   fi
