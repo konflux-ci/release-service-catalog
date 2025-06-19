@@ -23,6 +23,9 @@
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
 
 ## Changes in 4.7.0
+* Add retries in the pipeline
+
+## Changes in 4.7.0
 * Update all tasks that now support trusted artifacts to specify the taskGit* parameters for the step action resolvers
 * Align workspace name with changes in the apply-mapping task
 

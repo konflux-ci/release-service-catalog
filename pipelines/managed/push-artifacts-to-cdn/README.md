@@ -21,6 +21,9 @@ It uses InternalRequests so that it can be run on both public and private cluste
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                               | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                      | No       | -                                                         |
 
+### Changes in 1.0.1
+* Added retries in the pipline 
+
 ### Changes in 1.0.0
 * Added advisory generation tasks:
   - `populate-release-notes` - Populates release notes for the advisory
