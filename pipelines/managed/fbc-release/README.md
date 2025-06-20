@@ -4,21 +4,38 @@ Tekton release pipeline to interact with FBC Pipeline
 
 ## Parameters
 
-| Name                            | Description                                                                                                                                | Optional | Default value                                             |
-|---------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|----------|-----------------------------------------------------------|
-| release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution                                     | No       | -                                                         |
-| releasePlan                     | The namespaced name (namespace/name) of the releasePlan                                                                                    | No       | -                                                         |
-| releasePlanAdmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                                                           | No       | -                                                         |
-| releaseServiceConfig            | The namespaced name (namespace/name) of the releaseServiceConfig                                                                           | No       | -                                                         |
-| snapshot                        | The namespaced name (namespace/name) of the snapshot                                                                                       | No       | -                                                         |
-| enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                                                        | No       | -                                                         |
-| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..."         | Yes      | pipeline_intention=release                                |
-| enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                          | Yes      | 40m0s                                                     |
-| verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                                                  | No       | -                                                         |
-| verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                        | No       | -                                                         |
-| postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                                 | Yes      | true                                                      |
-| taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                                      | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
-| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                             | No       | -                                                         |
+| Name                            | Description                                                                                                                        | Optional | Default value                                             |
+|---------------------------------|------------------------------------------------------------------------------------------------------------------------------------|----------|-----------------------------------------------------------|
+| release                         | The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution                             | No       | -                                                         |
+| releasePlan                     | The namespaced name (namespace/name) of the releasePlan                                                                            | No       | -                                                         |
+| releasePlanAdmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                                                   | No       | -                                                         |
+| releaseServiceConfig            | The namespaced name (namespace/name) of the releaseServiceConfig                                                                   | No       | -                                                         |
+| snapshot                        | The namespaced name (namespace/name) of the snapshot                                                                               | No       | -                                                         |
+| enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                                                | No       | -                                                         |
+| enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes      | pipeline_intention=release                                |
+| enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 40m0s                                                     |
+| verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                                          | No       | -                                                         |
+| verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                | No       | -                                                         |
+| postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                         | Yes      | true                                                      |
+| taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
+| taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
+| ociStorage                      | The OCI repository where the Trusted Artifacts are stored                                                                          | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts      |
+| orasOptions                     | oras options to pass to Trusted Artifacts calls                                                                                    | Yes      | ""                                                        |
+| trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
+| dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
+
+## Changes in 5.0.0
+* Activate the use of trusted artifacts
+* Use the verify-conforma task to verify the enterprise contract policy
+
+## Changes in 4.8.1
+* Pass `internalRequestResultsFile` to `publish-index-image` and `extract-index-image` tasks
+
+## Changes in 4.8.0
+* Pass taskGitUrl and taskGitRevision to extract-index-image task
+* Pass taskGitUrl and taskGitRevision to get-ocp-version task
+* update to specify new required params for task prepare-fbc-release
+* update to specify new required params for task update-ocp-tag
 
 ## Changes in 4.7.0
 * use snapshotPath as input parameter to `get-ocp-version` now

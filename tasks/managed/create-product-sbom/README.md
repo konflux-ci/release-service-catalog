@@ -19,6 +19,9 @@ releaseNotes content.
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 2.1.0
+* Added compute resource limits
+
 ## Changes in 2.0.0
 * Task was refactored to use the new SBOM workflow. SBOMs are now generated from the mapped snapshot spec.
   * Renamed `productSBOMPath` result to `sbomPath` and param `dataJsonPath` to `dataPath`.

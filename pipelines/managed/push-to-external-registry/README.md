@@ -16,10 +16,18 @@ Tekton pipeline to release Snapshots to an external registry.
 | enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 8h0m0s                                                    |
 | enterpriseContractWorkerCount   | Number of parallel workers to use for policy evaluation.                                                                           | Yes      | 4                                                         |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                         | Yes      | true                                                      |
-| verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                                          | No       | -                                                         |
 | verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                | No       | -                                                         |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
+| ociStorage                      | The OCI repository where the Trusted Artifacts are stored                                                                          | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts      |
+| orasOptions                     | oras options to pass to Trusted Artifacts calls                                                                                    | Yes      | ""                                                        |
+| trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
+| dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
+
+## Changes in 6.0.0
+* Activate the use of trusted artifacts
+* Use the verify-conforma task to verify the enterprise contract policy
+* Remove deprecated verify_ec_task_bundle parameter
 
 ## Changes in 5.8.0
 * add new required parameters to `collect-registry-token-secret` and

@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: sign-index-image
   labels:
-    app.kubernetes.io/version: "4.4.0"
+    app.kubernetes.io/version: "5.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -34,16 +34,6 @@ spec:
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
-    - name: taskGitUrl
-      type: string
-      description: |
-        The url to the git repo where the release-service-catalog tasks to be used are stored. This is passed to
-        the InternalRequest as it is needed by the simple-signing-pipeline
-    - name: taskGitRevision
-      type: string
-      description: |
-        The revision in the taskGitUrl repo to be used. This is passed to the InternalRequest as it is needed by the
-        simple-signing-pipeline
     - name: fbcResultsPath
       type: string
       description: Path to the JSON file in the data workspace containing fbc results
@@ -51,10 +41,95 @@ spec:
       type: string
       description: The maximum number of concurrent signing requests
       default: 16
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: $(workspaces.data.path)
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
   workspaces:
     - name: data
       description: workspace to read and save files
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
   steps:
+    - name: skip-trusted-artifact-operations
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 20m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+    - name: use-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
     - name: sign-index-image
       image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
       computeResources:
@@ -75,13 +150,13 @@ spec:
         TASK_ID=$(context.taskRun.uid)
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No valid data file was provided."
             exit 1
         fi
 
-        RESULTS_FILE="$(workspaces.data.path)/$(params.fbcResultsPath)"
+        RESULTS_FILE="$(params.dataDir)/$(params.fbcResultsPath)"
         if [ ! -f "${RESULTS_FILE}" ] ; then
             echo "No valid results file was provided."
             exit 1
@@ -89,7 +164,7 @@ spec:
 
         requestType=$(jq -r '.sign.requestType // "internal-request"' "${DATA_FILE}")
         if [ "${requestType}" == "internal-pipelinerun" ] ; then
-          RPA_FILE="$(workspaces.data.path)/$(params.releasePlanAdmissionPath)"
+          RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
           if [ ! -f "${RPA_FILE}" ] ; then
               echo "No valid rpa file was provided."
               exit 1
@@ -156,3 +231,35 @@ spec:
         done
 
         echo "done"
+    - name: create-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
+    - name: patch-source-data-artifact-result
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

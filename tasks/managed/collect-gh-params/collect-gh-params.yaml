@@ -22,6 +22,37 @@ spec:
       description: Path to the binaries directory to release
       type: string
       default: binaries
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: $(workspaces.data.path)
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
   workspaces:
     - name: data
       description: The workspace where the snapshot spec json file resides
@@ -35,7 +66,57 @@ spec:
     - name: githubSecret
       type: string
       description: "The kube secret to use to authenticate to GitHub, containing one key: token"
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
   steps:
+    - name: skip-trusted-artifact-operations
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 20m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+    - name: use-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
     - name: collect-gh-params
       image:
         quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -49,19 +130,19 @@ spec:
         #!/usr/bin/env bash
         set -x
 
-        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No valid data file was provided."
             exit 1
         fi
 
-        SNAPSHOT_SPEC_FILE="$(workspaces.data.path)/$(params.snapshotPath)"
+        SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
             echo "No valid snapshot file was provided."
             exit 1
         fi
 
-        BINARIES_PATH="$(workspaces.data.path)/$(params.binariesPath)"
+        BINARIES_PATH="$(params.dataDir)/$(params.binariesPath)"
         RELEASE_VERSION=$(find "$BINARIES_PATH" -name '*_SHA256SUMS' \
           | sed 's/.*_\([^_]\+\)_SHA256SUMS$/\1/')
 

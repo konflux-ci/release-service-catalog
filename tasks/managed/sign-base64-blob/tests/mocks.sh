@@ -4,7 +4,7 @@ set -eux
 # mocks to be injected into task step scripts
 function internal-request() {
   echo Mock internal-request called with: $*
-  echo $* >> $(workspaces.data.path)/mock_internal-request.txt
+  echo $* >> "$(params.dataDir)/mock_internal-request.txt"
 
   # set to async
   /home/utils/internal-request $@ -s false
@@ -15,7 +15,7 @@ function internal-request() {
 }
 
 function kubectl() {
-  if [ $* != "get internalrequest internal-request -o=jsonpath='{.status.results.signed_payload}'" ]
+  if [[ $* != *"get internalrequest"* ]]
   then
     echo "Unexpected call to kubectl"
     exit 1
@@ -25,5 +25,5 @@ function kubectl() {
 }
 
 function gpg() {
-  echo -n "dummy-payload" 	
+  echo -n "dummy-payload"
 }

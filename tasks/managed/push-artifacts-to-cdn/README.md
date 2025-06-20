@@ -17,6 +17,9 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | resultsDirPath           | Path to results directory in the data workspace                                           | No       | -             |
 | requestTimeout           | Request timeout                                                                           | Yes      | 86400         |
 
+## Changes in 2.1.0
+* Added compute resource limits
+
 ## Changes in 2.0.0
 * task now extracts the signing key name from the config map and passes it to the internalRequest
 

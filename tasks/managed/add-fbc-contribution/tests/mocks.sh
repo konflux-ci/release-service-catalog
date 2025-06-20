@@ -3,7 +3,7 @@ set -eux
 
 # mocks to be injected into task step scripts
 function internal-request() {
-  echo $* >> $(workspaces.data.path)/mock_internal-request.txt
+  echo $* >> $(params.dataDir)/mock_internal-request.txt
 
   # set to async
   /home/utils/internal-request $@ -s false
@@ -29,12 +29,12 @@ function internal-request() {
 function set_ir_status() {
     NAME=$1
     EXITCODE=$2
-    PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    PATCH_FILE=$(params.dataDir)/${NAME}-patch.json
     cat > $PATCH_FILE << EOF
 {
   "status": {
     "results": {
-      "jsonBuildInfo": "{\"updated\":\"2023-03-06T16:39:11.314092Z\"}",
+      "jsonBuildInfo": "{\"updated\":\"2024-03-06T16:39:11.314092Z\", \"index_image\": \"redhat.com/rh-stage/iib:01\", \"index_image_resolved\": \"redhat.com/rh-stage/iib@sha256:abcdefghijk\"}",
       "indexImageDigests": "quay.io/a quay.io/b",
       "genericResult": "{\"fbc_opt_in\":\"true\",\"publish_index_image\":\"false\",\"sign_index_image\":\"false\"}",
       "iibLog": "Dummy IIB Log",
@@ -47,14 +47,14 @@ EOF
 }
 
 function date() {
-  echo $* >> $(workspaces.data.path)/mock_date.txt
+  echo $* >> $(params.dataDir)/mock_date.txt
 
   case "$*" in
       "+%Y-%m-%dT%H:%M:%SZ")
-          echo "2023-10-10T15:00:00Z" |tee $(workspaces.data.path)/mock_date_iso_format.txt
+          echo "2023-10-10T15:00:00Z" |tee $(params.dataDir)/mock_date_iso_format.txt
           ;;
       "+%s")
-          echo "1696946200" | tee $(workspaces.data.path)/mock_date_epoch.txt
+          echo "1696946200" | tee $(params.dataDir)/mock_date_epoch.txt
           ;;
       "*")
           echo Error: Unexpected call

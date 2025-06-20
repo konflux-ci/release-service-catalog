@@ -28,6 +28,11 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.1.1
+* Remove snippet to allow `close-advisory-issues` to fail
+  * This was added temporarily in 2.0.1
+  * We no longer need it since the task no longer fails if it cannot close an issue
+
 ## Changes in 2.1.0
 * Add new task `filter-already-released-advisory-images` to filter out images that have already been released in advisories
   * Task is placed after `apply-mapping` and before `verify-conforma`

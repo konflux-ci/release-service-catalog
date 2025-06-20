@@ -9,14 +9,51 @@ spec:
     In this scenario there will be multiple index images to sign.
   workspaces:
     - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
   tasks:
     - name: setup
       workspaces:
         - name: data
           workspace: tests-workspace
       taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
         workspaces:
           - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
@@ -24,14 +61,15 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              cat > "$(workspaces.data.path)/data.json" << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "sign": {
                   "configMapName": "signing-config-map"
                 }
               }
               EOF
-              cat > "$(workspaces.data.path)/release_plan_admission.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
               {
                 "spec": {
                   "pipeline": {
@@ -57,7 +95,7 @@ spec:
                 }
               }
               EOF
-              cat > "$(workspaces.data.path)/fbcResults.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/fbcResults.json" << EOF
               {
                   "components": [
                       {
@@ -76,6 +114,32 @@ spec:
                   ]
               }
               EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
         name: sign-index-image
@@ -88,25 +152,40 @@ spec:
           value: "sha256:6f9a420f660e73a sha256:6f9a420f660e73b"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: releasePlanAdmissionPath
+          value: $(context.pipelineRun.uid)/release_plan_admission.json
+        - name: fbcResultsPath
+          value: $(context.pipelineRun.uid)/fbcResults.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-        - name: dataPath
-          value: data.json
-        - name: releasePlanAdmissionPath
-          value: release_plan_admission.json
-        - name: fbcResultsPath
-          value: fbcResults.json
+      runAfter:
+        - setup
       workspaces:
         - name: data
           workspace: tests-workspace
-      runAfter:
-        - setup
     - name: check-result
       workspaces:
         - name: data
           workspace: tests-workspace
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
       taskSpec:
         steps:
           - name: check-result

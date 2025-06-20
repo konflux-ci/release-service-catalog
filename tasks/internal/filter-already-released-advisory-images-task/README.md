@@ -12,3 +12,6 @@ It returns a list of component names that still need to be released (i.e., not f
 | origin                         | The origin workspace for the release CR (used to locate advisories)                                    | No       | -             |
 | advisory_secret_name           | Name of the secret containing GitLab repo and token information                                        | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
+
+## Changes in 0.2.0
+* Added compute resource limits

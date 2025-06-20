@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: push-artifacts-to-cdn
   labels:
-    app.kubernetes.io/version: "0.2.1"
+    app.kubernetes.io/version: "1.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -202,7 +202,31 @@ spec:
         - name: data
           workspace: release-workspace
       runAfter:
-        - check-data-keys
+        - apply-mapping
+    - name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/populate-release-notes/populate-release-notes.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - verify-enterprise-contract
     - name: check-data-keys
       params:
         - name: dataPath
@@ -212,6 +236,7 @@ spec:
         - name: systems
           value:
             - cdn
+            - releaseNotes
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
@@ -229,7 +254,31 @@ spec:
         - name: data
           workspace: release-workspace
       runAfter:
-        - apply-mapping
+        - populate-release-notes
+    - name: embargo-check
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/embargo-check/embargo-check.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - check-data-keys
     - name: push-artifacts-to-cdn
       timeout: "2h00m0s"
       when:
@@ -267,6 +316,7 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-enterprise-contract
+        - embargo-check
     - name: update-cr-status
       params:
         - name: resource
@@ -291,6 +341,60 @@ spec:
           workspace: release-workspace
       runAfter:
         - push-artifacts-to-cdn
+    - name: create-advisory
+      params:
+        - name: releasePlanAdmissionPath
+          value: "$(tasks.collect-data.results.releasePlanAdmission)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: resultsDirPath
+          value: "$(tasks.collect-data.results.resultsDir)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/create-advisory/create-advisory.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - update-cr-status
+    - name: close-advisory-issues
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: advisoryUrl
+          value: "$(tasks.create-advisory.results.advisory_url)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/close-advisory-issues/close-advisory-issues.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - create-advisory
   finally:
     - name: cleanup
       taskRef:

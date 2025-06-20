@@ -14,6 +14,9 @@ Tekton task to submit a IIB build request to add/update a fbc-fragment to an ind
 | hotfix                  | Whether this build is a hotfix build                                         | Yes      | "false"       |
 | stagedIndex             | Whether this build is for a staged index build                               | Yes      | "false"       |
 
+## Changes in 1.2.1
+* Increased memory limit from 128Mi to 512Mi
+
 ## Changes in 1.2.0
 * Added compute resource limits
 

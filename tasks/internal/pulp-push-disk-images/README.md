@@ -15,6 +15,9 @@ Tekton task to push disk images with Pulp
 | cgwHostname     | The hostname of the content-gateway to publish the metadata to    | Yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret       | Env specific secret containing the content gateway credentials    | No       | -                                                        |
 
+## Changes in 0.3.0
+* Added compute resource limits
+
 ## Changes in 0.2.3
 * Base image in task is updated
   * The new image contains a fix for a missing helper script used in select-oci-auth

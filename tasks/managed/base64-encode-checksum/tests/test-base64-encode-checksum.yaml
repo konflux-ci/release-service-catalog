@@ -2,13 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-close-advisory-issues-fail-getting-closed-id
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-base64-encode-checksum
 spec:
   description: |
-    Test for close-advisory-issues where the curl command to get the id of the Closed
-    transition state fails. This is done with the mocks because of the issue id
+    Run the base64-encode-checksum task
   workspaces:
     - name: tests-workspace
   params:
@@ -58,30 +55,14 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:b7f90a1dde20efe9a4063c1082c4f0ce31113bb1
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
-              {
-                "releaseNotes": {
-                  "issues": {
-                    "fixed": [
-                      {
-                        "id": "NOCLOSE-555",
-                        "source": "issues.redhat.com"
-                      },
-                      {
-                        "id": "12345",
-                        "source": "bugzilla.redhat.com"
-                      }
-                    ]
-                  }
-                }
-              }
-              EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/binaries/"
+              echo "c01b39c7a35ccc3b081a3e83d2c71fa9a767ebfeb45c69f08e17dfe3ef375a7b ubuntu-9.10-dvd-i386.iso" \
+                > "$(params.dataDir)/$(context.pipelineRun.uid)/binaries/foo_1.0.0_SHA256SUMS"
           - name: skip-trusted-artifact-operations
             ref:
               name: skip-trusted-artifact-operations
@@ -110,12 +91,10 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: close-advisory-issues
+        name: base64-encode-checksum
       params:
-        - name: dataPath
-          value: $(context.pipelineRun.uid)/data.json
-        - name: advisoryUrl
-          value: https://access.redhat.com/errata/RHBA-2025:1111
+        - name: binaries_dir
+          value: $(context.pipelineRun.uid)/binaries
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -135,3 +114,30 @@ spec:
           workspace: tests-workspace
       runAfter:
         - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: blob
+          value: $(tasks.run-task.results.blob)
+      taskSpec:
+        params:
+          - name: blob
+            type: string
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -ex
+
+              expected_blob="YzAxYjM5YzdhMzVjY2MzYjA4MWEzZTgzZDJjNzFmYTlhNzY3ZWJmZWI0NWM2OWYwOGUxN2RmZTNlZjM3NWE3YiB1YnVudHUtOS4xMC1kdmQtaTM4Ni5pc28K"
+              if [ "$(params.blob)" != "$expected_blob" ]; then
+                echo "Error: blob result is not correct: $(params.blob)"
+                exit 1
+              fi
+      runAfter:
+        - run-task

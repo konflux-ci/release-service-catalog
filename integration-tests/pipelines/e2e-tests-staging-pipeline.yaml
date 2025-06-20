@@ -10,6 +10,13 @@ spec:
       type: string
     - name: PIPELINE_TEST_SUITE
       type: string
+      description: 'The name of the test corresponding to a defined Konflux integration test.'
+    - name: PIPELINE_USED
+      default: ''
+      type: string
+      description: |
+        The pipeline that is used by the test suite. 
+        If empty, use the PIPELINE_TEST_SUITE as the pipeline to be used
     - name: VAULT_PASSWORD_SECRET_NAME
       default: 'vault-password-secret'
       type: string
@@ -52,6 +59,8 @@ spec:
       params:
         - name: PIPELINE_TEST_SUITE
           value: $(params.PIPELINE_TEST_SUITE)
+        - name: PIPELINE_USED
+          value: $(params.PIPELINE_USED)
         - name: STEP_IMAGE
           value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
         - name: PR_GIT_URL
@@ -68,6 +77,7 @@ spec:
       taskSpec:
         params:
           - name: PIPELINE_TEST_SUITE
+          - name: PIPELINE_USED
           - name: STEP_IMAGE
           - name: PR_GIT_URL
           - name: PR_GIT_REVISION
@@ -97,8 +107,37 @@ spec:
                   secretKeyRef:
                     name: $(params.KUBECONFIG_SECRET_NAME)
                     key: kubeconfig
+              - name: PR_NUMBER
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['pac.test.appstudio.openshift.io/pull-request']
             script: |
               #!/usr/bin/env bash
+
+              # Function to check if a word exists in a string
+              # Arguments:
+              #   $1: The word to search for
+              #   $2: The string to search in
+              # Returns:
+              #   0 if word is found, 1 if not found
+              # Example:
+              #   if string_has_word "hello" "say hello world"; then
+              #     echo "Found word"
+              #   fi
+              string_has_word() {
+                  local search_word="$1"
+                  local search_string="$2"
+                  
+                  # Add spaces around both strings to ensure word boundaries
+                  search_string=" ${search_string} "
+                  search_word=" ${search_word} "
+                  
+                  if [[ "${search_string}" == *"${search_word}"* ]]; then
+                      return 0  # Word found
+                  else
+                      return 1  # Word not found
+                  fi
+              }
 
               exitfunc() {
                 local err=$1
@@ -129,6 +168,7 @@ spec:
 
               echo "PR_GIT_URL: $(params.PR_GIT_URL)"
               echo "PR_GIT_REVISION: $(params.PR_GIT_REVISION)"
+              echo "PR_NUMBER: ${PR_NUMBER:?}"
 
               VAULT_PASSWORD_FILE=$(mktemp)
               export VAULT_PASSWORD_FILE
@@ -147,7 +187,32 @@ spec:
               export RELEASE_CATALOG_GIT_URL
               export RELEASE_CATALOG_GIT_REVISION
 
-              "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/run-test.sh"
+              AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
+                "konflux-ci/release-service-catalog" "${PR_NUMBER:?}")
+
+              # if PIPELINE_USED is set, use it, otherwise use PIPELINE_TEST_SUITE
+              PIPELINE=""
+              if [ -n "$(params.PIPELINE_USED)" ]; then
+                PIPELINE="$(params.PIPELINE_USED)"
+              else
+                PIPELINE="$(params.PIPELINE_TEST_SUITE)"
+              fi
+
+              # check if PIPELINE is found as an affected pipeline
+              if string_has_word "${PIPELINE}" "${AFFECTED_PIPELINES}"; then
+                echo "This Test Suite is affected by changes in PR ${PR_NUMBER}"
+                # initially, there was a run-test.sh in every test suite directory.
+                # then we moved to have a generic run-test.sh in the root.
+                # support both cases.
+                if [ -f "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/run-test.sh" ]; then
+                  "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/run-test.sh"
+                else
+                  "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
+                fi
+              else
+                echo "This Test Suite is not affected by changes in PR ${PR_NUMBER}"
+                exit 0
+              fi
 
       runAfter:
         - get-snapshot-data

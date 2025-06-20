@@ -2,13 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-already-released-advisory-no-prod-or-pending
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-close-advisory-issues-cannot-get-transitions
 spec:
   description: |
-    Run the filter-already-released-advisory-images task with a snapshot containing only non-prod and non-pending
-    repositories and verify the task fails as expected.
+    Test for close-advisory-issues where the curl command to get the id of the Closed
+    transition state returns an empty transitions array. This is done with the mocks because of the issue id.
+    This can happen if we don't have the permissions to close the issue.
+    The task will add a comment to the Jira and succeed.
   workspaces:
     - name: tests-workspace
   params:
@@ -33,6 +33,9 @@ spec:
       type: string
   tasks:
     - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
         results:
           - name: sourceDataArtifact
@@ -49,49 +52,34 @@ spec:
           env:
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
-            - name: ORAS_OPTIONS
-              value: $(params.orasOptions)
-            - name: DEBUG
-              value: $(params.trustedArtifactsDebug)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: create-inputs
-            image: quay.io/konflux-ci/release-service-utils:6a1df8c94948c3f1e83eb9e92a38a8e6431baa3b
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:b7f90a1dde20efe9a4063c1082c4f0ce31113bb1
             script: |
-              #!/usr/bin/env bash
+              #!/usr/bin/env sh
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" <<EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
-                "apiVersion": "appstudio.redhat.com/v1alpha1",
-                "kind": "ReleasePlanAdmission",
-                "metadata": {
-                  "name": "test",
-                  "namespace": "default"
-                },
-                "spec": {
-                  "applications": ["app"],
-                  "origin": "dev"
-                }
-              }
-              EOF
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" <<EOF
-              {
-                "application": "myapp",
-                "components": [
-                  {
-                    "name": "dev-component",
-                    "repository": "quay.io/redhat-dev/repo",
-                    "containerImage": "quay.io/redhat-dev/repo@sha256:abc123"
-                  },
-                  {
-                    "name": "other-component",
-                    "repository": "quay.io/other/repo",
-                    "containerImage": "quay.io/other/repo@sha256:def456"
+                "releaseNotes": {
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "NOCLOSE-555",
+                        "source": "issues.redhat.com"
+                      },
+                      {
+                        "id": "12345",
+                        "source": "bugzilla.redhat.com"
+                      }
+                    ]
                   }
-                ]
+                }
               }
               EOF
           - name: skip-trusted-artifact-operations
@@ -120,41 +108,30 @@ spec:
                 value: $(params.ociStorage)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
-      workspaces:
-        - name: data
-          workspace: tests-workspace
     - name: run-task
       taskRef:
-        name: filter-already-released-advisory-images
+        name: close-advisory-issues
       params:
-        - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
-        - name: releasePlanAdmissionPath
-          value: "$(context.pipelineRun.uid)/test_release_plan_admission.json"
-        - name: resultsDirPath
-          value: "$(context.pipelineRun.uid)/results"
-        - name: synchronously
-          value: "false"
-        - name: taskGitUrl
-          value: "http://localhost"
-        - name: taskGitRevision
-          value: "main"
-        - name: pipelineRunUid
-          value: $(context.pipelineRun.uid)
-        - name: subdirectory
-          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: advisoryUrl
+          value: https://access.redhat.com/errata/RHBA-2025:1111
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
           value: $(params.orasOptions)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
         - name: sourceDataArtifact
-          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)/$(context.pipelineRun.uid)"
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
-      runAfter:
-        - setup
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
       workspaces:
         - name: data
           workspace: tests-workspace
+      runAfter:
+        - setup

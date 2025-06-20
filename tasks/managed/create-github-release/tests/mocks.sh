@@ -5,7 +5,7 @@ set -eux
 
 function gh() {
   echo "Mock gh called with: $*" >&2
-  echo "$*" >> $(workspaces.data.path)/mock_gh.txt
+  echo "$*" >> "$(params.dataDir)/mock_gh.txt"
   if [[ "$*" == "api repos/foo/repo_with_release/releases"* ]]; then
     echo "{"repodata": "lotsofdata"}"
     exit 0

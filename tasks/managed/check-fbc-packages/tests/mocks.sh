@@ -2,7 +2,7 @@
 set -eux
 
 function opm() {
-  echo $* >> $(workspaces.data.path)/mock_opm.txt
+  echo $* >> $(params.dataDir)/mock_opm.txt
   if [[ "$*" == "render "* ]]
   then
     echo '{"schema": "olm.package","name": "test-package-1"}'

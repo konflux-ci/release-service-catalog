@@ -9,6 +9,26 @@ spec:
     but only extract binaries for the desired components. Result should be 2.
   workspaces:
     - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
   tasks:
     - name: setup
       workspaces:
@@ -17,6 +37,23 @@ spec:
       taskSpec:
         workspaces:
           - name: data
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-snapshot
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
@@ -24,7 +61,8 @@ spec:
               #!/usr/bin/env sh
               set -eux
 
-              cat > "$(workspaces.data.path)"/snapshot.json << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
               {
                 "application": "myapp",
                 "components": [
@@ -44,7 +82,7 @@ spec:
               }
               EOF
 
-              cat > "$(workspaces.data.path)"/data.json << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "contentGateway": {
                   "components": [
@@ -55,8 +93,8 @@ spec:
               }
               EOF
 
-              mkdir -p "$(workspaces.data.path)"/image_data
-              cd "$(workspaces.data.path)"/image_data
+              mkdir -p "$(params.dataDir)/image_data"
+              cd "$(params.dataDir)/image_data"
 
               cat > manifest.json <<EOF
               {
@@ -77,6 +115,32 @@ spec:
               mkdir -p "$TAR_IN2"/my-binaries-path
               echo text2 > "$TAR_IN2"/my-binaries-path/file2.txt
               tar czf 2222 -C "$TAR_IN2" my-binaries-path
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
         name: extract-binaries-from-image
@@ -84,11 +148,25 @@ spec:
         - name: image_binaries_path
           value: my-binaries-path
         - name: snapshotPath
-          value: snapshot.json
+          value: $(context.pipelineRun.uid)/snapshot.json
         - name: subdirectory
           value: my-subdir
         - name: dataPath
-          value: "data.json"
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
       workspaces:
         - name: data
           workspace: tests-workspace
@@ -101,25 +179,63 @@ spec:
       params:
         - name: binaries_path
           value: $(tasks.run-task.results.binaries_path)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
       taskSpec:
-        workspaces:
-          - name: data
         params:
           - name: binaries_path
             type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
           - name: check-result
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              ACTUAL_CALLS="$(wc -l < "$(workspaces.data.path)"/mock_skopeo.txt)"
+              ACTUAL_CALLS="$(wc -l < "$(params.dataDir)/mock_skopeo.txt")"
               EXPECTED_CALLS=2
 
               if [ "$ACTUAL_CALLS" != "$EXPECTED_CALLS" ]; then
                 echo "Error: skopeo was expected to be called $EXPECTED_CALLS times. Actual calls: $ACTUAL_CALLS"
-                cat "$(workspaces.data.path)"/mock_skopeo.txt
+                cat "$(params.dataDir)/mock_skopeo.txt"
                 exit 1
               fi
 
@@ -128,7 +244,7 @@ spec:
                   exit 1
               fi
 
-              cd "$(workspaces.data.path)/$(params.binaries_path)"
+              cd "$(params.dataDir)/$(params.binaries_path)"
 
               test -f file1.txt
               test -f file2.txt

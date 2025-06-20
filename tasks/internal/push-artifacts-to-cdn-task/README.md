@@ -29,6 +29,9 @@ Tekton task to push artifacts to CDN and optionally Dev Portal with optional sig
 | cgwHostname           | The hostname of the content-gateway to publish the metadata to    | Yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret             | Env specific secret containing the content gateway credentials    | No       | -                                                        |
 
+## Changes in 2.1.0
+* Added compute resource limits
+
 ## Changes in 2.0.0
 * Add new required parameter `signingKeyName`. This is used for checksum signing
 

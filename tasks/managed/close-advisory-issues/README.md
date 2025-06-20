@@ -21,6 +21,11 @@ Issues in other servers will be skipped without the task failing.
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
 
+## Changes in 1.2.0
+* Change the logic to pass the task even if we cannot close an issue
+  * In some cases we do not have the permissions to close a Jira
+  * If we cannot close it, we at least try to add a comment
+
 ## Changes in 1.1.0
 * Added compute resource limits
 

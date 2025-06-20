@@ -4,13 +4,13 @@ kind: Task
 metadata:
   name: publish-index-image
   labels:
-    app.kubernetes.io/version: "4.0.0"
+    app.kubernetes.io/version: "5.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: >-
-      Publish a built FBC index image using skopeo
+    Publish a built FBC index image using skopeo
   params:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
@@ -21,6 +21,9 @@ spec:
     - name: targetIndex
       type: string
       description: Pullspec to push the image to
+    - name: internalRequestResultsFile
+      type: string
+      description: File containing the results of the build
     - name: retries
       type: string
       default: "0"
@@ -35,9 +38,34 @@ spec:
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: $(workspaces.data.path)
     - name: taskGitUrl
       type: string
-      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
@@ -47,15 +75,74 @@ spec:
   results:
     - name: requestMessage
       type: string
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
   steps:
+    - name: skip-trusted-artifact-operations
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 20m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+    - name: use-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
     - name: publish-index-image
       image: >-
         quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 200m
       script: |
         #!/usr/bin/env bash
         set -e
 
-        DATA_FILE="$(workspaces.data.path)/$(params.dataPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No valid data file was provided."
             exit 1
@@ -65,28 +152,72 @@ spec:
         credentials=$(jq -r '.fbc.publishingCredentials' "$DATA_FILE")
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        publishingImages=("$(params.targetIndex)")
-        # only publish the extra timestamp-based tag if the targetIndex does not have it already
-        if [[ ! "$(params.targetIndex)" =~ .*$(params.buildTimestamp)$ ]]; then
-          publishingImages+=("$(params.targetIndex)-$(params.buildTimestamp)")
-        fi
+        LENGTH="$(jq -r '.components | length' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
+        for((i=0; i<LENGTH; i++)); do
+          targetIndex=$(jq -r --argjson i "$i" \
+            '.components[$i].target_index' "$(params.dataDir)/$(params.internalRequestResultsFile)")
 
-        for((i=0; i<${#publishingImages[@]}; i++ )); do
-            echo "=== Creating internal request to publish image:"
-            echo ""
-            echo "- from: $(params.sourceIndex)"
-            echo "- to: ${publishingImages[$i]}"
+          sourceIndex=$(jq -r  --argjson i "$i" \
+            '.components[$i].index_image_resolved' "$(params.dataDir)/$(params.internalRequestResultsFile)")
 
-            internal-request --pipeline "${request}" \
-                -p sourceIndex="$(params.sourceIndex)" \
-                -p targetIndex="${publishingImages[$i]}" \
-                -p publishingCredentials="${credentials}" \
-                -p retries="$(params.retries)" \
-                -p taskGitUrl="$(params.taskGitUrl)" \
-                -p taskGitRevision="$(params.taskGitRevision)" \
-                -t "$(params.requestTimeout)" \
-                -l ${pipelinerun_label}="$(params.pipelineRunUid)"
-            echo "=== done"
-            echo ""
-            echo ""
+          buildTimestamp=$(jq -r --argjson i "$i" '.components[$i].completion_time' \
+            "$(params.dataDir)/$(params.internalRequestResultsFile)")
+
+          publishingImages=("$targetIndex")
+          # only publish the extra timestamp-based tag if the targetIndex does not have it already
+          if [[ ! "$targetIndex" =~ .*"$buildTimestamp"$ ]]; then
+            publishingImages+=("${targetIndex}-${buildTimestamp}")
+          fi
+
+          for((x=0; x<${#publishingImages[@]}; x++ )); do
+              echo "=== Creating internal request to publish image:"
+              echo ""
+              echo "- from: ${sourceIndex}"
+              echo "- to: ${publishingImages[$i]}"
+
+              internal-request --pipeline "${request}" \
+                  -p sourceIndex="${sourceIndex}" \
+                  -p targetIndex="${publishingImages[$x]}" \
+                  -p publishingCredentials="${credentials}" \
+                  -p retries="$(params.retries)" \
+                  -p taskGitUrl="$(params.taskGitUrl)" \
+                  -p taskGitRevision="$(params.taskGitRevision)" \
+                  -t "$(params.requestTimeout)" \
+                  -l ${pipelinerun_label}="$(params.pipelineRunUid)"
+              echo "=== done"
+              echo ""
+              echo ""
+          done
         done
+    - name: create-trusted-artifact
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
+    - name: patch-source-data-artifact-result
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

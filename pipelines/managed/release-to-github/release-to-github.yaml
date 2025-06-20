@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: release-to-github
   labels:
-    app.kubernetes.io/version: "4.5.0"
+    app.kubernetes.io/version: "5.0.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -41,7 +41,11 @@ spec:
     - name: enterpriseContractTimeout
       type: string
       description: Timeout setting for `ec validate`
-      default: 40m0s
+      default: 8h0m0s
+    - name: enterpriseContractWorkerCount
+      type: string
+      description: Number of parallel workers for policy evaluation
+      default: 4
     - name: postCleanUp
       type: string
       description: Cleans up workspace after finishing executing the pipeline
@@ -59,6 +63,23 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: ociStorage
+      type: string
+      default: "quay.io/konflux-ci/release-service-trusted-artifacts"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      # to avoid tar extraction errors, we need to specify a subdirectory
+      # inside the volume.
+      default: "/var/workdir/release"
   workspaces:
     - name: release-workspace
   tasks:
@@ -108,6 +129,12 @@ spec:
           value: $(params.snapshot)
         - name: subdirectory
           value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
@@ -127,6 +154,14 @@ spec:
           value:
             - github
             - sign
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
@@ -158,39 +193,56 @@ spec:
       params:
         - name: snapshotPath
           value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
       workspaces:
         - name: data
           workspace: release-workspace
       runAfter:
         - collect-data
-    - name: verify-enterprise-contract
+    - name: verify-conforma
+      timeout: "4h00m0s"
       taskRef:
-        resolver: "bundles"
+        resolver: "git"
         params:
-          - name: bundle
-            value: $(params.verify_ec_task_bundle)
-          - name: kind
-            value: task
-          - name: name
-            value: verify-enterprise-contract
+          - name: url
+            value: https://github.com/enterprise-contract/ec-cli
+          - name: revision
+            value: "$(params.verify_ec_task_git_revision)"
+          - name: pathInRepo
+            value: "tasks/verify-conforma-konflux-ta/0.1/verify-conforma-konflux-ta.yaml"
       params:
-        - name: IMAGES
-          value: "$(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)"
+        - name: SNAPSHOT_FILENAME
+          value: "$(tasks.collect-data.results.snapshotSpec)"
         - name: SSL_CERT_DIR
           value: /var/run/secrets/kubernetes.io/serviceaccount
         - name: POLICY_CONFIGURATION
           value: $(params.enterpriseContractPolicy)
         - name: STRICT
-          value: "1"
+          # only set to false for development
+          value: "true"
         - name: IGNORE_REKOR
           value: "true"
         - name: EXTRA_RULE_DATA
           value: $(params.enterpriseContractExtraRuleData)
         - name: TIMEOUT
           value: $(params.enterpriseContractTimeout)
-      workspaces:
-        - name: data
-          workspace: release-workspace
+        - name: WORKERS
+          value: $(params.enterpriseContractWorkerCount)
+        - name: SOURCE_DATA_ARTIFACT
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: TRUSTED_ARTIFACTS_DEBUG
+          value: "$(params.trustedArtifactsDebug)"
       runAfter:
         - validate-single-component
     - name: extract-requester-from-release
@@ -220,7 +272,7 @@ spec:
             if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
       runAfter:
         - verify-access-to-resources
-        - verify-enterprise-contract
+        - verify-conforma
     - name: extract-binaries-from-image
       workspaces:
         - name: data
@@ -239,6 +291,18 @@ spec:
           value: $(context.pipelineRun.uid)
         - name: snapshotPath
           value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
       runAfter:
         - validate-single-component
     - name: base64-encode-checksum
@@ -257,6 +321,18 @@ spec:
       params:
         - name: binaries_dir
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-binaries-from-image.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
       runAfter:
         - extract-binaries-from-image
     - name: sign-base64-blob
@@ -283,6 +359,14 @@ spec:
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-binaries-from-image.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
@@ -310,6 +394,18 @@ spec:
           value: $(tasks.collect-data.results.snapshotSpec)
         - name: binariesPath
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-binaries-from-image.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
       runAfter:
         - extract-binaries-from-image
     - name: create-github-release
@@ -336,6 +432,18 @@ spec:
           value: $(tasks.extract-binaries-from-image.results.binaries_path)
         - name: resultsDirPath
           value: $(tasks.collect-data.results.resultsDir)
+        - name: sourceDataArtifact
+          value: "$(tasks.sign-base64-blob.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
       runAfter:
         - collect-gh-params
         - sign-base64-blob
@@ -345,6 +453,17 @@ spec:
           value: $(params.release)
         - name: resultsDirPath
           value: $(tasks.collect-data.results.resultsDir)
+        - name: resultsDirName
+          value: "results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: resultArtifacts
+          value:
+            - "$(tasks.create-github-release.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
@@ -364,7 +483,7 @@ spec:
       runAfter:
         - create-github-release
   finally:
-    - name: cleanup
+    - name: cleanup-internal-requests
       taskRef:
         resolver: "git"
         params:
@@ -373,16 +492,11 @@ spec:
           - name: revision
             value: $(params.taskGitRevision)
           - name: pathInRepo
-            value: tasks/managed/cleanup-workspace/cleanup-workspace.yaml
+            value: tasks/managed/cleanup-internal-requests/cleanup-internal-requests.yaml
       when:
         - input: $(params.postCleanUp)
           operator: in
           values: ["true"]
       params:
-        - name: subdirectory
-          value: "$(context.pipelineRun.uid)"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
-      workspaces:
-        - name: input
-          workspace: release-workspace
