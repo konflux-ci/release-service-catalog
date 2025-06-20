@@ -20,6 +20,9 @@ Tekton task to reduce a snapshot to a single component based on the component th
 | taskGitUrl                          | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | Yes        | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                     | The revision in the taskGitUrl repo to be used                                                                             | Yes        | production                                                |
 
+## Chnages in 1.1.1
+* Updates compute resource limits due to OOM kill
+
 ## Changes in 1.1.0
 * Added compute resource limits
 
