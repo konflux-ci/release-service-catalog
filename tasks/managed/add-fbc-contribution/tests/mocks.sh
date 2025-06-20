@@ -56,6 +56,12 @@ function date() {
       "+%s")
           echo "1696946200" | tee $(params.dataDir)/mock_date_epoch.txt
           ;;
+      "-u +%Hh%Mm%Ss -d @"*)
+          /usr/bin/date $*
+          ;;
+      "-u +%Hh%Mm%Ss -d @"*)
+          usr/bin/date $*
+          ;;
       "*")
           echo Error: Unexpected call
           exit 1
