@@ -30,10 +30,10 @@ function cleanup_tags() {
 
 function skopeo() {
   echo $* >> $(params.dataDir)/mock_skopeo.txt
-  if [[ "$*" == "inspect --raw docker://registry.io/oci-artifact"* ]]
+  if [[ "$*" == "inspect --retry-times 3 --raw docker://registry.io/oci-artifact"* ]]
   then
     echo '{"mediaType": "application/vnd.oci.image.index.v1+json"}'
-  elif [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
   then
     echo '{"mediaType": "my_media_type+gzip"}'
   else

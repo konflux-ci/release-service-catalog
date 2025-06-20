@@ -118,22 +118,22 @@ function skopeo() {
     tomorrow="$(date --date="tomorrow" --iso-8601="seconds")"
 
     shift
-    if [[ "$*" == "--raw docker://registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:1" ]]; then
+    if [[ "$*" == "--retry-times 3 --raw docker://registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:1" ]]; then
         echo '{"manifests": ['
         echo '{ "mediaType": "application/vnd.docker.distribution.manifest.v2+json", "digest": "sha256:000" },'
         echo '{ "mediaType": "application/vnd.docker.distribution.manifest.v2+json", "digest": "sha256:001" }'
         echo ']}'
     fi
 
-    if [[ "$*" == "--config docker://registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000" ]]; then
+    if [[ "$*" == "--retry-times 3 --config docker://registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000" ]]; then
         echo '{"created": "'"${today}"'"}'
     fi
 
-    if [[ "$*" == "--config docker://quay.io/fbc/catalog:complete" ]]; then
+    if [[ "$*" == "--retry-times 3 --config docker://quay.io/fbc/catalog:complete" ]]; then
         echo '{"created": "'"${yesterday}"'"}'
     fi
 
-    if [[ "$*" == "--config docker://quay.io/fbc/catalog:outdated" ]]; then
+    if [[ "$*" == "--retry-times 3 --config docker://quay.io/fbc/catalog:outdated" ]]; then
         echo '{"created": "'"${tomorrow}"'"}'
     fi
 }

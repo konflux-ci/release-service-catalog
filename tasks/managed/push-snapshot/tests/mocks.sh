@@ -55,10 +55,10 @@ function cosign() {
 function skopeo() {
   echo Mock skopeo called with: $* >&2
   echo $* >> "$(params.dataDir)/mock_skopeo.txt"
-  if [[ "$*" == "inspect --raw docker://reg.io/test@sha256:abcdefg" ]]; then
+  if [[ "$*" == "inspect --retry-times 3 --raw docker://reg.io/test@sha256:abcdefg" ]]; then
     echo '{"mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [{"platform":{"os":"linux","architecture":"amd64"}}, {"platform":{"os":"linux","architecture":"ppc64le"}}]}'
     return
-  elif [[ "$*" == "inspect --raw docker://"* ]]; then
+  elif [[ "$*" == "inspect --retry-times 3 --raw docker://"* ]]; then
     echo '{"mediaType": "my_media_type"}'
     return
   fi

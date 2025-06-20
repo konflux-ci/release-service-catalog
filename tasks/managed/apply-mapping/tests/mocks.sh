@@ -33,34 +33,34 @@ function skopeo() {
   echo Mock skopeo called with: $* >&2
   echo $* >> $(params.dataDir)/mock_skopeo.txt
 
-  if [[ "$*" =~ list-tags\ docker://repo1 ]]; then
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo1 ]]; then
       echo '{"Tags": ["v2.0.0-4", "v2.0.0-3", "v2.0.0-2"]}'
       return
   fi
 
-  if [[ "$*" =~ inspect\ --no-tags\ docker://repo1 ]]; then
+  if [[ "$*" =~ inspect\ --retry-times\ 3\ --no-tags\ docker://repo1 ]]; then
       echo '{"Tags": ["v2.0.0-4", "v2.0.0-3", "v2.0.0-2"]}'
       return
   fi
 
-  if [[ "$*" =~ inspect\ --no-tags\ docker://repo2 ]]; then
+  if [[ "$*" =~ inspect\ --retry-times\ 3\ --no-tags\ docker://repo2 ]]; then
       echo '{"Tags": []}'
       return
   fi
 
-  if [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/badimage"* ]]
+  if [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/badimage"* ]]
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}}'
     return
-  elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/labels"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/labels"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "Goodlabel": "labelvalue", "Goodlabel.with-dash": "labelvalue-with-dash", "Badlabel": "label with space"}}'
     return
-  elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://registry.io/onlycreated"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/onlycreated"* ]]
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}, "Created": "2024-07-29T02:17:29"}'
     return
-  elif [[ "$*" == "inspect --no-tags --override-os linux --override-arch amd64 docker://"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
     return

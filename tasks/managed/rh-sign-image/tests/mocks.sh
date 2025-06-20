@@ -154,13 +154,13 @@ EOF
 function skopeo() {
   echo $* >> $(params.dataDir)/mock_skopeo.txt
   echo Mock skopeo called with: $*  >> /dev/stderr
-  if [[ "$*" == "inspect --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
+  if [[ "$*" == "inspect --retry-times 3 --raw docker://"* ]] || [[ "$*" == "inspect --no-tags --override-os linux --override-arch "*" docker://"* ]]
   then
     echo '{"mediaType": "my_media_type"}'
   else
-    if [[ "$*" != "inspect --no-tags docker://"* ]]
+    if [[ "$*" != "inspect --retry-times 3 --no-tags docker://"* ]]
     then
-      if [[ "$*" == "inspect --no-tags --raw docker://registry.io/multi-arch-image0"* ]]
+      if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/multi-arch-image0"* ]]
       then
         echo '{
                 "schemaVersion": 2,
@@ -188,7 +188,7 @@ function skopeo() {
               }
             '
       else
-        if [[ "$*" == "inspect --no-tags --raw docker://registry.io/image"* ]]
+        if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/image"* ]]
         then
           echo '{
                   "schemaVersion": 2,

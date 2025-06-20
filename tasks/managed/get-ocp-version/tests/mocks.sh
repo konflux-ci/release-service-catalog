@@ -2,7 +2,7 @@
 set -eux
 
 function skopeo() {
-    if [[ "$*" == "inspect --raw docker://quay.io/fbc/multi-arch@sha256:index" ]]; then
+    if [[ "$*" == "inspect --retry-times 3 --raw docker://quay.io/fbc/multi-arch@sha256:index" ]]; then
         echo '{ "mediaType": "application/vnd.oci.image.index.v1+json" }'
     else
         echo '{ "mediaType": "application/vnd.oci.image.manifest.v1+json",

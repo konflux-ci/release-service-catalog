@@ -9,7 +9,7 @@ function skopeo() {
   echo "$*" >> $(params.dataDir)/mock_skopeo.txt
 
 
-  if [[ "$*" == "inspect --raw docker://quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297" ]]; then
+  if [[ "$*" == "inspect --retry-times 3 --raw docker://quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297" ]]; then
     echo '{"annotations":{"org.opencontainers.image.base.name":"registry.redhat.io/openshift4/ose-operator-registry:v4.12"}}'
     return
   fi
