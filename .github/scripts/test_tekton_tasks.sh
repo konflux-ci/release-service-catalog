@@ -9,18 +9,61 @@
 # - Tekton installed on the cluster
 # - tkn installed
 #
-# Examples of usage:
-# export TEST_ITEMS="mydir/tasks/apply-mapping some/other/dir"
-# ./test_tekton_tasks.sh
-#
-# or
-#
-# ./test_tekton_tasks.sh mydir/tasks/apply-mapping some/other/dir
 
 # yield empty strings for unmatched patterns
 shopt -s nullglob
 
 WORKSPACE_TEMPLATE=${BASH_SOURCE%/*/*}/resources/workspace-template.yaml
+
+show_help() {
+  echo "Usage: $0 [--remove-compute-resources] [item1] [item2] [...]"
+  echo
+  echo Flags:
+  echo "  --help: Show this help message"
+  echo "  --remove-compute-resources: Remove compute resources from tasks"
+  echo
+  echo "Items can be task directories or paths to task test yaml files"
+  echo "(useful when working on a single test). They can be supplied"
+  echo "either as arguments or via the TEST_ITEMS environment variable."
+  echo
+  echo "Examples:"
+  echo "  $0 --remove-compute-resources tasks/apply-mapping"
+  echo "  $0 tasks/apply-mapping/tests/test-apply-mapping.yaml"
+  exit 1
+}
+
+REMOVE_COMPUTE_RESOURCES=false
+CLI_TEST_ITEMS=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --remove-compute-resources)
+      REMOVE_COMPUTE_RESOURCES=true
+      shift
+      ;;
+    --help)
+      show_help
+      ;;
+    --*)
+      show_help
+      ;;
+    *)
+      CLI_TEST_ITEMS+="$1 "
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$CLI_TEST_ITEMS" ]]; then
+  TEST_ITEMS="${CLI_TEST_ITEMS% }"  # Remove trailing space
+else
+  TEST_ITEMS="${TEST_ITEMS:-}"      # Use env var or empty string
+fi
+
+if [ -z "${TEST_ITEMS}" ]
+then
+  show_help
+fi
 
 if [ -z "${USE_TRUSTED_ARTIFACTS}" ]
 then
@@ -41,27 +84,6 @@ else
   kubectl patch serviceaccount default -p \
     '{"imagePullSecrets": [{"name": "docker-config"}], "secrets": [{"name": "docker-config"}]}'
 
-fi
-
-if [ $# -gt 0 ]
-then
-  TEST_ITEMS=$@
-fi
-
-if [ -z "${TEST_ITEMS}" ]
-then
-  echo Error: No task directories.
-  echo Usage:
-  echo "$0 [item1] [item2] [...]"
-  echo
-  echo or
-  echo
-  echo "export TEST_ITEMS=\"item1 item2 ...\""
-  echo "$0"
-  echo
-  echo Items can be task directories or paths to task test yaml files
-  echo "(useful when working on a single test)"
-  exit 1
 fi
 
 # Check that all directories exist. If not, fail
@@ -141,6 +163,11 @@ do
     echo "  Update resolver for $name"
     yq -i "(.spec.steps[] | select(.name == \"$name\") | .ref) = {\"name\": \"$name\"}" $TASK_COPY
   done
+
+  if [[ "$REMOVE_COMPUTE_RESOURCES" == "true" ]]; then
+    echo "Removing compute resources from task $TASK_NAME"
+    yq -i 'del(.spec.steps[].computeResources)' "$TASK_COPY"
+  fi
 
   echo "  Installing task"
   kubectl apply -f "$TASK_COPY"
