@@ -15,11 +15,31 @@ It uses InternalRequests so that it can be run on both public and private cluste
 | enterpriseContractPolicy        | JSON representation of the policy to be applied when validating the enterprise contract                                             | No       | -                                                         |
 | enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..."  | Yes      | pipeline_intention=release                                |
 | enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                   | Yes      | 10m0s                                                     |
+| enterpriseContractWorkerCount   | Number of parallel workers for policy evaluation                                                                                    | Yes      | 4                                                         |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                          | Yes      | true                                                      |
 | verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                                           | No       | -                                                         |
 | verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                 | No       | -                                                         |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                               | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                      | No       | -                                                         |
+| ociStorage                      | The OCI repository where the Trusted Artifacts are stored                                                                           | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts     |
+| orasOptions                     | oras options to pass to Trusted Artifacts calls                                                                                     | Yes      | ""                                                        |
+| trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                              | Yes      | ""                                                        |
+| dataDir                         | The location where data will be stored                                                                                              | Yes      | /var/workdir/release                                      |
+
+
+## Changes in 2.0.1
+* Fixed trusted artifacts references throughout the pipeline
+* Corrected `sourceDataArtifact` references in task parameters
+* Updated `update-cr-status` task to use `resultArtifacts` parameter instead of `sourceDataArtifact`
+* Fixed task execution order to ensure `update-cr-status` runs after all required results are available
+
+## Changes in 2.0.0
+* **BREAKING**: Migrated to trusted artifacts architecture for enhanced security and traceability
+* Added trusted artifacts parameters: `ociStorage`, `orasOptions`, `trustedArtifactsDebug`, `dataDir`
+* Added `enterpriseContractWorkerCount` parameter for configurable parallel processing
+* Replaced `verify-enterprise-contract` task with `verify-conforma` task for better performance
+* All tasks now use trusted artifacts for data exchange instead of shared workspaces
+* Updated file paths to use `dataDir` instead of workspace paths
 
 ### Changes in 1.0.1
 * Added retries in the pipline 

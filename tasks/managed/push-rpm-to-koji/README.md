@@ -12,6 +12,9 @@ Tekton task to push konflux build rpms to koji instance.
 | subdirectory         | Path to results directory in the data workspace                                | No       | -             |
 | pipelineImage        | The image url with koji (1.34 or higher), jq and kinit installed for running the push-rpm-to-koji task | No       | -             |
 
+## Changes in 0.4.0
+* Added compute resource limits
+
 ## Changes in 0.3.0
 * Tags builds using `koji.build-target` annotation on the RPM image.
 

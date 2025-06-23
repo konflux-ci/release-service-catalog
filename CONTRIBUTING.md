@@ -107,6 +107,24 @@ For other images, the reference should always either specify an image by a non-m
 or by its digest (e.g. `registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded`).
 Floating tags like `latest` or `8.8` in the case of the ubi image should be avoided.
 
+### Compute Resources
+
+All steps in the [managed](tasks/managed) and [internal](tasks/internal) tasks have `computeResources` defined. This is because the namespace in which these run is often under a very high load.
+If you are contributing a new managed or internal task (or adding a step to an existing one), you must provide appropriate `computeResources`. If you do not do this, your PR will fail
+the linting check due to the check defined in [this script](.github/scripts/tkn_check_compute_resources.sh).
+
+When setting `computeResources`, you should set the `limits.memory` and `requests.memory` to the same value. No `limits.cpu` should be defined, but a `requests.cpu` should be.
+Here is an example
+```yaml
+- name: my-new-step
+  computeResources:
+    limits:
+      memory: 256Mi
+    requests:
+      memory: 256Mi
+      cpu: 250m
+```
+
 ### Modes for Running Pipelines
 
 Note: There are currently 2 modes that may be used when running pipelines:
