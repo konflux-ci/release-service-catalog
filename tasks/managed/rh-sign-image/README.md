@@ -25,6 +25,11 @@ Task to create internalrequests or pipelineruns to sign snapshot components
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                                                                                                                                             | No       | ""                      |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                                                                                                                                                                    | No       | ""                      |
 
+## Changes in 6.0.2
+* Adjust computeResources to the guidance we were given
+  * Removed cpu limit
+  * Set memory request to be the same as memory limit
+
 ## Changes in 6.0.1
 * The default serviceAccount is changed from `appstudio-pipeline` to `release-service-account`
 
