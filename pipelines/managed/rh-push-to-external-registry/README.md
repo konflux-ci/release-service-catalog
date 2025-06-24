@@ -24,6 +24,9 @@ Tekton pipeline to release Red Hat Snapshots to an external registry. This pipel
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 6.0.1
+* Add retries in the pipeline
+
 ## Changes in 6.0.0
 * Activate the use of trusted artifacts
 * Use the verify-conforma task to verify the enterprise contract policy

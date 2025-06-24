@@ -25,6 +25,9 @@ tasks:
         value: '{"components":[{"name":"component1","containerImage":"quay.io/repo/component1:digest"}}]}'
 ```
 
+## Changes in 0.8.0
+* Added compute resource limits
+
 ## Changes in 0.7.1
 * Fix shellcheck/checkton linting issues in the task
 

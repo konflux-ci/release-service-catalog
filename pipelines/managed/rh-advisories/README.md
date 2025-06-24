@@ -28,6 +28,9 @@ the rh-push-to-registry-redhat-io pipeline.
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                             | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 
+## Changes in 2.1.2
+* Add advisory_internal_url from create-advisory task as a pipeline result
+
 ## Changes in 2.1.1
 * Remove snippet to allow `close-advisory-issues` to fail
   * This was added temporarily in 2.0.1

@@ -14,11 +14,26 @@ Tekton pipeline to release a single FBC component to the Addons Registry.
 | enterpriseContractPolicy        | JSON representation of the policy to be applied when validating the enterprise contract                                            | No       | -                                                         |
 | enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes      | pipeline_intention=release                                |
 | enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 40m0s                                                     |
+| enterpriseContractWorkerCount   | Number of parallel workers for policy evaluation                                                                                   | Yes      | 4                                                         |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                         | Yes      | true                                                      |
-| verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task                                                          | No       | -                                                         |
+| verify_ec_task_bundle           | The location of the bundle containing the verify-enterprise-contract task (deprecated, kept for compatibility)                    | No       | -                                                         |
 | verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                | No       | -                                                         |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
+| ociStorage                      | The URL of the OCI storage for trusted artifacts                                                                                   | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts     |
+| orasOptions                     | Oras options to pass to Trusted Artifacts calls                                                                                    | Yes      | ""                                                        |
+| trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.                                           | Yes      | ""                                                        |
+| dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
+
+## Changes in 1.0.0
+* Convert pipeline to use trusted artifacts
+* Add new parameters: `ociStorage`, `orasOptions`, `trustedArtifactsDebug`, and `dataDir`
+* Update all tasks to pass trusted artifacts parameters and use `sourceDataArtifact` for data flow
+* Change file paths to use `dataDir` instead of workspace paths
+* Use the verify-conforma task to verify the enterprise contract policy
+
+## Changes in 0.5.1
+* Add retries in the pipeline
 
 ## Changes in 0.5.0
 * add new required parameters to `collect-registry-token-secret` and

@@ -7,7 +7,7 @@ function internal-request() {
   END_TIME=$(date -ud "$TIMEOUT seconds" +%s)
 
   echo Mock internal-request called with: $*
-  echo $* >> $(workspaces.data.path)/mock_internal-request.txt
+  echo $* >> $(params.dataDir)/mock_internal-request.txt
 
   # since we put the IR in the background, we need to be able to locate it so we can
   # get the name to patch it. We do this by tacking on another random label that we can use
@@ -53,7 +53,7 @@ function set_ir_status() {
     DELAY=$3
     echo "Setting status of $NAME to reason $REASON with result $RESULT in $DELAY seconds..." >&2
     sleep $DELAY
-    PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    PATCH_FILE=$(params.dataDir)/${NAME}-patch.json
     status="True"
     RESULTS="Success"
     if [ "${REASON}" == "Failure" ]; then
@@ -87,7 +87,7 @@ function internal-pipelinerun() {
   END_TIME=$(date -ud "$TIMEOUT seconds" +%s)
 
   echo Mock internal-pipelinerun called with: $*
-  echo $* >> $(workspaces.data.path)/mock_internal-pipelinerun.txt
+  echo $* >> $(params.dataDir)/mock_internal-pipelinerun.txt
 
   # since we put the PLR in the background, we need to be able to locate it so we can
   # get the name to patch it. We do this by tacking on another random label that we can use
@@ -130,7 +130,7 @@ function set_plr_status() {
     DELAY=$3
     echo Setting status of $NAME to reason $REASON in $DELAY seconds... >&2
     sleep $DELAY
-    PATCH_FILE=$(workspaces.data.path)/${NAME}-patch.json
+    PATCH_FILE=$(params.dataDir)/${NAME}-patch.json
     status="True"
     RESULTS="Success"
     if [ "${REASON}" == "Failed" ]; then

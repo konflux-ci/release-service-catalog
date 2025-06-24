@@ -4,7 +4,7 @@ kind: Task
 metadata:
   name: push-artifacts-to-cdn-task
   labels:
-    app.kubernetes.io/version: "2.1.0"
+    app.kubernetes.io/version: "2.2.0"
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
@@ -179,9 +179,16 @@ spec:
             PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}") \
                   || (echo "Missing containerImage for component." >&2 && exit 1 )
 
-            DESTINATION="${DISK_IMAGE_DIR}/$(jq -er '.staged.destination' <<< "${COMPONENT}")/FILES" \
-              || (echo "Missing staged.destination value for component. This should be an existing pulp repo. \
-                  Failing" >&2 && exit 1)
+            STAGED_DESTINATION=$(jq -r '.staged.destination // empty' <<< "${COMPONENT}")
+
+            if [ -z "$STAGED_DESTINATION" ]; then
+              # Use a default destination if not provided
+              DESTINATION="${DISK_IMAGE_DIR}/default/FILES"
+              echo "No staged.destination specified for component; using default destination: $DESTINATION"
+            else
+              DESTINATION="${DISK_IMAGE_DIR}/${STAGED_DESTINATION}/FILES"
+            fi
+
             mkdir -p "${DESTINATION}"
             DOWNLOAD_DIR=$(mktemp -d)
             cd "$DOWNLOAD_DIR"
@@ -1086,9 +1093,16 @@ spec:
 
         echo "$STAGED_JSON" | yq -P -I 4 > staged.yaml
 
-        pulp_push_wrapper --debug --source "${DISK_IMAGE_DIR}" --pulp-url "$PULP_URL" \
-          --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL" \
-          2> "$STDERR_FILE"
+        # Check if staged.destination exists in any component
+        HAS_STAGED_DESTINATION=$(jq 'any(.components[]?.staged?.destination; . != null)' <<< "$SNAPSHOT_JSON")
+        if [ "$HAS_STAGED_DESTINATION" = "true" ]; then
+          echo "Pushing to customer portal (Pulp) with destination: $HAS_STAGED_DESTINATION"
+          pulp_push_wrapper --debug --source "${DISK_IMAGE_DIR}" --pulp-url "$PULP_URL" \
+            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL" \
+            2> "$STDERR_FILE"
+        else
+          echo "Skipping Pulp push: no staged.destination found in any component."
+        fi
 
         relative_paths=$(echo "$STAGED_JSON" | jq -erc .payload.files[].relative_path)
         component_destinations=()

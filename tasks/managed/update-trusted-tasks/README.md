@@ -11,5 +11,8 @@ If it is already in place, it will be used as an input to which the results will
 |------------|-------------------------------------------------------------------------|----------|---------------|
 | snapshotPath   | Path to the JSON string of the Snapshot spec in the data workspace | No       | -             |
 
+## Changes in 0.3.0
+* Added compute resource limits
+
 ## Changes in 0.2.0
 * Task's image (quay.io/konflux-ci/appstudio-utils) has been updated to the latest

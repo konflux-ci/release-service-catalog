@@ -18,6 +18,9 @@
 | defaultGithubAppID             | ID of Github app used for updating PR                                                        | true     | 305606                                                                                                                                           |
 | defaultGithubAppInstallationID | Installation ID of Github app in the organization                                            | true     | 35269675                                                                                                                                         |
 
+## Changes in 1.4.0
+* Added compute resource limits
+
 ## Changes in 1.3.0
 * Updated the base image used in this task
   * Deprecated the `gitImage` and `scriptImage` parameters

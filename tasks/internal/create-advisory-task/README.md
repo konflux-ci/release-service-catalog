@@ -17,8 +17,11 @@ internal request. The success/failure is handled in the task creating the intern
 | errata_secret_name             | The name of the secret that contains the errata service account metadata                               | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 
+## Changes in 2.0.2
+* Use `--slurpfile` with `jq` since `--argfile` is deprecated
+
 ## Changes in 2.0.1
-*  Updated the `ADVISORY_URL_PREFIX` logic to select either `https://access.redhat.com/errata` or 
+*  Updated the `ADVISORY_URL_PREFIX` logic to select either `https://access.redhat.com/errata` or
   `https://access.stage.redhat.com/errata` based on the Git repository's org.
 
 ## Changes in 2.0.0
