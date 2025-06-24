@@ -18,18 +18,3 @@ A tekton task that updates the passed CR status with the contents stored in the 
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
-
-## Changes in 1.1.0
-* Added compute resource limits
-
-## Changes in 1.0.0
-* This task now supports Trusted artifacts
-
-## Changes in 0.3.1
-* Fix shellcheck/checkton linting issues in the task and tests
-
-## Changes in 0.3.0
-* Updated the base image used in this task
-
-## Changes in 0.2.0
-* Updated the base image used in this task

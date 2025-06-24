@@ -17,9 +17,3 @@ A task result is returned for each resource with the relative path to the stored
 | collectorsResourceType | The type of resource that contains the collectors                | No       | -             |
 | collectorsResource     | The namespaced name of the resource that contains the collectors | No       | -             |
 | subdirectory           | Subdirectory inside the workspace to be used                     | Yes      | ""            |
-
-## Changes in 0.3.0
-* Handle the case where the previousRelease value is empty
-
-## Changes in 0.2.0
-* Stop passing releasePlan and releasePlanAdmission and pass instead a reference to a resource

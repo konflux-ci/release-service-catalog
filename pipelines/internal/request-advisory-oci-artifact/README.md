@@ -9,6 +9,3 @@ Pipeline to request an oci artifact containing an advisory json using an advisor
 | advisory_url        | URL pointing to the advisory                                                            | No       | -                                                           |
 | taskGitUrl          | The url to the git repo where the release-service-catalog tasks to be used are stored   | Yes      | https://github.com/konflux-ci/release-service-catalog.git   |
 | taskGitRevision     | The revision in the taskGitUrl repo to be used                                          | No       | -                                                           |
-
-## Changes in 0.0.2
-* Add retries to request-advisory-oci-artifact task call

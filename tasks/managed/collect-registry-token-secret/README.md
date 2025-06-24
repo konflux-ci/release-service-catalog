@@ -15,9 +15,3 @@ Tekton task that collects secret name containing registry token from the data fi
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
-
-## Changes in 1.0.0
-* This task now supports Trusted artifacts
-
-## Changes in 0.2.0
-* Added compute resource limits

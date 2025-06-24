@@ -19,31 +19,3 @@ as a task result for downstream tasks to use.
 | dataDir                  | The location where data will be stored                                                                       | Yes      | $(workspaces.data.path) |
 | taskGitUrl               | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored       | No       | -             |
 | taskGitRevision          | The revision in the taskGitUrl repo to be used                                                               | No       | -             | 
-
-## Changes in 2.0.0
-* Convert task to use trusted artifacts
-* Add new parameters: `ociStorage`, `sourceDataArtifact`, `orasOptions`, `ociArtifactExpiresAfter`, `trustedArtifactsDebug`, `dataDir`, `taskGitUrl`, and `taskGitRevision`
-* Add new result: `sourceDataArtifact` for trusted artifacts flow
-* Update file paths to use `dataDir` instead of workspace paths
-* Add trusted artifacts step actions: `use-trusted-artifact`, `create-trusted-artifact`, and `patch-source-data-artifact-result`
-
-## Changes in 1.5.0
-* Added compute resource limits
-
-## Changes in 1.4.2
-* The processing struct in the release status is now called managedProcessing
-
-## Changes in 1.4.1
-* Fixed shellcheck linting issues in this task
-
-## Changes in 1.4.0
-* Updated the base image used in this task
-
-## Changes in 1.3.0
-* Updated the base image used in this task
-
-## Changes in 1.2.0
-* remove `dataPath` and `snapshotPath` default values
-
-## Changes in 1.1.0
-* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

@@ -73,7 +73,7 @@ Examples:
 
 Title prefixes:
 
-- **chore**: Changes that do not modify functionality (e.g., version bumps, tool updates, or maintenance tasks).
+- **chore**: Changes that do not modify functionality (e.g., tool updates, or maintenance tasks).
 - **docs**: Documentation updates or additions (e.g., README changes, inline comments).
 - **feat**: Introduction of a new feature or functionality.
 - **fix**: Bug fixes or corrections to existing functionality.

@@ -12,21 +12,3 @@ impact from all of the CVEs is returned as a task result.
 |--------------------------------|-------------------------------------------------------|----------|---------------|
 | releaseNotesImages             | Json array of image specific details for the advisory | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task         | No       | -             |
-
-## Changes in 0.3.0
-* Added compute resource limits
-
-## Changes in 0.2.2
-* Fix bug where component specific impact exists but is the empty string. The overall impact should be used
-  as severity instead in this instance
-
-## Changes in 0.2.1
-* Improve logging by enabling `set -x`
-
-## Changes in 0.2.0
-* Instead of comparing `ps_component` with the component name to check for component specific severity, use the
-  `repository` value from the component in the snapshot and compare that with the `repository_url` from the `purl`
-  in OSIDB
-
-## Changes in 0.1.1
-* Fix bug regarding the jq query that determines the number of images

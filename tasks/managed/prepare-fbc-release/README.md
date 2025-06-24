@@ -21,34 +21,3 @@ to each component, so other task can use them.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
-
-## Changes in 2.0.1
-* Add retry for skopeo inspect
-
-## Changes in 2.0.0
-* This task now supports Trusted artifacts
-
-## Changes in 1.5.0
-* Added compute resource limits
-
-## Changes in 1.4.1
-* The task now support multiarchitecture images
-* Changed to use `mktemp` to generate the temporary snapshot json file
-
-## Changes in 1.4.0
-* Removed the `binaryImage` parameter so IIB can auto resolve it
-
-## Changes in 1.3.1
-* Changed the replace_tag function to only replace the version when the {{ OCP_VERSION }}
-  placeholder is given
-* Added the validateOcpVersion function to check if the index version matches with the one
-  found in the base image
-
-## Changes in 1.3.0
-* updated the base image used in this task
-
-## Changes in 1.2.0
-* updated the base image used in this task
-
-## Changes in 1.1.0
-* remove `dataPath` and `snapshotPath` default values

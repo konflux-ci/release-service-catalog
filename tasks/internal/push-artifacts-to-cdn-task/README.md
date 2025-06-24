@@ -28,25 +28,3 @@ Tekton task to push artifacts to CDN and optionally Dev Portal with optional sig
 | udcacheSecret         | Env specific secret containing the udcache credentials                | No       | -                                                        |
 | cgwHostname           | The hostname of the content-gateway to publish the metadata to        | Yes      | https://developers.redhat.com/content-gateway/rest/admin |
 | cgwSecret             | Env specific secret containing the content gateway credentials        | No       | -                                                        |
-
-## Changes in 2.2.0
-* Update Pulp push logic to be controlled by `staged.destination`.
-* When `staged.destination` is present in any component, the task will push to Pulp.
-* When `staged.destination` is not present, the task will skip the Pulp push step.
-
-## Changes in 2.1.0
-* Added compute resource limits
-
-## Changes in 2.0.0
-* Add new required parameter `signingKeyName`. This is used for checksum signing
-
-## Changes in 1.0.1
-* Base64 decode keytab used for interacting with the checksum signing host (ETERA)
-
-## Changes in 1.0.0
-* Add steps for signing: `push-unsigned-using-oras`, `sign-mac-binaries`, `sign-windows-binaries`, `generate-checksums`
-  * The code was copied and adapted from the `sign-binaries` managed task
-  * New parameters were added to support signing, many of which have a default which is normally used
-
-## Changes in 0.1.0
-* Split out the extracting of the artifacts (via oras pull) to a separate step

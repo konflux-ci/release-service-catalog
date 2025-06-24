@@ -16,21 +16,3 @@ single component. The task will fail otherwise.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
-
-## Changes in 1.0.0
-* This task now supports Trusted artifacts
-
-## Changes in 0.6.0
-* Added compute resource limits
-
-## Changes in 0.5.0
-* Updated the base image used in this task
-
-## Changes in 0.4.0
-* Updated the base image used in this task
-
-## Changes in 0.3.0
-* remove `snapshotPath` default value
-
-## Changes in 0.1.0
-* Updated hacbs-release/release-utils image to reference redhat-appstudio/release-service-utils image instead

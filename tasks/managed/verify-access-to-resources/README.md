@@ -12,18 +12,3 @@ This Tekton task is used to verify access to various resources in the pipelines.
 | releaseServiceConfig    | Namespace/name of the ReleaseServiceConfig              | No       | -             |
 | snapshot                | Namespace/name of the Snapshot                          | No       | -             |
 | requireInternalServices | Whether to check if internal requests can be created    | Yes      | false         |
-
-## Changes in 0.4.1
-* Increased compute resource limits for memory
-
-## Changes in 0.4.0
-* Added compute resource limits
-
-## Changes in 0.3.1
-* Fix shellcheck/checkton linting issues in the task
-
-## Changes in 0.3.0
-* Added `requireInternalServices` parameter to determine if internal request checks are required.
-
-## Changes in 0.2.0
-* Updated the base image used in this task from `hacbs-release/cloud-builders` to `redhat-appstudio/release-service-utils` image

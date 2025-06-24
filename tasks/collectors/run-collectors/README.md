@@ -14,18 +14,3 @@ one file per collector.
 | collectorsRepositoryRevision | Git repository revision                                                                 | Yes      | main          |
 | releasePath                  | Path to the json data file of the current in-progress Release                           | No       | -             | 
 | previousReleasePath          | Path to the json data file of the previous successful Release prior to the current one  | No       | -             |
-
-## Changes in 1.1.0
-* Add releasePath parameter
-
-## Changes in 1.0.0
-* Add previousReleasePath parameter
-
-## Changes in 0.3.0
-* Add new parameters to define the collectors repository and revision
-* Force a cd into /tmp to avoid errors while cloning
-* Address the change in the collectors spec which allows to specify a serviceAccountName while grouping
-  every collector under a `items` field.
-
-## Changes in 0.2.0
-* Pass reference to the collectors path and to the resource type

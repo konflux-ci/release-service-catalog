@@ -13,7 +13,3 @@ directly.
 | repoUrl      | The repo to update, starting with github.com, without https:// (e.g. github.com/org/repo.git) | Yes      | github.com/hacbs/release/app-interface-deployments.git |
 | githubSecret | The secret containing a `token` key with value set to the GitHub access token                 | No       | -                                                      |
 | image        | The manager image to update to                                                                | No       | -                                                      |
-
-## Changes in 0.1.1
-* Always push to the same PR branch instead of including a timestamp in it so that an endless
-  number of PRs aren't opened

@@ -24,37 +24,3 @@ Tekton pipeline to release a single FBC component to the Addons Registry.
 | orasOptions                     | Oras options to pass to Trusted Artifacts calls                                                                                    | Yes      | ""                                                        |
 | trustedArtifactsDebug           | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.                                           | Yes      | ""                                                        |
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
-
-## Changes in 1.0.0
-* Convert pipeline to use trusted artifacts
-* Add new parameters: `ociStorage`, `orasOptions`, `trustedArtifactsDebug`, and `dataDir`
-* Update all tasks to pass trusted artifacts parameters and use `sourceDataArtifact` for data flow
-* Change file paths to use `dataDir` instead of workspace paths
-* Use the verify-conforma task to verify the enterprise contract policy
-
-## Changes in 0.5.1
-* Add retries in the pipeline
-
-## Changes in 0.5.0
-* add new required parameters to `collect-registry-token-secret` and
-  `make-repo-public` tasks
-
-## Changes in 0.4.0
-* Update all tasks that now support trusted artifacts to specify the taskGit* parameters for the step action resolvers
-* Align workspace name with changes in the apply-mapping task
-
-## Changes in 0.3.0
-* Add new parameter `verify_ec_task_git_revision` needed for consuming the verify-conforma task
-  via git resolver
-
-## Changes in 0.2.1
-* Pass taskGitUrl and taskGitRevision to run-file-updates task
-
-## Changes in 0.2.0
-* Update all task pathInRepo values as they are now in `tasks/managed`
-
-## Changes in 0.1.0
-* Add the `check-data-keys` task to validate the `data.json` file using the JSON schema.
-
-## Changes in 0.0.1
-* Initially forked from push-to-external-registry v5.2.1

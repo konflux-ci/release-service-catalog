@@ -20,21 +20,3 @@ Issues in other servers will be skipped without the task failing.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | ""                      |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | ""                      |
-
-## Changes in 1.2.0
-* Change the logic to pass the task even if we cannot close an issue
-  * In some cases we do not have the permissions to close a Jira
-  * If we cannot close it, we at least try to add a comment
-
-## Changes in 1.1.0
-* Added compute resource limits
-
-## Changes in 1.0.1
-* Bump the utils image to allow 201 and other 2xx codes in `curl-with-retry` script
-
-## Changes in 1.0.0
-* This task now supports Trusted artifacts
-
-## Changes in 0.1.1
-* Deal with Jira API rate limiting using a new `curl-with-retry` script from utils image
-  * Bump the utils image to a version containing the new script

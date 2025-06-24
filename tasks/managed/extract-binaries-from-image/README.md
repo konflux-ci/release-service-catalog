@@ -24,33 +24,3 @@ passed.
 | dataDir                    | The location where data will be stored                                                                                     | Yes       | $(workspaces.data.path) |
 | taskGitUrl                 | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No        | ""                      |
 | taskGitRevision            | The revision in the taskGitUrl repo to be used                                                                             | No        | ""                      |
-
-## Changes in 3.0.1
-* Add retry for skopeo copy
-
-## Changes in 3.0.0
-* This task now supports Trusted artifacts
-
-## Changes in 2.2.0
-* Added compute resource limits
-
-## Changes in 2.1.3
-* Add comprobation to only extract from the layer with the releases directory
-
-## Changes in 2.1.2
-* Fix typo in fetching DESIRED_COMPONENTS_LIST `content-gateway` -> `contentGateway`
-
-## Changes in 2.1.1
-* Fix shellcheck/checkton linting issues in the task and tests
-
-## Changes in 2.1.0
-* updated the base image used in this task
-
-## Changes in 2.0.0
-* support multiple components in snapshot
-
-## Changes in 1.2.0
-* updated the base image used in this task
-
-## Changes in 1.1.0
-* remove `snapshotPath` default value

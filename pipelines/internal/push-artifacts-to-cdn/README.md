@@ -17,10 +17,3 @@ Tekton Pipeline to push artifacts to CDN and/or Dev Portal
 | cgwSecret       | Env specific secret containing the content gateway credentials                         | No          | -                                                          |
 | taskGitUrl      | The url to the git repo where the release-service-catalog tasks to be used are stored  | Yes         | https://github.com/konflux-ci/release-service-catalog.git  |
 | taskGitRevision | The revision in the taskGitUrl repo to be used                                         | No          | -                                                          |
-
-## Changes in 2.0.0
-* Add new required parameter `signingKeyName`. This is used for checksum signing
-  
-## Changes in 1.0.0
-* Add new required parameter `author`. This was already required by the task inside the pipeline, so the pipeline
-  did not work before this

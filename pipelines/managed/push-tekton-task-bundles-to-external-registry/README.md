@@ -19,21 +19,3 @@ Tekton pipeline to release tekton tasks bundles to an external registry and upda
 | verify_ec_task_git_revision     | The git revision to be used when consuming the verify-conforma task                                                                | No       | -                                                         |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
-
-## Changes in 0.5.1
-* Add retries in the pipeline
-
-## Changes in 0.5.0
-* add new required parameters to `collect-registry-token-secret` and
-  `make-repo-public` tasks
-
-## Changes in 0.4.0
-Update the `update-trusted-tasks` task to run after the `make-repo-public` task
-
-## Changes in 0.3.0
-* Update all tasks that now support trusted artifacts to specify the taskGit* parameters for the step action resolvers
-* Align workspace name with changes in the apply-mapping task
-
-## Changes in 0.2.0
-* Add new parameter `verify_ec_task_git_revision` needed for consuming the verify-conforma task
-  via git resolver

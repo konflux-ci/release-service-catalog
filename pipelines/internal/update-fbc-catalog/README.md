@@ -17,9 +17,3 @@ Tekton pipeline add/update FBC fragments to the FBC catalog by interacting with 
 | buildTimeoutSeconds     | IIB Build Service timeout seconds                                                     |   no     | -                                                         |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks to be used are stored |   yes    | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                        |   no     | -                                                         |
-
-## Changes in 1.1.0
-* adds `publishingCredentials` parameter
-
-## Changes in 1.0.0
-* Added taskGiturl and taskGitRevision parameters so the task can be called via git resolvers

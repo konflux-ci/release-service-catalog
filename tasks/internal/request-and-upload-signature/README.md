@@ -24,11 +24,3 @@ Task to request and upload signatures using RADAS and pyxis
 | umb_ssl_key_file_name      | The key within the Kubernetes secret that contains the umb SSL key.                                   | No       | -                                                     |
 | pyxis_url                  | Pyxis instance to upload the signature to.                                                            | Yes      | https://pyxis.engineering.redhat.com                  |
 | signature_data_file        | The file where the signing response should be placed                                                  | Yes      | signing_response.json                                 |
-
-## Changes in 1.1.0
-* Added compute resource limits
-
-## Changes in 1.0.0
-* Replaced `ssl_cert_secret_name`, `ssl_cert_file_name` and `ssl_key_file_name` parameters with Pyxis and UMB
-  specific ones
-  * This allows us to use the stage version of one system with the prod version of the other
