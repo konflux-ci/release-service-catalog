@@ -22,6 +22,10 @@
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | No       | -                                                         |
 
+## Changes in 4.8.0
+* Add required taskGit* parameters for collect-slack-notification-params task
+* Add required taskGit* parameters for send-slack-notification task
+
 ## Changes in 4.7.0
 * Add retries in the pipeline
 

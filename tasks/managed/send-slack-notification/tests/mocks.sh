@@ -5,7 +5,7 @@ set -eux
 
 function curl() {
   echo Mock curl called with: $*
-  echo $* >> $(workspaces.data.path)/mock_curl.txt
+  echo $* >> "$(params.dataDir)/mock_curl.txt"
 
   if [[ "$*" != "-H Content-type: application/json --data-binary @/tmp/release.json ABCDEF"* ]]
   then

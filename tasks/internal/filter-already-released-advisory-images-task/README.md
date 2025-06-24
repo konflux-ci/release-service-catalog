@@ -13,5 +13,10 @@ It returns a list of component names that still need to be released (i.e., not f
 | advisory_secret_name           | Name of the secret containing GitLab repo and token information                                        | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 
+## Changes in 0.2.1
+* Fix handling of long argument list with `jq`
+  * When a large number of objects was in the list, `jq` would fail with `Argument list too long`
+  * The solution is to use `--slurpfile` instead of `--argjson`
+
 ## Changes in 0.2.0
 * Added compute resource limits
