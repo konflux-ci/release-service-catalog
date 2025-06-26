@@ -143,22 +143,28 @@ spec:
           workspace: release-workspace
       runAfter:
         - verify-access-to-resources
-    - name: check-data-keys
+    - name: apply-mapping
+      retries: 3
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/apply-mapping/apply-mapping.yaml
       params:
+        - name: failOnEmptyResult
+          value: "true"
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
-        - name: schema
-          value: $(params.taskGitUrl)/raw/$(params.taskGitRevision)/schema/dataKeys.json
-        - name: systems
-          value: |
-            [
-              {"systemName": "github", "dynamic": false},
-              {"systemName": "sign", "dynamic": false}
-            ]
-        - name: sourceDataArtifact
-          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
         - name: ociStorage
           value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -167,15 +173,6 @@ spec:
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
-      taskRef:
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/managed/check-data-keys/check-data-keys.yaml
-        resolver: git
       workspaces:
         - name: data
           workspace: release-workspace
@@ -210,7 +207,7 @@ spec:
         - name: data
           workspace: release-workspace
       runAfter:
-        - collect-data
+        - apply-mapping
     - name: verify-conforma
       timeout: "4h00m0s"
       taskRef:
@@ -246,34 +243,6 @@ spec:
           value: "$(params.trustedArtifactsDebug)"
       runAfter:
         - validate-single-component
-    - name: extract-requester-from-release
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: hub/kubernetes-actions/kubernetes-actions.yaml
-      params:
-        - name: image
-          value: "quay.io/hacbs-release/cloud-builders-kubectl\
-            @sha256:8ab94be8b2b4f3d117f02d868b39540fddd225447abf4014f7ba4765cb39f753"
-        - name: script
-          value: |
-            set -x
-
-            NAMESPACE=$(echo $(params.release) | cut -d '/' -f 1)
-            NAME=$(echo $(params.release) | cut -d '/' -f 2)
-
-            AUTHOR=$(kubectl get release ${NAME} -n ${NAMESPACE} \
-            -o=jsonpath='{.status.attribution.author}' | tee $(results.output-result.path))
-
-            if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
-      runAfter:
-        - verify-access-to-resources
-        - verify-conforma
     - name: extract-binaries-from-image
       workspaces:
         - name: data
@@ -303,7 +272,178 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - validate-single-component
+        - verify-conforma
+    - name: collect-gh-params
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-gh-params/collect-gh-params.yaml
+      params:
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+        - name: snapshotPath
+          value: $(tasks.collect-data.results.snapshotSpec)
+        - name: binariesPath
+          value: $(tasks.extract-binaries-from-image.results.binaries_path)
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-binaries-from-image.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - extract-binaries-from-image
+    - name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-binaries-from-image.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: github_release_version
+          value: "$(tasks.collect-gh-params.results.release_version)"
+        - name: github_release_url
+          value: "$(tasks.collect-gh-params.results.repository)"
+        - name: binaries_dir
+          value: $(tasks.extract-binaries-from-image.results.binaries_path)
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/populate-release-notes/populate-release-notes.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - collect-gh-params
+        - extract-binaries-from-image
+    - name: check-data-keys
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: schema
+          value: $(params.taskGitUrl)/raw/$(params.taskGitRevision)/schema/dataKeys.json
+        - name: systems
+          value: |
+            [
+              {"systemName": "github", "dynamic": false},
+              {"systemName": "sign", "dynamic": false},
+              {"systemName": "releaseNotes", "dynamic": false}
+            ]
+        - name: sourceDataArtifact
+          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/check-data-keys/check-data-keys.yaml
+        resolver: git
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - populate-release-notes
+    - name: embargo-check
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.check-data-keys.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/embargo-check/embargo-check.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - check-data-keys
+    - name: extract-requester-from-release
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: hub/kubernetes-actions/kubernetes-actions.yaml
+      params:
+        - name: image
+          value: "quay.io/hacbs-release/cloud-builders-kubectl\
+            @sha256:8ab94be8b2b4f3d117f02d868b39540fddd225447abf4014f7ba4765cb39f753"
+        - name: script
+          value: |
+            set -x
+
+            NAMESPACE=$(echo $(params.release) | cut -d '/' -f 1)
+            NAME=$(echo $(params.release) | cut -d '/' -f 2)
+
+            AUTHOR=$(kubectl get release ${NAME} -n ${NAMESPACE} \
+            -o=jsonpath='{.status.attribution.author}' | tee $(results.output-result.path))
+
+            if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
+      runAfter:
+        - embargo-check
     - name: base64-encode-checksum
       workspaces:
         - name: data
@@ -333,7 +473,7 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - extract-binaries-from-image
+        - extract-requester-from-release
     - name: sign-base64-blob
       retries: 3
       workspaces:
@@ -373,41 +513,6 @@ spec:
           value: "$(params.taskGitRevision)"
       runAfter:
         - base64-encode-checksum
-        - extract-requester-from-release
-    - name: collect-gh-params
-      workspaces:
-        - name: data
-          workspace: release-workspace
-      taskRef:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: tasks/managed/collect-gh-params/collect-gh-params.yaml
-      params:
-        - name: dataPath
-          value: $(tasks.collect-data.results.data)
-        - name: snapshotPath
-          value: $(tasks.collect-data.results.snapshotSpec)
-        - name: binariesPath
-          value: $(tasks.extract-binaries-from-image.results.binaries_path)
-        - name: sourceDataArtifact
-          value: "$(tasks.extract-binaries-from-image.results.sourceDataArtifact)"
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: dataDir
-          value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: "$(params.trustedArtifactsDebug)"
-        - name: taskGitUrl
-          value: "$(params.taskGitUrl)"
-        - name: taskGitRevision
-          value: "$(params.taskGitRevision)"
-      runAfter:
-        - extract-binaries-from-image
     - name: create-github-release
       retries: 3
       workspaces:
@@ -446,8 +551,79 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - collect-gh-params
         - sign-base64-blob
+    - name: create-advisory
+      params:
+        - name: releasePlanAdmissionPath
+          value: "$(tasks.collect-data.results.releasePlanAdmission)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: resultsDirPath
+          value: "$(tasks.collect-data.results.resultsDir)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: environment
+          value: ""
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/create-advisory/create-advisory.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - create-github-release
+    - name: close-advisory-issues
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: advisoryUrl
+          value: "$(tasks.create-advisory.results.advisory_url)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.create-advisory.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/close-advisory-issues/close-advisory-issues.yaml
+      workspaces:
+        - name: data
+          workspace: release-workspace
+      runAfter:
+        - create-advisory
     - name: update-cr-status
       params:
         - name: resource
@@ -461,6 +637,7 @@ spec:
         - name: resultArtifacts
           value:
             - "$(tasks.create-github-release.results.sourceDataArtifact)=$(params.dataDir)"
+            - "$(tasks.create-advisory.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -482,7 +659,7 @@ spec:
         - name: data
           workspace: release-workspace
       runAfter:
-        - create-github-release
+        - close-advisory-issues
   finally:
     - name: cleanup-internal-requests
       taskRef:

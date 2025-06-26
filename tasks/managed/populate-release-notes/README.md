@@ -18,3 +18,6 @@ the releaseNotes data can use it.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                       |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                       |
+| binaries_dir            | The location of github release binaries. Needed for PURL generation                                                        | Yes      | ""                      |
+| github_release_version  | The version string of the release (from collect-gh-params)                                                                 | Yes      | ""                      |
+| github_release_url      | The url of the release (from collect-gh-params)                                                                            | Yes      | ""                      |

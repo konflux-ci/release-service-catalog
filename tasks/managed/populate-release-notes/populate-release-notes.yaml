@@ -49,6 +49,18 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: binaries_dir
+      description: The location of github release binaries. Needed for PURL generation
+      type: string
+      default: ""
+    - name: github_release_version
+      description: The version string of the release (from collect-gh-params)
+      type: string
+      default: ""
+    - name: github_release_url
+      description: The url of the release (from collect-gh-params)
+      type: string
+      default: ""
   results:
     - description: Produced trusted data artifact
       name: sourceDataArtifact
@@ -133,6 +145,13 @@ spec:
 
         # Try to extract the first contentType if it exists
         content_type=$(jq -r '.mapping.components[]?.contentGateway?.contentType // empty' "$DATA_FILE" | head -n1)
+
+        # Extract github field from data.json
+        github_field=$(jq -r '.github // empty' "$DATA_FILE")
+        if [[ -n "$github_field" ]]; then
+            echo "Github release. Skipping image-specific release note generation."
+            exit 0
+        fi
 
         if [ "$content_type" == "binary" ]; then
             echo "Content type is binary. Skipping image-specific release note generation."
@@ -300,6 +319,115 @@ spec:
                 jq --argjson content "$jsonString" '.releaseNotes.content.artifacts += [$content]' "${DATA_FILE}" > \
                     /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
             done
+        done
+
+    - name: populate-release-notes-github
+      image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        # Extract github field from data.json
+        github_field=$(jq -r '.github // empty' "$DATA_FILE")
+        if [[ -z "$github_field" ]]; then
+            echo "Not a github release. Skipping github-specific release note generation."
+            exit 0
+        fi
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        # github releases are single-component snapshots
+        # get component name from snapshot file
+        name=$(jq -r '.components[0].name' "${SNAPSHOT_FILE}")
+        # Construct CVE json
+        CVEsJson='{"cves":{"fixed":{}}}'
+        CVES=$(jq -c '[.releaseNotes.cves[]? | select(.component=="'"$name"'")]' "${DATA_FILE}")
+        NUM_CVES=$(jq 'length' <<< "$CVES")
+        for ((j = 0; j < NUM_CVES; j++)); do
+            cve=$(jq -c --argjson j "$j" '.[$j]' <<< "$CVES")
+            cveJson=$(jq -n \
+                --arg id "$(jq -r '.key' <<< "$cve")" \
+                --argjson packages "$(jq -c '.packages // []' <<< "$cve")" \
+                '{($id): {"packages": $packages}}')
+            CVEsJson=$(jq --argjson cve "$cveJson" '.cves.fixed += $cve' <<< "$CVEsJson")
+        done
+
+        GITHUB_RELEASE_VERSION="$(params.github_release_version)"
+        GITHUB_RELEASE_URL="$(params.github_release_url)"
+
+        # check that params datadir params binaries_dir exists
+        if [ ! -d "$(params.dataDir)/$(params.binaries_dir)" ] ; then
+            echo "Binaries directory does not exist."
+            exit 1
+        fi
+
+        # get the checksum file from the binaries directory
+        CHECKSUM_FILE=$(find "$(params.dataDir)/$(params.binaries_dir)" -name '*_SHA256SUMS')
+        if [ ! -f "${CHECKSUM_FILE}" ] ; then
+            echo "No checksum file was provided."
+            exit 1
+        fi
+
+        # create a map of filename to checksum
+        declare -A CHECKSUM_MAP
+
+        while read -r checksum filename; do
+          # Ignore empty lines and manifest file
+          [[ -z "$filename" ]] && continue
+          [[ "$filename" == *_manifest.json ]] && continue
+          CHECKSUM_MAP["$filename"]="$checksum"
+        done < "${CHECKSUM_FILE}"
+
+        # Parse owner/repo from the release URL
+        owner_repo=$(echo "$GITHUB_RELEASE_URL" | sed -E 's#https://github.com/([^/]+/[^/]+).*#\1#')
+
+        # Get the number of files for this component
+        FILES_LENGTH=$(jq --arg name "$name" \
+          '[.mapping.components[]
+            | select(.name == $name)
+            | .files
+            | length][0]' "$DATA_FILE")
+        for ((k = 0; k < FILES_LENGTH; k++)); do
+            file=$(jq -c --arg name "$name" --argjson k "$k" \
+                '.mapping.components[]
+                  | select(.name == $name)
+                  | .files[$k]' "$DATA_FILE")
+            file_source=$(jq -r '.source' <<< "$file")
+            filename=$(basename "$file_source")
+            arch=$(jq -r '.arch' <<< "$file")
+            os=$(jq -r '.os' <<< "$file")
+            # Ignore manifest files
+            [[ "$filename" == *_manifest.json ]] && continue
+            checksum="${CHECKSUM_MAP[$filename]}"
+            download_url="https://github.com/$owner_repo/releases/download/$GITHUB_RELEASE_VERSION/$filename"
+            purl="pkg:generic/$name@$GITHUB_RELEASE_VERSION?checksum=$checksum&download_url=$download_url"
+            jsonString=$(jq -cn \
+                --arg component "$name" \
+                --arg arch "$arch" \
+                --arg os "$os" \
+                --arg purl "$purl" \
+                '{"architecture": $arch, "os": $os, "purl": $purl, "component": $component}')
+            if [ "$(jq '.cves.fixed | length' <<< "$CVEsJson")" -gt 0 ]; then
+                jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< "$jsonString")
+            fi
+            jq --argjson content "$jsonString" '.releaseNotes.content.artifacts += [$content]' "${DATA_FILE}" > \
+                /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
         done
 
     - name: populate-release-notes-type-and-references
