@@ -13,6 +13,7 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 | releasePlanAdmissionPath | Path to the JSON file of the ReleasePlanAdmission in the data workspace                                                    | No        | -                       |
 | snapshotPath             | Path to the JSON file of the Snapshot spec in the data workspace                                                           | No        | -                       |
 | dataPath                 | Path to data JSON in the data workspace                                                                                    | No        | -                       |
+| environment              | The environment for the advisory to be published. Options are stage and production                                         | No        | -                       |
 | resultsDirPath           | Path to results directory in the data workspace                                                                            | No        | -                       |
 | request                  | Type of request to be created                                                                                              | Yes       | create-advisory         |
 | cgwHostname              | The hostname of the content-gateway to publish the metadata to                                                             | Yes       |https://developers.redhat.com/content-gateway/rest/admin |
