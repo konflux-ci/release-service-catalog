@@ -14,7 +14,7 @@ function internal-pipelinerun() {
   # get the name to patch it. We do this by tacking on another random label that we can use
   # to select with later.
   rando=$(openssl rand -hex 12)
-  /home/utils/internal-pipelinerun "$@" -l "internal-services.appstudio.openshift.io/test-id=$rando" &
+  /home/utils/internal-pipelinerun $@ -l "internal-services.appstudio.openshift.io/test-id=$rando" &
 
   sleep 2
   NAME=
@@ -37,9 +37,9 @@ function internal-pipelinerun() {
   done
   echo "PLR Name: $NAME"
 
-  if [[ "$*" == *"expected-ir-failure"* ]]; then
+  if [[ "$*" == *"requester=testuser-failure"* ]]; then
       set_plr_status $NAME Failure 5
-  elif [[ "$*" == *"expected-timeout-failure"* ]]; then
+  elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
       echo "skipping setting PLR status since we want a timeout..."
   else
       set_plr_status $NAME Succeeded 5
@@ -88,7 +88,7 @@ function internal-request() {
   # get the name to patch it. We do this by tacking on another random label that we can use
   # to select with later.
   rando=$(openssl rand -hex 12)
-  /home/utils/internal-request "$@" -l "internal-services.appstudio.openshift.io/test-id=$rando" &
+  /home/utils/internal-request $@ -l "internal-services.appstudio.openshift.io/test-id=$rando" &
 
   sleep 2
   NAME=
@@ -111,9 +111,9 @@ function internal-request() {
   done
   echo "IR Name: $NAME"
 
-  if [[ "$*" == *"expected-ir-failure"* ]]; then
+  if [[ "$*" == *"requester=testuser-failure"* ]]; then
       set_ir_status $NAME Failure 5
-  elif [[ "$*" == *"expected-timeout-failure"* ]]; then
+  elif [[ "$*" == *"requester=testuser-timeout"* ]]; then
       echo "skipping setting IR status since we want a timeout..."
   else
       set_ir_status $NAME Succeeded 5

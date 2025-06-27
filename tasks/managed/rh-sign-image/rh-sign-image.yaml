@@ -41,13 +41,6 @@ spec:
       type: string
       description: |
         The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert
-    - name: batchLimit
-      type: string
-      description: |
-        size of batch attributes to send to internal-request. As internal request arguments are need to be
-        strings, size here represent maximal string length of `references` and `manifest_digests` sent to
-        internal request
-      default: 4096
     - name: signRegistryAccessPath
       type: string
       description: |
@@ -149,7 +142,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: sign-image
-      image: quay.io/konflux-ci/release-service-utils:3f3831a4265258d2a3db4435873938a02270c044
+      image: quay.io/konflux-ci/release-service-utils:2d6f05c89fc619042a2be19d64ff48de9975397a
       computeResources:
         limits:
           memory: 4Gi
@@ -167,8 +160,6 @@ spec:
             secretKeyRef:
               name: $(params.pyxisSecret)
               key: key
-        - name: BATCH_LIMIT
-          value: $(params.batchLimit)
       script: |
         #!/usr/bin/env bash
         #
@@ -247,9 +238,6 @@ spec:
         export PYXIS_KEY_PATH=/tmp/key
 
         COMPONENTS_LENGTH=$(jq '.components |length' "${SNAPSHOT_PATH}")
-        declare -a to_sign_references=()
-        declare -a to_sign_digests=()
-
         for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
 
             referenceContainerImage=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
@@ -310,14 +298,36 @@ spec:
                 for tag in ${TAGS}; do
 
                   if ! grep -q "^${registry_reference}:${tag}$" "/tmp/${manifest_digest}" ; then
-                    to_sign_references+=("${registry_reference}:${tag}")
-                    to_sign_digests+=("${manifest_digest}")
+                    while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+                      wait -n
+                    done
+
+                    echo "Creating ${requestType} to sign image with tag ${tag}:"
+                    echo "- reference=${registry_reference}:${tag}"
+                    echo "- manifest_digest=${manifest_digest}"
+                    echo "- requester=$(params.requester)"
+
+                    ${requestType} --pipeline "${request}" \
+                      -p pipeline_image="${pipeline_image}" \
+                      -p reference="${registry_reference}:${tag}" \
+                      -p manifest_digest="${manifest_digest}" \
+                      -p requester="$(params.requester)" \
+                      -p config_map_name="${config_map_name}" \
+                      -p taskGitUrl="$(params.taskGitUrl)" \
+                      -p taskGitRevision="$(params.taskGitRevision)" \
+                      -l ${TASK_LABEL}="${TASK_ID}" \
+                      -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                      -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
+                      "${EXTRA_ARGS[@]}" -s true &
+
                   else
                     echo "Signature already exists for:"
                     echo "- reference=${registry_reference}:${tag}"
                     echo "- manifest_digest=${manifest_digest}"
                   fi
 
+                  ((++REQUEST_COUNT))
+                  echo "Request Count: $REQUEST_COUNT"
                 done
               done
             done
@@ -335,82 +345,39 @@ spec:
                     sourceTag=${tag}-source
 
                     if ! grep -q "^${registry_reference}:${sourceTag}$" "/tmp/${sourceContainerDigest}" ; then
-                      to_sign_references+=("${registry_reference}:${sourceTag}")
-                      to_sign_digests+=("${manifest_digest}")
+                      while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+                        wait -n
+                      done
+
+                      echo "Creating ${requestType} to sign image with tag ${tag}:"
+                      echo "- reference=${registry_reference}:${sourceTag}"
+                      echo "- manifest_digest=${sourceContainerDigest}"
+                      echo "- requester=$(params.requester)"
+
+                      ${requestType} --pipeline "${request}" \
+                        -p pipeline_image="${pipeline_image}" \
+                        -p reference="${registry_reference}:${sourceTag}" \
+                        -p manifest_digest="${sourceContainerDigest}" \
+                        -p requester="$(params.requester)" \
+                        -p config_map_name="${config_map_name}" \
+                        -p taskGitUrl="$(params.taskGitUrl)" \
+                        -p taskGitRevision="$(params.taskGitRevision)" \
+                        -l ${TASK_LABEL}="${TASK_ID}" \
+                        -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                        -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
+                        "${EXTRA_ARGS[@]}" -s true &
                     else
                       echo "Signature already exists for:"
                       echo "- reference=${registry_reference}:${sourceTag}"
                       echo "- manifest_digest=${sourceContainerDigest}"
                     fi
+
+                  ((++REQUEST_COUNT))
+                  echo "Request Count: $REQUEST_COUNT"
                 done
               done
             fi
         done
-
-        references_batch=""
-        digests_batch=""
-
-        # Process to sign arrays in batches
-        for i in "${!to_sign_references[@]}"; do
-          new_references_batch="${references_batch}${to_sign_references[$i]} "
-          new_digests_batch="${digests_batch}${to_sign_digests[$i]} "
-
-          # if batches are too big, send the request
-          if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
-
-            while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
-              wait -n
-            done
-
-            echo "Creating ${requestType} to sign images: ${references_batch}"
-            echo "- digests: ${digests_batch[*]}"
-
-            ${requestType} \
-              --pipeline "${request}" \
-              -p pipeline_image="${pipeline_image}" \
-              -p references="${references_batch}" \
-              -p manifest_digests="${digests_batch}" \
-              -p config_map_name="${config_map_name}" \
-              -p requester="$(params.requester)" \
-              -p taskGitUrl="$(params.taskGitUrl)" \
-              -p taskGitRevision="$(params.taskGitRevision)" \
-              -l ${TASK_LABEL}="${TASK_ID}" \
-              -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-              -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
-              "${EXTRA_ARGS[@]}" -s true &
-              ((++REQUEST_COUNT))
-              echo "Request Count: $REQUEST_COUNT"
-
-            # next batches consist of values which didn't fit in the previous batches
-            references_batch="${to_sign_references[$i]} "
-            digests_batch="${to_sign_digests[$i]} "
-          else
-            # if batches are still small enough, add the values to the batches
-            references_batch="${new_references_batch}"
-            digests_batch="${new_digests_batch}"
-          fi
-        done
-
-        # Process the last batch
-        if [[ ${#references_batch} -gt 0 ]]; then
-          while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
-            wait -n
-          done
-
-          ${requestType} \
-            --pipeline "${request}" \
-            -p pipeline_image="${pipeline_image}" \
-            -p references="${references_batch[*]}" \
-            -p manifest_digests="${digests_batch[*]}" \
-            -p config_map_name="${config_map_name}" \
-            -p requester="$(params.requester)" \
-            -p taskGitUrl="$(params.taskGitUrl)" \
-            -p taskGitRevision="$(params.taskGitRevision)" \
-            -l ${TASK_LABEL}="${TASK_ID}" \
-            -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-            -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
-            "${EXTRA_ARGS[@]}" -s true &
-        fi
 
         echo "Waiting for remaining processes to finish..."
         while (( ${RUNNING_JOBS@P} > 0 )); do

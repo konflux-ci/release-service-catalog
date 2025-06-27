@@ -2,14 +2,17 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-request-and-upload-signature
+  name: test-request-and-upload-signature-retries
 spec:
   description: |
-    Run the request-and-upload-signature task and make sure that task succeeds
+    Run the request-and-upload-signature task and make sure that task retries before failing.
+    The request-and-upload-signature task is set to "onError: continue" so that we can check
+    how many retries occurred
   workspaces:
     - name: tests-workspace
   tasks:
     - name: run-task
+      onError: continue
       taskRef:
         name: request-and-upload-signature
       params:
@@ -20,7 +23,7 @@ spec:
         - name: reference
           value: "registry.redhat.io/myproduct/myrepo:abc"
         - name: requester
-          value: tom
+          value: iamgoingtofail
         - value: 4096R/55A34A82 SHA-256
           name: sig_key_id
         - value: containerisvsign
@@ -52,3 +55,24 @@ spec:
       workspaces:
         - name: data
           workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:2ddb2b1e7b406674273a2aa3d3e4e92b78cdf625
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              if [ "$(cat "$(workspaces.data.path)/request-signature-failure-count.txt")" != 3 ]; then
+                echo Error: request-signature was expected to be fail 3 times. Actual calls:
+                cat "$(workspaces.data.path)/request-signature-failure-count.txt"
+                exit 1
+              fi
+      runAfter:
+        - run-task

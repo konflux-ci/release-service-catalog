@@ -16,18 +16,16 @@ spec:
   params:
     - description: A docker image of operator-pipeline-images for the steps to run in.
       name: pipeline_image
-      default: "quay.io/konflux-ci/release-service-utils:7312e2ecbe67e973edd1f0031acb490d6c961a41"
+      default: "quay.io/redhat-isv/operator-pipelines-images:released"
       type: string
-    - description: |
-        List of space separated manifest digests for the signed content, usually in the format sha256:xxx
-      name: manifest_digests
+    - description: Manifest digest for the signed content, usually in the format sha256:xxx
+      name: manifest_digest
+      type: string
+    - description: Docker reference for the signed content, e.g. registry.redhat.io/redhat/community-operator-index:v4.9
+      name: reference
       type: string
     - description: Name of the user that requested the signing, for auditing purposes
       name: requester
-    - description: |
-        List of space separated docker references for the signed content,
-        e.g. registry.com/ns/image:v4.9 registry.com/ns/image:v4.10
-      name: references
       type: string
     - default: 4096R/55A34A82 SHA-256
       description: The signing key id that the content is signed with
@@ -46,10 +44,6 @@ spec:
     - description: The key within the Kubernetes secret that contains the Pyxis SSL key.
       name: pyxis_ssl_key_file_name
       type: string
-    - description: Number of threads used to upload signatures to pyxis
-      name: pyxis_threads
-      type: string
-      default: 5
     - default: operatorpipelines
       description: Client name to connect to umb, usually a service account name
       name: umb_client_name
@@ -84,90 +78,6 @@ spec:
       default: "signing_response.json"
       type: string
   steps:
-    - name: build-pubtools-sign-config
-      image: "$(params.pipeline_image)"
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 100m
-      workingDir: "$(workspaces.data.path)"
-      env:
-        - name: UMB_CERT_PATH
-          value: "/tmp/crt"
-        - name: UMB_KEY_PATH
-          value: "/tmp/key"
-        - name: requester
-          value: $(params.requester)
-        - name: manifest_digests
-          value: $(params.manifest_digests)
-        - name: umb_client_name
-          value: $(params.umb_client_name)
-        - name: umb_listen_topic
-          value: $(params.umb_listen_topic)
-        - name: umb_publish_topic
-          value: $(params.umb_publish_topic)
-        - name: umb_url
-          value: $(params.umb_url)
-        - name: signature_data_file
-          value: "$(params.signature_data_file)"
-        - name: CA_BUNDLE
-          value: /etc/pki/tls/certs/ca-bundle.crt
-      script: |
-        #!/usr/bin/env /bin/bash
-        set -x
-        cat <<EOF > "$(workspaces.data.path)/pubtools-sign-config.yaml"
-        msg_signer:
-          messaging_brokers:
-            - "amqps://${umb_url}:5671"
-          messaging_cert_key: /tmp/umb.pem
-          messaging_ca_cert: ${CA_BUNDLE}
-          topic_send_to: topic://${umb_publish_topic}
-          topic_listen_to: queue://Consumer.{creator}.${requester}-{task_id}.${umb_listen_topic}
-          environment: prod
-          service: ${umb_client_name}
-          timeout: 10
-          retries: 2
-          send_retries: 2
-          message_id_key: request_id
-          log_level: debug
-        EOF
-        echo "Using signing config:"
-        cat "$(workspaces.data.path)/pubtools-sign-config.yaml"
-    - name: check-umb-connection
-      image: "$(params.pipeline_image)"
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 100m
-      workingDir: "$(workspaces.data.path)"
-      env:
-        - name: umb_cert
-          valueFrom:
-            secretKeyRef:
-              name: $(params.umb_ssl_cert_secret_name)
-              key: $(params.umb_ssl_cert_file_name)
-        - name: umb_key
-          valueFrom:
-            secretKeyRef:
-              name: $(params.umb_ssl_cert_secret_name)
-              key: $(params.umb_ssl_key_file_name)
-        - name: umb_url
-          value: $(params.umb_url)
-        - name: CA_BUNDLE
-          value: /etc/pki/tls/certs/ca-bundle.crt
-      script: |
-        #!/usr/bin/env /bin/bash
-        echo "${umb_cert:?}" > /tmp/umb.crt
-        echo "${umb_key:?}" >> /tmp/umb.key
-        openssl s_client -connect "${umb_url}:5671"\
-                        -cert "/tmp/umb.crt"\
-                        -key "/tmp/umb.key"\
-                        -servername "$umb_url"\
-                        -CAfile "${CA_BUNDLE}" < /dev/null
     - name: request-signature
       image: "$(params.pipeline_image)"
       computeResources:
@@ -178,100 +88,83 @@ spec:
           cpu: 100m
       workingDir: "$(workspaces.data.path)"
       env:
-        - name: umb_cert
+        - name: UmbCert
           valueFrom:
             secretKeyRef:
               name: $(params.umb_ssl_cert_secret_name)
               key: $(params.umb_ssl_cert_file_name)
-        - name: umb_key
+        - name: UmbKey
           valueFrom:
             secretKeyRef:
               name: $(params.umb_ssl_cert_secret_name)
               key: $(params.umb_ssl_key_file_name)
-        - name: manifest_digests
-          value: $(params.manifest_digests)
-        - name: references
-          value: $(params.references)
+        - name: UMB_CERT_PATH
+          value: "/tmp/crt"
+        - name: UMB_KEY_PATH
+          value: "/tmp/key"
+        - name: manifest_digest
+          value: $(params.manifest_digest)
+        - name: reference
+          value: $(params.reference)
+        - name: requester
+          value: $(params.requester)
+        - name: sig_key_id
+          value: $(params.sig_key_id)
         - name: sig_key_name
-          value: "$(params.sig_key_name)"
+          value: $(params.sig_key_name)
+        - name: umb_client_name
+          value: $(params.umb_client_name)
+        - name: umb_listen_topic
+          value: $(params.umb_listen_topic)
+        - name: umb_publish_topic
+          value: $(params.umb_publish_topic)
+        - name: umb_url
+          value: $(params.umb_url)
         - name: signature_data_file
           value: "$(params.signature_data_file)"
       script: |
         #!/usr/bin/env /bin/bash
-        function get-task-id() {
-          if [[ -v CUSTOM_TASK_ID ]]; then
-            echo "${CUSTOM_TASK_ID}"
-          else
-            echo $(context.taskRun.uid)
-          fi
-        }
-        echo "${umb_cert:?}" > /tmp/umb.pem
-        echo "${umb_key:?}" >> /tmp/umb.pem
         set -x
-        declare -a reference_args=()
-        declare -a digest_args=()
-        for reference in "${references[@]}"; do
-          reference_args+=("--reference")
-          reference_args+=("${reference}")
+        
+        MAX_RETRIES=3
+        RETRY_DELAY=5 # Initial delay
+        
+        set +x
+        # This helps with Shellcheck warning
+        echo "${UmbCert:?}" > /tmp/crt
+        echo "${UmbKey:?}" > /tmp/key
+        set -x
+        
+        echo "Requesting signing from RADAS"
+        for ((i=1; i<=MAX_RETRIES; i++)); do
+          if request-signature \
+            --manifest-digest "${manifest_digest}" \
+            --output "${signature_data_file:?}" \
+            --reference "${reference}" \
+            --requester "${requester}" \
+            --sig-key-id "${sig_key_id}" \
+            --sig-key-name "${sig_key_name}" \
+            --umb-client-name "${umb_client_name}" \
+            --umb-listen-topic "${umb_listen_topic}" \
+            --umb-publish-topic "${umb_publish_topic}" \
+            --umb-url "${umb_url}" \
+            --verbose
+          then
+            echo "request-signature command succeeded."
+            break
+          elif [ $i -eq $MAX_RETRIES ]; then
+            echo "Max retries reached. Exiting."
+            exit 1
+          else
+            echo "Attempt $i failed. Retrying in $RETRY_DELAY seconds..."
+            sleep $RETRY_DELAY
+            RETRY_DELAY=$((RETRY_DELAY * 2))  # Exponential backoff
+          fi
         done
-        for digest in "${manifest_digests[@]}"; do
-          digest_args+=("--digest")
-          digest_args+=("${digest}")
-        done
-        task_id=$(get-task-id)
-        echo "Running pubtools-sign-msg-container-sign "
-        echo "--signing-key ${sig_key_name} --config-file $(workspaces.data.path)/pubtools-sign-config.yaml"
-        echo " ${reference_args[@]} ${digest_args[@]} --task-id $task_id"
-
-        pubtools-sign-msg-container-sign \
-          --signing-key-name "${sig_key_name}" \
-          --signing-key "${sig_key_name}" \
-          --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" "${reference_args[@]}" "${digest_args[@]}" \
-          --task-id $task_id > "$(workspaces.data.path)/${signature_data_file}"
-        echo "Signing response was:"
-        fold "$(workspaces.data.path)/${signature_data_file}"
-    - name: check-signing-response
-      image: "$(params.pipeline_image)"
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 100m
-      workingDir: "$(workspaces.data.path)"
-      env:
-        - name: signature_data_file
-          value: "$(params.signature_data_file)"
-      script: |
-        #!/usr/bin/env /bin/bash
-        set -xe
-        STATUS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.status" | tr -d \")
-        ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.error_message")
-        if [ "${STATUS}" != "ok" ]; then
-          echo "Signing failed with error: ${ERRORS}"
-          exit 1
-        fi
-        SIGNATURE_ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" |\
-          jq -cM ".operation_results|.[]|.[0].msg.errors")
-        if [ "$SIGNATURE_ERRORS" != "[]" ]; then
-          echo "Signing failed with error: ${SIGNATURE_ERRORS}"
-          exit 1
-        fi
-
-        SIGNATURE_DATA=$(
-          cat "$(workspaces.data.path)/${signature_data_file}" | \
-          jq -cM "[
-            [.operation_results, .operation.references]|
-            transpose|
-            .[]|
-            {reference:.[1], 
-             manifest_digest:.[0][0].msg.manifest_digest,
-             repository:.[0][0].msg.repo,
-             signature_data:.[0][0].msg.signed_claim,
-             sig_key_id: .[0][0].msg.sig_key_id}
-          ]")
-        echo "${SIGNATURE_DATA}" > "${signature_data_file}"
-
+        
+        SIG_DATA=$(cat "${signature_data_file:?}")
+        echo "${SIG_DATA}"
+        echo "signature data file: ${signature_data_file:?}"
     - name: upload-signature
       image: "$(params.pipeline_image)"
       computeResources:
@@ -298,21 +191,22 @@ spec:
           value: "/tmp/pyxisKey"
         - name: pyxis_url
           value: $(params.pyxis_url)
-        - name: pyxis_threads
-          value: "$(params.pyxis_threads)"
         - name: signature_data_file
           value: "$(params.signature_data_file)"
       script: |
-        #!/usr/bin/env /bin/bash
+        #!/bin/bash
+        set -xe
+        
+        set +x
         # This helps with Shellcheck warning
-        echo "${PyxisCert:?}" > "${PYXIS_CERT_PATH}"
-        echo "${PyxisKey:?}" > "${PYXIS_KEY_PATH}"
+        echo "${PyxisCert:?}" > /tmp/pyxisCert
+        echo "${PyxisKey:?}" > /tmp/pyxisKey
         set -x
-        pubtools-pyxis-upload-signatures\
-          --pyxis-server "${pyxis_url}" \
-          --pyxis-ssl-crtfile "${PYXIS_CERT_PATH}" \
-          --pyxis-ssl-keyfile "${PYXIS_KEY_PATH}" \
-          --request-threads "${pyxis_threads}" \
-          --signatures @"${signature_data_file}"
+        
+        echo "Signature verified. Uploading to Pyxis sigstore"
+        upload-signature \
+          --pyxis-url "${pyxis_url:?}" \
+          --signature-data "${signature_data_file:?}" \
+          --verbose
   workspaces:
     - name: data

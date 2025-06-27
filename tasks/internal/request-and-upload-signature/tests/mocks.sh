@@ -6,6 +6,7 @@ if [[ ! -f "$count_file" ]]; then
     echo "0" > "$count_file"
 fi
 
+
 function ssh() {
     # Read the current ssh_call_count from the file
     ssh_call_count=$(cat "$count_file")
@@ -15,20 +16,29 @@ function ssh() {
     echo "$ssh_call_count" > "$(workspaces.data.path)/ssh_calls.txt"
 }
 
-function pubtools-sign-msg-container-sign() {
-  >&2 echo "Mock pubtools-sign-msg-container-sign called with: $*"
-  echo "$*" >> "$(workspaces.data.path)/mock_pubtools-sign.txt"
-  cat "$(workspaces.data.path)/mocked_signing_response"
+function request-signature() {
+  echo Mock request-signature called with: $*
+  echo $* >> $(workspaces.data.path)/mock_request-signature.txt
+
+  requester=$(echo $* | grep -oP 'requester \K\w+')
+  file=$(echo $* | grep -oP 'output (.+)$' | cut -f2 -d' ')
+  touch "${file}"
+
+  if [ "${requester}" == "iamgoingtofail" ]; then
+    echo "forcing a failure to get a retry"
+    # Read the current ssh_call_count from the file
+    call_count=$(cat "$count_file")
+    call_count=$((call_count + 1))
+    echo "$call_count" > "$count_file"
+    echo "$call_count" > "$(workspaces.data.path)/request-signature-failure-count.txt"
+    return 1
+  fi
+
+  echo "{}" > "${file}"
 }
 
-function pubtools-pyxis-upload-signatures() {
-  >&2 echo "Mock pubtools-pyxis-upload-signatures called with: $*"
-  echo "$*" >> "$(workspaces.data.path)/mock_pubtools-pyxis-upload-signatures.txt"
+function upload-signature() {
+  echo Mock upload-signature called with: $*
+  echo $* >> $(workspaces.data.path)/mock_upload-signature.txt
+  cat signing_response.json
 }
-
-function openssl() {
-  >&2 echo "Mock openssl called with: $*"
-  echo "$*" >> "$(workspaces.data.path)/mock_openssl.txt"
-}
-
-export CUSTOM_TASK_ID="1234"
