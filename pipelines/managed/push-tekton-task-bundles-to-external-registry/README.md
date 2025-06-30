@@ -1,4 +1,4 @@
-# Push Tekton Task Bundles to External Registry Pipeline
+# push-tekton-task-bundles-to-external-registry pipeline
 
 Tekton pipeline to release tekton tasks bundles to an external registry and update trusted-tasks list.
 
@@ -11,7 +11,7 @@ Tekton pipeline to release tekton tasks bundles to an external registry and upda
 | releasePlanAdmission            | The namespaced name (namespace/name) of the releasePlanAdmission                                                                   | No       | -                                                         |
 | releaseServiceConfig            | The namespaced name (namespace/name) of the releaseServiceConfig                                                                   | No       | -                                                         |
 | snapshot                        | The namespaced name (namespace/name) of the snapshot                                                                               | No       | -                                                         |
-| enterpriseContractPolicy        | JSON representation of the policy to be applied when validating the enterprise contract                                            | No       | -                                                         |
+| enterpriseContractPolicy        | JSON representation of the EnterpriseContractPolicy                                                                                | No       | -                                                         |
 | enterpriseContractExtraRuleData | Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax "key1=value1,key2=value2..." | Yes      | pipeline_intention=release                                |
 | enterpriseContractTimeout       | Timeout setting for `ec validate`                                                                                                  | Yes      | 40m0s                                                     |
 | postCleanUp                     | Cleans up workspace after finishing executing the pipeline                                                                         | Yes      | true                                                      |

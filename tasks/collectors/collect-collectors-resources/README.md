@@ -12,8 +12,8 @@ A task result is returned for each resource with the relative path to the stored
 
 | Name                   | Description                                                      | Optional | Default value |
 |------------------------|------------------------------------------------------------------|----------|---------------|
-| previousRelease        | Namespaced name of the previous Release                          | No       | -             |
-| release                | Namespaced name of the Release                                   | No       | -             |
-| collectorsResourceType | The type of resource that contains the collectors                | No       | -             |
+| previousRelease        | The namespaced name of the previous Release                      | No       | -             |
+| release                | The namespaced name of the Release                               | No       | -             |
+| collectorsResourceType | The type of resource that contains the collectors                | Yes      | releaseplan   |
 | collectorsResource     | The namespaced name of the resource that contains the collectors | No       | -             |
 | subdirectory           | Subdirectory inside the workspace to be used                     | Yes      | ""            |

@@ -1,4 +1,4 @@
-# publish-index-image-pipeline
+# publish-index-image pipeline
 
 Tekton pipeline to publish a built FBC index image using skopeo
 

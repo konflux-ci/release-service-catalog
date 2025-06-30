@@ -17,6 +17,13 @@ Whenever a change is pushed to this repository and a pull request is created, a 
 resource definition doesn't contain invalid yaml data. Refer to the [.yamllint file](.yamllint) to see the exact applied
 rules. For more information on yamllint, check the [official documentation](https://yamllint.readthedocs.io/en/stable).
 
+# Keeping Documentation Up to Date
+
+Whenever a task or pipeline is changed, please run the `./hack/readme_generator.sh` script with the
+changed task/pipeline directories as arguments to update the README.md description and table included with the
+table. A check is run on each pull request to ensure that the README.md files in each task/pipeline are up to date.
+For more information, check the `./hack/readme_generator.sh` script.
+
 # Versioning
 
 All the resources in this repository are versioned through the use of the `app.kubernetes.io/version` label. Any change

@@ -1,9 +1,9 @@
 # collect-simple-signing-params
 
-Task to collect parameters for the simple signing pipeline
+null
 
 ## Parameters
 
-| Name             | Description                                                                           | Optional | Default value                                          |
-|------------------|---------------------------------------------------------------------------------------|----------|--------------------------------------------------------|
-| config_map_name  | Name of a configmap with pipeline configuration                                       | No       | -                                                      |
+| Name            | Description                                     | Optional | Default value |
+|-----------------|-------------------------------------------------|----------|---------------|
+| config_map_name | Name of a configmap with pipeline configuration | No       | -             |
