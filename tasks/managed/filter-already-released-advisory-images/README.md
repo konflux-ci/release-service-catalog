@@ -30,3 +30,4 @@ Downstream tasks continue to use the same snapshot path.
 | taskGitRevision          | Git revision to use for internal task                                                                                      | No       | -                       |
 | pipelineRunUid           | UID of the current pipelineRun                                                                                             | No       | -                       |
 | synchronously            | Whether to wait for the InternalRequest completion                                                                         | Yes      | true                    |
+| dataPath                 | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                       |

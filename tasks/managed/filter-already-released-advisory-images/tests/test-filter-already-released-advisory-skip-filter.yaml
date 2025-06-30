@@ -2,13 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-already-released-advisory-no-prod-or-pending
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-filter-already-released-advisory-skip-filter
 spec:
   description: |
-    Run the filter-already-released-advisory-images task with a snapshot containing only non-prod and non-pending
-    repositories and verify the task fails as expected.
+    Test that filter-already-released-advisory-images task skips
+    filtering when skipFilter: true is set in the data file.
   workspaces:
     - name: tests-workspace
   params:
@@ -33,6 +31,9 @@ spec:
       type: string
   tasks:
     - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
         results:
           - name: sourceDataArtifact
@@ -59,9 +60,24 @@ spec:
             script: |
               #!/usr/bin/env bash
               set -eux
-
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" <<EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "repository": "quay.io/redhat-prod/repo",
+                    "containerImage": "quay.io/redhat-prod/repo@sha256:abc123"
+                  }
+                ]
+              }
+              EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" <<EOF
+              {
+                "skipFilter": true
+              }
+              EOF
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" <<EOF
               {
                 "apiVersion": "appstudio.redhat.com/v1alpha1",
@@ -75,28 +91,6 @@ spec:
                   "origin": "dev"
                 }
               }
-              EOF
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" <<EOF
-              {
-                "application": "myapp",
-                "components": [
-                  {
-                    "name": "dev-component",
-                    "repository": "quay.io/redhat-dev/repo",
-                    "containerImage": "quay.io/redhat-dev/repo@sha256:abc123"
-                  },
-                  {
-                    "name": "other-component",
-                    "repository": "quay.io/other/repo",
-                    "containerImage": "quay.io/other/repo@sha256:def456"
-                  }
-                ]
-              }
-              EOF
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" <<EOF
-              {}
               EOF
           - name: skip-trusted-artifact-operations
             ref:
@@ -130,6 +124,8 @@ spec:
     - name: run-task
       taskRef:
         name: filter-already-released-advisory-images
+      runAfter:
+        - setup
       params:
         - name: snapshotPath
           value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
@@ -139,12 +135,14 @@ spec:
           value: "$(context.pipelineRun.uid)/results"
         - name: synchronously
           value: "false"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
         - name: taskGitUrl
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-        - name: pipelineRunUid
-          value: $(context.pipelineRun.uid)
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -157,8 +155,91 @@ spec:
           value: $(params.dataDir)
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
-      runAfter:
-        - setup
       workspaces:
         - name: data
           workspace: tests-workspace
+    - name: check-result
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: result
+            type: string
+          - name: skip_release
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify
+            image: quay.io/konflux-ci/release-service-utils:6a1df8c94948c3f1e83eb9e92a38a8e6431baa3b
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              # When skipFilter is true, no InternalRequests should be created
+              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
+
+              if [ "$requestsCount" -ne 0 ]; then
+                echo "When skipFilter is true, no InternalRequests should be created. Found: $requestsCount"
+                exit 1
+              fi
+
+              # Check that skip_release is set to false (pipeline should continue)
+              if [ "$(params.skip_release)" != "false" ]; then
+                echo "skip_release should be false when skipFilter is true"
+                exit 1
+              fi
+
+              # Check that the result was properly set to Success
+              if [ "$(params.result)" != "Success" ]; then
+                echo "Task failed: $(params.result)"
+                exit 1
+              fi
+
+              echo "All assertions passed: skipFilter=true correctly skipped filtering"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: skip_release
+          value: $(tasks.run-task.results.skip_release)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: "$(params.dataDir)" 
