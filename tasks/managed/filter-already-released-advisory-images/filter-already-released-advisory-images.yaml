@@ -284,33 +284,36 @@ spec:
             exit 1
           fi
 
-          UNRELEASED_COMPONENTS=$(echo "$UNRELEASED_COMPONENTS_RAW" | base64 -d | gunzip)
+          UNRELEASED_COMPONENTS=$(mktemp)
+          FILTERED_SNAPSHOT=$(mktemp)
+
+          echo "$UNRELEASED_COMPONENTS_RAW" | base64 -d | gunzip | tee "$UNRELEASED_COMPONENTS"
 
           # Filter the original snapshot using the unreleased components list
-          FILTERED_SNAPSHOT=$(jq --argjson unreleased "$UNRELEASED_COMPONENTS" '
+          jq --slurpfile unreleased "$UNRELEASED_COMPONENTS" '
             .components = (
               .components | map(
                 select(
-                  .name as $name | ($unreleased | contains([$name]))
+                  .name as $name | ($unreleased[0] | contains([$name]))
                 )
               )
             )
-          ' < "$SNAPSHOT_FILE")
+          ' "$SNAPSHOT_FILE" > "$FILTERED_SNAPSHOT"
 
           # Check if the filtered snapshot has any components
-          if jq -e '.components | length == 0' <<< "$FILTERED_SNAPSHOT"; then
+          if jq -e '.components | length == 0' < "$FILTERED_SNAPSHOT"; then
             echo "All images in the snapshot have already been released in advisories. Stopping pipeline."
-            echo "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
+            cat "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
             echo -n "Success" > "$(results.result.path)"
             echo -n "true" > "$(results.skip_release.path)"
-            jq -n --arg snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
+            jq -n --rawfile snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
             exit 0
           fi
 
-          echo "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
+          cat "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
           echo -n "Success" > "$(results.result.path)"
           echo -n "false" > "$(results.skip_release.path)"
-          jq -n --arg snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
+          jq -n --rawfile snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
         else
           echo "Filtering failed. Results:"
           echo "$results"
