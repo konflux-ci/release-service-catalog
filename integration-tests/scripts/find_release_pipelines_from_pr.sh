@@ -13,6 +13,25 @@ find_release_pipelines_from_pr() {
   setup_workspace
   clone_and_checkout_pr "$REPO" "$PR_NUM" || return 1
 
+  _find_and_process_pipelines
+}
+
+find_release_pipelines_from_branch() {
+  local REPO=$1
+  local BRANCH=$2
+
+  if [ -z "$REPO" ] || [ -z "$BRANCH" ]; then
+    echo "please provide repo and branch name, for example: find_release_pipelines_from_branch konflux-ci/release-service-catalog development"
+    return 1
+  fi
+
+  setup_workspace
+  clone_and_checkout_branch "$REPO" "$BRANCH" || return 1
+
+  _find_and_process_pipelines
+}
+
+_find_and_process_pipelines() {
   # Declare global variables
   declare -a FOUND_PIPELINENAMES
   declare -a FOUND_INTERNAL_PIPELINENAMES
@@ -223,6 +242,21 @@ clone_and_checkout_pr() {
   fi
 }
 
+clone_and_checkout_branch() {
+  local repo=$1
+  local branch=$2
+
+  git clone --quiet "https://github.com/$repo.git" release-service-catalog
+  cd release-service-catalog || exit 1
+
+  if ! git checkout "$branch" > /dev/null 2>&1; then
+    echo "Failed to checkout branch '$branch'"
+    cd ../.. || exit 1
+    rm -rf ".tmp_pr_check"
+    return 1
+  fi
+}
+
 find_changed_tekton_tasks_pipelines() {
   local FILES
   FILES=$(git diff --name-only origin/development...HEAD)
@@ -329,4 +363,97 @@ cleanup_workspace() {
   rm -rf ".tmp_pr_check"
 }
 
-find_release_pipelines_from_pr "$1" "$2"
+# Usage function
+usage() {
+  echo "Usage: $0 --repo <repo> [--pull_request_number <number> | --branch <branch>]"
+  echo ""
+  echo "Options:"
+  echo "  --repo <repo>                   Repository in 'owner/repo' format (e.g., 'konflux-ci/release-service-catalog')"
+  echo "  --pull_request_number <number>  Pull request number"
+  echo "  --branch <branch>               Branch name to checkout"
+  echo "  -h, --help                      Show this help message"
+  echo ""
+  echo "Note: Either --pull_request_number or --branch must be provided, but not both."
+  echo ""
+  echo "Examples:"
+  echo "  $0 --repo konflux-ci/release-service-catalog --pull_request_number 949"
+  echo "  $0 --repo konflux-ci/release-service-catalog --branch development"
+  exit 1
+}
+
+# Main execution with command line switch parsing
+main() {
+  local repo=""
+  local pull_number=""
+  local branch=""
+
+  # Parse command line arguments
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --repo)
+        repo="$2"
+        shift 2
+        ;;
+      --pull_request_number)
+        pull_number="$2"
+        shift 2
+        ;;
+      --branch)
+        branch="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        ;;
+      *)
+        echo "Error: Unknown option '$1'" >&2
+        echo "" >&2
+        usage
+        ;;
+    esac
+  done
+
+  # Validate required parameters
+  if [ -z "$repo" ]; then
+    echo "Error: --repo parameter is required." >&2
+    echo "" >&2
+    usage
+  fi
+
+  # Validate that either pull_request_number or branch is provided, but not both
+  if [ -n "$pull_number" ] && [ -n "$branch" ]; then
+    echo "Error: Cannot specify both --pull_request_number and --branch. Choose one." >&2
+    echo "" >&2
+    usage
+  fi
+
+  if [ -z "$pull_number" ] && [ -z "$branch" ]; then
+    echo "Error: Either --pull_request_number or --branch parameter is required." >&2
+    echo "" >&2
+    usage
+  fi
+
+  # Validate repo format (should contain owner/repo)
+  if [[ ! "$repo" =~ ^[^/]+/[^/]+$ ]]; then
+    echo "Error: Repository must be in 'owner/repo' format (e.g., 'konflux-ci/release-service-catalog')" >&2
+    echo "" >&2
+    usage
+  fi
+
+  # Validate pull_number is numeric if provided
+  if [ -n "$pull_number" ] && ! [[ "$pull_number" =~ ^[0-9]+$ ]]; then
+    echo "Error: Pull request number must be a positive integer" >&2
+    echo "" >&2
+    usage
+  fi
+
+  # Call the main function with appropriate parameters
+  if [ -n "$pull_number" ]; then
+    find_release_pipelines_from_pr "$repo" "$pull_number"
+  else
+    find_release_pipelines_from_branch "$repo" "$branch"
+  fi
+}
+
+# Execute main function with all arguments
+main "$@"
