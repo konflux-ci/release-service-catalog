@@ -1,4 +1,4 @@
-# push-disk-images
+# push-disk-images pipeline
 
 Tekton Pipeline to push disk images with Pulp
 
