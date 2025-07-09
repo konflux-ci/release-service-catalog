@@ -125,6 +125,30 @@ Here is an example
       cpu: 250m
 ```
 
+### Keeping Documentation Up to Date
+
+Whenever a task or pipeline is changed, please run the `.github/scripts/readme_generator.sh` script with the
+changed task/pipeline directories as arguments to update the README.md description and parameter table.
+
+A check is run on each pull request to ensure that the README.md files in each task/pipeline are up to date and that task/pipeline
+descriptions (including parameter descriptions) are valid.
+
+You can run this check locally with the `.github/scripts/check_readme.sh` script.
+
+This script also checks if descriptions are present in each task/pipeline (and their parameters) and that they don't end with
+a trailing `.` or `,`
+
+Running `.github/scripts/check_readme.sh` locally is recommended to find these errors in task/pipeline/parameter descriptions.
+
+If you wish to update a task, pipeline, or task/pipeline parameter description, do **not** manually change the README.md file.
+
+Instead, you should change the descriptions in the `yaml` file associated with the task/pipeline, and then run `.github/scripts/readme_generator.sh`
+with the changed task/pipeline directories as arguments. This is because the task/pipeline `yaml` file is considered the source of truth for each 
+task/pipeline README.md file. If you manually change the README.md file without updating the yaml, `check_readme.sh` will fail and `readme_generator.sh`
+will overwrite your changes. You should never have to update the README.md file manually.
+
+For more information, check the `.github/scripts/readme_generator.sh` and `.github/scripts/check_readme.sh` scripts.
+
 ### Modes for Running Pipelines
 
 Note: There are currently 2 modes that may be used when running pipelines:
