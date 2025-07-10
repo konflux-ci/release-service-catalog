@@ -127,7 +127,9 @@ spec:
         #!/usr/bin/env bash
         set -ex
 
-        RESULTS_JSON="{}"
+        # Use temporary files to avoid command line argument length limits
+        RESULTS_JSON_FILE=$(mktemp)
+        echo '{}' > "$RESULTS_JSON_FILE"
         RESULTS_DIR="$(params.dataDir)/$(params.resultsDirPath)"
         for resultsFile in $([ -d "$RESULTS_DIR" ] && find "$RESULTS_DIR" -type f); do
             if ! jq . >/dev/null 2>&1 "${resultsFile}" ; then
@@ -136,10 +138,23 @@ spec:
             fi
             # If two files have arrays with the same key, it will be overwritten. Otherwise, the jsons
             # are merged (only arrays are not merged properly with this notation).
-            RESULTS_JSON=$(jq -c "${RESULTS_JSON} * ." "${resultsFile}")
+            TMP_RESULT=$(mktemp)
+            jq -c '. * $newData' --slurpfile newData <(jq -c '.' "${resultsFile}") "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+            mv "$TMP_RESULT" "$RESULTS_JSON_FILE"
         done
+        
+        # Create patch file to avoid command line argument length limits
+        PATCH_FILE=$(mktemp)
+        jq -n --arg statusKey "$(params.statusKey)" --slurpfile resultsData "$RESULTS_JSON_FILE" \
+          '{"status": {($statusKey): $resultsData[0]}}' > "$PATCH_FILE"
+        
+        # Clean up results file
+        rm -f "$RESULTS_JSON_FILE"
 
         IFS='/' read -r namespace name <<< "$(params.resource)"
 
         kubectl --warnings-as-errors=true patch "$(params.resourceType)" -n "$namespace" "$name" \
-          --type=merge --subresource status --patch "status: {'$(params.statusKey)':${RESULTS_JSON}}"
+          --type=merge --subresource status --patch-file "$PATCH_FILE"
+        
+        # Clean up patch file
+        rm -f "$PATCH_FILE"
