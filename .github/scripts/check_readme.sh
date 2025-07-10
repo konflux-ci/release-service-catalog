@@ -3,7 +3,7 @@
 # This script will verify that the README.md of all task and 
 # pipeline directories provided matches the output of hack/readme_generator.sh
 # to ensure that README files are up to date.
-#
+# test
 # Task and pipeline directories are provided
 # either via README_ITEMS env var, or as arguments
 # when running the script.
