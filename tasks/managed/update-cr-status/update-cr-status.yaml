@@ -129,18 +129,78 @@ spec:
 
         # Use temporary files to avoid command line argument length limits
         RESULTS_JSON_FILE=$(mktemp)
-        echo '{}' > "$RESULTS_JSON_FILE"
         RESULTS_DIR="$(params.dataDir)/$(params.resultsDirPath)"
+        FIRST_FILE=true
+        
         for resultsFile in $([ -d "$RESULTS_DIR" ] && find "$RESULTS_DIR" -type f); do
             if ! jq . >/dev/null 2>&1 "${resultsFile}" ; then
                 echo "Passed results JSON file ${resultsFile} in results directory was not proper JSON."
                 exit 1
             fi
-            # If two files have arrays with the same key, it will be overwritten. Otherwise, the jsons
-            # are merged (only arrays are not merged properly with this notation).
-            TMP_RESULT=$(mktemp)
-            jq -c '. * $newData' --slurpfile newData <(jq -c '.' "${resultsFile}") "$RESULTS_JSON_FILE" > "$TMP_RESULT"
-            mv "$TMP_RESULT" "$RESULTS_JSON_FILE"
+            
+            if [ "$FIRST_FILE" = true ]; then
+                # For the first file, just copy it directly
+                jq -c '.' "${resultsFile}" > "$RESULTS_JSON_FILE"
+                FIRST_FILE=false
+            else
+                # For subsequent files, merge with existing content
+                TMP_RESULT=$(mktemp)
+                # Get the types of both files
+                EXISTING_TYPE=$(jq -r 'type' "$RESULTS_JSON_FILE")
+                NEW_TYPE=$(jq -r 'type' "${resultsFile}")
+                
+                echo "Merging files: existing type=$EXISTING_TYPE, new type=$NEW_TYPE"
+                
+                # Always merge as objects to ensure compatibility with Kubernetes CR
+                if [ "$EXISTING_TYPE" = "object" ] && [ "$NEW_TYPE" = "object" ]; then
+                    echo "Both are objects, merging with conflict resolution..."
+                    # Use a more robust merge that handles nested conflicts
+                    jq -c '
+                    def safe_merge(a; b):
+                        if a == null then b
+                        elif b == null then a
+                        elif (a | type) == "object" and (b | type) == "object" then
+                            a + b
+                        elif (a | type) == "array" and (b | type) == "array" then
+                            a + b
+                        elif (a | type) == "array" or (b | type) == "array" then
+                            # If either is an array, convert both to arrays and concatenate
+                            (if (a | type) == "array" then a else [a] end) + (if (b | type) == "array" then b else [b] end)
+                        else
+                            # For other types, prefer the new value
+                            b
+                        end;
+                    with_entries(
+                        .key as $k
+                        | .value = safe_merge(.[$k]; $newData[0][$k])
+                    )
+                    ' --slurpfile newData <(jq -c '.' "${resultsFile}") "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+                elif [ "$EXISTING_TYPE" = "array" ] && [ "$NEW_TYPE" = "array" ]; then
+                    echo "Both are arrays, converting to object and merging..."
+                    # Convert both arrays to objects with descriptive keys
+                    jq -c '{"array_results": .}' "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+                    mv "$TMP_RESULT" "$RESULTS_JSON_FILE"
+                    jq -c '. * {"additional_results": $newData}' --slurpfile newData <(jq -c '.' "${resultsFile}") "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+                else
+                    # Mixed types - convert everything to objects
+                    echo "Mixed types, converting to objects and merging..."
+                    # Convert existing to object if needed
+                    if [ "$EXISTING_TYPE" = "array" ]; then
+                        echo "Converting existing array to object..."
+                        jq -c '{"array_results": .}' "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+                        mv "$TMP_RESULT" "$RESULTS_JSON_FILE"
+                    fi
+                    # Convert new data to object if needed and merge
+                    if [ "$NEW_TYPE" = "array" ]; then
+                        echo "Converting new array to object and merging..."
+                        jq -c '. * {"additional_results": $newData}' --slurpfile newData <(jq -c '.' "${resultsFile}") "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+                    else
+                        echo "Merging new object with existing..."
+                        jq -c '. * $newData' --slurpfile newData <(jq -c '.' "${resultsFile}") "$RESULTS_JSON_FILE" > "$TMP_RESULT"
+                    fi
+                fi
+                mv "$TMP_RESULT" "$RESULTS_JSON_FILE"
+            fi
         done
         
         # Create patch file to avoid command line argument length limits
