@@ -12,6 +12,16 @@ function kinit() {
     fi
 }
 
+function mktemp() {
+    echo /tmp/foobar
+}
+
+function select-oci-auth() {
+    echo "select-oci-auth $@" >> "$(params.dataDir)/select_oci_auth_calls.txt"
+    # This usually includes some auth details, but we're not really going to use it
+    echo "{}"
+}
+
 function oras() {
     echo "oras $@" >> "$(params.dataDir)/oras_calls.txt"
     if [[ "$1" == "manifest" && "$2" == "fetch" ]]; then
