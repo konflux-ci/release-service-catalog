@@ -8,10 +8,10 @@ function skopeo() {
 
   if [[ "$1" == "inspect" ]]; then
     # Handle `skopeo inspect`
-    if [[ "$*" == *"--dest-creds target docker://quay.io/match-target-digest"* ]]; then
+    if [[ "$*" == *"docker://quay.io/match-target-digest"* ]]; then
       echo "sha256:match1234567890"  # Mock target digest for idempotency check
       return 0
-    elif [[ "$*" == *"--dest-creds target docker://quay.io/target"* ]]; then
+    elif [[ "$*" == *"docker://quay.io/target"* ]]; then
       echo "sha256:target1234567890"
       return 0
     elif [[ "$*" == *"--tls-verify=false --src-creds source docker://quay.io/source"* ]]; then
