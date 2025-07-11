@@ -78,6 +78,10 @@ spec:
       description: Name of the Secret containing AWS credentials for retry mechanism
     - name: retryS3Bucket
       description: Name of the S3 bucket for the retry mechanism
+    - name: concurrentLimit
+      type: string
+      description: The maximum number of SBOMs to be uploaded at once
+      default: 10
   workspaces:
     - name: data
   results:
@@ -151,9 +155,9 @@ spec:
       image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
       computeResources:
         limits:
-          memory: 32Mi
+          memory: 512Mi
         requests:
-          memory: 32Mi
+          memory: 512Mi
           cpu: 10m
       volumeMounts:
         - name: atlas-secret
@@ -182,50 +186,119 @@ spec:
         sso_account="$(cat /secrets/sso_account)"
         sso_token="$(cat /secrets/sso_token)"
 
-        for sbom_path in "${sboms_to_upload[@]}"; do
-          echo "Processing $sbom_path"
+        # Function to upload a single SBOM to Atlas
+        upload_sbom_to_atlas() {
+            local sbom_path="$1"
+            local access_token="$2"
+            local atlas_api_url="$3"
+            local retry_max_time="$4"
+            local failed_sbom_dir="$5"
+            local sbom_filename
+            sbom_filename=$(basename "$sbom_path")
+            
+            echo "Uploading SBOM $sbom_path to $atlas_api_url"
+            
+            handle_atlas_failure() {
+                >&2 echo "WARNING: SBOM upload of $1 to Atlas has failed! Upload will be retried later."
+                cp "$1" "${failed_sbom_dir}"
+            }
 
-          ssoTokenUrl=$(params.ssoTokenUrl)
-          echo "Getting SSO token from $ssoTokenUrl"
+            if ! curl -X POST "${curl_opts[@]}" \
+                --retry-max-time "$retry_max_time" \
+                -H "authorization: Bearer $access_token" \
+                -H "transfer-encoding: chunked" \
+                -H "content-type: application/json" \
+                --data "@$sbom_path" \
+                "$atlas_api_url/api/v2/sbom"; then
+                handle_atlas_failure "$sbom_path"
+            fi
 
-          token_response="$(
-            curl -X POST "${curl_opts[@]}" \
-              -d "grant_type=client_credentials" \
-              -d "client_id=$sso_account" \
-              -d "client_secret=$sso_token" \
-              "$ssoTokenUrl"
-            )"
+            # In the stage environment (and e2e tests), retry the push of all
+            # SBOMs to test functionality of the retry mechanism.
+            if [[ "$(params.atlasSecretName)" = "atlas-staging-sso-secret" ]]; then
+                cp "$sbom_path" "${failed_sbom_dir}"
+            fi
+        }
 
-          # https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1
-          access_token="$(jq -r .access_token <<< "$token_response")"
-          expires_in="$(jq -r ".expires_in // empty" <<< "$token_response")"
+        # Get SSO token once for all uploads
+        ssoTokenUrl=$(params.ssoTokenUrl)
+        echo "Getting SSO token from $ssoTokenUrl"
 
-          retry_max_time=0  # no limit
-          if [[ -n "$expires_in" ]]; then
-            retry_max_time="$expires_in"
-          fi
-
-          atlasApiUrl=$(params.atlasApiUrl)
-          echo "Uploading SBOM $sbom_path to $atlasApiUrl"
-
-          handle_atlas_failure () {
-            >&2 echo "WARNING: SBOM upload of $1 to Atlas has failed! Upload will be retried later."
-            cp "$1" "${failedSbomDir}"
-          }
-
+        token_response="$(
           curl -X POST "${curl_opts[@]}" \
-            --retry-max-time "$retry_max_time" \
-            -H "authorization: Bearer $access_token" \
-            -H "transfer-encoding: chunked" \
-            -H "content-type: application/json" \
-            --data "@$sbom_path" \
-            "$atlasApiUrl/api/v2/sbom" \
-            || handle_atlas_failure "$sbom_path"
+            -d "grant_type=client_credentials" \
+            -d "client_id=$sso_account" \
+            -d "client_secret=$sso_token" \
+            "$ssoTokenUrl"
+        )"
 
-          # In the stage environment (and e2e tests), retry the push of all
-          # SBOMs to test functionality of the retry mechanism.
-          if [[ "$(params.atlasSecretName)" = "atlas-staging-sso-secret" ]]; then
-            cp "$sbom_path" "${failedSbomDir}"
+        # https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1
+        access_token="$(jq -r .access_token <<< "$token_response")"
+        expires_in="$(jq -r ".expires_in // empty" <<< "$token_response")"
+
+        retry_max_time=0  # no limit
+        if [[ -n "$expires_in" ]]; then
+          retry_max_time="$expires_in"
+        fi
+
+        atlasApiUrl=$(params.atlasApiUrl)
+
+        # Process uploads in parallel batches
+        N=$(params.concurrentLimit)  # The maximum number of SBOMs to be uploaded at once
+        declare -a jobs=()
+        declare -a job_outputs=()
+        total=${#sboms_to_upload[@]}
+        count=0
+        success=true
+        echo "Starting SBOM upload for $total files in total. " \
+          "Up to $N files will be uploaded at once..."
+
+        # Create temporary directory for output files
+        temp_output_dir=$(mktemp -d)
+        trap 'rm -rf "$temp_output_dir"' EXIT
+
+        for sbom_path in "${sboms_to_upload[@]}"; do
+          sbom_filename=$(basename "$sbom_path")
+          output_file="${temp_output_dir}/${sbom_filename}.upload.out"
+          echo "Starting upload for SBOM: $sbom_filename"
+          
+          upload_sbom_to_atlas "$sbom_path" "$access_token" "$atlasApiUrl" \
+            "$retry_max_time" "$failedSbomDir" > "$output_file" 2>&1 &
+          
+          jobs+=($!)  # Save the background process ID
+          job_outputs+=("$output_file")
+          ((++count))
+
+          if [ $((count%N)) -eq 0 ] || [ $((count)) -eq "$total" ]; then
+            echo "Waiting for the current batch of background processes to finish"
+            for job_id in "${!jobs[@]}"; do
+              if ! wait "${jobs[job_id]}"; then
+                echo "Error: upload of sbom failed for one of the files"
+                success=false
+              fi
+            done
+
+            echo
+            echo "Printing outputs for current upload runs"
+            for output_file in "${job_outputs[@]}"; do
+              sbom_name=$(basename "$output_file" .upload.out)
+              echo "=== $sbom_name ==="
+              if [ -f "$output_file" ]; then
+                cat "$output_file"
+              else
+                echo "Output file not found: $output_file"
+              fi
+              echo
+            done
+
+            if [ $success != "true" ]; then
+              echo "ERROR: At least one upload in the last batch failed"
+              exit 1
+            fi
+
+            # Reset job arrays for the next batch
+            jobs=()
+            job_outputs=()
           fi
         done
 
@@ -233,9 +306,9 @@ spec:
       image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
       computeResources:
         limits:
-          memory: 32Mi
+          memory: 512Mi
         requests:
-          memory: 32Mi
+          memory: 512Mi
           cpu: 10m
       volumeMounts:
         - name: aws-secret
@@ -253,28 +326,103 @@ spec:
         region="us-east-1"
         bucket="$(params.retryS3Bucket)"
 
+        # Function to upload a single SBOM to S3
+        upload_sbom_to_s3() {
+            local sbom="$1"
+            local bucket="$2"
+            local region="$3"
+            local aws_access_key_id="$4"
+            local aws_secret_access_key="$5"
+            
+            # we don't want the full path in S3
+            local s3_filename
+            s3_filename=$(basename "$sbom")
+            local resource="/${bucket}/${s3_filename}"
+            local content_type="application/json"
+            local date_value
+            date_value=$(date -R)
+            local to_sign="PUT\n\n${content_type}\n${date_value}\n${resource}"
+            local signature
+            signature=$(echo -en "${to_sign}" | openssl sha1 -hmac "${aws_secret_access_key}" -binary | base64)
+
+            echo "Pushing $sbom to S3."
+            if ! curl -X PUT --upload-file "${sbom}" \
+                --silent --show-error --fail-with-body --retry 10 \
+                --retry-all-errors \
+                -H "Host: ${bucket}.s3.${region}.amazonaws.com" \
+                -H "Date: ${date_value}" \
+                -H "Content-Type: ${content_type}" \
+                -H "Authorization: AWS ${aws_access_key_id}:${signature}" \
+                "https://${bucket}.s3.${region}.amazonaws.com/${s3_filename}"; then
+              >&2 echo "ERROR: Failed to push SBOM to S3 bucket."
+              return 1
+            fi
+        }
+
         shopt -s nullglob
-        for sbom in "$sbomDir"/*; do
-          # we don't want the full path in S3
-          s3_filename=$(basename "$sbom")
+        sboms_to_s3=("$sbomDir"/*)
+        
+        if [[ "${#sboms_to_s3[@]}" -eq 0 ]]; then
+          echo "No SBOMs to upload to S3"
+          exit 0
+        fi
 
-          resource="/${bucket}/${s3_filename}"
-          content_type="application/json"
-          date_value=$(date -R)
-          to_sign="PUT\n\n${content_type}\n${date_value}\n${resource}"
-          signature=$(echo -en "${to_sign}" | openssl sha1 -hmac "${aws_secret_access_key}" -binary | base64)
+        # Process S3 uploads in parallel batches
+        N=$(params.concurrentLimit)  # The maximum number of SBOMs to be uploaded at once
+        declare -a jobs=()
+        declare -a job_outputs=()
+        total=${#sboms_to_s3[@]}
+        count=0
+        success=true
+        echo "Starting S3 upload for $total files in total. " \
+          "Up to $N files will be uploaded at once..."
 
-          echo "Pushing $sbom to S3."
-          if ! curl -X PUT --upload-file "${sbom}" \
-              --silent --show-error --fail-with-body --retry 10 \
-              --retry-all-errors \
-              -H "Host: ${bucket}.s3.${region}.amazonaws.com" \
-              -H "Date: ${date_value}" \
-              -H "Content-Type: ${content_type}" \
-              -H "Authorization: AWS ${aws_access_key_id}:${signature}" \
-              "https://${bucket}.s3.${region}.amazonaws.com/${s3_filename}"; then
-            >&2 echo "ERROR: Failed to push SBOM to S3 bucket."
-            exit 1
+        # Create temporary directory for output files
+        temp_output_dir=$(mktemp -d)
+        trap 'rm -rf "$temp_output_dir"' EXIT
+
+        for sbom in "${sboms_to_s3[@]}"; do
+          sbom_filename=$(basename "$sbom")
+          output_file="${temp_output_dir}/${sbom_filename}.s3.out"
+          echo "Starting S3 upload for SBOM: $sbom_filename"
+          
+          upload_sbom_to_s3 "$sbom" "$bucket" "$region" "$aws_access_key_id" \
+            "$aws_secret_access_key" > "$output_file" 2>&1 &
+          
+          jobs+=($!)  # Save the background process ID
+          job_outputs+=("$output_file")
+          ((++count))
+
+          if [ $((count%N)) -eq 0 ] || [ $((count)) -eq "$total" ]; then
+            echo "Waiting for the current batch of background processes to finish"
+            for job_id in "${!jobs[@]}"; do
+              if ! wait "${jobs[job_id]}"; then
+                echo "Error: upload of sbom to S3 failed for one of the files"
+                success=false
+              fi
+            done
+
+            echo
+            echo "Printing outputs for current S3 upload runs"
+            for output_file in "${job_outputs[@]}"; do
+              sbom_name=$(basename "$output_file" .s3.out)
+              echo "=== $sbom_name ==="
+              if [ -f "$output_file" ]; then
+                cat "$output_file"
+              else
+                echo "Output file not found: $output_file"
+              fi
+              echo
+            done
+
+            if [ $success != "true" ]; then
+              echo "ERROR: At least one S3 upload in the last batch failed"
+              exit 1
+            fi
+
+            # Reset job arrays for the next batch
+            jobs=()
+            job_outputs=()
           fi
         done
     - name: create-trusted-artifact
