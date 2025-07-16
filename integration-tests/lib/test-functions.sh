@@ -604,10 +604,18 @@ delete_old_branches() {
 
 # Function to verify Release contents
 verify_release_contents() {
-    echo "WARNING: Test Suite should implement this function to verify Release contents in their test.sh file"
+    echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
+     "to verify Release contents in their test.sh file"
 }
 
-# Function to patch the component source
+# Function to patch the component source BEFORE Component creation
 patch_component_source() {
-    echo "WARNING: Test Suite should implement this function to patch the component source in their test.sh file"
+    echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
+     "to patch the component source BEFORE Component creation in their test.sh file"
+}
+
+# Function to patch the component source BEFORE MERGE
+patch_component_source_before_merge() {
+    echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
+     "to patch the component source BEFORE MERGE in their test.sh file"
 }

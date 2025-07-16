@@ -26,6 +26,15 @@ verify_release_contents() {
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
     catalog_url=$(jq -r '.status.artifacts.catalog_urls[]?.url // ""' <<< "${release_json}")
     cve=$(jq -r '.status.collectors.tenant.cve.releaseNotes.cves[]? | select(.key == "CVE-2024-8260") | .key // ""' <<< "${release_json}")
+    image_arches=$(jq -r '.status.artifacts.images[0].arches | sort | join(" ") // ""' <<< "${release_json}")
+
+    echo "Checking image arches..."
+    if [ "$image_arches" = "amd64 arm64" ]; then
+      echo "✅️ Found required image arches: amd64 arm64"
+    else
+      echo "🔴 Some required image arches were NOT found: expected: amd64 arm64, found: ${image_arches}"
+      failures=$((failures+1))
+    fi
 
     if [ -z "$advisory_internal_url" ]; then
         echo "Warning: advisory_internal_url is empty. Skipping advisory content check."
@@ -168,4 +177,44 @@ verify_release_contents() {
     echo "✅️ Success!"
   fi
 
+}
+
+patch_component_source_before_merge() {
+  echo "Patching component source BEFORE MERGE to:"
+  echo "- Add multi-arch support to the PaC pipeline"
+  echo "- Add source image build to the PaC pipeline"
+  set +x
+  # Get secret value from the tenant secrets file and use
+  # it for GH_TOKEN
+  secret_value=$(yq '. | select(.metadata.name | contains("pipelines-as-code-secret-")) | .stringData.password' ${SUITE_DIR}/resources/tenant/secrets/tenant-secrets.yaml)
+  export GH_TOKEN=${secret_value}
+
+  # Patch each PaC pipeline to add multi-arch support and source image build
+  local file_names=".tekton/${component_name}-pull-request.yaml .tekton/${component_name}-push.yaml "
+  for file_name in ${file_names}; do
+    echo "Patching ${file_name}..."
+    head_sha=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+    "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}" | jq -r '.head.sha')
+
+    decoded_contents=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+        "https://api.github.com/repos/${component_repo_name}/contents/${file_name}?ref=${head_sha}" | \
+        jq -r '.content' | base64 -d)
+
+    local work_dir=$(mktemp -d)
+    nopath_file_name=$(basename "${file_name}")
+    echo "${decoded_contents}" > "${work_dir}/${nopath_file_name}"
+    yq -i '(.spec.params[] | select(.name == "build-platforms") | .value) += ["linux/arm64"]' "${work_dir}/${nopath_file_name}"
+    yq -i '.spec.params += [{"name": "build-source-image", "value": "true"}]' "${work_dir}/${nopath_file_name}"
+    encoded_contents=$(base64 -w 0 <<< "$(cat "${work_dir}/${nopath_file_name}")")
+    rm -rf "${work_dir}"
+
+    "${SCRIPT_DIR}/scripts/update-file-in-pull-request.sh" \
+        "${component_repo_name}" \
+        "${pr_number}" \
+        "${file_name}" \
+        "Update component source before merge" \
+        "${encoded_contents}"
+  done
+
+  echo "✅️ Successfully patched component source!"
 }
