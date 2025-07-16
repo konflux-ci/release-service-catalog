@@ -14,7 +14,6 @@ passed.
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-------------------------|
 | image_binaries_path     | Path inside the image where the binaries to extract are stored                                                             | Yes      | releases                |
 | snapshotPath            | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                  | No       | -                       |
-| subdirectory            | Subdirectory inside the workspace to be used for storing the binaries                                                      | Yes      | ""                      |
 | dataPath                | Path to the JSON string of the merged data to use in the data workspace                                                    | Yes      | ""                      |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                   |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                      |
