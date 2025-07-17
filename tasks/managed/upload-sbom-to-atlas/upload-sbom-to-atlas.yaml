@@ -182,6 +182,57 @@ spec:
         sso_account="$(cat /secrets/sso_account)"
         sso_token="$(cat /secrets/sso_token)"
 
+        # Function to extract SBOM identifier for checking existence
+        extract_sbom_identifier() {
+          local sbom_file="$1"
+          # Extract a unique identifier from SBOM - use document namespace for SPDX or name/version for CycloneDX
+          local identifier=""
+          
+          if jq -e '.spdxVersion' "$sbom_file" >/dev/null 2>&1; then
+            # SPDX format - use documentNamespace as identifier
+            identifier=$(jq -r '.documentNamespace // empty' "$sbom_file")
+          elif jq -e '.bomFormat == "CycloneDX"' "$sbom_file" >/dev/null 2>&1; then
+            # CycloneDX format - use metadata.component.name and version
+            local name=$(jq -r '.metadata.component.name // empty' "$sbom_file")
+            local version=$(jq -r '.metadata.component.version // empty' "$sbom_file")
+            if [[ -n "$name" && -n "$version" ]]; then
+              identifier="${name}@${version}"
+            fi
+          fi
+          
+          echo "$identifier"
+        }
+
+        # Function to check if SBOM already exists in Atlas
+        check_sbom_exists() {
+          local access_token="$1"
+          local identifier="$2"
+          local atlasApiUrl="$3"
+          
+          if [[ -z "$identifier" ]]; then
+            echo "false"
+            return
+          fi
+          
+          # Query Atlas to check if SBOM with this identifier already exists
+          # Using a simple search query - adjust based on actual Atlas API capabilities
+          local query_response
+          if query_response=$(curl -s -X GET "${curl_opts[@]}" \
+            -H "authorization: Bearer $access_token" \
+            -H "content-type: application/json" \
+            "$atlasApiUrl/api/v2/sbom?identifier=$(printf '%s' "$identifier" | jq -sRr @uri)" 2>/dev/null); then
+            
+            # Check if response contains any results
+            local count=$(echo "$query_response" | jq -r '.total // (.results | length) // 0' 2>/dev/null || echo "0")
+            if [[ "$count" -gt 0 ]]; then
+              echo "true"
+              return
+            fi
+          fi
+          
+          echo "false"
+        }
+
         for sbom_path in "${sboms_to_upload[@]}"; do
           echo "Processing $sbom_path"
 
@@ -206,6 +257,23 @@ spec:
           fi
 
           atlasApiUrl=$(params.atlasApiUrl)
+          
+          # Extract SBOM identifier for idempotency check
+          sbom_identifier=$(extract_sbom_identifier "$sbom_path")
+          
+          # Check if SBOM already exists in Atlas
+          if [[ -n "$sbom_identifier" ]]; then
+            echo "Checking if SBOM already exists in Atlas: $sbom_identifier"
+            sbom_exists=$(check_sbom_exists "$access_token" "$sbom_identifier" "$atlasApiUrl")
+            
+            if [[ "$sbom_exists" == "true" ]]; then
+              echo "SBOM $sbom_path already exists in Atlas (identifier: $sbom_identifier). Skipping upload."
+              continue
+            fi
+          else
+            echo "Warning: Could not extract identifier from SBOM $sbom_path. Proceeding with upload."
+          fi
+
           echo "Uploading SBOM $sbom_path to $atlasApiUrl"
 
           handle_atlas_failure () {

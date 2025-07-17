@@ -16,6 +16,17 @@ curl() {
     return 0
   elif [[ "$params" =~ "AWS" ]]; then
     return 0
+  elif [[ "$params" =~ "GET" && "$params" =~ "/api/v2/sbom" ]]; then
+    # Check if this is for the idempotent test (by checking if identifier contains "existing-sbom")
+    if [[ "$params" =~ "existing-sbom" ]]; then
+      # Mock GET request to check if SBOM exists - return result indicating SBOM exists
+      echo '{"total":1,"results":[{"id":"existing-sbom-id","documentNamespace":"http://spdx.org/spdxdocs/existing-sbom"}]}'
+      return 0
+    else
+      # Mock GET request to check if SBOM exists - return empty result (SBOM doesn't exist)
+      echo '{"total":0,"results":[]}'
+      return 0
+    fi
   else
     return 1
   fi
