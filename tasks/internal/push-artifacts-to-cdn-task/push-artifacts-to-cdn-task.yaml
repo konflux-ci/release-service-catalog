@@ -8,7 +8,13 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task to push artifacts to CDN and optionally Dev Portal with optional signing
+    Tekton task to push artifacts to the Customer Portal using Pulp and optionally to 
+    the Developer Portal using exodus-rsync with optional signing. It uses logic based
+    on the snapshot data to determine which targets to publish to: if components contain 
+    both `staged` and `contentGateway` data, artifacts are pushed to the Customer Portal
+    (Pulp) and to CGW; if components contain `staged` data only, artifacts are 
+    pushed to the Customer Portal (Pulp); if components contain `contentGateway`
+    data only, artifacts are pushed to the Developer Portal (exodus-rsync) and CGW.
   params:
     - name: snapshot_json
       type: string
@@ -998,6 +1004,7 @@ spec:
         # Setup required variables
         export EXODUS_GW_CERT=/tmp/exodus.crt
         export EXODUS_GW_KEY=/tmp/exodus.key
+        EXODUS_CONF_PATH=/tmp/exodus-rsync.conf
         export PULP_CERT_FILE=/tmp/pulp.crt
         export PULP_KEY_FILE=/tmp/pulp.key
         export UDCACHE_CERT=/tmp/udc.crt
@@ -1019,65 +1026,119 @@ spec:
 
         DISK_IMAGE_DIR="/shared/artifacts/compressed"
         export DISK_IMAGE_DIR
+        RELATIVE_PATHS=""
 
-        # use the 1st component's version for STAGED_JSON
-        VERSION=$(jq -cr '.components[0].staged.version // ""' <<< "$SNAPSHOT_JSON")
+        push_to_pulp() { 
+          # use the 1st component's version for STAGED_JSON
+          version=$(jq -cr '.components[0].staged.version // ""' <<< "$SNAPSHOT_JSON")
+          # Check if staged.destination exists in any component
+          has_staged_destination=$(jq 'any(.components[]?.staged?.destination; . != null)' <<< "$SNAPSHOT_JSON")
+          if [[ -z "$version" || "$has_staged_destination" != "true" ]]; then
+            echo "Error: Pulp push requires both staged.version and components[].staged.destination to be set" >&2
+            exit 1
+          fi
+
+          echo "Pushing to customer portal with pulp"
+          staged_json='{"header":{"version": "0.2"},"payload":{"files":[]}}'
+          # Add the files to the payload
+          # shell check wants us to find ./* but that adds `./` to the paths which breaks the script
+          # shellcheck disable=SC2035
+          while IFS= read -r -d '' file ; do
+              staged_json=$(jq --arg filename "$(basename "$file")" --arg path "$file" \
+                --arg version "$version" \
+                '.payload.files[.payload.files | length] =
+                {"filename": $filename, "relative_path": $path, "version": $version}' <<< "$staged_json")
+          done < <(find * -type f -print0)
+          echo "$staged_json" | yq -P -I 4 > staged.yaml
+
+          pulp_push_wrapper --debug --source "${DISK_IMAGE_DIR}" --pulp-url "$PULP_URL" \
+            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL" 
+          RELATIVE_PATHS=$(jq -erc '.payload.files[].relative_path' <<< "$staged_json")
+
+          # Clean up file to avoid uploading it in exodus-rsync as an artifact.
+          rm -f staged.yaml
+         }
+
+        create_exodus_conf() {
+          echo "Creating Exodus configuration file....."
+          set +x
+          cat >"$EXODUS_CONF_PATH" <<EOF
+        gwcert:   $EXODUS_GW_CERT
+        gwkey:    $EXODUS_GW_KEY
+        gwurl:    $EXODUS_GW_URL
+        gwenv:    $EXODUS_GW_ENV
+
+        logger: file:/proc/1/fd/1
+        loglevel: info
+
+        environments:
+          - prefix: exodus
+        EOF
+          set -x
+        }
+
+        push_to_cdn () {
+            echo "Pushing to CDN with exodus-rsync"
+            create_exodus_conf
+            prefix="exodus:/content/origin/files/sha256"
+            files_output="{}"
+            # shell check wants us to find ./* but that adds `./` to the paths which breaks the script
+            # shellcheck disable=SC2035
+            while IFS= read -r -d '' file; do
+              set +x
+              file_name=$(basename "$file")
+              checksum=$(sha256sum "$file" | awk '{print $1}')
+              destination_path="$prefix/${checksum:0:2}/$checksum/$file_name"
+              files_output=$(jq --arg key "$file" \
+                --arg value "$destination_path" '.[$key]=$value' <<< "$files_output")
+              set -x
+
+              # We're using exodus-rsync as a drop-in replacement for rsync, by overriding the rsync binary.
+              rsync --exodus-conf "$EXODUS_CONF_PATH" "$file" "$destination_path"
+            done < <(find * -type f -print0)
+            RELATIVE_PATHS=$(jq -erc 'keys[]' <<< "$files_output")
+        }
+
+        publish_to_cgw() {
+          NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+          i=0
+          for path in $RELATIVE_PATHS; do
+            [[ $i -ge "$NUM_COMPONENTS" ]] && break  # stop once we've processed all components
+            component_destination="${DISK_IMAGE_DIR}/$(dirname "$path")"
+            
+            SNAPSHOT_JSON=$(
+              jq --argjson i "$i" --arg dir "$component_destination" '
+                .components[$i] |=
+                  if .contentGateway? then
+                    .contentGateway.contentDir = $dir
+                  else
+                    . # components without contentGateway will not be published. 
+                  end
+              ' <<<"$SNAPSHOT_JSON"
+            )
+            ((++i))
+          done
+
+          ## Process Files for Developer Portal / CGW
+          ## Validation of fields done inside CGW wrapper.
+          publish_to_cgw_wrapper \
+            --cgw_host "$(params.cgwHostname)" \
+            --data_json "$SNAPSHOT_JSON"
+        }
 
         # Change to the subdir with the images
         cd "${DISK_IMAGE_DIR}"
 
-        STAGED_JSON='{"header":{"version": "0.2"},"payload":{"files":[]}}'
-
-        # Add the files to the payload
-        # shell check wants us to find ./* but that adds `./` to the paths which breaks the script
-        # shellcheck disable=SC2035
-        while IFS= read -r -d '' file ; do
-            STAGED_JSON=$(jq --arg filename "$(basename "$file")" --arg path "$file" \
-              --arg version "$VERSION" \
-              '.payload.files[.payload.files | length] =
-              {"filename": $filename, "relative_path": $path, "version": $version}' <<< "$STAGED_JSON")
-        done < <(find * -type f -print0)
-        set -x
-
-        echo "$STAGED_JSON" | yq -P -I 4 > staged.yaml
-
-        # Check if staged.destination exists in any component
-        HAS_STAGED_DESTINATION=$(jq 'any(.components[]?.staged?.destination; . != null)' <<< "$SNAPSHOT_JSON")
-        if [[ -n "$VERSION" && "$HAS_STAGED_DESTINATION" = "true" ]]; then
-          echo "Pushing to customer portal (Pulp) with destination: $HAS_STAGED_DESTINATION"
-          pulp_push_wrapper --debug --source "${DISK_IMAGE_DIR}" --pulp-url "$PULP_URL" \
-            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL" \
-            2> "$STDERR_FILE"
-        elif [[ -z "$VERSION" && "$HAS_STAGED_DESTINATION" != "true" ]]; then
-          echo "Skipping Pulp push: staged.version is empty and components[].staged.destination is not set"
-        else
-          (echo "Error: Pulp push requires both staged.version and" \
-          "components[].staged.destination to be set" >&2 && exit 1) 2> "$STDERR_FILE"
+        # Check if any component has staged defined further validation of fields done inside the function.
+        CUSTOMER_PORTAL_PUSH=$(jq 'any(.components[]?.staged?; length > 0)' <<< "$SNAPSHOT_JSON")
+        # Check if any component has contentGateway defined validaion of field done inside CGW wrapper.
+        CGW_PUSH=$(jq 'any(.components[]?.contentGateway?; length > 0)' <<< "$SNAPSHOT_JSON")
+        if [[ "$CUSTOMER_PORTAL_PUSH" == "true" && "$CGW_PUSH" == "true" ]]; then
+          push_to_pulp 2> "$STDERR_FILE"
+          publish_to_cgw 2> >(tee "$STDERR_FILE" >&2)
+        elif [[ "$CUSTOMER_PORTAL_PUSH" == "true" ]]; then
+          push_to_pulp 2> "$STDERR_FILE"
+        elif [[ "$CGW_PUSH" == "true" ]]; then
+          push_to_cdn > >(tee "$STDERR_FILE") 2>&1
+          publish_to_cgw 2> >(tee "$STDERR_FILE" >&2)
         fi
-
-        relative_paths=$(echo "$STAGED_JSON" | jq -erc .payload.files[].relative_path)
-        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
-        i=0
-        for path in $relative_paths; do
-          [[ $i -ge "$NUM_COMPONENTS" ]] && break  # stop once we've processed all components
-          component_destination="${DISK_IMAGE_DIR}/$(dirname "$path")"
-          
-          SNAPSHOT_JSON=$(
-            jq --argjson i "$i" --arg dir "$component_destination" '
-              .components[$i] |=
-                if .contentGateway? then
-                  .contentGateway.contentDir = $dir
-                else
-                  . # components without contentGateway will not be published. 
-                end
-            ' <<<"$SNAPSHOT_JSON"
-          )
-          ((++i))
-        done
-          
-        ## Process Files for Developer Portal / CGW
-        ##
-        publish_to_cgw_wrapper \
-          --cgw_host "$(params.cgwHostname)" \
-          --data_json "$SNAPSHOT_JSON" \
-          2> >(tee "$STDERR_FILE" >&2)

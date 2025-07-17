@@ -1,6 +1,12 @@
 # push-artifacts-to-cdn-task
 
-Tekton task to push artifacts to CDN and optionally Dev Portal with optional signing
+Tekton task to push artifacts to the Customer Portal using Pulp and optionally to 
+the Developer Portal using exodus-rsync with optional signing. It uses logic based
+on the snapshot data to determine which targets to publish to: if components contain 
+both `staged` and `contentGateway` data, artifacts are pushed to the Customer Portal
+(Pulp) and to CGW; if components contain `staged` data only, artifacts are 
+pushed to the Customer Portal (Pulp); if components contain `contentGateway`
+data only, artifacts are pushed to the Developer Portal (exodus-rsync) and CGW.
 
 ## Parameters
 

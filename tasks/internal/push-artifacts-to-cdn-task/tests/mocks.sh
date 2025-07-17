@@ -24,6 +24,13 @@ function oras() {
             touch testproduct2-binary-darwin-amd64.tar.gz
             touch testproduct2-binary-linux-amd64.tar.gz
         fi
+
+        if [[ "$4" =~ "abelml6910" ]]; then
+            touch testproduct3-binary-windows-amd64.zip
+            touch testproduct3-binary-darwin-amd64.tar.gz
+            touch testproduct3-binary-linux-amd64.tar.gz
+        fi
+
         touch testproduct-binary-windows-amd64.zip
         touch testproduct-binary-darwin-amd64.tar.gz
         touch testproduct-binary-linux-amd64.tar.gz
@@ -38,6 +45,12 @@ function oras() {
             touch windows/testproduct2-binary-windows-amd64.exe
             touch linux/testproduct2-binary-linux-amd64
             touch macos/testproduct2-binary-darwin-amd64
+        fi
+
+        if [ -f "/shared/artifacts/linux/testproduct3-binary-linux-amd64" ]; then
+            touch windows/testproduct3-binary-windows-amd64.exe
+            touch linux/testproduct3-binary-linux-amd64
+            touch macos/testproduct3-binary-darwin-amd64
         fi
     fi
     touch testproduct-fail_gzip.raw.gz
@@ -85,6 +98,15 @@ function pulp_push_wrapper() {
 
     if [[ "$*" != *"--pulp-url https://pulp.com"* ]]; then
         printf "Mocked failure of pulp_push_wrapper" > /nonexistent/location
+    fi
+}
+
+function rsync() {
+    echo Mock rsync called with: $*
+
+    if [[ "$3" = "testproduct3-binary-linux-amd64.tar.gz" ]]; then
+        printf "Mocked failure of exodus-rsync"
+        exit 1
     fi
 }
 
