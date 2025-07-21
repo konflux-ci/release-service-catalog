@@ -1,12 +1,15 @@
 # upload-sbom-to-atlas
 
 This Tekton task gathers SBOM data from a directory specified by the parameters
-and uploads them to Atlas. Supports both CycloneDX and SPDX format. If the push 
-to Atlas fails, the SBOM is pushed to an S3 bucket. The push to Atlas is then 
+and uploads them to Atlas. Supports both CycloneDX and SPDX format. If the push
+to Atlas fails, the SBOM is pushed to an S3 bucket. The push to Atlas is then
 retried asynchronously from the bucket by another service. (Bombino)
 
 The provided directory is searched for SBOMs recursively and all found SBOMs
 are uploaded as-is to Atlas.
+
+Optionally, if the dataPath and snapshotSpec parameters are provided, pushes
+SBOM regeneration data to the S3 bucket.
 
 ## Parameters
 
@@ -28,3 +31,5 @@ are uploaded as-is to Atlas.
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                                                                                | No       | -                                                                             |
 | retryAWSSecretName      | Name of the Secret containing AWS credentials for retry mechanism                                                                                                             | No       | -                                                                             |
 | retryS3Bucket           | Name of the S3 bucket for the retry mechanism                                                                                                                                 | No       | -                                                                             |
+| dataPath                | Path to the release data file in the dataDir. Regeneration data push is skipped if empty.                                                                                     | Yes      | ""                                                                            |
+| snapshotSpec            | Path to the snapshot spec file in the dataDir. Regeneration data push is skipped if empty.                                                                                    | Yes      | ""                                                                            |
