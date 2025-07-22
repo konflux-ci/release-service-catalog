@@ -8,13 +8,16 @@ retried asynchronously from the bucket by another service. (Bombino)
 The provided directory is searched for SBOMs recursively and all found SBOMs
 are uploaded as-is to Atlas.
 
-Optionally, if the dataPath and snapshotSpec parameters are provided, pushes
-SBOM regeneration data to the S3 bucket.
+Optionally, if the dataPath, snapshotSpec and releaseId parameters are
+provided, pushes SBOM regeneration data to the S3 bucket.
 
 ## Parameters
 
 | Name                    | Description                                                                                                                                                                   | Optional | Default value                                                                 |
 |-------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------|-------------------------------------------------------------------------------|
+| dataPath                | Relative path to the JSON data file in the workspace                                                                                                                          | Yes      | ""                                                                            |
+| snapshotSpec            | Path to the mapped snapshot spec                                                                                                                                              | Yes      | ""                                                                            |
+| releaseId               | Release ID to name SBOM regeneration data with                                                                                                                                | Yes      | ""                                                                            |
 | sbomDir                 | Directory containing SBOM files. The task will search for JSON SBOMs recursively in this directory and upload them all to Atlas. The path is relative to the 'data' workspace | No       | -                                                                             |
 | httpRetries             | Maximum number of retries for transient HTTP(S) errors                                                                                                                        | Yes      | 3                                                                             |
 | atlasSecretName         | Name of the Secret containing SSO auth credentials for Atlas                                                                                                                  | Yes      | atlas-prod-sso-secret                                                         |
@@ -31,6 +34,3 @@ SBOM regeneration data to the S3 bucket.
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                                                                                | No       | -                                                                             |
 | retryAWSSecretName      | Name of the Secret containing AWS credentials for retry mechanism                                                                                                             | No       | -                                                                             |
 | retryS3Bucket           | Name of the S3 bucket for the retry mechanism                                                                                                                                 | No       | -                                                                             |
-| dataPath                | Path to the release data file in the dataDir. Regeneration data push is skipped if empty.                                                                                     | Yes      | ""                                                                            |
-| snapshotSpec            | Path to the snapshot spec file in the dataDir. Regeneration data push is skipped if empty.                                                                                    | Yes      | ""                                                                            |
-| releaseId               | Release ID to name SBOM regeneration data with. Regeneration data push is skipped if empty.                                                                                   | Yes      | ""                                                                            |
