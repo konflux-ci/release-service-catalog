@@ -9,7 +9,7 @@ releaseNotes content.
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------------|
 | dataPath                | Relative path to the JSON data file in the workspace                                                                       | No       | -                          |
 | snapshotSpec            | Path to the mapped snapshot spec                                                                                           | No       | -                          |
-| releaseID               | ID to inject into the SBOM for regeneration purposes                                                                       | No       | -                          |
+| releaseId               | ID to inject into the SBOM for regeneration purposes                                                                       | No       | -                          |
 | sbomPath                | Path to store the updated SBOMs to                                                                                         | Yes      | sboms                      |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                      |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                         |
