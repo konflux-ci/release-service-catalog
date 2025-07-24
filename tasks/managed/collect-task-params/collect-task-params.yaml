@@ -1,0 +1,208 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: collect-task-params
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task that extracts values from the data JSON file based on specified keys and exposes them as task results.
+    The task takes an array of resultIndex/key pairs and extracts the corresponding values from the dataPath JSON file.
+    Each extracted value is placed at the specified resultIndex in the extractedValues array for use by downstream
+    tasks. Optional default values can be provided for keys that may not exist in the data file. If no default is
+    provided and the key does not exist, the task will fail.
+  params:
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data containing the values to extract
+    - name: keysToExtract
+      type: string
+      description: |
+        JSON array of objects with "resultIndex", "key", and optional "default" fields. Each object specifies the array
+        index where the extracted value should be placed, the JSON path key to extract from the data file, and an
+        optional default value to use if the key is not found. Example: [{"resultIndex": 1,
+        "key": ".releaseNotes.summary"}, {"resultIndex": 0, "key": ".foo", "default": "fallback_value"}]
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: $(workspaces.data.path)
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  workspaces:
+    - name: data
+      description: The workspace where the dataPath json file resides
+  results:
+    - name: extractedValues
+      type: array
+      description: |
+        Array of extracted values. Each value is placed at the resultIndex specified in the keysToExtract parameter.
+        Values can be accessed by their specified index in downstream tasks.
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: skip-trusted-artifact-operations
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 20m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: collect-task-params
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 50m
+      env:
+        - name: "KEYS_JSON"
+          value: "$(params.keysToExtract)"
+      script: |
+        #!/usr/bin/env bash
+        set -x
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+
+        # Validate KEYS_JSON format
+        if ! jq -e 'type == "array"' <<< "$KEYS_JSON" > /dev/null; then
+            echo "keysToExtract must be a valid JSON array"
+            echo "Received value: $KEYS_JSON"
+            exit 1
+        fi
+
+        # Get the number of keys to extract
+        KEY_COUNT=$(jq 'length' <<< "$KEYS_JSON")
+        if [ "$KEY_COUNT" -eq 0 ]; then
+            echo "keysToExtract array is empty"
+            exit 1
+        fi
+
+        # Initialize result array with empty strings since it may not be populated in order based on
+        # keysToExtract resultIndex input
+        RESULT_ARRAY="[]"
+        for i in $(seq 0 $((KEY_COUNT - 1))); do
+            RESULT_ARRAY=$(jq '. += [""]' <<< "$RESULT_ARRAY")
+        done
+
+        for i in $(seq 0 $((KEY_COUNT - 1))); do
+            RESULT_INDEX=$(jq -r ".[$i].resultIndex" <<< "$KEYS_JSON")
+            KEY=$(jq -r ".[$i].key" <<< "$KEYS_JSON")
+            DEFAULT_VALUE=$(jq -r ".[$i].default // empty" <<< "$KEYS_JSON")
+            
+            if [ "$RESULT_INDEX" = "null" ] || [ "$KEY" = "null" ]; then
+                echo "Invalid key extraction specification at index $i: missing resultIndex or key"
+                exit 1
+            fi
+
+            # Check if resultIndex is a valid integer
+            if ! [[ "$RESULT_INDEX" =~ ^[0-9]+$ ]]; then
+                echo "Error: resultIndex at position $i must be a non-negative integer, got: $RESULT_INDEX"
+                exit 1
+            fi
+
+            # Check if resultIndex is within valid bounds
+            if [ "$RESULT_INDEX" -ge "$KEY_COUNT" ]; then
+                echo "Error: resultIndex $RESULT_INDEX at position $i is out of bounds."
+                echo "Valid range is 0 to $((KEY_COUNT - 1))"
+                exit 1
+            fi
+
+            # Extract the value from the data file using the specified key
+            VALUE=$(jq -r "$KEY" "$DATA_FILE" 2>/dev/null)
+
+            # Check if the key exists in the data file
+            if [ "$VALUE" = "null" ]; then
+                if [ -n "$DEFAULT_VALUE" ]; then
+                    echo "Key $KEY not found in data file, using default value: $DEFAULT_VALUE"
+                    VALUE="$DEFAULT_VALUE"
+                else
+                    echo "Error: Key $KEY not found in data file, and no default value for it was passed"
+                    exit 1
+                fi
+            fi
+
+            # Update the array at the specified resultIndex
+            RESULT_ARRAY=$(jq --argjson idx "$RESULT_INDEX" --arg value "$VALUE" '.[$idx] = $value' <<< "$RESULT_ARRAY")
+        done
+
+        # Write the array result
+        jq <<< "$RESULT_ARRAY" | tee "$(results.extractedValues.path)"
