@@ -9,7 +9,7 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | snapshotPath            | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                  | No       | -                       |
 | dataPath                | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                       |
 | resultsDirPath          | Path to the results directory in the data workspace                                                                        | No       | -                       |
-| concurrentLimit         | The maximum number of images to be proccessed concurrently                                                                 | Yes      | 10                      |
+| concurrentLimit         | The maximum number of images to be proccessed concurrently                                                                 | Yes      | 20                      |
 | retries                 | Retry copy N times                                                                                                         | Yes      | 3                       |
 | caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca              |
 | caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt           |

@@ -9,13 +9,28 @@ metadata:
 spec:
   description: |-
     This Tekton task gathers SBOM data from a directory specified by the parameters
-    and uploads them to Atlas. Supports both CycloneDX and SPDX format. If the push 
-    to Atlas fails, the SBOM is pushed to an S3 bucket. The push to Atlas is then 
+    and uploads them to Atlas. Supports both CycloneDX and SPDX format. If the push
+    to Atlas fails, the SBOM is pushed to an S3 bucket. The push to Atlas is then
     retried asynchronously from the bucket by another service. (Bombino)
-    
+
     The provided directory is searched for SBOMs recursively and all found SBOMs
     are uploaded as-is to Atlas.
+
+    Optionally, if the dataPath, snapshotSpec and releaseId parameters are
+    provided, pushes SBOM regeneration data to the S3 bucket.
   params:
+    - name: dataPath
+      description: Relative path to the JSON data file in the workspace
+      type: string
+      default: ""
+    - name: snapshotSpec
+      type: string
+      description: Path to the mapped snapshot spec
+      default: ""
+    - name: releaseId
+      type: string
+      description: Release ID to name SBOM regeneration data with
+      default: ""
     - name: sbomDir
       description: >-
         Directory containing SBOM files. The task will search for JSON
@@ -425,6 +440,75 @@ spec:
             job_outputs=()
           fi
         done
+
+    - name: push-regeneration-data-to-s3
+      image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      volumeMounts:
+        - name: aws-secret
+          mountPath: /secrets
+      script: |
+        #!/usr/bin/env bash
+        set -o pipefail -o nounset
+
+        if [ -z "$(params.dataPath)" ]; then
+          echo "Release data path not provided, skipping regeneration data push."
+          exit 0
+        fi
+
+        if [ -z "$(params.snapshotSpec)" ]; then
+          echo "Snapshot spec path not provided, skipping regeneration data push."
+          exit 0
+        fi
+
+        if [ -z "$(params.releaseId)" ]; then
+          echo "Snapshot spec path not provided, skipping regeneration data push."
+          exit 0
+        fi
+
+        aws_access_key_id="$(cat /secrets/atlas-aws-access-key-id)"
+        aws_secret_access_key="$(cat /secrets/atlas-aws-secret-access-key)"
+
+        region="us-east-1"
+        bucket="$(params.retryS3Bucket)"
+
+        push_s3() {
+          prefix="$1"
+          file="$2"
+
+          s3_filename="${prefix}/$(params.releaseId)"
+          resource="/${bucket}/${s3_filename}"
+
+          echo "Pushing $file to $prefix"
+          content_type="application/json"
+          date_value=$(date -R)
+          to_sign="PUT\n\n${content_type}\n${date_value}\n${resource}"
+          signature=$(echo -en "${to_sign}" | openssl sha1 -hmac "${aws_secret_access_key}" -binary | base64)
+
+          if ! curl -X PUT --upload-file "$file" \
+              --silent --show-error --fail-with-body --retry 10 \
+              --retry-all-errors \
+              -H "Host: ${bucket}.s3.${region}.amazonaws.com" \
+              -H "Date: ${date_value}" \
+              -H "Content-Type: ${content_type}" \
+              -H "Authorization: AWS ${aws_access_key_id}:${signature}" \
+              "https://${bucket}.s3.${region}.amazonaws.com/${s3_filename}"; then
+            >&2 echo "ERROR: Failed to push SBOM regeneration data to S3 bucket."
+            exit 1
+          fi
+        }
+
+        data_path="$(params.dataDir)/$(params.dataPath)"
+        snapshot_path="$(params.dataDir)/$(params.snapshotSpec)"
+
+        push_s3 "release-data" "$data_path"
+        push_s3 "snapshots" "$snapshot_path"
+
     - name: create-trusted-artifact
       computeResources:
         limits:

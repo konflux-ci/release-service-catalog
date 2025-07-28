@@ -1,0 +1,302 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-cves-github
+spec:
+  description: |
+    Run the populate-release-notes task and ensure CVE information present in the data.json
+    is properly included in the releaseNotes.content.artifacts for github releases.
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils:ea7868ebdcc7a2116c620255034226611d837f42
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "github": {
+                  "githubSecret": "some-secret"
+                },
+                "mapping": {
+                  "components": [
+                      {
+                        "name": "releng-test-product-binaries",
+                        "files": [
+                          {
+                            "filename": "releng-test-product-binaries-windows-amd64",
+                            "source": "/releases/releng-test-product-binaries-windows-amd64.gz",
+                            "arch": "amd64",
+                            "os": "windows"
+                          },
+                          {
+                            "filename": "releng-test-product-binaries-linux-amd64",
+                            "source": "/releases/releng-test-product-binaries-linux-amd64.gz",
+                            "arch": "amd64",
+                            "os": "linux"
+                          }
+                          ]
+                      }
+                    ]
+                  },
+                "releaseNotes": {
+                   "cves": [
+                    {
+                      "component": "releng-test-product-binaries",
+                      "packages": [
+                        "pkg1",
+                        "pkg2"
+                      ],
+                      "key": "CVE-123",
+                      "summary": "",
+                      "uploadDate": "01-01-1980",
+                      "url": ""
+                    },
+                    {
+                      "component": "releng-test-product-binaries",
+                      "packages": [
+                        "pkg3"
+                      ],
+                      "key": "CVE-456",
+                      "summary": "",
+                      "uploadDate": "01-01-1980",
+                      "url": ""
+                    }
+                  ],
+                  "product_id": [
+                    123
+                  ],
+                  "product_name": "Releng Test Product",
+                  "product_version": "123",
+                  "cpe": "cpe:/a:example:openstack:el8",
+                  "type": "RHSA",
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "RHOSP-12345",
+                        "source": "issues.example.com"
+                      },
+                      {
+                        "id": 1234567,
+                        "source": "bugzilla.example.com"
+                      }
+                    ]
+                  },
+                  "synopsis": "test synopsis",
+                  "topic": "test topic",
+                  "description": "test description",
+                  "solution": "test solution",
+                  "references": [
+                    "https://docs.example.com/some/example/release-notes"
+                  ]
+                }
+              }
+              EOF
+
+              # Create the binaries directory and checksum files required for GitHub releases
+              RELEASES_DIR="$(params.dataDir)/$(context.pipelineRun.uid)/releases"
+              mkdir -p "$RELEASES_DIR"
+
+              # Create sample binary files (empty files for testing)
+              touch "$RELEASES_DIR/releng-test-product-binaries-windows-amd64.gz"
+              touch "$RELEASES_DIR/releng-test-product-binaries-linux-amd64.gz"
+
+              # Create the checksum file that the task expects
+              cat > "$RELEASES_DIR/releng-test-product-binaries_SHA256SUMS" << 'CHECKSUM_EOF'
+              abc123def456  releng-test-product-binaries-windows-amd64.gz
+              def456abc123  releng-test-product-binaries-linux-amd64.gz
+              CHECKSUM_EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "releng-test-product-binaries",
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "repository": "quay.io/redhat-prod/product----repo",
+                    "rh-registry-repo": "registry.redhat.io/product/repo",
+                    "tags": [
+                      "foo",
+                      "bar"
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: github_release_version
+          value: "v1.0.0"
+        - name: github_release_url
+          value: "https://github.com/some-org/some-repo/releases/tag/v1.0.0"
+        - name: binaries_dir
+          value: "$(context.pipelineRun.uid)/releases"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:ea7868ebdcc7a2116c620255034226611d837f42
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              # Ensure 'arch' and 'os' are present in the artifact entry
+              test "$(jq -e '.releaseNotes.content.artifacts[0] | has("architecture")' "$DATA_FILE")" == "true"
+              test "$(jq -e '.releaseNotes.content.artifacts[0] | has("os")' "$DATA_FILE")" == "true"
+
+              # The CVEs should be present in the comp artifacts section
+              test "$(jq '.releaseNotes.content.artifacts[0].cves.fixed | length' \
+                "$DATA_FILE")" \
+                == 2
+              test "$(jq -jr '.releaseNotes.content.artifacts[0].cves.fixed | keys[]' \
+                "$DATA_FILE")" == "CVE-123CVE-456"
+              test "$(jq '.releaseNotes.content.artifacts[0].cves.fixed."CVE-123".packages | length' \
+                "$DATA_FILE")" == 2
+      runAfter:
+        - run-task

@@ -7,8 +7,10 @@ function update_component_sbom() {
 
   if [[ "$1" != "--snapshot-path" ]] ||
      [[ "$2" != "$(params.dataDir)/$(params.subdirectory)/snapshot_spec.json" ]] ||
-     [[ "$3" != "--output-path" ]] ||
-     [[ "$4" != "$(params.dataDir)/$(params.subdirectory)/sboms" ]]; then
+     [[ "$3" != "--release-id" ]] ||
+     [[ "$4" != "$(params.releaseId)" ]] ||
+     [[ "$5" != "--output-path" ]] ||
+     [[ "$6" != "$(params.dataDir)/$(params.subdirectory)/sboms" ]]; then
     echo "Error: Unexpected call"
     exit 1
   fi

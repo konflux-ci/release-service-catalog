@@ -134,9 +134,25 @@ spec:
                 echo "Passed results JSON file ${resultsFile} in results directory was not proper JSON."
                 exit 1
             fi
-            # If two files have arrays with the same key, it will be overwritten. Otherwise, the jsons
-            # are merged (only arrays are not merged properly with this notation).
-            RESULTS_JSON=$(jq -c "${RESULTS_JSON} * ." "${resultsFile}")
+            # Merge with array concatenation for array fields and object merging
+            RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --argjson new "$(cat "${resultsFile}")" '
+              # Store current values as $base and get all unique keys from both objects
+              . as $base | ($base | keys + ($new | keys)) | unique | 
+              # Process each key and build the merged result
+              reduce .[] as $key ({}; . + {($key): (
+                # Case 1: Both values are arrays - concatenate them
+                if ($new[$key] | type == "array") and ($base[$key] | type == "array")
+                then $base[$key] + $new[$key]
+                else 
+                  # Case 2: Both values are objects - merge them recursively
+                  if ($new[$key] | type == "object") and ($base[$key] | type == "object")
+                  then $base[$key] * $new[$key]
+                  # Case 3: Default - use new value or fall back to base value
+                  else $new[$key] // $base[$key]
+                  end
+                end
+              )})
+            ')
         done
 
         IFS='/' read -r namespace name <<< "$(params.resource)"

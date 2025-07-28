@@ -15,5 +15,6 @@ Tekton task to update component-level SBOMs with purls containing release-time i
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
 | snapshotSpec            | Path to the mapped snapshot spec                                                                                           | No       | -                       |
 | sbomPath                | Path to store the updated SBOMs to                                                                                         | Yes      | sboms                   |
+| releaseId               | Release ID to inject into SBOMs for regeneration purposes                                                                  | No       | -                       |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                       |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                       |
