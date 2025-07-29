@@ -242,10 +242,10 @@ call Pyxis API). The way to do this is to create a file with mock shell function
 as the commands you want to mock) and inject this file to the beginning of each `script` field in
 the task step that needs mocking.
 
-For reference implementation, check [create-pyxis-image/tests/](tasks/create-pyxis-image/tests/). Here's a breakdown of how it's done:
+For reference implementation, check [create-pyxis-image/tests/](tasks/managed/create-pyxis-image/tests/). Here's a breakdown of how it's done:
 
 1. Create a `mocks.sh` file in the tests directory of your task, e.g.
-    `tasks/create-pyxis-image/tests/mocks.sh`. This file will contain the mock function
+    `tasks/managed/create-pyxis-image/tests/mocks.sh`. This file will contain the mock function
     definitions. It also needs to contain a shebang at the top as it will get injected to the top
     of the original script. For example:
 

@@ -21,7 +21,14 @@ ansible-vault encrypt resources/tenant/secrets/tenant-secrets.yaml --output "vau
 ```shell
 kubectl annotate es e2e-test-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
 ```
-
+  * Remove any old pipelines-as-code-secret- secrets
+```
+kubectl get secrets --no-headers | grep pipelines-as-code-secret- | awk '{print "kubectl delete secret/"$1}'
+```
+  * Failure to the above step may result in these errors:
+```
+{"pac":{"state":"error","error-id":74,"error-message":"74: Access token is unrecognizable by GitHub"},"message":"done"}
+```
 ## Should you require to add or update a secret, follow these steps:
 ```shell
 ansible-vault decrypt vault/tenant-secrets.yaml --output "/tmp/tenant-secrets.yaml" --vault-password-file <vault password file>
