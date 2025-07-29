@@ -21,3 +21,4 @@ Tekton task to push snapshot images to an image registry using `cosign copy`.
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | /var/workdir/release |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
+| copyAttachedArtifacts   | Enable copying of attached artifacts                                                                                       | Yes      | false                |

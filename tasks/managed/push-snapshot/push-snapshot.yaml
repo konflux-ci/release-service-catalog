@@ -66,6 +66,10 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: copyAttachedArtifacts
+      type: string
+      description: Enable copying of attached artifacts
+      default: "false"
   results:
     - description: Produced trusted data artifact
       name: sourceDataArtifact
@@ -157,9 +161,50 @@ spec:
             # shellcheck disable=SC2128
             jq -s 'reduce .[] as $item ({}; . * $item)' \
               "$SOURCE_AUTH_FILE" "$DEST_AUTH_FILE" > "$DOCKER_CONFIG"/config.json
+            
+            # Check if we should copy attached artifacts
+            if [[ "$COPY_ATTACHED_ARTIFACTS" == "true" ]]; then
+              # Check for any attached artifacts using oras discover, with retries on failure
+              printf '* Checking for attached artifacts on %s\n' "$3"
+              artifact_count="0"
+              discover_attempt=0
+              discover_succeeded=false
+              until [ "$discover_attempt" -gt "$(params.retries)" ]; do # same retry style as copy loop
+                if oras discover \
+                  --registry-config "$SOURCE_AUTH_FILE" \
+                  "$3" \
+                  --format json \
+                  >/tmp/artifacts.json
+                then
+                  artifact_count=$(jq -r '.manifests | length' /tmp/artifacts.json || echo "0")
+                  echo "Found $artifact_count artifacts"
+                  discover_succeeded=true
+                  break
+                else
+                  rc=$?
+                  echo "oras discover failed (attempt $((discover_attempt+1))) with exit code $rc"
+                  discover_attempt=$((discover_attempt+1))
+                fi
+              done
+              if [ "$discover_succeeded" != true ]; then
+                echo "Max retries exceeded. Proceeding without attached artifacts (falling back to cosign copy)."
+              fi
+            fi
+            
             attempt=0
             until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
-              cosign copy -f "$3" "$4:$5" && break
+              if [[ "$COPY_ATTACHED_ARTIFACTS" == "true" && "${artifact_count}" -gt 0 ]]; then
+                # Copy the image and all attached artifacts
+                oras cp -r \
+                  --registry-config "$DOCKER_CONFIG/config.json" \
+                  "${oras_args[@]}" \
+                  "$3" \
+                  "$4:$5" \
+                  && break
+              else
+                # Fallback to classic image copy
+                cosign copy -f "$3" "$4:$5" && break
+              fi
               attempt=$((attempt+1))
             done
             if [ "$attempt" -gt "$(params.retries)" ] ; then
@@ -215,6 +260,7 @@ spec:
         TMP_RESULTS_DIR=$(mktemp -d)
 
         defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' "$DATA_FILE")
+        COPY_ATTACHED_ARTIFACTS="$(params.copyAttachedArtifacts)"
 
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")

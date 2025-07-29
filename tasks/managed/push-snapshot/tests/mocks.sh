@@ -11,11 +11,11 @@ function cosign() {
   then
     LOCK_FILE="$(params.dataDir)/${RANDOM}.lock"
     touch $LOCK_FILE
-    sleep 1
+    sleep 2
     LOCK_FILE_COUNT="$(ls "$(params.dataDir)/"*.lock | wc -l)"
     # Create a .count file to log the number of parallel cosign calls currently running.
     echo $LOCK_FILE_COUNT > "$(params.dataDir)/${RANDOM}.count"
-    sleep 1
+    sleep 2
     rm $LOCK_FILE
   fi
 
@@ -79,6 +79,21 @@ function select-oci-auth() {
 
 function oras() {
   echo $* >> "$(params.dataDir)/mock_oras.txt"
+  if [[ "$1" == "discover" ]]; then
+    # Match the reference within the full argument string (last arg may be --format json)
+    if [[ " $* " == *" reg.io/test@sha256:abcdefg "* ]]; then
+      # Simulate one attached artifact for this image
+      echo '{"manifests": [{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:deadbeef","size":123}]}'
+    else
+      echo '{"manifests": []}'
+    fi
+    return 0
+  fi
+  # Accept oras cp -r calls (used to copy image and its attached artifacts)
+  if [[ "$1" == "cp" && "$2" == "-r" ]]; then
+    # Simulate success
+    return 0
+  fi
   if [[ "$*" == "resolve --registry-config "*" "* ]]; then
     if [[ "$*" =~ "--platform" && "$4" =~ ".src" ]]; then
       echo "Error: .src images should not use --platform" >&2
