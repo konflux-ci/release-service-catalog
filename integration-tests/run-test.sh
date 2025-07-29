@@ -132,6 +132,7 @@ setup_namespaces # Ensures correct context before resource creation
 cleanup_old_resources "${originating_tool}"
 create_kubernetes_resources # tmpDir is set here
 
+validate_pac_repository # Validate PAC Repository CRs and their secrets
 wait_for_component_initialization # component_pr and pr_number are set here
 patch_component_source_before_merge
 merge_github_pr # SHA is set here

@@ -619,3 +619,27 @@ patch_component_source_before_merge() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
      "to patch the component source BEFORE MERGE in their test.sh file"
 }
+
+# Function to validate PAC Repository CRs and their secrets
+# Relies on global variables: component_git_url, tenant_namespace, SCRIPT_DIR
+validate_pac_repository() {
+    echo "Validating PAC Repository CRs..."
+    
+    # Set environment variables for the validation script
+    export TARGET_URL="${component_git_url}"
+    export NAMESPACE="${tenant_namespace}"
+    
+    # Path to the validation script
+    local validation_script="${SCRIPT_DIR}/scripts/validate-pac-repository.sh"
+    
+    if [ ! -f "$validation_script" ]; then
+        log_error "PAC repository validation script not found at: $validation_script"
+    fi
+    
+    # Run the validation script
+    if ! bash "$validation_script"; then
+        log_error "PAC repository validation failed"
+    fi
+    
+    echo "PAC repository validation completed successfully."
+}
