@@ -127,39 +127,47 @@ spec:
         #!/usr/bin/env bash
         set -ex
 
-        RESULTS_JSON="{}"
         RESULTS_DIR="$(params.dataDir)/$(params.resultsDirPath)"
+        TEMP_FILE="/tmp/temp.json"
+        RESULTS_JSON="/tmp/results.json"
+        echo '{}' > "$RESULTS_JSON"
+        
         for resultsFile in $([ -d "$RESULTS_DIR" ] && find "$RESULTS_DIR" -type f); do
             if ! jq . >/dev/null 2>&1 "${resultsFile}" ; then
                 echo "Passed results JSON file ${resultsFile} in results directory was not proper JSON."
                 exit 1
             fi
+            
             # Merge with array concatenation for array fields and object merging
-            RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --argjson new "$(cat "${resultsFile}")" '
+            jq --slurpfile new "${resultsFile}" '
               # Store current values as $base and get all unique keys from both objects
-              . as $base | ($base | keys + ($new | keys)) | unique | 
+              . as $base | ($base | keys + ($new[0] | keys)) | unique | 
               # Process each key and build the merged result
               reduce .[] as $key ({}; . + {($key): (
                 # Case 1: Both values are arrays - concatenate them
-                if ($new[$key] | type == "array") and ($base[$key] | type == "array")
-                then $base[$key] + $new[$key]
+                if ($new[0][$key] | type == "array") and ($base[$key] | type == "array")
+                then $base[$key] + $new[0][$key]
                 else 
                   # Case 2: Both values are objects - merge them recursively
-                  if ($new[$key] | type == "object") and ($base[$key] | type == "object")
-                  then $base[$key] * $new[$key]
+                  if ($new[0][$key] | type == "object") and ($base[$key] | type == "object")
+                  then $base[$key] * $new[0][$key]
                   # Case 3: Default - use new value or fall back to base value
-                  else $new[$key] // $base[$key]
+                  else $new[0][$key] // $base[$key]
                   end
                 end
               )})
-            ')
+            ' "$RESULTS_JSON" > "$TEMP_FILE"
+            mv "$TEMP_FILE" "$RESULTS_JSON"
         done
 
         IFS='/' read -r namespace name <<< "$(params.resource)"
 
+        # Read the final JSON from the file
+        FINAL_JSON=$(cat "$RESULTS_JSON")
+
         # Create patch file to avoid "Argument list too long" error
         PATCH_FILE="/tmp/patch-$(date +%s).json"
-        echo "status: {'$(params.statusKey)':${RESULTS_JSON}}" > "$PATCH_FILE"
+        echo "status: {'$(params.statusKey)':${FINAL_JSON}}" > "$PATCH_FILE"
 
         kubectl --warnings-as-errors=true patch "$(params.resourceType)" -n "$namespace" "$name" \
           --type=merge --subresource status --patch-file "$PATCH_FILE"
