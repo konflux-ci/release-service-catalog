@@ -1,0 +1,345 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-rpm-data-to-pyxis-deduplication
+spec:
+  description: |
+    Run the push-rpm-data-to-pyxis task with a comprehensive scenario that covers
+    all deduplication and edge cases in a single test:
+    - Deduplication (same imageId, different containerImage)
+    - Unique filenames (all different imageIds)
+    - Mixed scenarios (duplicated and unique imageIds)
+    - Same containerImage with mixed digests (same and different)
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        params:
+          - name: subdirectory
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:fe734aa04168690e96f0a729f93845e7c70b7934
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/pyxis-data.json" << EOF
+              {
+                "components": [
+                  {
+                    "containerImage": "imageurl1",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID1",
+                        "digest": "mydigest1",
+                        "arch_digest": "mydigest1",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "imageurl2",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID1",
+                        "digest": "mydigest2",
+                        "arch_digest": "mydigest2",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "imageurl3",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID2",
+                        "digest": "mydigest3",
+                        "arch_digest": "mydigest3",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "imageurl4",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID3",
+                        "digest": "mydigest4",
+                        "arch_digest": "mydigest4",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "imageurl5",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID4",
+                        "digest": "mydigest5",
+                        "arch_digest": "mydigest5",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "imageurl4",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID3",
+                        "digest": "mydigest4",
+                        "arch_digest": "mydigest4",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "imageurl6",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "myImageID1",
+                        "digest": "mydigest6",
+                        "arch_digest": "mydigest6",
+                        "os": "linux"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: push-rpm-data-to-pyxis
+      params:
+        - name: pyxisJsonPath
+          value: $(context.pipelineRun.uid)/pyxis-data.json
+        - name: pyxisSecret
+          value: test-push-rpm-data-to-pyxis-cert
+        - name: server
+          value: stage
+        - name: concurrentLimit
+          value: "3"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:fe734aa04168690e96f0a729f93845e7c70b7934
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Comprehensive test scenario covering all deduplication cases:
+              # 
+              # 1. DEDUPLICATION TEST (same imageId, different containerImage):
+              #    - myImageID1 appears 3 times with different containerImages
+              #    - Should be downloaded once, uploaded 3 times
+              #
+              # 2. UNIQUE FILENAMES TEST:
+              #    - myImageID2 appears 1 time (unique)
+              #    - myImageID3 appears 2 times (should be downloaded once, uploaded 2 times)
+              #    - myImageID4 appears 1 time (unique)
+              #    - Should be downloaded once each, uploaded once each
+              #
+              # 3. SAME CONTAINERIMAGE TEST:
+              #    - myImageID3 appears twice with same containerImage (imageurl4) and same digest
+              #    - Should be downloaded once, uploaded 2 times (deduplication by imageId)
+              #
+              # Expected: 4 unique downloads (myImageID1, myImageID2, myImageID3, myImageID4)
+              # Expected: 7 total uploads (3 for myImageID1 + 1 for myImageID2 + 2 for myImageID3 + 1 for myImageID4)
+
+              # Check that 4 unique SBOMs were downloaded
+              if [ "$(wc -l < "$(params.dataDir)/mock_cosign.txt")" != 4 ]; then
+                echo Error: cosign was expected to be called 4 times for unique imageIds. Actual calls:
+                cat "$(params.dataDir)/mock_cosign.txt"
+                exit 1
+              fi
+
+              # Check that upload was called for all 7 images
+              if [ "$(wc -l < "$(params.dataDir)/mock_upload_rpm_data.txt")" != 7 ]; then
+                echo Error: upload_rpm_data was expected to be called 7 times. Actual calls:
+                cat "$(params.dataDir)/mock_upload_rpm_data.txt"
+                exit 1
+              fi
+
+              # Check that unique filenames were created for all 4 unique imageIds
+              if [ ! -f "$(params.dataDir)/$(context.pipelineRun.uid)/downloaded-sboms/myImageID1.json" ]; then
+                echo Error: Expected SBOM file myImageID1.json not found
+                exit 1
+              fi
+
+              if [ ! -f "$(params.dataDir)/$(context.pipelineRun.uid)/downloaded-sboms/myImageID2.json" ]; then
+                echo Error: Expected SBOM file myImageID2.json not found
+                exit 1
+              fi
+
+              if [ ! -f "$(params.dataDir)/$(context.pipelineRun.uid)/downloaded-sboms/myImageID3.json" ]; then
+                echo Error: Expected SBOM file myImageID3.json not found
+                exit 1
+              fi
+
+              if [ ! -f "$(params.dataDir)/$(context.pipelineRun.uid)/downloaded-sboms/myImageID4.json" ]; then
+                echo Error: Expected SBOM file myImageID4.json not found
+                exit 1
+              fi
+
+              # Verify exactly 4 files were created
+              SBOM_FILES=$(find "$(params.dataDir)/$(context.pipelineRun.uid)/downloaded-sboms/" -name "*.json" | wc -l)
+              if [ "$SBOM_FILES" != 4 ]; then
+                echo Error: Expected exactly 4 SBOM files, but found "$SBOM_FILES"
+                ls -la "$(params.dataDir)/$(context.pipelineRun.uid)/downloaded-sboms/"
+                exit 1
+              fi
+
+              echo "✅ Comprehensive test passed: All deduplication scenarios working correctly"
+              echo "  - Deduplication: ✅ (same imageId downloaded once, uploaded multiple times)"
+              echo "  - Unique filenames: ✅ (different imageIds downloaded separately)"
+              echo "  - Same containerImage: ✅ (same containerImage with same imageId deduplicated correctly)"
+      runAfter:
+        - run-task

@@ -149,7 +149,24 @@ spec:
             exit 1
         fi
 
-        NUM_COMPONENTS=$(jq '.components | length' "${PYXIS_FILE}")
+        # Create a mapping of unique imageIds to their SBOM files for efficient download
+        echo "Creating unique imageId mapping for efficient SBOM download..."
+        UNIQUE_IMAGES_FILE="$(mktemp)"
+        jq '
+        # Flatten all pyxisImages and preserve component containerImage
+        [.components[] as $c | $c.pyxisImages[] | {
+          imageId: .imageId,
+          containerImage: $c.containerImage,
+          pyxisImage: .
+        }]
+        | group_by(.imageId)
+        | map({
+          imageId: .[0].imageId,
+          containerImage: .[0].containerImage,
+          pyxisImage: .[0].pyxisImage,
+          # Include all instances for later processing
+          instances: .
+        })' "${PYXIS_FILE}" > "${UNIQUE_IMAGES_FILE}"
 
         SBOM_PATH="$(dirname "$(params.pyxisJsonPath)")/downloaded-sboms"
         # The dir might already exist in case of retries of the task.
@@ -180,38 +197,43 @@ spec:
             fi
         }
 
-        for (( i=0; i < NUM_COMPONENTS; i++ )); do
-          COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${PYXIS_FILE}")
-          IMAGEURL=$(jq -r '.containerImage' <<< "${COMPONENT}")
-          NUM_PYXIS_IMAGES=$(jq '.pyxisImages | length' <<< "${COMPONENT}")
+        # Download SBOMs only for unique imageIds
+        UNIQUE_IMAGES_COUNT=$(jq '. | length' "${UNIQUE_IMAGES_FILE}")
+        echo "Downloading SBOMs for $UNIQUE_IMAGES_COUNT unique images..."
+
+        for (( i=0; i < UNIQUE_IMAGES_COUNT; i++ )); do
+          UNIQUE_IMAGE=$(jq -c --argjson i "$i" '.[$i]' "${UNIQUE_IMAGES_FILE}")
+          IMAGEID=$(jq -r '.imageId' <<< "${UNIQUE_IMAGE}")
+          CONTAINER_IMAGE=$(jq -r '.containerImage' <<< "${UNIQUE_IMAGE}")
+          PYXIS_IMAGE=$(jq -c '.pyxisImage' <<< "${UNIQUE_IMAGE}")
+          
+          FILE="${IMAGEID}.json"
+          DIGEST="$(jq -r '.digest' <<< "$PYXIS_IMAGE")"
+          ARCH_DIGEST="$(jq -r '.arch_digest' <<< "$PYXIS_IMAGE")"
+          
           # cosign has very limited support for selecting the right auth entry,
           # so create a custom auth file with just one entry
-          select-oci-auth "$IMAGEURL" > "$DOCKER_CONFIG"/config.json
-          for (( j=0; j < NUM_PYXIS_IMAGES; j++ )); do
-            PYXIS_IMAGE=$(jq -c --argjson j "$j" '.pyxisImages[$j]' <<< "${COMPONENT}")
-            FILE="$(jq -r '.imageId' <<< "$PYXIS_IMAGE").json"
-            DIGEST="$(jq -r '.digest' <<< "$PYXIS_IMAGE")"
-            ARCH_DIGEST="$(jq -r '.arch_digest' <<< "$PYXIS_IMAGE")"
-            # You can't pass --platform to a single arch image or cosign errors.
-            # If digest equals arch_digest, then it's a single arch image
-            if [ "$DIGEST" = "$ARCH_DIGEST" ] ; then
-              echo "Fetching sbom for single arch image: $IMAGEURL to: $FILE"
-              run_cosign download sbom --output-file "${FILE}" "${IMAGEURL}"
-            else
-              OS=$(jq -r '.os' <<< "$PYXIS_IMAGE")
-              ARCH=$(jq -r '.arch' <<< "$PYXIS_IMAGE")
-              PLATFORM="${OS}/${ARCH}"
-              echo "Fetching sbom for image: $IMAGEURL with platform: $PLATFORM to: $FILE"
-              run_cosign download sbom --output-file "${FILE}" --platform "${PLATFORM}" "${IMAGEURL}"
-            fi
-          done
+          select-oci-auth "$CONTAINER_IMAGE" > "$DOCKER_CONFIG"/config.json
+          
+          # You can't pass --platform to a single arch image or cosign errors.
+          # If digest equals arch_digest, then it's a single arch image
+          if [ "$DIGEST" = "$ARCH_DIGEST" ] ; then
+            echo "Fetching sbom for single arch image: $CONTAINER_IMAGE to: $FILE"
+            run_cosign download sbom --output-file "${FILE}" "${CONTAINER_IMAGE}"
+          else
+            OS=$(jq -r '.os' <<< "$PYXIS_IMAGE")
+            ARCH=$(jq -r '.arch' <<< "$PYXIS_IMAGE")
+            PLATFORM="${OS}/${ARCH}"
+            echo "Fetching sbom for image: $CONTAINER_IMAGE with platform: $PLATFORM to: $FILE"
+            run_cosign download sbom --output-file "${FILE}" --platform "${PLATFORM}" "${CONTAINER_IMAGE}"
+          fi
         done
 
+        # Verify we downloaded the expected number of unique SBOMs
         sbom_files=(*.json)
         SBOM_COUNT=${#sbom_files[@]}
-        PYXIS_IMAGES=$(jq '[.components[].pyxisImages | length] | add' "${PYXIS_FILE}")
-        if [ "$SBOM_COUNT" != "$PYXIS_IMAGES" ]; then
-          echo "ERROR: Expected to fetch sbom for $PYXIS_IMAGES images, but only $SBOM_COUNT were saved"
+        if [ "$SBOM_COUNT" != "$UNIQUE_IMAGES_COUNT" ]; then
+          echo "ERROR: Expected to fetch sbom for $UNIQUE_IMAGES_COUNT unique images, but only $SBOM_COUNT were saved"
           exit 1
         fi
     - name: push-rpm-data-to-pyxis
@@ -260,20 +282,46 @@ spec:
         echo "${PYXIS_CERT}" > $PYXIS_CERT_PATH
         echo "${PYXIS_KEY}" > $PYXIS_KEY_PATH
 
+        PYXIS_FILE="$(params.dataDir)/$(params.pyxisJsonPath)"
+        if [ ! -f "${PYXIS_FILE}" ] ; then
+            echo "No valid pyxis file was provided."
+            exit 1
+        fi
+
         SBOM_PATH="$(dirname "$(params.pyxisJsonPath)")/downloaded-sboms"
         cd "$(params.dataDir)/${SBOM_PATH}"
 
+        # Create a list of all images to push to Pyxis (including duplicates)
+        echo "Creating list of all images to push to Pyxis..."
+        ALL_IMAGES_FILE="$(mktemp)"
+        jq '
+        # Flatten all pyxisImages from all components
+        [.components[] | .pyxisImages[]] |
+        map({
+          imageId: .imageId,
+          containerImage: .containerImage
+        })' "${PYXIS_FILE}" > "${ALL_IMAGES_FILE}"
+
+        TOTAL_IMAGES_TO_PUSH=$(jq '. | length' "${ALL_IMAGES_FILE}")
+        echo "Will push RPM data for $TOTAL_IMAGES_TO_PUSH total images"
+
         N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
         declare -a jobs=()
-        json_files=(*.json)
-        total=${#json_files[@]}
         count=0
         success=true
-        echo "Starting RPM data upload for $total files in total. " \
-          "Up to $N files will be uploaded at once..."
+        echo "Starting RPM data upload for $TOTAL_IMAGES_TO_PUSH images in total. " \
+          "Up to $N images will be uploaded at once..."
 
-        for FILE in *.json; do
-          IMAGEID=$(echo "$FILE" | cut -d '.' -f 1)
+        for (( i=0; i < TOTAL_IMAGES_TO_PUSH; i++ )); do
+          IMAGE_DATA=$(jq -c --argjson i "$i" '.[$i]' "${ALL_IMAGES_FILE}")
+          IMAGEID=$(jq -r '.imageId' <<< "$IMAGE_DATA")
+
+          # Find the corresponding SBOM file
+          SBOM_FILE="${IMAGEID}.json"
+          if [ ! -f "$SBOM_FILE" ]; then
+            echo "ERROR: SBOM file $SBOM_FILE not found for image $IMAGEID"
+            exit 1
+          fi
 
           # Extract the format information using jq
           UPLOAD_SCRIPT=$(
@@ -284,23 +332,23 @@ spec:
                 "upload_rpm_data"
               else
                 empty
-              end end' "$FILE"
+              end end' "$SBOM_FILE"
           )
 
           # If UPLOAD_SCRIPT is empty, it's not a valid SBOM (CycloneDX or SPDX)
           if [ -z "$UPLOAD_SCRIPT" ]; then
-            echo "Error: ${FILE}: not a valid SBOM (CycloneDX or SPDX)"
+            echo "Error: ${SBOM_FILE}: not a valid SBOM (CycloneDX or SPDX)"
             exit 1
           fi
 
-          echo Uploading RPM data to Pyxis for IMAGE: "$IMAGEID" with SBOM: "$FILE using script: $UPLOAD_SCRIPT"
-          $UPLOAD_SCRIPT --retry --image-id "$IMAGEID" --sbom-path "$FILE" --verbose > "${IMAGEID}.out" 2>&1 &
+          echo "Uploading RPM data to Pyxis for IMAGE: $IMAGEID with SBOM: $SBOM_FILE using script: $UPLOAD_SCRIPT"
+          $UPLOAD_SCRIPT --retry --image-id "$IMAGEID" --sbom-path "$SBOM_FILE" --verbose > "${IMAGEID}.out" 2>&1 &
 
           jobs+=($!)  # Save the background process ID
           images+=("$IMAGEID")
           ((++count))
 
-          if [ $((count%N)) -eq 0 ] || [ $((count)) -eq "$total" ]; then
+          if [ $((count%N)) -eq 0 ] || [ $((count)) -eq "$TOTAL_IMAGES_TO_PUSH" ]; then
             echo Waiting for the current batch of background processes to finish
             for job_id in "${!jobs[@]}"; do
               if ! wait "${jobs[job_id]}"; then
