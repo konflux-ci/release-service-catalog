@@ -116,3 +116,15 @@ function kubectl() {
     /usr/bin/kubectl $*
   fi
 }
+
+function check-jsonschema() {
+  echo "Mock check-jsonschema called with: $*"
+
+  if [[ "$*" == *"schema-tenant"* ]]; then
+    # Use a bogus file so it fails validation
+    echo "A:B:C" > /tmp/fail.yaml
+    /usr/local/bin/check-jsonschema "$1" "$2" /tmp/fail.yaml
+  else
+    /usr/local/bin/check-jsonschema $*
+  fi
+}

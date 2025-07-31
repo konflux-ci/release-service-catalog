@@ -1,0 +1,66 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-fail-check-jsonschema
+spec:
+  description: |
+    Run the create-advisory task and have it fail on the check-jsonschema command. The task itself will always
+    succeed, but we should see the actual check-jsonschema error in the result task result.
+
+    The failure here is due to the `origin` param being `schema-tenant`, which ends up in the $ADVISORY_FILEPATH
+    and check-jsonschema is mocked to fail if the filepath argument has schema-tenant in it
+  tasks:
+    - name: run-task
+      taskRef:
+        name: create-advisory-task
+      params:
+        - name: advisory_json
+          value: >-
+            H4sIAAAAAAAAA2VS30vDMBB+319R8rw1tuqQgDgRQd9kgi8y5ExvbbBNYpKOjeL/7qWd+1FDSbjvvnz33TUds84UrQwfqmAiyy+nB0BDg0ywJRbJE4TkZYDZkbBB55XRxMnSPL08yfjgEBpKBJux6SQ5WUzaqEq74CBwC42tUewvCqxvSCbses7y6fWeIr/Txnrloxz6kBxiIhqr5B8+BKNqBXrplA2Dz553CpG6qdvT7CGeModrdKglUul3VoVgveC8MNKne9+pNA3Xhi6y1bhNowPqwETHVANlr9H1KCiN7jliVPO7hV2qDN8LcmNR+wDya+EryK/nAj4LXIOqx405tMarYNyOVFxlvM3mM1fRAI8acUJQ9u5riN2RSwZOViqgDK2LBqAp5ldjcdu6mnL2qxT/jQ2uZIF3Rw8fdOF23MuZK/IiN3EKHVurLdJj685rPrw9zvKLPJ/RI7yKNEvF9oPrnZSmBl3y4UiNK/mWaww8/ph8kaUZfWz1Q4u2yS+hdGYS2QIAAA==
+          # advisory_json string before `gzip -c|base64 -w 0` encoding:
+          # {"product_id":123,"product_name":"Red Hat Product","product_version":"1.2.3","product_stream":"tp1",
+          # "cpe":"cpe:/a:example:product:el8","type":"RHSA","synopsis":"test synopsis","topic":"test topic",
+          # "description":"test description","solution":"test solution","references":["https://docs.example.com/notes"],
+          # "content":{"images":[{"containerImage":"quay.io/example/openstack@sha256:abdefail",
+          # "repository":"rhosp16-rhel8/openstack","tags":["latest"],"architecture":"amd64",
+          # "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8","cves":{"fixed":{
+          # "CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}}]}}
+        - name: application
+          value: "test-app"
+        - name: origin
+          value: "schema-tenant"
+        - name: config_map_name
+          value: "create-advisory-test-cm"
+        - name: advisory_secret_name
+          value: "create-advisory-secret"
+        - name: errata_secret_name
+          value: "create-advisory-errata-secret"
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: advisory_url
+          value: $(tasks.run-task.results.advisory_url)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: advisory_url
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:7addbf5630418cea87bf66df33a05fdd57e43728
+            script: |
+              #!/usr/bin/env bash
+              set -ex # if set -u is here, there will be STDERR_FILE unbound variable errors
+
+              echo Test that result contains the schema error
+              grep "'A:B:C' is not of type 'object'" <<< "$(params.result)"
+
+              echo Test that advisory_url was not set
+              test -z "$(params.advisory_url)"
