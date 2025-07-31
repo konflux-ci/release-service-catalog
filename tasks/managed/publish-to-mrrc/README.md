@@ -2,10 +2,10 @@
 
 Tekton task that publishes the maven artifacts to MRRC(maven.repository.redhat.com)
 service. MRRC is used to host maven artifacts of Red Hat Middleware products.
-This task will work with [collect-mrrc-task](../collect-mrrc-params/README.md)
+This task will work with [collect-charon-task](../collect-charon-params/README.md)
 together to do the MRRC publishment work.
-It accepts the `mrrc.env` file from the
-[collect-mrrc-task](../collect-mrrc-params/README.md)
+It accepts the `charon.env` file from the
+[collect-charon-task](../collect-charon-params/README.md)
 and use the variables in it as parameters for the MRRC publishing task.
 
 ## Parameters
@@ -14,7 +14,7 @@ and use the variables in it as parameters for the MRRC publishing task.
 |-------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|----------|---------------------------------|
 | caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                                      | Yes      | trusted-ca                      |
 | caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                                      | Yes      | ca-bundle.crt                   |
-| mrrcParamFilePath       | path of the env file for mrrc parameters to use                                                                                            | No       | -                               |
+| charonParamFilePath     | path of the env file for charon parameters to use                                                                                          | No       | -                               |
 | charonConfigFilePath    | path of the charon config file for charon to consume                                                                                       | No       | -                               |
 | charonAWSSecret         | the secret name for charon aws credential file                                                                                             | No       | -                               |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                                  | Yes      | empty                           |

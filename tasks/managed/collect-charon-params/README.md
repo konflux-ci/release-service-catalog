@@ -1,10 +1,13 @@
-# collect-mrrc-params
+# collect-charon-params
 
-Tekton task that collects MRRC(maven.repository.redhat.com) configuration options from
-the data file. MRRC is used to host maven artifacts of Red Hat Middleware products.
+Tekton task that collects charon configuration options from the data file. 
+Charon is a tool to publish maven or npm artifacts of RedHat products the following
+services:
+* MRRC(maven.repository.redhat.com), which is used to host maven artifacts
+* NRRC(npm.registry.redhat.com), which is used to host npm libraries
 This task looks at the data file in the workspace to extract the params like
-`mrrc.*`, `cosignPubKeySecret` and `charonAWSSecret` keys for MRRC.
-`mrrc.*` will be stored in a mrrc.env file and are emitted as task results with
+`charon.*`, `cosignPubKeySecret` and `charonAWSSecret` keys for MRRC/NRRC.
+`charon.*` will be stored in a charon.env file and are emitted as task results with
 other three for downstream tasks to use.
 
 ## Parameters
