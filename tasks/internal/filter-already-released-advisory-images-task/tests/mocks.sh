@@ -5,15 +5,15 @@ set -eux
 function git() {
   echo "Mock git called with: $*"
 
-  if [[ "$*" == *"clone"* ]]; then
-    gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
-    mkdir -p "$gitRepo"/schema
-    echo '{"$schema": "http://json-schema.org/draft-07/schema#", "type": "object", "properties": {}}' > "$gitRepo"/schema/advisory.json
-    mkdir -p "$gitRepo"/data/advisories/test-origin
-  elif [[ "$*" == *"failing-origin"* ]]; then
-    echo "Mocking failing git command" && false
+  if [[ "$1" == "clone" ]]; then
+    mkdir -p "$6"
+  elif [[ "$1" == "sparse-checkout" ]]; then
+    : # no-op
+  elif [[ "$1" == "checkout" ]]; then
+    mkdir -p data/advisories/test-origin
   else
-    : # no-op for other git commands
+    echo "Error: Unexpected git command: $*" >&2
+    exit 1
   fi
 }
 
