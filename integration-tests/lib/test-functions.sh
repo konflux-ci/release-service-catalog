@@ -36,7 +36,9 @@ check_env_vars() {
     echo "Checking test environment variables..."
     local -a test_env_vars=(
         "application_name"
+        "component_github_org"
         "appstudio_component_branch"
+        "component_base_repo_name"
         "component_base_branch"
         "component_branch"
         "component_git_url"
@@ -47,7 +49,6 @@ check_env_vars() {
         "managed_sa_name"
         "originating_tool"
         "tenant_namespace"
-        "tenant_sa_name"
     )
     for var_name in "${test_env_vars[@]}"; do
         # Check if variable is set
@@ -155,10 +156,8 @@ cleanup_resources() {
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
 
-    echo "Deleting Github branch ${component_branch} and PR branch konflux-${component_branch} for repo ${component_repo_name}..." >> "${cleanup_log_file}"
-    # Ensure SUITE_DIR is available
-    "${SUITE_DIR}/../scripts/delete-single-branch.sh" "${component_repo_name}" "${component_branch}" >> "${cleanup_log_file}" 2>&1
-    "${SUITE_DIR}/../scripts/delete-single-branch.sh" "${component_repo_name}" "konflux-${component_branch}" >> "${cleanup_log_file}" 2>&1
+    echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
+    "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
 
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
         echo "Deleting test resources..." | tee -a "${cleanup_log_file}"
@@ -215,12 +214,9 @@ decrypt_secrets() {
     echo "Secret decryption check complete."
 }
 
-# Function to create GitHub branch
-# Relies on global variables: SUITE_DIR, component_branch, component_base_branch, component_repo_name
-create_github_branch() {
-    echo "Creating component branch ${component_branch} from ${component_base_branch} in repo ${component_repo_name}..."
-    "${SUITE_DIR}/../scripts/create-branch-from-base.sh" "${component_repo_name}" "${component_base_branch}" "${component_branch}"
-    echo "Branch creation initiated."
+create_github_repository() {
+    echo "Creating component repository ${component_repo_name} branch ${component_branch} from ${component_base_repo_name} branch ${component_base_branch}"
+    "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" "${component_base_repo_name}" "${component_base_branch}" "${component_repo_name}" "${component_branch}"
 }
 
 # Function to set up Kubernetes namespaces
@@ -568,38 +564,6 @@ cleanup_old_resources() {
     fi
     # re-enable exit on error
     set -e
-}
-
-# Function to delete old branches from a GitHub repository
-# Arguments:
-#   $1: Repository name in format "owner/repo" (e.g. "redhat/release-service")
-#   $2: Cutoff period in days (optional, defaults to 1)
-# Requirements:
-#   - GITHUB_TOKEN environment variable must be set
-delete_old_branches() {
-    local repo_name="$1"
-    local branch_prefix="$2"
-    local cutoff_days="${3:-1}"
-
-    if [ -z "$repo_name" ]; then
-        echo "🔴 Error: Repository name is required (format: owner/repo)"
-        return 1
-    fi
-
-    if [ -z "$GITHUB_TOKEN" ]; then
-        echo "🔴 Error: GITHUB_TOKEN environment variable is not set"
-        return 1
-    fi
-
-    local script_path="${SUITE_DIR}/../scripts/delete-old-branches.sh"
-
-    if [ ! -f "$script_path" ]; then
-        echo "🔴 Error: delete-old-branches.sh script not found at ${script_path}"
-        return 1
-    fi
-
-    echo "🔍 Deleting branches in ${repo_name} older than ${cutoff_days} day(s)..."
-    CUTOFF_DATE="${cutoff_days} day" bash "$script_path" "$repo_name" "$branch_prefix"
 }
 
 # Function to verify Release contents

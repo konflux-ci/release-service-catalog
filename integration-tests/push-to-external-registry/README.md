@@ -1,7 +1,7 @@
 # push-to-external-registry test
 ## Setup
 ### Dependencies
-* GitHub repo: https://github.com/scoheb/e2e-base
+* GitHub repo: https://github.com/hacbs-release-tests/e2e-base
 * GitHub personal access token (classic) for above repo with **admin:repo_hook**, **delete_repo**, **repo** scopes.
 * The password to the vault files. (Contact a member of the Release team should you want to run this
   test suite.)
