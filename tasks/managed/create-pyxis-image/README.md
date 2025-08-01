@@ -4,6 +4,10 @@ Tekton task that pushes metadata to Pyxis for all container images contained in 
 result of the `apply-mapping` task. It first extracts the containerImages from the snapshot, then runs
 `skopeo inspect` on each, before finally pushing metadata to Pyxis.
 
+The task includes protection against race conditions that could occur when multiple components have the same
+digest. Components with the same digest are processed in series while different digest groups are processed
+in parallel, ensuring optimal performance while preventing conflicts.
+
 The relative path of the pyxis.json file in the data workspace is output as a task result named
 `pyxisDataPath`.
 

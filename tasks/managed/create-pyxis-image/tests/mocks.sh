@@ -5,9 +5,36 @@ set -exo pipefail
 
 function create_container_image() {
   echo $* >> $(params.dataDir)/mock_create_container_image.txt
-  # The image id is a 4 digit number with leading zeros calculated from the call number,
-  # e.g. 0001, 0002, 0003...
-  echo The image id is $(awk 'END{printf("%04i", NR)}' $(params.dataDir)/mock_create_container_image.txt)
+  
+  # Extract repository name from parameters to determine the line number
+  # This allows us to have a thread-safe way to determine the image id without locking
+  local repository=""
+  local args=("$@")
+  
+  # Parse arguments to extract the --name parameter (repository)
+  for ((i=0; i<${#args[@]}; i++)); do
+    if [[ "${args[i]}" == "--name" && $((i+1)) -lt ${#args[@]} ]]; then
+      repository="${args[i+1]}"
+      break
+    fi
+  done
+  
+  # Find the line number where this repository appears in the file
+  local matching_lines=$(grep -n -- "--name $repository" "$(params.dataDir)/mock_create_container_image.txt")
+  local line_count=$(echo "$matching_lines" | wc -l)
+  
+  # Use the last line number for this repository (handles multi-arch images)
+  # WARNING: this is thread safe as long as the repository name is unique. If you need to
+  # test thread safety, you need to use a different repository name for each request.
+  if [[ "$line_count" -gt 0 ]]; then
+    local line_number=$(echo "$matching_lines" | tail -1 | cut -d: -f1)
+    printf "The image id is %04d\n" "$line_number"
+  else
+    # Fallback: count total lines in file (original behavior)
+    local total_lines=$(wc -l < "$(params.dataDir)/mock_create_container_image.txt" 2>/dev/null || echo "0")
+    local image_id=$((total_lines + 1))
+    printf "The image id is %04d\n" "$image_id"
+  fi
 
   if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --oras-manifest-fetch "*" --name "*" --media-type "*" --digest "*" --architecture-digest "*" --architecture "*" --rh-push "* ]]
   then

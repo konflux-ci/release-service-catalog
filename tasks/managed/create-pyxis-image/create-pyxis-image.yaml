@@ -12,6 +12,10 @@ spec:
     result of the `apply-mapping` task. It first extracts the containerImages from the snapshot, then runs
     `skopeo inspect` on each, before finally pushing metadata to Pyxis.
     
+    The task includes protection against race conditions that could occur when multiple components have the same
+    digest. Components with the same digest are processed in series while different digest groups are processed
+    in parallel, ensuring optimal performance while preventing conflicts.
+    
     The relative path of the pyxis.json file in the data workspace is output as a task result named
     `pyxisDataPath`.
   params:
@@ -384,22 +388,53 @@ spec:
             done <<< "$ARCHITECTURES"
 
             # Save component result to file
-            echo "$COMPONENT_JSON" > "$output_file"
+            echo "$COMPONENT_JSON" | tee "$output_file"
+        }
+
+        # Function to process a group of components with the same digest in series
+        process_digest_group() {
+            local digest=$1
+            local component_indices_string="$2"
+            
+            echo "Processing components with digest: $digest"
+            
+            # Process each component in the group in series
+            for component_index in $component_indices_string; do
+                echo "Processing component $component_index for digest $digest"
+                process_component "$component_index"
+            done
         }
 
         COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
 
+        # Group components by digest to prevent race conditions
+        declare -A digest_groups
+        for (( i=0; i < COMPONENTS; i++ )); do
+            CONTAINER_IMAGE=$(jq -r ".components[${i}].containerImage" "${SNAPSHOT_SPEC_FILE}")
+            DIGEST="${CONTAINER_IMAGE##*@}"
+            
+            if [[ -z "${digest_groups[$DIGEST]}" ]]; then
+                digest_groups[$DIGEST]="$i"
+            else
+                digest_groups[$DIGEST]="${digest_groups[$DIGEST]} $i"
+            fi
+        done
+
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         SUCCESS=true
 
-        # Process each component with concurrency limit
-        for (( i=0; i < COMPONENTS; i++ )); do
-            echo "Starting component processing for component $i"
+        # Process each digest group in parallel, but components within each group in series
+        for digest in "${!digest_groups[@]}"; do
+            echo "Starting parallel processing for components with digest: $digest"
             # Limit batch size to concurrent limit
             while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
                 wait -n || SUCCESS=false
             done
-            process_component $i > "/tmp/component_${i}.out" 2> "/tmp/component_${i}.err" &
+            # Use hex digest without sha256: prefix for filename consistency
+            digest_filename="${digest#sha256:}"
+            process_digest_group "$digest" "${digest_groups[$digest]}" \
+              > "/tmp/component_group_${digest_filename}.out" \
+              2> "/tmp/component_group_${digest_filename}.err" &
         done
 
         # Wait for remaining processes to finish
@@ -409,15 +444,17 @@ spec:
         echo "All component processing jobs completed"
 
         # Print outputs and errors for each component processing job
-        for (( i=0; i < COMPONENTS; i++ )); do
-            if [ -f "/tmp/component_${i}.out" ]; then
-                echo "=== Component $i Output ==="
-                cat "/tmp/component_${i}.out"
+        for digest in "${!digest_groups[@]}"; do
+            digest_filename="${digest#sha256:}"
+            if [ -f "/tmp/component_group_${digest_filename}.out" ]; then
+                echo "=== Component Processing Output ==="
+                cat "/tmp/component_group_${digest_filename}.out"
                 echo
             fi
-            if [ -f "/tmp/component_${i}.err" ] && [ -s "/tmp/component_${i}.err" ]; then
-                echo "=== Component $i Errors ==="
-                cat "/tmp/component_${i}.err"
+            if [ -f "/tmp/component_group_${digest_filename}.err" ] && \
+               [ -s "/tmp/component_group_${digest_filename}.err" ]; then
+                echo "=== Component Processing Errors ==="
+                cat "/tmp/component_group_${digest_filename}.err"
                 echo
             fi
         done

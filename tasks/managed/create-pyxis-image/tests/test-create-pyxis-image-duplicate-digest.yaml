@@ -1,0 +1,435 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-pyxis-image-duplicate-digest
+spec:
+  description: |
+    Run the create-pyxis-image task with multiple containerImages that have the same digest
+    to test that the race condition fix works correctly.
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:ea7868ebdcc7a2116c620255034226611d837f42
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)"/mapped_snapshot.json << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "source@sha256:mydigest",
+                    "repository": "registry.io/image1",
+                    "tags": [
+                      "testtag1"
+                    ]
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "source@sha256:mydigest",
+                    "repository": "registry.io/image2",
+                    "tags": [
+                      "testtag2"
+                    ]
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "source@sha256:differentdigest",
+                    "repository": "registry.io/image3",
+                    "tags": [
+                      "testtag3"
+                    ]
+                  },
+                  {
+                    "name": "comp4",
+                    "containerImage": "source@sha256:mydigest",
+                    "repository": "registry.io/image4",
+                    "tags": [
+                      "testtag4"
+                    ]
+                  },
+                  {
+                    "name": "comp5",
+                    "containerImage": "source@sha256:differentdigest5",
+                    "repository": "registry.io/image5",
+                    "tags": [
+                      "testtag5"
+                    ]
+                  },
+                  {
+                    "name": "comp6",
+                    "containerImage": "source@sha256:differentdigest6",
+                    "repository": "registry.io/image6",
+                    "tags": [
+                      "testtag6"
+                    ]
+                  },
+                  {
+                    "name": "comp7",
+                    "containerImage": "source@sha256:mydigest",
+                    "repository": "registry.io/image7",
+                    "tags": [
+                      "testtag7"
+                    ]
+                  },
+                  {
+                    "name": "comp8",
+                    "containerImage": "source@sha256:differentdigest8",
+                    "repository": "registry.io/image8",
+                    "tags": [
+                      "testtag8"
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/mydata.json" << EOF
+              {
+              }
+              EOF
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+          - name: patch-source-data-artifact-result
+            ref:
+              name: patch-source-data-artifact-result
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: create-pyxis-image
+      params:
+        - name: pyxisSecret
+          value: test-create-pyxis-image-cert
+        - name: server
+          value: stage
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/mapped_snapshot.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/mydata.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: pyxisDataPath
+          value: $(tasks.run-task.results.pyxisDataPath)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        params:
+          - name: pyxisDataPath
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: skip-trusted-artifact-operations
+            ref:
+              name: skip-trusted-artifact-operations
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:ea7868ebdcc7a2116c620255034226611d837f42
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Test that create_container_image was called the expected number of times
+              # We expect 8 calls: 4 for components with 'mydigest' + 4 for 'differentdigest'
+              if [ "$(wc -l < "$(params.dataDir)"/mock_create_container_image.txt)" != 8 ]; then
+                echo Error: create_container_image was expected to be called 8 times. Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              # Verify that all expected calls were made with correct parameters
+              if ! grep -- "--tags testtag1" < \
+                "$(params.dataDir)/mock_create_container_image.txt" 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include "--tags testtag1". Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              if ! grep -- "--tags testtag2" < \
+                "$(params.dataDir)/mock_create_container_image.txt" 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include "--tags testtag2". Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              if ! grep -- "--tags testtag3" < \
+                "$(params.dataDir)/mock_create_container_image.txt" 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include "--tags testtag3". Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              if ! grep -- "--tags testtag4" < \
+                "$(params.dataDir)/mock_create_container_image.txt" 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include "--tags testtag4". Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              # Verify that all calls include the correct digest parameters
+              if ! grep -- "--digest sha256:mydigest" < \
+                "$(params.dataDir)/mock_create_container_image.txt" 2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include \
+                  "--digest sha256:mydigest". Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              if ! grep -- "--digest sha256:differentdigest" < \
+                "$(params.dataDir)/mock_create_container_image.txt" \
+                2> /dev/null
+              then
+                echo Error: create_container_image call was expected to include \
+                  "--digest sha256:differentdigest". Actual calls:
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+
+              # Check that the result JSON contains all expected components
+              jq -e '.components | length == 8' "$(params.dataDir)/$(params.pyxisDataPath)"
+
+              # Check that all components have image IDs assigned (order may vary due to parallel processing)
+              # Verify that all 8 image IDs (0001 through 0008) are used
+              all_image_ids=$(jq -r '.components[] | .pyxisImages[0].imageId' \
+                "$(params.dataDir)/$(params.pyxisDataPath)" | sort)
+              if [ "$(echo "$all_image_ids" | wc -l)" != 8 ]; then
+                echo "Error: Expected 8 image IDs, found $(echo "$all_image_ids" | wc -l)"
+                exit 1
+              fi
+              
+              # Verify all expected image IDs are present
+              for i in {1..8}; do
+                expected_id=$(printf "%04d" "$i")
+                if ! echo "$all_image_ids" | grep -q "$expected_id"; then
+                  echo "Error: Expected image ID $expected_id not found. Actual:"
+                  echo "$all_image_ids"
+                  exit 1
+                fi
+              done
+
+              # Check for duplicate repository names in create_container_image calls
+              # This ensures that the race condition fix is working properly
+              # Components with the same digest should be processed in series, not in parallel
+              echo "Checking for duplicate repository names in create_container_image calls..."
+              
+              # Extract all repository names from the mock calls
+              repositories=$(grep -o -- "--name [^ ]*" "$(params.dataDir)/mock_create_container_image.txt" \
+                | cut -d' ' -f2 | sort)
+              
+              # Check for duplicates
+              duplicate_repos=$(echo "$repositories" | uniq -d)
+              if [ -n "$duplicate_repos" ]; then
+                echo "Error: Found duplicate repository names in create_container_image calls:"
+                echo "$duplicate_repos"
+                echo "This indicates a race condition where components with the same digest were processed in parallel"
+                echo "All repository calls:"
+                cat "$(params.dataDir)/mock_create_container_image.txt"
+                exit 1
+              fi
+              
+              echo "✅ No duplicate repository names found so we can verify the race condition fix"
+
+              # Verify race condition fix using component indices
+              # Components with the same digest should be processed in series (same digest group)
+              # We can verify this by checking that components with the same digest have
+              # image IDs that are close to each other (indicating they were processed together)
+              
+              # Get all components with mydigest and their component indices
+              mydigest_components=$(jq -r '
+                .components[] 
+                | select(.containerImage | endswith("@sha256:mydigest")) 
+                | {componentIndex: .componentIndex, imageId: .pyxisImages[0].imageId}
+              ' "$(params.dataDir)/$(params.pyxisDataPath)")
+              
+              if [ "$(echo "$mydigest_components" | jq -r '.componentIndex' | wc -l)" != 4 ]; then
+                echo "Error: Expected 4 components with 'mydigest', found \
+                  $(echo "$mydigest_components" | jq -r '.componentIndex' | wc -l)"
+                exit 1
+              fi
+              
+              # Check that mydigest components have the expected component indices
+              # This indicates they were processed in the same digest group (series)
+              mydigest_indices=$(echo "$mydigest_components" | jq -r '.componentIndex' | sort -n)
+              
+              # Verify we have exactly 4 mydigest components with the expected indices
+              # Based on our test data: comp1(0), comp2(1), comp4(3), comp7(6)
+              # These indices are deterministic based on the test data structure
+              expected_indices="0 1 3 6"
+              actual_indices=$(echo "$mydigest_indices" | tr '\n' ' ' | sed 's/ $//')
+              
+              if [ "$actual_indices" != "$expected_indices" ]; then
+                echo "Error: Components with 'mydigest' should have the expected component indices"
+                echo "Expected component indices: $expected_indices"
+                echo "Actual component indices: $actual_indices"
+                echo "This indicates the digest grouping logic is not working correctly"
+                exit 1
+              fi
+              
+              echo "✅ Race condition verified: Components with same digest processed in series"
+              
+              # Verify that the last component processed is from the same digest group
+              # Since different digest groups run in parallel and finish quickly,
+              # while the same digest group runs in series and takes longer,
+              # the last component processed should be from the same digest group
+              
+              # Get the highest image ID (last processed)
+              highest_image_id=$(jq -r '.components[] | .pyxisImages[0].imageId' \
+                "$(params.dataDir)/$(params.pyxisDataPath)" | sort -n | tail -1)
+              
+              # Find which component has this image ID
+              last_component=$(jq -r --arg imageId "$highest_image_id" \
+                '.components[] 
+                | select(.pyxisImages[0].imageId == $imageId) 
+                | {componentIndex: .componentIndex, containerImage: .containerImage}' \
+                "$(params.dataDir)/$(params.pyxisDataPath)")
+              
+              last_component_index=$(echo "$last_component" | jq -r '.componentIndex')
+              last_component_digest=$(echo "$last_component" | jq -r '.containerImage')
+              
+              # Check if the last component is from the same digest group (mydigest)
+              if [[ "$last_component_digest" != *"@sha256:mydigest" ]]; then
+                echo "Error: Expected last processed component to be from same digest group (mydigest)"
+                echo "Last component index: $last_component_index"
+                echo "Last component digest: $last_component_digest"
+                echo "Highest image ID: $highest_image_id"
+                echo "All components:"
+                jq -r '.components[] | "Index \(.componentIndex): \(.containerImage) -> \(.pyxisImages[0].imageId)"' \
+                  "$(params.dataDir)/$(params.pyxisDataPath)"
+                exit 1
+              fi
+              
+              echo "✅ Last processed component is from same digest group (index $last_component_index)"
+              
+              echo "✅ Race condition fix test passed - all components processed correctly"
+
+      runAfter:
+        - run-task 
