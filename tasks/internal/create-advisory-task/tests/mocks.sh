@@ -5,7 +5,7 @@ set -eux
 function git() {
   echo "Mock git called with: $*"
 
-  if [[ "$*" == *"clone"* ]]; then
+  if [[ "$1" == "clone" ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
     mkdir -p "$gitRepo"/schema
     echo '{"$schema": "http://json-schema.org/draft-07/schema#","type": "object", "properties":{}}' > "$gitRepo"/schema/advisory.json
@@ -19,7 +19,8 @@ function git() {
     touch -d "@1712012344" "$gitRepo"/data/advisories/dev-tenant/2024/1452
     touch -d "@1708012343" "$gitRepo"/data/advisories/dev-tenant/2025/1602
     touch -d "@1704012342" "$gitRepo"/data/advisories/dev-tenant/2024/1442
-
+  elif [[ "$1" == "sparse-checkout" ]]; then
+    : # no-op
   elif [[ "$*" == *"failing-tenant"* ]]; then
     echo "Mocking failing git command" && false
   else
