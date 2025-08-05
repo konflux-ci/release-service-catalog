@@ -52,7 +52,12 @@ function yq() {
   if [[ "$2" == ".spec.content.images // []" ]]; then
     case "$advisory_num" in
       1601)
-        echo '[{"containerImage":"quay.io/test/released-image:1.0.0","tags":["v1.0"],"repository":"quay.io/test"}]'
+        # Include entries that match our get-image-architectures mock digests
+        echo '[
+          {"containerImage":"registry.redhat.io/test@sha256:releasedarch123","tags":["v1.0"],"repository":"registry.redhat.io/test"},
+          {"containerImage":"registry.redhat.io/test@sha256:amd64digest123","tags":["v1.0"],"repository":"registry.redhat.io/test"},
+          {"containerImage":"registry.redhat.io/test@sha256:arm64digest456","tags":["v1.0"],"repository":"registry.redhat.io/test"}
+        ]'
         ;;
       1602)
         echo '[{"containerImage":"quay.io/test/other-image:1.0.0","tags":["stable"],"repository":"quay.io/test"}]'

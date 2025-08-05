@@ -207,10 +207,55 @@ spec:
                 exit 1
               fi
 
-              # Check the snapshot parameter
-              snapshotJson=$(echo "$internalRequest" | jq -r '.spec.params.snapshot' | base64 --decode | gzip -d)
-              if [ "$(jq -r '.application' <<< "$snapshotJson")" != "myapp" ]; then
-                echo "InternalRequest has the wrong application in snapshot"
+              # Check the transformedSnapshot parameter exists and decodes
+              transformedSnapshotB64=$(echo "$internalRequest" | jq -r '.spec.params.transformedSnapshot // empty')
+              if [ -z "$transformedSnapshotB64" ]; then
+                echo "InternalRequest missing transformedSnapshot parameter"
+                exit 1
+              fi
+              transformedSnapshotJson=$(echo "$transformedSnapshotB64" | base64 --decode | gzip -d)
+              if ! jq -e 'type=="array"' <<< "$transformedSnapshotJson" >/dev/null; then
+                echo "transformedSnapshot should be a JSON array"
+                exit 1
+              fi
+              if [ "$(jq 'length' <<< "$transformedSnapshotJson")" -lt 2 ]; then
+                echo "transformedSnapshot should contain at least one entry per component"
+                exit 1
+              fi
+              # Validate per-component transformed entries
+              oldEntry=$(jq -c '.[] | select(.originalComponent=="old-component")' <<< "$transformedSnapshotJson")
+              if [ -z "$oldEntry" ]; then
+                echo "Missing transformed entry for old-component"
+                exit 1
+              fi
+              if [ "$(jq -r '.repository' <<< "$oldEntry")" != "quay.io/redhat-pending/repo" ]; then
+                echo "Unexpected repository for old-component in transformedSnapshot"
+                exit 1
+              fi
+              if [[ "$(jq -r '.containerImage' <<< "$oldEntry")" != *"@sha256:amd64digest_abc123" ]]; then
+                echo "Unexpected digest for old-component in transformedSnapshot"
+                exit 1
+              fi
+              if [ "$(jq -r '.architecture' <<< "$oldEntry")" != "amd64" ]; then
+                echo "Unexpected architecture for old-component in transformedSnapshot"
+                exit 1
+              fi
+
+              newEntry=$(jq -c '.[] | select(.originalComponent=="new-component")' <<< "$transformedSnapshotJson")
+              if [ -z "$newEntry" ]; then
+                echo "Missing transformed entry for new-component"
+                exit 1
+              fi
+              if [ "$(jq -r '.repository' <<< "$newEntry")" != "quay.io/redhat-pending/repo2" ]; then
+                echo "Unexpected repository for new-component in transformedSnapshot"
+                exit 1
+              fi
+              if [[ "$(jq -r '.containerImage' <<< "$newEntry")" != *"@sha256:amd64digest_def456" ]]; then
+                echo "Unexpected digest for new-component in transformedSnapshot"
+                exit 1
+              fi
+              if [ "$(jq -r '.architecture' <<< "$newEntry")" != "amd64" ]; then
+                echo "Unexpected architecture for new-component in transformedSnapshot"
                 exit 1
               fi
 

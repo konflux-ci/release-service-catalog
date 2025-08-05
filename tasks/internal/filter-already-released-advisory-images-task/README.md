@@ -6,9 +6,9 @@ that still need to be released (i.e., not found in any advisory).
 
 ## Parameters
 
-| Name                           | Description                                                       | Optional | Default value |
-|--------------------------------|-------------------------------------------------------------------|----------|---------------|
-| snapshot                       | Base64 string of gzipped JSON representation of the snapshot spec | No       | -             |
-| origin                         | The origin workspace for the release CR                           | No       | -             |
-| advisory_secret_name           | Name of the secret containing advisory metadata                   | No       | -             |
-| internalRequestPipelineRunName | Name of the PipelineRun that requested this task                  | No       | -             |
+| Name                           | Description                                                                                | Optional | Default value |
+|--------------------------------|--------------------------------------------------------------------------------------------|----------|---------------|
+| transformedSnapshot            | Base64 string of gzipped JSON representation of architecture-specific images from snapshot | No       | -             |
+| origin                         | The origin workspace for the release CR                                                    | No       | -             |
+| advisory_secret_name           | Name of the secret containing advisory metadata                                            | No       | -             |
+| internalRequestPipelineRunName | Name of the PipelineRun that requested this task                                           | No       | -             |
