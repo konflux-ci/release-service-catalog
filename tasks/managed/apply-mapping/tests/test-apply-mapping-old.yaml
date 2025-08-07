@@ -2,11 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping-other-formats
+  name: test-apply-mapping-old
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json where the repositories.url is in a format not specifically
-    handled by the task. Verify that the resulting json remains unchanged in the repositories.url field.
+    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
+    the data json file and verify that the resulting json contains the expected values.
+
+    To be deleted when component.repository is no longer supported
   workspaces:
     - name: tests-workspace
   params:
@@ -36,8 +38,6 @@ spec:
           workspace: tests-workspace
       taskSpec:
         results:
-          - name: snapshot
-            type: string
           - name: sourceDataArtifact
             type: string
         workspaces:
@@ -64,33 +64,58 @@ spec:
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data_other_formats.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
               {
                 "mapping": {
                   "components": [
                     {
                       "name": "comp1",
-                      "repositories": [
-                        {
-                          "url": "quay.io/my-sample/my-image"
-                        },
-                        {
-                          "url": "quay.io/my-sample2/my-image"
-                        }
-                      ]
+                      "repository": "repo1"
+                    },
+                    {
+                      "name": "comp2",
+                      "repository": "repo2"
+                    },
+                    {
+                      "name": "comp3",
+                      "repository": "repo3a"
+                    },
+                    {
+                      "name": "comp4",
+                      "customfield": "custom"
                     }
                   ]
                 }
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
               {
                 "application": "myapp",
                 "components": [
                   {
                     "name": "comp1",
-                    "containerImage": "imageurl1@sha256:123456"
+                    "containerImage": "imageurl1@sha256:123456",
+                    "source": {
+                      "git": {
+                        "revision": "myrev",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "imageurl3@sha256:123456",
+                    "repository": "repo3"
+                  },
+                  {
+                    "name": "comp4",
+                    "containerImage": "imageurl4@sha256:123456",
+                    "repository": "repo4"
+                  },
+                  {
+                    "name": "comp5",
+                    "containerImage": "imageurl5@sha256:123456"
                   }
                 ]
               }
@@ -126,9 +151,9 @@ spec:
         name: apply-mapping
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json
+          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/test_data_other_formats.json
+          value: $(context.pipelineRun.uid)/test_data.json
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -207,29 +232,41 @@ spec:
               echo Test that SNAPSHOT contains component comp1
               test "$(
                 jq -r '[ .components[] | select(.name=="comp1") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
               )" -eq 1
 
-              echo Test that repository 1 of component comp1 stayed intact
+              echo Test that SNAPSHOT contains repository from the mapping file
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )" == quay.io/my-sample/my-image
+                jq -r '.components[] | select(.name=="comp1") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == repo1
 
-              echo Test that rh-registry-repo for comp1 repo 1 is not set because it was not in a known format
-              test -z "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0]."rh-registry-repo" // empty' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )"
-
-              echo Test that registry-access-repo for comp1 repo 1 is not set because it was not in a known format
-              test -z "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0]."registry-access-repo" // empty' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )"
-
-              echo Test that repository 2 of component comp1 stayed intact
+              echo Test that SNAPSHOT does not contain component comp2
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[1].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )" == quay.io/my-sample2/my-image
+                jq -r '[ .components[] | select(.name=="comp2") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" -eq 0
+
+              echo Test that repository of component comp3 was overridden by mapping file
+              test "$(
+                jq -r '.components[] | select(.name=="comp3") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == repo3a
+
+              echo Test that repository of component comp4 stayed intact
+              test "$(
+                jq -r '.components[] | select(.name=="comp4") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == repo4
+
+              echo Test that customfield of component comp4 was added to its snapshot entry
+              test "$(
+                jq -r '.components[] | select(.name=="comp4") | .customfield' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == custom
+
+              echo Test that SNAPSHOT does not contain component comp5 as it was not included in the mapping file
+              test "$(
+                jq -r '[ .components[] | select(.name=="comp5") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" -eq 0

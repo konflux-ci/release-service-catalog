@@ -2,11 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping-other-formats
+  name: test-apply-mapping-tag-expansion-old
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json where the repositories.url is in a format not specifically
-    handled by the task. Verify that the resulting json remains unchanged in the repositories.url field.
+    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
+    the data file with tags per component and verify that the resulting json
+    contains the expected values with tags expanded, including incrementer logic.
+
+    To be deleted when component.repository is no longer supported
   workspaces:
     - name: tests-workspace
   params:
@@ -36,8 +39,6 @@ spec:
           workspace: tests-workspace
       taskSpec:
         results:
-          - name: snapshot
-            type: string
           - name: sourceDataArtifact
             type: string
         workspaces:
@@ -64,33 +65,79 @@ spec:
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data_other_formats.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
               {
                 "mapping": {
                   "components": [
                     {
                       "name": "comp1",
-                      "repositories": [
-                        {
-                          "url": "quay.io/my-sample/my-image"
-                        },
-                        {
-                          "url": "quay.io/my-sample2/my-image"
-                        }
+                      "repository": "repo1",
+                      "tags": [
+                        "tag1-{{timestamp}}",
+                        "tag2-{{ timestamp }}",
+                        "tag3-{{ timestamp }}-{{ git_short_sha }}",
+                        "{{git_sha}}",
+                        "{{ git_sha }}-abc",
+                        "{{git_short_sha}}",
+                        "{{ git_short_sha }}-bar",
+                        "foo-{{digest_sha}}",
+                        "{{ digest_sha }}",
+                        "v2.0.0-{{ incrementer }}",
+                        "tag-{{ labels.Goodlabel }}",
+                        "tag-{{ labels.Goodlabel.with-dash }}",
+                        "tag1-2024-07-29"
                       ]
+                    },
+                    {
+                      "name": "comp2",
+                      "repository": "repo2",
+                      "tags": [
+                        "tag1-{{timestamp}}",
+                        "tag2-{{ release_timestamp }}",
+                        "tag4-{{release_timestamp}}",
+                        "v1.0.0-{{ incrementer }}",
+                        "v1-{{ incrementer }}-release"
+                      ],
+                      "timestampFormat": "%Y-%m"
+                    },
+                    {
+                      "name": "comp3",
+                      "repository": "repo3a"
                     }
-                  ]
+                  ],
+                  "defaults": {
+                    "timestampFormat": "%Y-%m-%d",
+                    "tags": [
+                      "defaultTag"
+                    ]
+                  }
                 }
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
               {
                 "application": "myapp",
                 "components": [
                   {
                     "name": "comp1",
-                    "containerImage": "imageurl1@sha256:123456"
+                    "containerImage": "registry.io/labels@sha256:123456",
+                    "source": {
+                      "git": {
+                        "revision": "testrevision",
+                        "url": "myurl"
+                      }
+                    }
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/onlycreated@sha256:123456",
+                    "repository": "repo2"
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "registry.io/image3@sha256:123456",
+                    "repository": "repo3"
                   }
                 ]
               }
@@ -126,9 +173,9 @@ spec:
         name: apply-mapping
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json
+          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/test_data_other_formats.json
+          value: $(context.pipelineRun.uid)/test_data.json
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -207,29 +254,37 @@ spec:
               echo Test that SNAPSHOT contains component comp1
               test "$(
                 jq -r '[ .components[] | select(.name=="comp1") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
               )" -eq 1
 
-              echo Test that repository 1 of component comp1 stayed intact
+              echo Test that comp1 has the proper tags
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )" == quay.io/my-sample/my-image
+                jq -c '.components[] | select(.name=="comp1") | .tags' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == '["defaultTag","foo-123456","tag-labelvalue","tag-labelvalue-with-dash",'\
+              '"tag1-2024-07-29","tag2-2024-07-29","tag3-2024-07-29-testrev","v2.0.0-5","123456",'\
+              '"testrevision-abc","testrev-bar","testrevision","testrev"]'
 
-              echo Test that rh-registry-repo for comp1 repo 1 is not set because it was not in a known format
-              test -z "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0]."rh-registry-repo" // empty' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )"
-
-              echo Test that registry-access-repo for comp1 repo 1 is not set because it was not in a known format
-              test -z "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0]."registry-access-repo" // empty' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )"
-
-              echo Test that repository 2 of component comp1 stayed intact
+              echo Test that SNAPSHOT contains component comp2
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[1].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec_other_formats.json"
-              )" == quay.io/my-sample2/my-image
+                jq -r '[ .components[] | select(.name=="comp2") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" -eq 1
+
+              echo Test that comp2 has the proper tags
+              test "$(
+                jq -c '.components[] | select(.name=="comp2") | .tags' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == '["defaultTag","tag1-1980-01","tag2-1980-01","tag4-1980-01","v1-1-release","v1.0.0-1"]'
+
+              echo Test that repository of component comp3 was overridden by mapping file
+              test "$(
+                jq -r '.components[] | select(.name=="comp3") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == repo3a
+
+              echo Test that comp3 has the 1 default tag
+              test "$(
+                jq -r '.components[] | select(.name=="comp3") | .tags | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" -eq 1

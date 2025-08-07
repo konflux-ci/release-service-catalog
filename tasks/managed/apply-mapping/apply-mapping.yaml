@@ -226,12 +226,13 @@ spec:
             echo "$result"
         }
 
-        # Expected arguments are [tags, substitute_map, labels_map]
+        # Expected arguments are [tags, substitute_map, labels_map, repo]
         # The tags argument is a json array
         translate_tags () {
             tags=$1
             substitute_map=$2
             labels_map=$3
+            repo=$4
             if [ "$tags" = '' ] ; then
                 echo ''
                 return
@@ -255,7 +256,6 @@ spec:
 
                   # Handle incrementer logic
                   if [[ "$var_name" == "incrementer" ]]; then
-                      repo=$(jq -r '.repository' <<< "$component")
                       tag=$(increment_tag "$tag" "$repo")
                   else
                       replacement=$(substitute "$var_name" "$substitute_map" "$labels_map")
@@ -372,6 +372,9 @@ spec:
         NUM_MAPPED_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
         for ((i = 0; i < NUM_MAPPED_COMPONENTS; i++)) ; do
             component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            componentTags=$(jq '.componentTags // []' <<< "$component")
+            defaultComponentTags=$(jq -n --argjson defaults "$defaultTags" --argjson componentTags \
+              "$componentTags" '$defaults? + $componentTags? | unique')
 
             # images are required to use sha reference - check this
             NAME=$(jq -r '.name' <<< "$component")
@@ -381,7 +384,6 @@ spec:
               exit 1
             fi
 
-            imageTags=$(jq '.tags // []' <<< "$component")
             git_sha=$(jq -r '.source.git.revision' <<< "$component") # this sets the value to "null" if it doesn't exist
             build_sha=$(echo "$IMAGE_REF" | cut -d ':' -f 2)
             passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
@@ -402,8 +404,6 @@ spec:
               timestamp="$(date -d "${build_date}" "+$passedTimestampFormat")"
             fi
 
-            allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultTags" --argjson imageTags \
-              "$imageTags" '$defaults? + $imageTags? | unique')
             substitute_map="$(jq -n -c \
               --arg timestamp "${timestamp}" \
               --arg release_timestamp "${release_timestamp}" \
@@ -413,19 +413,15 @@ spec:
               '$ARGS.named')"
             labels="$(jq -c '.Labels' <<< "${image_metadata}")"
 
-            tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}")
-            if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
-              jq --argjson i "$i" --argjson updatedTags "$tags" '.components[$i].tags = $updatedTags' \
-                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
-            fi
-
             # Also substitute filename values in the staged section of components
             STAGED_FILES=$(jq '.staged.files | length' <<< "$component")
             for ((j = 0; j < STAGED_FILES; j++)) ; do
                 file=$(jq -c --argjson j "$j" '.staged.files[$j]' <<< "$component")
                 filenameArrayPreSubstitution=$(jq '.filename' <<< "$file" | jq -cs)
+                # {{ incrementer }} is not supported in staged.files values, so we just pass
+                # "" as the repo argument
                 subbedFilename=$(translate_tags "${filenameArrayPreSubstitution}" \
-                  "${substitute_map}" "${labels}" | jq -r '.[0]')
+                  "${substitute_map}" "${labels}" ""| jq -r '.[0]')
                 jq --argjson i "$i" --argjson j "$j" --arg filename "$subbedFilename" \
                   '.components[$i].staged.files[$j].filename = $filename' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
                   && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
@@ -442,32 +438,97 @@ spec:
               "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             fi
 
-            # Determine the format of the original repository and update keys accordingly
-            repository=$(jq -r '.repository' <<< "$component")
-            echo "Processing component: $NAME"
-            echo "Original repository: $repository"
+            # *** Temporary code to maintain backwards compatibility and set .repositories[0] to .repository ***
+            if [[ $(jq 'has("repository")' <<< "$component") == "true" ]] ; then
+              repository=$(jq -r '.repository' <<< "$component")
+              echo "Processing component: $NAME"
+              echo "Original repository: $repository"
 
-            # This block is temporary to support both quay.io and registry.redhat.io
-            # It should be removed once all repositories are migrated to registry.redhat.io
-            if [[ "$repository" == quay.io/redhat-prod/* || "$repository" == quay.io/redhat-pending/* ]]; then
-                repository=$(convert_to_registry "$repository")
+              imageTags=$(jq '.tags // []' <<< "$component")
+              oldAllTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson imageTags \
+                "$imageTags" '$defaults? + $imageTags? | unique')
+              oldTags=$(translate_tags "${oldAllTagsPreSubstitution}" "${substitute_map}" "${labels}" "${repository}")
+              if [ "$(jq 'length' <<< "$oldTags")" -gt 0 ] ; then
+                jq --argjson i "$i" --argjson updatedTags "$oldTags" '.components[$i].tags = $updatedTags' \
+                  "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+              fi
+
+              if [[ "$repository" == quay.io/redhat-prod/* || "$repository" == quay.io/redhat-pending/* ]]; then
+                  repository=$(convert_to_registry "$repository")
+              fi
+
+              if [[ "$repository" == registry.redhat.io/* || "$repository" == registry.stage.redhat.io/* ]]; then
+                rh_registry_repo=$repository
+                registry_access_repo=$(convert_to_registry_access "$repository")
+                repository=$(convert_to_quay "$repository")
+
+                jq --argjson i "$i" \
+                  --arg repository "$repository" \
+                  --arg rh_registry_repo "$rh_registry_repo" \
+                  --arg registry_access_repo "$registry_access_repo" \
+                  '(.components[$i].repository = $repository) |
+                      .components[$i]["rh-registry-repo"] = $rh_registry_repo |
+                      .components[$i]["registry-access-repo"] = $registry_access_repo' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+
+                if [[ $(jq 'has("repositories")' <<< "$component") == "false" ]] ; then
+                  jq --argjson i "$i" --arg rh_registry_repo "$rh_registry_repo" \
+                    --arg registry_access_repo "$registry_access_repo" \
+                      '.components[$i].repositories[0]["rh-registry-repo"] = $rh_registry_repo |
+                      .components[$i].repositories[0]["registry-access-repo"] = $registry_access_repo' \
+                    "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+                fi
+              fi
+              if [[ $(jq 'has("repositories")' <<< "$component") == "false" ]] ; then
+                jq --argjson i "$i" --arg url "$repository" \
+                  --argjson tags "$oldTags" \
+                  '.components[$i].repositories[0].url = $url |
+                    .components[$i].repositories[0]["tags"] = $tags' \
+                  "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+              fi
             fi
+            # *** End of temporary code ***
 
-            # Convert to registry and quay format
-            if [[ "$repository" == registry.redhat.io/* || "$repository" == registry.stage.redhat.io/* ]]; then
-              rh_registry_repo=$repository
-              registry_access_repo=$(convert_to_registry_access "$repository")
-              repository=$(convert_to_quay "$repository")
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$component")
+            for ((j = 0; j < NUM_REPOSITORIES; j++)) ; do
+                repository=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
+                repoTags=$(jq '.tags // []' <<< "$repository")
+                url=$(jq -r '.url' <<< "$repository")
+                echo "Processing component: $NAME, repository: $url"
 
-              jq --argjson i "$i" \
-                --arg repository "$repository" \
-                --arg rh_registry_repo "$rh_registry_repo" \
-                --arg registry_access_repo "$registry_access_repo" \
-                '(.components[$i].repository = $repository) |
-                    .components[$i]["rh-registry-repo"] = $rh_registry_repo |
-                    .components[$i]["registry-access-repo"] = $registry_access_repo' \
-              "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
-            fi
+                allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson repoTags \
+                  "$repoTags" '$defaults? + $repoTags? | unique')
+
+                tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}" "${url}")
+                if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
+                  jq --argjson i "$i" --argjson j "$j" --argjson updatedTags "$tags" \
+                    '.components[$i].repositories[$j].tags = $updatedTags' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
+                    && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+                fi
+
+                # This block is temporary to support both quay.io and registry.redhat.io
+                # It should be removed once all repositories are migrated to registry.redhat.io
+                if [[ "$url" == quay.io/redhat-prod/* || "$url" == quay.io/redhat-pending/* ]]; then
+                    url=$(convert_to_registry "$url")
+                fi
+
+                # Convert to registry and quay format
+                if [[ "$url" == registry.redhat.io/* || "$url" == registry.stage.redhat.io/* ]]; then
+                  rh_registry_repo=$url
+                  registry_access_repo=$(convert_to_registry_access "$url")
+                  url=$(convert_to_quay "$url")
+
+                  jq --argjson i "$i" \
+                    --argjson j "$j" \
+                    --arg url "$url" \
+                    --arg rh_registry_repo "$rh_registry_repo" \
+                    --arg registry_access_repo "$registry_access_repo" \
+                    '.components[$i].repositories[$j].url = $url |
+                        .components[$i].repositories[$j]["rh-registry-repo"] = $rh_registry_repo |
+                        .components[$i].repositories[$j]["registry-access-repo"] = $registry_access_repo' \
+                  "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+                fi
+            done
         done
     - name: create-trusted-artifact
       computeResources:
