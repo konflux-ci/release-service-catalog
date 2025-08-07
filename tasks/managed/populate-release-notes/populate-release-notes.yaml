@@ -219,8 +219,8 @@ spec:
             exit 0
         fi
 
-        if [ "$content_type" == "binary" ]; then
-            echo "Content type is binary. Skipping image-specific release note generation."
+        if [[ "$content_type" == "binary" || "$content_type" == "disk-image" ]]; then
+            echo "Content type is ${content_type}. Skipping image-specific release note generation."
             exit 0
         fi
 
@@ -302,7 +302,7 @@ spec:
                     /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
             done
         done
-    - name: populate-release-notes-binaries
+    - name: populate-release-notes-artifacts
       image: quay.io/konflux-ci/release-service-utils:a58dc96cb28b54cdef2564a346d43a6d7bd4d656
       computeResources:
         limits:
@@ -323,8 +323,8 @@ spec:
         # Try to extract the first contentType if it exists
         content_type=$(jq -r '.mapping.components[]?.contentGateway?.contentType // empty' "$DATA_FILE" | head -n1)
 
-        if [ "$content_type" != "binary" ]; then
-            echo "Not binary content. Skipping binary-specific logic."
+        if [ "$content_type" != "binary" ] && [ "$content_type" != "disk-image" ]; then
+            echo "Not binary or disk-image content. Skipping artifact-specific logic."
             exit 0
         fi
 
@@ -333,6 +333,26 @@ spec:
             echo "No valid snapshot file was provided."
             exit 1
         fi
+
+        append_artifact_entry() {
+          local component="$1" arch="$2" os="$3" purl="$4"
+          local jsonString
+          jsonString=$(jq -cn \
+            --arg component "$component" \
+            --arg arch "$arch" \
+            --arg os "$os" \
+            --arg purl "$purl" \
+            '{"architecture": $arch, "os": $os, "purl": $purl, "component": $component}')
+
+          if [ "$(jq '.cves.fixed | length' <<< "$CVEsJson")" -gt 0 ]; then
+            jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< "$jsonString")
+          fi
+
+          jq --argjson content "$jsonString" \
+              '.releaseNotes.content.artifacts += [$content]' \
+              "${DATA_FILE}" > /tmp/data.tmp && \
+              mv /tmp/data.tmp "${DATA_FILE}"
+        }
 
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
         for ((i = 0; i < NUM_COMPONENTS; i++))
@@ -353,38 +373,60 @@ spec:
                 CVEsJson=$(jq --argjson cve "$cveJson" '.cves.fixed += $cve' <<< "$CVEsJson")
             done
 
-            # Get the number of files for this component
-            FILES_LENGTH=$(jq --arg name "$name" \
-              '[.mapping.components[]
-                | select(.name == $name)
-                | .files
-                | length][0]' "$DATA_FILE")
+            if [ "$content_type" = "binary" ]; then
+                # Get the number of files for this component (binaries use files structure)
+                FILES_LENGTH=$(jq --arg name "$name" \
+                  '[.mapping.components[]
+                    | select(.name == $name)
+                    | .files
+                    | length][0]' "$DATA_FILE")
 
-            for ((k = 0; k < FILES_LENGTH; k++)); do
-                file=$(jq -c --arg name "$name" --argjson k "$k" \
-                    '.mapping.components[]
-                      | select(.name == $name)
-                      | .files[$k]' "$DATA_FILE")
-                arch=$(jq -r '.arch' <<< "$file")
-                os=$(jq -r '.os' <<< "$file")
+                for ((k = 0; k < FILES_LENGTH; k++)); do
+                    file=$(jq -c --arg name "$name" --argjson k "$k" \
+                        '.mapping.components[]
+                          | select(.name == $name)
+                          | .files[$k]' "$DATA_FILE")
+                    arch=$(jq -r '.arch' <<< "$file")
+                    os=$(jq -r '.os' <<< "$file")
 
-                # This will be filled in with a later task after signing so we have an accurate checksum
-                purl="placeholder"
+                    # This will be filled in with a later task after signing so we have an accurate checksum
+                    purl="placeholder"
 
-                jsonString=$(jq -cn \
-                  --arg component "$name" \
-                  --arg arch "$arch" \
-                  --arg os "$os" \
-                  --arg purl "$purl" \
-                  '{"architecture": $arch, "os": $os, "purl": $purl, "component": $component}')
+                    append_artifact_entry "$name" "$arch" "$os" "$purl"
+                done
+            else
+                # Get the number of staged files for this component (disk-images use staged.files structure)
+                FILES_LENGTH=$(jq --arg name "$name" \
+                  '[.mapping.components[]
+                    | select(.name == $name)
+                    | .staged.files
+                    | length][0]' "$DATA_FILE")
 
-                if [ "$(jq '.cves.fixed | length' <<< "$CVEsJson")" -gt 0 ]; then
-                    jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< "$jsonString")
-                fi
+                for ((k = 0; k < FILES_LENGTH; k++)); do
+                    file=$(jq -c --arg name "$name" --argjson k "$k" \
+                        '.mapping.components[]
+                          | select(.name == $name)
+                          | .staged.files[$k]' "$DATA_FILE")
+                    filename=$(jq -r '.filename' <<< "$file")
 
-                jq --argjson content "$jsonString" '.releaseNotes.content.artifacts += [$content]' "${DATA_FILE}" > \
-                    /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-            done
+                    # Extract architecture from filename (disk images typically have arch in filename)
+                    arch="unknown"  # Default
+                    if [[ "$filename" == *"aarch64"* ]]; then
+                        arch="aarch64"
+                    elif [[ "$filename" == *"x86_64"* ]]; then
+                        arch="x86_64"
+                    fi
+
+                    # Determine OS based on file extension
+                    os="linux"  # Default for disk images
+
+                    # Create PURL placeholder for disk-image
+                    # Complete PURL with real CDN URLs will be built by create-advisory update-purl step
+                    purl="placeholder"
+
+                    append_artifact_entry "$name" "$arch" "$os" "$purl"
+                done
+            fi
         done
     - name: populate-release-notes-github
       image: quay.io/konflux-ci/release-service-utils:e85ceb962ee6f4d0672b4aa4e9946621ab302f20
