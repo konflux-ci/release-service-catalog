@@ -1,0 +1,139 @@
+---
+name: Promote branch with automated reporting
+on:
+  workflow_dispatch:
+    inputs:
+      promotion-type:
+        description: The type of promotion to perform
+        type: choice
+        required: true
+        default: development-to-staging
+        options:
+          - development-to-staging
+          - staging-to-production
+      force-to-staging:
+        description: |
+          Force to staging: Allow promotion to staging even if staging and production differ
+        type: boolean
+        required: true
+        default: false
+      override:
+        description: |
+          Override: Allow promotion to production even if the change has not been in staging for one
+          week
+        type: boolean
+        required: true
+        default: false
+      dry-run:
+        description: |
+          Dry run: Print out the changes that would be promoted but do not perform the git push
+        type: boolean
+        required: true
+        default: false
+      send-email-report:
+        description: |
+          Send email report: Automatically generate and send email report after promotion
+        type: boolean
+        required: true
+        default: true
+
+jobs:
+  promote-branch:
+    name: Promote Branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch full history for commit analysis
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+      
+      - name: Run branch promotion script
+        id: promote
+        run: |
+          .github/scripts/promote_branch.sh --promotion-type $PROMOTION_TYPE --force-to-staging $FORCE \
+            --override $OVERRIDE --dry-run $DRY
+        env:
+          PROMOTION_TYPE: ${{ inputs.promotion-type }}
+          FORCE: ${{ inputs.force-to-staging }}
+          OVERRIDE: ${{ inputs.override }}
+          DRY: ${{ inputs.dry-run }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Generate promotion report
+        if: |
+          steps.promote.outcome == 'success' && 
+          inputs.send-email-report == true
+        run: |
+          # Determine source and target branches
+          if [ "${{ inputs.promotion-type }}" = "development-to-staging" ]; then
+            FROM_BRANCH="development"
+            TO_BRANCH="staging"
+          else
+            FROM_BRANCH="staging"
+            TO_BRANCH="production"
+          fi
+          
+          # Generate the promotion report
+          python .github/scripts/generate_promotion_report.py $FROM_BRANCH $TO_BRANCH
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      
+      - name: Upload promotion report artifacts
+        if: |
+          steps.promote.outcome == 'success' && 
+          inputs.send-email-report == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: promotion-report-${{ inputs.promotion-type }}-${{ github.run_id }}
+          path: promotion_reports/
+          retention-days: 30
+      
+      - name: Create GitHub release with report
+        if: |
+          steps.promote.outcome == 'success' && 
+          inputs.send-email-report == true && 
+          inputs.dry-run == false &&
+          inputs.promotion-type == 'staging-to-production'
+        run: |
+          # Create a GitHub release for production promotions
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          RELEASE_TAG="v$(date +"%Y.%m.%d")-${TIMESTAMP}"
+          
+          # Find the latest report
+          LATEST_REPORT=$(find promotion_reports/ -name "report.html" | head -1)
+          
+          if [ -n "$LATEST_REPORT" ]; then
+            # Create release with report
+            gh release create $RELEASE_TAG \
+              --title "Production Release - $(date +"%B %d, %Y")" \
+              --notes "Automated production release with detailed change report" \
+              --attach "$LATEST_REPORT" \
+              --repo konflux-ci/release-service-catalog
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+
+ 
