@@ -12,7 +12,7 @@ function oras() {
     if [[ "$*" =~ login.* ]]; then
         echo Simulating oras quay login
     elif [[ "$*" =~ push.* ]]; then
-        echo Simulating oras push 
+        echo Simulating oras push
         echo "Digest: sha256:$(echo | sha256sum |awk '{ print $1}')"
     elif [[ "$*" == *"nonexistent-disk-image"* ]]; then
         echo Simulating failing oras pull call >&2
@@ -140,3 +140,6 @@ function kinit() {
         echo initialized
     fi
 }
+
+# The retry script won't see the kinit function unless we export it
+export -f kinit

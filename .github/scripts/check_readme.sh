@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script will verify that the README.md of all task and 
+# This script will verify that the README.md of all task and
 # pipeline directories provided matches the output of hack/readme_generator.sh
 # to ensure that README files are up to date.
 #
@@ -112,7 +112,7 @@ do
   fi
 
   if ! diff -u <(.github/scripts/readme_generator.sh --dry-run "$ITEM_DIR") "$README_PATH"; then
-    echo "  Error: README.md has not been updated. Please use hack/readme-generator.sh to" \
+    echo "  Error: README.md has not been updated. Please use .github/scripts/readme_generator.sh to" \
       "generate a new README.md to replace $ITEM/README.md"
     FAILED_ITEMS+=("$ITEM - outdated README.md")
   else

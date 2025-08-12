@@ -129,3 +129,6 @@ function check-jsonschema() {
     /usr/local/bin/check-jsonschema $*
   fi
 }
+
+# The retry script won't see the kinit function unless we export it
+export -f kinit

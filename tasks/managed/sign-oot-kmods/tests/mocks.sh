@@ -5,7 +5,7 @@ set -eux
 
 function kinit() {
   echo "Mock kinit called with: $*"
-  
+
   # Write to both locations to support both modes
   if [ -d /workspace/kmods ]; then
     echo "$*" >> /workspace/kmods/mock_kinit.txt
@@ -26,7 +26,7 @@ function kinit() {
 
 function ssh() {
   echo "Mock ssh called with: $*"
-  
+
   # Write to both locations to support both modes
   if [ -d /workspace/kmods ]; then
     echo "$*" >> /workspace/kmods/mock_ssh.txt
@@ -47,7 +47,7 @@ function ssh() {
 
 function scp() {
   echo "Mock scp called with: $*"
-  
+
   # Write to both locations to support both modes
   if [ -d /workspace/kmods ]; then
     echo "$*" >> /workspace/kmods/mock_scp.txt
@@ -65,3 +65,6 @@ function scp() {
       ;;
   esac
 }
+
+# The retry script won't see the kinit function unless we export it
+export -f kinit
