@@ -38,12 +38,7 @@ function skopeo() {
       return
   fi
 
-  if [[ "$*" =~ inspect\ --retry-times\ 3\ --no-tags\ docker://repo1 ]]; then
-      echo '{"Tags": ["v2.0.0-4", "v2.0.0-3", "v2.0.0-2"]}'
-      return
-  fi
-
-  if [[ "$*" =~ inspect\ --retry-times\ 3\ --no-tags\ docker://repo2 ]]; then
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://(repoa|repo2) ]]; then
       echo '{"Tags": []}'
       return
   fi
