@@ -22,6 +22,9 @@ function date() {
       *"+%Y-%m")
           echo "1980-01"
           ;;
+      *"+%Y.%m.%d")
+          echo "2024.07.29"
+          ;;
       "*")
           echo Error: Unexpected call
           exit 1
@@ -55,6 +58,22 @@ function skopeo() {
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}, "Created": "2024-07-29T02:17:29"}'
     return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/web-app"* ]]
+  then
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}, "annotations": {"org.opencontainers.image.version": "1.2.3-beta"}}'
+    return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/api-service"* ]]
+  then
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
+    return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/helm-chart"* ]]
+  then
+    # Helm chart should fail normal inspect and fall back to raw manifest
+    return 1
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/helm-chart"* ]]
+  then
+    echo '{"annotations": {"org.opencontainers.image.version": "2.0.1+alpha", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
@@ -66,6 +85,12 @@ function skopeo() {
 }
 
 function get-image-architectures() {
-    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
-    echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+    if [[ "$1" == *"helm-chart"* ]]; then
+        # Return Helm chart format with configMediaType (only for Helm charts)
+        echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "sha256:789abcdef123456", "multiarch": false, "configMediaType": "application/vnd.cncf.helm.config.v1+json"}'
+    else
+        # Return regular container image format without configMediaType
+        echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg", "multiarch": false}'
+        echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef", "multiarch": false}'
+    fi
 }

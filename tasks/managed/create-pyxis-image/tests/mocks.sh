@@ -5,12 +5,12 @@ set -exo pipefail
 
 function create_container_image() {
   echo $* >> $(params.dataDir)/mock_create_container_image.txt
-  
+
   # Extract repository name from parameters to determine the line number
   # This allows us to have a thread-safe way to determine the image id without locking
   local repository=""
   local args=("$@")
-  
+
   # Parse arguments to extract the --name parameter (repository)
   for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[i]}" == "--name" && $((i+1)) -lt ${#args[@]} ]]; then
@@ -18,11 +18,11 @@ function create_container_image() {
       break
     fi
   done
-  
+
   # Find the line number where this repository appears in the file
   local matching_lines=$(grep -n -- "--name $repository" "$(params.dataDir)/mock_create_container_image.txt")
   local line_count=$(echo "$matching_lines" | wc -l)
-  
+
   # Use the last line number for this repository (handles multi-arch images)
   # WARNING: this is thread safe as long as the repository name is unique. If you need to
   # test thread safety, you need to use a different repository name for each request.
@@ -80,7 +80,11 @@ function get-image-architectures() {
   elif [[ "$1" = registry.io/fail-get-image-architectures@sha256:mydigest ]]; then
     echo "Simulating get-image-architectures failure" >&2
     return 1
+  elif [[ "$1" == *"registry.io/oci-artifact@sha256:mydigest"* ]]; then
+    # This represents the OCI artifact test case - will include configMediaType
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg", "configMediaType": "application/vnd.oci.artifact.config.v1+json"}'
   else
+    # Regular container images - no configMediaType in output
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
   fi
 }
