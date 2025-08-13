@@ -143,9 +143,9 @@ COMMITS=($(git rev-list --first-parent --ancestry-path origin/"$TARGET_BRANCH"'.
 for COMMIT in "${COMMITS[@]}"
 do
   PR_INFO="$(curl -s   -H 'Authorization: token  '"$token"  'https://api.github.com/search/issues?q=sha:'"$COMMIT" | jq -r '.items[]
-    | select(.repository_url=="https://api.github.com/repos/'"$ORG"'/'"$REPO"'")')"
-  echo -n "$(jq -r '.pull_request | select(.merged_at!=null) | .html_url' <<< "$PR_INFO")"
-  LABEL="$(jq -r '.labels[].name | select(. | contains("breaking-change"))' <<< "$PR_INFO")"
+    | select(.repository_url=="https://api.github.com/repos/'"$ORG"'/'"$REPO"'")' || true)"
+  echo -n "$(jq -r '.pull_request | select(.merged_at!=null) | .html_url' <<< "$PR_INFO" || true)"
+  LABEL="$(jq -r '.labels[].name | select(. | contains("breaking-change"))' <<< "$PR_INFO" || true)"
   [[ -z "$LABEL" ]] || echo -n " ($LABEL)"
   echo
   git show --oneline --no-patch $COMMIT
