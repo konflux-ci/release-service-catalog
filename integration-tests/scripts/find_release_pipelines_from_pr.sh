@@ -280,8 +280,11 @@ find_changed_tekton_tasks_pipelines() {
         SELECT_ALL_TESTCASES=true
         break
       else
-        IFS='/' read -ra parts <<< "$file"
-        INTEGRATION_SUITES+=("${parts[1]}")
+        filename=$(basename "$file")
+        if [[ ! $filename =~ \.md$ ]]; then
+          IFS='/' read -ra parts <<< "$file"
+          INTEGRATION_SUITES+=("${parts[1]}")
+        fi
       fi
     elif [[ "$file" =~ ^tasks/internal/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
       if grep -q -E 'kind: *Task' "$file"; then
