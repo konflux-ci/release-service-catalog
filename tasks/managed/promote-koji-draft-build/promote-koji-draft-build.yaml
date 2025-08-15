@@ -2,13 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: push-rpm-to-koji
+  name: promote-koji-draft-build
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
-    tekton.dev/tags: push-koji
+    tekton.dev/tags: promote-koji
 spec:
   description: |-
-    Tekton task to push konflux build rpms to koji instance.
+    Tekton task to promote draft build in koji instance.
   params:
     - name: snapshotPath
       type: string
@@ -26,7 +26,7 @@ spec:
       type: string
       description: |
         The image url with koji (1.34 or higher), jq and kinit installed for
-        running the push-rpm-to-koji task, please make sure you have such image
+        running the promote-koji-draft-build task, please make sure you have such image
         or you build this image first
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
@@ -104,7 +104,7 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: push-rpm-to-koji
+    - name: promote-koji-draft-build
       # The pipelineImage will be fetching from get-secrets task with koji installed there
       image: "$(params.pipelineImage)"
       computeResources:
@@ -138,8 +138,6 @@ spec:
         PRINCIPAL=$(jq --exit-status -r '.pushOptions.pushKeytab.principal' "${DATA_FILE}")
         KEYTAB_FILE=$(jq --exit-status -r '.pushOptions.pushKeytab.name' "${DATA_FILE}")
         KOJI_PROFILE=$(jq --exit-status -r '.pushOptions.koji_profile' "${DATA_FILE}")
-        KOJI_TAGS=$(jq --exit-status -r '.pushOptions.koji_tags // [] | join(" ")' "${DATA_FILE}")
-        KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft' "${DATA_FILE}")
 
         koji-cmd() {
             koji --profile="$KOJI_PROFILE" "$@"
@@ -189,8 +187,10 @@ spec:
         for ((i = 0; i < NUM_COMPONENTS; i++))
         do
           component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
-          containerImage=$(jq -r '.containerImage' <<< "$component")
           componentName=$(jq -r '.name' <<< "$component")
+          gitUrl=$(jq -r '.source.git.url' <<< "$component")
+          commitHash=$(jq -r '.source.git.revision' <<< "$component")
+          commitUrl="git+$gitUrl#$commitHash"
 
           # Use printf to join the array elements and grep to check for the presence of the variable
           if ! printf "%s\n" "${RELEASE_COMPONENTS[@]}" | grep -q -x "$componentName"; then
@@ -198,90 +198,19 @@ spec:
               continue
           fi
 
-          mkdir temp && cd temp
-
-          # The login serviceaccount should have the dockerconfig to pull the images.
-          # oras has very limited support for selecting the right auth entry,
-          # so create a custom auth file with just one entry
-          authFile=$(mktemp)
-          select-oci-auth "${containerImage}" > "$authFile"
-          oras pull --registry-config "$authFile" "$containerImage"
-
-          SRPM=$(ls ./*.src.rpm)
-          PACKAGE_NVR=$(basename "$SRPM" .src.rpm)
-
-          if [[ "$KOJI_IMPORT_DRAFT" == "false" ]]; then
-              if koji-cmd buildinfo "$PACKAGE_NVR" >/dev/null 2>&1;  then
-                  printf "Skip import %s into BREW as it's exist ...\n" "$PACKAGE_NVR"
-                  cd .. && rm -rf temp
-                  continue
-              fi
-              draft="false"
-              draft_flag=""
-          else
-              draft="true"
-              draft_flag="--draft"
-          fi
-
-          # Get Koji build target from the RPM image annotation to tag the
-          # imported build later.
-          koji_target=$(
-            oras manifest fetch "$containerImage" --registry-config "$authFile" |
-              jq --exit-status -r '.annotations."koji.build-target"'
+          builds=$(
+            koji-cmd call --json-output listBuilds \
+              userID="$USER_NAME" \
+              packageID="$componentName" \
+              state=1 \
+              source="$commitUrl" \
+              draft=True
           )
-          if [ -z "$koji_target" ]; then
-              echo "ERROR: No Koji build target found in the container image annotations."
-              exit 1
-          fi
-          # For draft builds, remove "-candidate" tag suffix if present and
-          # append "-draft".
-          if [[ "$draft" == "true" && "$koji_target" != *-draft ]]; then
-              koji_tag=${koji_target%-candidate}-draft
-          else
-              koji_tag=${koji_target}
-          fi
-          KOJI_TAGS="$koji_tag $KOJI_TAGS"
+          # Get the latest build ID
+          build_id=$(jq -r 'max_by(".creation_time").build_id' <<< "$builds")
 
-          printf "Import rpm %s with tags %s ...\n" "$PACKAGE_NVR" "$KOJI_TAGS"
-
-          # Reserve build ID and import build (as draft by default)
-          build_name=$(jq -r '.build.name' cg_import.json)
-          build_version=$(jq -r '.build.version' cg_import.json)
-          build_release=$(jq -r '.build.release' cg_import.json)
-          build_epoch=$(jq '.build.epoch' cg_import.json)
-          import_build_data=$(jq --compact-output <<EOD
-              {
-                "name": "$build_name",
-                "version": "$build_version",
-                "release": "$build_release",
-                "epoch": $build_epoch,
-                "draft": $draft
-              }
-        EOD
-          )
-          set +x  # Avoid leaking the token
-          buildinfo=$(koji-cmd call --json CGInitBuild '"konflux"' "$import_build_data")
-          build_id=$(jq --exit-status -r '.build_id' <<< "$buildinfo")
-          token=$(jq --exit-status -r '.token' <<< "$buildinfo")
-
-          echo "Importing build $build_id"
-          if ! koji-cmd import-cg $draft_flag cg_import.json --token="$token" --build-id="$build_id" .; then
-              echo "ERROR: Import failed"
-              koji-cmd call --json CGRefundBuild '"konflux"' "$build_id" "\"$token\""
-              exit 1
-          fi
-
-          set -x
-
-          for tag in $KOJI_TAGS; do
-              if ! koji-cmd list-pkgs --tag "$tag" --package "$build_name" >/dev/null 2>&1;  then
-                  koji-cmd --force add-pkg "$tag" "$build_name" --owner "$USER_NAME"
-              fi
-              koji-cmd call tagBuild "$tag" "$build_id"
-          done
-
-          # Clean up to handle next component
-          cd .. && rm -rf temp
+          printf "Promoting build %s ...\n" "$build_id"
+          koji-cmd call promoteBuild "$build_id"
         done
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$APPLICATION"
