@@ -122,7 +122,10 @@ _find_and_process_pipelines() {
     # remove leading spaces
     pipeline_name="${pipeline_name//[[:space:]]/}"
     case "$pipeline_name" in
-      "create-advisory"|"check-embargoed-cves"|"get-advisory-severity"|"filter-already-released-advisory-images")
+      "create-advisory")
+        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "release-to-github")
+        ;;
+      "check-embargoed-cves"|"get-advisory-severity"|"filter-already-released-advisory-images")
         TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
         ;;
       "update-fbc-catalog"|"publish-index-image-pipeline")
