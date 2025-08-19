@@ -222,13 +222,54 @@ function skopeo() {
                 }
             '
         else
-          if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
+          if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/docker-image"* ]]
           then
-            echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
+            echo '{
+                    "schemaVersion": 2,
+                    "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                    "config": {
+                      "mediaType": "application/vnd.docker.container.image.v1+json",
+                      "size": 34835,
+                      "digest": "sha256:ec00ee53ba9645b1a40eb1bfe7420f9e2bd1b0b532a37237bed5c3a8eb89d550"
+                    },
+                    "layers": [
+                      {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 79977606,
+                        "digest": "sha256:1e0d3859902320579031b75c16b7945d5a4ddafd9fae85b6f7f1128659f6f26e"
+                      },
+                      {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 140891286,
+                        "digest": "sha256:dd85c74d1fe73af400c04e0a9d8e1cd002c6ee532afead97f2620c67c15ec2e9"
+                      },
+                      {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 30676092,
+                        "digest": "sha256:34245d8761530577f1516e7b6264788c6dd1aae3c3d94e4c231d18157bd80510"
+                      },
+                      {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 27232395,
+                        "digest": "sha256:3f9ee708b8241757f09522f2a92484f8781bcff14ddbbc65a75241c629020bda"
+                      },
+                      {
+                        "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                        "size": 8886287,
+                        "digest": "sha256:f8266280a85062784021fc530598c6c9e3787792e3e118a2056213b8d31bc689"
+                      }
+                    ]
+                  }
+              '
           else
-            echo Error: Unexpected call
-            exit 1
-          fi
+            if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
+            then
+              echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
+            else
+              echo Error: Unexpected call
+              exit 1
+	    fi
+	  fi
         fi
       fi
     fi
