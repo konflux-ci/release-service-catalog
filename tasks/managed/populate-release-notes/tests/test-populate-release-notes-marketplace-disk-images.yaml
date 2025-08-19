@@ -1,0 +1,294 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-marketplace-disk-images
+spec:
+  description: |
+    Run the populate-release-notes task and ensure marketplace disk image releases
+    generate PURLs with versions instead of placeholders.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils:ea7868ebdcc7a2116c620255034226611d837f42
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                      {
+                        "name": "amd-azure-disk-image-1-5",
+                        "contentType": "disk-image",
+                        "staged": {
+                          "destination": "rhelai-1_DOT_5-for-rhel-9-x86_64-isos",
+                          "version": "1.5",
+                          "files": [
+                            {
+                              "filename": "rhel-ai-amd-azure-1.5-20250101-x86_64.vhd.gz",
+                              "source": "disk.vhd.gz"
+                            }
+                          ]
+                        },
+                        "productInfo": {
+                          "filePrefix": "rhel-ai-amd-azure-1.5",
+                          "productCode": "RHELAI",
+                          "productName": "RHEL AI",
+                          "productVersionName": "1.5"
+                        },
+                        "starmap": [
+                          {
+                            "cloud": "azure",
+                            "mappings": {
+                              "azure-emea": {
+                                "destinations": [
+                                  {
+                                    "architecture": null,
+                                    "destination": "rh-rhel-ai/rh-rhelai-amd-1gpu",
+                                    "overwrite": false,
+                                    "restrict_version": false,
+                                    "vhd_check_base_sas_only": false
+                                  }
+                                ],
+                                "provider": null
+                              }
+                            },
+                            "meta": {"generation": "V2", "support_legacy": true},
+                            "name": "rhel-ai-amd-azure",
+                            "workflow": "stratosphere"
+                          }
+                        ]
+                      }
+                    ],
+                  "cloudMarketplacesSecret": "azure-stratosphere-secret",
+                  "cloudMarketplacesPrePush": false
+                },
+                "releaseNotes": {
+                  "cves": [
+                    {
+                      "component": "amd-azure-disk-image-1-5",
+                      "packages": [
+                        "pkg1",
+                        "pkg2"
+                      ],
+                      "key": "CVE-123",
+                      "summary": "",
+                      "uploadDate": "01-01-1980",
+                      "url": ""
+                    }
+                  ],
+                  "product_id": [
+                    932
+                  ],
+                  "product_name": "Red Hat Enterprise Linux AI",
+                  "product_version": "1.5",
+                  "cpe": "cpe:/a:redhat:enterprise_linux_ai:1.5",
+                  "type": "RHSA",
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "RHELAI-12345",
+                        "source": "issues.example.com"
+                      }
+                    ]
+                  },
+                  "synopsis": "test synopsis",
+                  "topic": "test topic",
+                  "description": "test description",
+                  "solution": "test solution",
+                  "references": [
+                    "https://docs.example.com/some/example/release-notes"
+                  ]
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "rhel-ai-app",
+                "components": [
+                  {
+                    "name": "amd-azure-disk-image-1-5",
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "repository": "quay.io/redhat-prod/rhel-ai----disk-image",
+                    "tags": [
+                      "1.5",
+                      "latest"
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:ea7868ebdcc7a2116c620255034226611d837f42
+            workingDir: $(params.dataDir)
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+
+              # Check that artifacts were populated for marketplace disk image
+              ARTIFACTS_COUNT=$(jq '.releaseNotes.content.artifacts | length' "$DATA_FILE")
+              if [ "$ARTIFACTS_COUNT" -ne 1 ]; then
+                echo "Expected 1 artifact, got $ARTIFACTS_COUNT"
+                exit 1
+              fi
+
+              # Verify the PURL contains the version from staged.version, not "placeholder"
+              PURL=$(jq -r '.releaseNotes.content.artifacts[0].purl' "$DATA_FILE")
+              EXPECTED_PURL="pkg:generic/amd-azure-disk-image-1-5@1.5"
+
+              if [ "$PURL" != "$EXPECTED_PURL" ]; then
+                echo "Error: Expected PURL '$EXPECTED_PURL', got '$PURL'"
+                exit 1
+              fi
+
+              # Verify architecture was extracted correctly
+              ARCH=$(jq -r '.releaseNotes.content.artifacts[0].architecture' "$DATA_FILE")
+              if [ "$ARCH" != "x86_64" ]; then
+                echo "Error: Expected architecture 'x86_64', got '$ARCH'"
+                exit 1
+              fi
+
+              # Verify OS was set correctly
+              OS=$(jq -r '.releaseNotes.content.artifacts[0].os' "$DATA_FILE")
+              if [ "$OS" != "linux" ]; then
+                echo "Error: Expected OS 'linux', got '$OS'"
+                exit 1
+              fi
+
+              # Verify component name matches
+              COMPONENT=$(jq -r '.releaseNotes.content.artifacts[0].component' "$DATA_FILE")
+              if [ "$COMPONENT" != "amd-azure-disk-image-1-5" ]; then
+                echo "Error: Expected component 'amd-azure-disk-image-1-5', got '$COMPONENT'"
+                exit 1
+              fi
+
+              # Verify CVE information was properly attached
+              CVE_COUNT=$(jq '.releaseNotes.content.artifacts[0].cves.fixed | keys | length' "$DATA_FILE")
+              if [ "$CVE_COUNT" -ne 1 ]; then
+                echo "Error: Expected 1 CVE, got $CVE_COUNT"
+                exit 1
+              fi
+
+              CVE_KEY=$(jq -r '.releaseNotes.content.artifacts[0].cves.fixed | keys[0]' "$DATA_FILE")
+              if [ "$CVE_KEY" != "CVE-123" ]; then
+                echo "Error: Expected CVE-123, got '$CVE_KEY'"
+                exit 1
+              fi
+
+              echo "SUCCESS: Marketplace disk image PURL generated correctly with version: $PURL"

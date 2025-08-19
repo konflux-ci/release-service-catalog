@@ -210,7 +210,8 @@ spec:
         fi
 
         # Try to extract the first contentType if it exists
-        content_type=$(jq -r '.mapping.components[]?.contentGateway?.contentType // empty' "$DATA_FILE" | head -n1)
+        content_type=$(jq -r '.mapping.components[]? |
+          (.contentGateway?.contentType // .contentType) // empty' "$DATA_FILE" | head -n1)
 
         # Extract github field from data.json
         github_field=$(jq -r '.github // empty' "$DATA_FILE")
@@ -321,7 +322,8 @@ spec:
         fi
 
         # Try to extract the first contentType if it exists
-        content_type=$(jq -r '.mapping.components[]?.contentGateway?.contentType // empty' "$DATA_FILE" | head -n1)
+        content_type=$(jq -r '.mapping.components[]? |
+          (.contentGateway?.contentType // .contentType) // empty' "$DATA_FILE" | head -n1)
 
         if [ "$content_type" != "binary" ] && [ "$content_type" != "disk-image" ]; then
             echo "Not binary or disk-image content. Skipping artifact-specific logic."
@@ -352,6 +354,15 @@ spec:
               '.releaseNotes.content.artifacts += [$content]' \
               "${DATA_FILE}" > /tmp/data.tmp && \
               mv /tmp/data.tmp "${DATA_FILE}"
+        }
+
+        # Check if this is a marketplace release
+        is_marketplace_release() {
+          if [[ -n "$(jq -r '.mapping.cloudMarketplacesSecret // empty' "$DATA_FILE")" ]]; then
+            return 0
+          else
+            return 1
+          fi
         }
 
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
@@ -420,9 +431,17 @@ spec:
                     # Determine OS based on file extension
                     os="linux"  # Default for disk images
 
-                    # Create PURL placeholder for disk-image
-                    # Complete PURL with real CDN URLs will be built by create-advisory update-purl step
-                    purl="placeholder"
+                    # Create PURL for disk-image
+                    if is_marketplace_release; then
+                        # For marketplace releases, generate a PURL without checksum or download_url
+                        # since these images go to cloud marketplaces, not CDN
+                        version=$(jq -r --arg name "$name" \
+                          '.mapping.components[] | select(.name == $name) | .staged.version // "unknown"' "$DATA_FILE")
+                        purl="pkg:generic/$name@$version"
+                    else
+                        # For CDN releases, use placeholder that will be updated by create-advisory
+                        purl="placeholder"
+                    fi
 
                     append_artifact_entry "$name" "$arch" "$os" "$purl"
                 done
