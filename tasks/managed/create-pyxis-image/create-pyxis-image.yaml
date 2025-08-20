@@ -202,13 +202,8 @@ spec:
             local output_file="/tmp/component_${component_index}.json"
 
             CONTAINER_IMAGE=$(jq -r ".components[${component_index}].containerImage" "${SNAPSHOT_SPEC_FILE}")
-            REPOSITORY=$(jq -r ".components[${component_index}].repository" "${SNAPSHOT_SPEC_FILE}")
-            REPOSITORY=${REPOSITORY%:*} # strip tag just in case - it should not be there
             SOURCE_REPO=${CONTAINER_IMAGE%%@sha256:*}
             DIGEST="${CONTAINER_IMAGE##*@}"
-            PULLSPEC="${REPOSITORY}@${DIGEST}"
-            MEDIA_TYPE=$(skopeo inspect --retry-times 3 --raw "docker://${PULLSPEC}" | jq -r .mediaType)
-            TAGS=$(jq -r ".components[${component_index}].tags | join(\" \")" "${SNAPSHOT_SPEC_FILE}")
 
             # Create component-specific auth file to avoid conflicts
             local AUTH_FILE="/tmp/auth_${component_index}"
@@ -231,137 +226,147 @@ spec:
               echo "Unable to get Dockerfile for the image. Maybe it's not enabled in the build pipeline?"
             fi
 
-            select-oci-auth "${REPOSITORY}" > "$AUTH_FILE"
+            NUM_REPOSITORIES=$(jq ".components[${component_index}].repositories | length" "${SNAPSHOT_SPEC_FILE}")
+            for ((i = 0; i < NUM_REPOSITORIES; i++)) ; do
+                REPOSITORY_OBJECT=$(jq -c ".components[${component_index}].repositories[${i}]" "${SNAPSHOT_SPEC_FILE}")
+                REPOSITORY=$(jq -r '.url' <<< "$REPOSITORY_OBJECT")
+                REPOSITORY=${REPOSITORY%:*} # strip tag just in case - it should not be there
+                PULLSPEC="${REPOSITORY}@${DIGEST}"
+                TAGS=$(jq -r ".tags | join(\" \")" <<< "$REPOSITORY_OBJECT")
+                MEDIA_TYPE=$(skopeo inspect --retry-times 3 --raw "docker://${PULLSPEC}" | jq -r .mediaType)
 
-            ARCHITECTURES=$(get-image-architectures "${PULLSPEC}")
+                select-oci-auth "${REPOSITORY}" > "$AUTH_FILE"
 
-            # Initialize component JSON structure
-            local COMPONENT_JSON='{}'
-            COMPONENT_JSON=$(jq --argjson id "$component_index" --arg image "${CONTAINER_IMAGE}" \
-              '.containerImage = $image | .componentIndex = $id | .pyxisImages = []' <<< "$COMPONENT_JSON")
+                ARCHITECTURES=$(get-image-architectures "${PULLSPEC}")
 
-            index=0
-            while IFS= read -r ARCH_DETAIL;
-            do
-                OS=$(jq -r '.platform.os' <<< "$ARCH_DETAIL")
-                ARCH=$(jq -r '.platform.architecture' <<< "$ARCH_DETAIL")
-                ARCH_DIGEST=$(jq -r '.digest' <<< "$ARCH_DETAIL")
+                # Initialize component JSON structure
+                local COMPONENT_JSON='{}'
+                COMPONENT_JSON=$(jq --argjson id "$component_index" --arg image "${CONTAINER_IMAGE}" \
+                  '.containerImage = $image | .componentIndex = $id | .pyxisImages = []' <<< "$COMPONENT_JSON")
 
-                ORAS_ARGS=()
-                if [[ "$MEDIA_TYPE" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]\
-                  || [[ "$MEDIA_TYPE" == "application/vnd.oci.image.index.v1+json" ]]; then
-                  ORAS_ARGS+=(--platform "$OS/$ARCH")
-                fi
-
-                # Save the OCI manifest locally, to pass to a script to create the pyxis entry
-                # Use component-specific manifest file to avoid conflicts
-                MANIFEST_FILE="$(params.dataDir)/$(dirname \
-                  "$(params.snapshotPath)")/oras-manifest-fetch-${component_index}-${index}.json"
-                oras manifest fetch \
-                  --registry-config "$AUTH_FILE" \
-                  "${ORAS_ARGS[@]}" \
-                  "${PULLSPEC}" \
-                      | tee "${MANIFEST_FILE}"
-
-                # When building images without squashing, their final layer might always be bit-wise identical.
-                # This causes upload to pyxis to fail which cannot tolerate duplicate "top_layer_id" values.
-                # This flag allows to overcome this limitation by just deleting the layers so that no layer
-                # information is uploaded.
-                if [ "$includeLayers" != true ]; then
-                  echo ".pyxis.includeLayers is not true in data file, so delete the layers"
-                  jq '.layers = []' "${MANIFEST_FILE}" > "${MANIFEST_FILE}.tmp"
-                  mv "${MANIFEST_FILE}.tmp"  "${MANIFEST_FILE}"
-                fi
-
-                # Augment that manifest with further information about the layers, decompressed
-                # This requires pulling the layers to decompress and then measure them
-                while IFS= read -r BLOB_DETAIL;
+                index=0
+                while IFS= read -r ARCH_DETAIL;
                 do
-                    BLOB_TYPE=$(jq -r '.mediaType' <<< "$BLOB_DETAIL")
-                    BLOB_DIGEST=$(jq -r '.digest' <<< "$BLOB_DETAIL")
+                    OS=$(jq -r '.platform.os' <<< "$ARCH_DETAIL")
+                    ARCH=$(jq -r '.platform.architecture' <<< "$ARCH_DETAIL")
+                    ARCH_DIGEST=$(jq -r '.digest' <<< "$ARCH_DETAIL")
 
-                    # Normal images will always have the layers compressed.
-                    # If they are not compressed, this will not save the
-                    # uncompressed data in Pyxis.
-                    #
-                    # It's also possible that the layers are compressed with
-                    # some scheme other than gzip.  In that case, the
-                    # uncompressed layer information will also not be saved in
-                    # Pyxis.
-                    # https://github.com/konflux-ci/build-definitions/issues/1264
-
-                    if [[ "$BLOB_TYPE" =~ ^.*\.gzip$|^.*\+gzip$ ]]; then
-                        BLOB_FILE="/tmp/oras-blob-fetch-${component_index}-${BLOB_DIGEST}"
-                        BLOB_PULLSPEC="${PULLSPEC%%@*}@${BLOB_DIGEST}"
-
-                        # Save the blob
-                        oras blob fetch \
-                          --registry-config "$AUTH_FILE" \
-                          --output "${BLOB_FILE}.gz" \
-                          "${BLOB_PULLSPEC}"
-
-                        # Decompress it
-                        gunzip "${BLOB_FILE}.gz"
-
-                        # Measure it
-                        EXPANDED_DIGEST="sha256:$(sha256sum "${BLOB_FILE}" | cut -d " " -f 1)"
-                        EXPANDED_SIZE=$(wc --bytes "${BLOB_FILE}" | awk '{print $1}' | tr -d '\n')
-
-                        # Append this information to the parsed_data manifest
-                        jq \
-                          '.uncompressed_layers += [{"digest": "'"$EXPANDED_DIGEST"'", "size": '"$EXPANDED_SIZE"'}]' \
-                          "${MANIFEST_FILE}" > "${MANIFEST_FILE}.tmp"
-                        mv "${MANIFEST_FILE}.tmp"  "${MANIFEST_FILE}"
-
-                        # Clean up, in case we're dealing with large images
-                        rm "${BLOB_FILE}"
+                    ORAS_ARGS=()
+                    if [[ "$MEDIA_TYPE" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]\
+                      || [[ "$MEDIA_TYPE" == "application/vnd.oci.image.index.v1+json" ]]; then
+                      ORAS_ARGS+=(--platform "$OS/$ARCH")
                     fi
-                done <<< "$(jq -c '.layers[]' "${MANIFEST_FILE}")"
 
-                PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
-                  --pyxis-url $PYXIS_URL \
-                  --certified "$(params.certified)" \
-                  --tags "$TAGS" \
-                  --is-latest "$(params.isLatest)" \
-                  --verbose \
-                  --oras-manifest-fetch "${MANIFEST_FILE}" \
-                  --name "$REPOSITORY" \
-                  --media-type "$MEDIA_TYPE" \
-                  --digest "$DIGEST" \
-                  --architecture-digest "$ARCH_DIGEST" \
-                  --architecture "$ARCH" \
-                  --rh-push "$(params.rhPush)" \
-                  --dockerfile "${DOCKERFILE_PATH}" | tee "/tmp/output_${component_index}_${index}"
-                # The rh-push-to-external-registry e2e test depends on this line being in the task log
-                IMAGEID=$(awk '/The image id is/{print $NF}' "/tmp/output_${component_index}_${index}" | head -1)
+                    # Save the OCI manifest locally, to pass to a script to create the pyxis entry
+                    # Use component-specific manifest file to avoid conflicts
+                    MANIFEST_FILE="$(params.dataDir)/$(dirname \
+                      "$(params.snapshotPath)")/oras-manifest-fetch-${component_index}-${index}.json"
+                    oras manifest fetch \
+                      --registry-config "$AUTH_FILE" \
+                      "${ORAS_ARGS[@]}" \
+                      "${PULLSPEC}" \
+                          | tee "${MANIFEST_FILE}"
 
-                # prepare the REPOSITORY string for cleanup_tags
-                TARGET_REPOSITORY="${REPOSITORY#*/}" # remove the host
-                TARGET_REPOSITORY="${TARGET_REPOSITORY//----/\/}"
-                TARGET_REPOSITORY="${TARGET_REPOSITORY#*/}"
+                    # When building images without squashing, their final layer might always be bit-wise identical.
+                    # This causes upload to pyxis to fail which cannot tolerate duplicate "top_layer_id" values.
+                    # This flag allows to overcome this limitation by just deleting the layers so that no layer
+                    # information is uploaded.
+                    if [ "$includeLayers" != true ]; then
+                      echo ".pyxis.includeLayers is not true in data file, so delete the layers"
+                      jq '.layers = []' "${MANIFEST_FILE}" > "${MANIFEST_FILE}.tmp"
+                      mv "${MANIFEST_FILE}.tmp"  "${MANIFEST_FILE}"
+                    fi
 
-                # Remove the new image tags from all previous images, but only if rhPush=true
-                if [ "$(params.rhPush)" = "true" ]; then
-                  PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key cleanup_tags \
-                    --verbose \
-                    --retry \
-                    --pyxis-graphql-api $PYXIS_GRAPHQL_URL \
-                    --repository "$TARGET_REPOSITORY" \
-                    "$IMAGEID"
-                fi
+                    # Augment that manifest with further information about the layers, decompressed
+                    # This requires pulling the layers to decompress and then measure them
+                    while IFS= read -r BLOB_DETAIL;
+                    do
+                        BLOB_TYPE=$(jq -r '.mediaType' <<< "$BLOB_DETAIL")
+                        BLOB_DIGEST=$(jq -r '.digest' <<< "$BLOB_DETAIL")
 
-                COMPONENT_JSON=$(jq --argjson arch_index $index \
-                  --arg arch "${ARCH}" --arg imageId "${IMAGEID}" --arg digest "${DIGEST}" \
-                  --arg arch_digest "${ARCH_DIGEST}" --arg os "${OS}" \
-                    '.pyxisImages[$arch_index] += {
-                      "arch": $arch,
-                      "imageId": $imageId,
-                      "digest": $digest,
-                      "arch_digest": $arch_digest,
-                      "os": $os}' <<< "$COMPONENT_JSON")
+                        # Normal images will always have the layers compressed.
+                        # If they are not compressed, this will not save the
+                        # uncompressed data in Pyxis.
+                        #
+                        # It's also possible that the layers are compressed with
+                        # some scheme other than gzip.  In that case, the
+                        # uncompressed layer information will also not be saved in
+                        # Pyxis.
+                        # https://github.com/konflux-ci/build-definitions/issues/1264
 
-                index=$((index + 1))
-            done <<< "$ARCHITECTURES"
+                        if [[ "$BLOB_TYPE" =~ ^.*\.gzip$|^.*\+gzip$ ]]; then
+                            BLOB_FILE="/tmp/oras-blob-fetch-${component_index}-${BLOB_DIGEST}"
+                            BLOB_PULLSPEC="${PULLSPEC%%@*}@${BLOB_DIGEST}"
+
+                            # Save the blob
+                            oras blob fetch \
+                              --registry-config "$AUTH_FILE" \
+                              --output "${BLOB_FILE}.gz" \
+                              "${BLOB_PULLSPEC}"
+
+                            # Decompress it
+                            gunzip "${BLOB_FILE}.gz"
+
+                            # Measure it
+                            EXPANDED_DIGEST="sha256:$(sha256sum "${BLOB_FILE}" | cut -d " " -f 1)"
+                            EXPANDED_SIZE=$(wc --bytes "${BLOB_FILE}" | awk '{print $1}' | tr -d '\n')
+
+                            # Append this information to the parsed_data manifest
+                            jq \
+                              '.uncompressed_layers += [{"digest": "'"$EXPANDED_DIGEST"'",
+                              "size": '"$EXPANDED_SIZE"'}]' "${MANIFEST_FILE}" > "${MANIFEST_FILE}.tmp"
+                            mv "${MANIFEST_FILE}.tmp"  "${MANIFEST_FILE}"
+
+                            # Clean up, in case we're dealing with large images
+                            rm "${BLOB_FILE}"
+                        fi
+                    done <<< "$(jq -c '.layers[]' "${MANIFEST_FILE}")"
+
+                    PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key create_container_image \
+                      --pyxis-url $PYXIS_URL \
+                      --certified "$(params.certified)" \
+                      --tags "$TAGS" \
+                      --is-latest "$(params.isLatest)" \
+                      --verbose \
+                      --oras-manifest-fetch "${MANIFEST_FILE}" \
+                      --name "$REPOSITORY" \
+                      --media-type "$MEDIA_TYPE" \
+                      --digest "$DIGEST" \
+                      --architecture-digest "$ARCH_DIGEST" \
+                      --architecture "$ARCH" \
+                      --rh-push "$(params.rhPush)" \
+                      --dockerfile "${DOCKERFILE_PATH}" | tee "/tmp/output_${component_index}_${index}"
+                    # The rh-push-to-external-registry e2e test depends on this line being in the task log
+                    IMAGEID=$(awk '/The image id is/{print $NF}' "/tmp/output_${component_index}_${index}" | head -1)
+
+                    # prepare the REPOSITORY string for cleanup_tags
+                    TARGET_REPOSITORY="${REPOSITORY#*/}" # remove the host
+                    TARGET_REPOSITORY="${TARGET_REPOSITORY//----/\/}"
+                    TARGET_REPOSITORY="${TARGET_REPOSITORY#*/}"
+
+                    # Remove the new image tags from all previous images, but only if rhPush=true
+                    if [ "$(params.rhPush)" = "true" ]; then
+                      PYXIS_CERT_PATH=/tmp/crt PYXIS_KEY_PATH=/tmp/key cleanup_tags \
+                        --verbose \
+                        --retry \
+                        --pyxis-graphql-api $PYXIS_GRAPHQL_URL \
+                        --repository "$TARGET_REPOSITORY" \
+                        "$IMAGEID"
+                    fi
+
+                    COMPONENT_JSON=$(jq --argjson arch_index $index \
+                      --arg arch "${ARCH}" --arg imageId "${IMAGEID}" --arg digest "${DIGEST}" \
+                      --arg arch_digest "${ARCH_DIGEST}" --arg os "${OS}" \
+                        '.pyxisImages[$arch_index] += {
+                          "arch": $arch,
+                          "imageId": $imageId,
+                          "digest": $digest,
+                          "arch_digest": $arch_digest,
+                          "os": $os}' <<< "$COMPONENT_JSON")
+
+                    index=$((index + 1))
+                done <<< "$ARCHITECTURES"
+            done
 
             # Save component result to file
             echo "$COMPONENT_JSON" | tee "$output_file"
