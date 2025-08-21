@@ -162,13 +162,15 @@ spec:
 
                     # Create transformed component with registry format containerImage
                     TRANSFORMED_CONTAINER_IMAGE="${RH_REGISTRY_REPO}@${arch_digest}"
+
                     echo "$component" \
                       | jq \
                         --arg ci "$TRANSFORMED_CONTAINER_IMAGE" \
                         --arg repo "$RH_REGISTRY_REPO" \
                         --arg orig_name "$COMPONENT_NAME" \
                         --arg arch "$arch" \
-                        '.containerImage = $ci
+                        '.repositories //= [{"url": $repo}]
+                         | .containerImage = $ci
                          | .repository = $repo
                          | .originalComponent = $orig_name
                          | .architecture = $arch'
@@ -205,18 +207,18 @@ spec:
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
         # Determine advisory_secret_name based on repositories in snapshot
-        pending_repositories=$(jq -r '.components[] | select(.repository |
-          test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/")) |
-          .repository' "$SNAPSHOT_FILE")
-        prod_repositories=$(jq -r '.components[] | select(.repository |
-          test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/")) |
-          .repository' "$SNAPSHOT_FILE")
+        # Support both legacy .repository field and new .repositories[] array
+        pending_repositories=$(jq -r '.components[] |
+          ((.repository // empty), (.repositories[]?.url // empty)) |
+          select(test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/"))' "$SNAPSHOT_FILE")
+        prod_repositories=$(jq -r '.components[] |
+          ((.repository // empty), (.repositories[]?.url // empty)) |
+          select(test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/"))' "$SNAPSHOT_FILE")
         orphan_repositories=$(jq -r '.components[] |
-          select(.repository |
-            test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/") | not) |
-          select(.repository |
-            test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/") | not) |
-          .repository' "$SNAPSHOT_FILE")
+          ((.repository // empty), (.repositories[]?.url // empty)) |
+          select(. != null and . != "") |
+          select(test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/") | not) |
+          select(test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/") | not)' "$SNAPSHOT_FILE")
         foundPendingRepositories=false
         [ -n "${pending_repositories}" ] && foundPendingRepositories=true
         foundProdRepositories=false
