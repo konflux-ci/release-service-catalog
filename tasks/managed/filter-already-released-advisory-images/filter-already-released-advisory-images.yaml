@@ -146,38 +146,41 @@ spec:
         SNAPSHOT_JSON=$(jq '.' "$SNAPSHOT_FILE")
         TRANSFORMED_COMPONENTS=$(mktemp)
 
-        echo "$SNAPSHOT_JSON" | jq -c '.components[]' | while IFS= read -r component; do
-            CONTAINER_IMAGE=$(echo "$component" | jq -r '.containerImage')
-            RH_REGISTRY_REPO=$(echo "$component" | jq -r '.["rh-registry-repo"] // .repository')
-            COMPONENT_NAME=$(echo "$component" | jq -r '.name')
+        jq -c '.components[]' <<< "$SNAPSHOT_JSON" | while IFS= read -r component; do
+            CONTAINER_IMAGE=$(jq -r '.containerImage' <<< "$component")
+            COMPONENT_NAME=$(jq -r '.name' <<< "$component")
 
             echo "Processing component: $COMPONENT_NAME with image: $CONTAINER_IMAGE" >&2
 
-            # Use get-image-architectures utility (same approach as populate-release-notes)
-            if get-image-architectures "${CONTAINER_IMAGE}" | while IFS= read -r arch_json; do
-                if [[ -n "$arch_json" ]]; then
-                    # Extract architecture-specific digest from arch_json
-                    arch_digest=$(echo "$arch_json" | jq -r '.digest')
-                    arch=$(echo "$arch_json" | jq -r '.platform.architecture')
-
-                    # Create transformed component with registry format containerImage
-                    TRANSFORMED_CONTAINER_IMAGE="${RH_REGISTRY_REPO}@${arch_digest}"
-                    echo "$component" \
-                      | jq \
-                        --arg ci "$TRANSFORMED_CONTAINER_IMAGE" \
-                        --arg repo "$RH_REGISTRY_REPO" \
-                        --arg orig_name "$COMPONENT_NAME" \
-                        --arg arch "$arch" \
-                        '.containerImage = $ci
-                         | .repository = $repo
-                         | .originalComponent = $orig_name
-                         | .architecture = $arch'
-                fi
-            done; then
-                echo "Successfully transformed component: $COMPONENT_NAME" >&2
-            else
+            if ! digests=$(get-image-architectures "${CONTAINER_IMAGE}"); then
                 echo "Warning: Failed to resolve architectures for ${CONTAINER_IMAGE}, skipping component" >&2
+                continue
             fi
+
+            repositories=$(jq -c '.repositories' <<< "$component")
+            NUM_REPOS=$(jq 'length' <<< "$repositories")
+            for ((i = 0; i < NUM_REPOS; i++)); do
+                repo_url=$(jq -r --argjson i "$i" '.[$i]."rh-registry-repo"' <<< "$repositories")
+
+                while IFS= read -r arch_json; do
+                    if [[ -n "$arch_json" ]]; then
+                        arch_digest=$(jq -r '.digest' <<< "$arch_json")
+                        arch=$(jq -r '.platform.architecture' <<< "$arch_json")
+                        containerImage="${repo_url}@${arch_digest}"
+
+                        jq \
+                            --arg ci "$containerImage" \
+                            --arg repo "$repo_url" \
+                            --arg orig_name "$COMPONENT_NAME" \
+                            --arg arch "$arch" \
+                            '.containerImage = $ci
+                             | .repository = $repo
+                             | .originalComponent = $orig_name
+                             | .architecture = $arch' \
+                            <<< "$component"
+                    fi
+                done <<< "$digests"
+            done
         done > "$TRANSFORMED_COMPONENTS"
 
         # Create transformed snapshot with arch-specific images
@@ -205,18 +208,17 @@ spec:
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
         # Determine advisory_secret_name based on repositories in snapshot
-        pending_repositories=$(jq -r '.components[] | select(.repository |
-          test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/")) |
-          .repository' "$SNAPSHOT_FILE")
-        prod_repositories=$(jq -r '.components[] | select(.repository |
-          test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/")) |
-          .repository' "$SNAPSHOT_FILE")
+        pending_repositories=$(jq -r '.components[] |
+          .repositories[]?.url |
+          select(test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/"))' "$SNAPSHOT_FILE")
+        prod_repositories=$(jq -r '.components[] |
+          .repositories[]?.url |
+          select(test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/"))' "$SNAPSHOT_FILE")
         orphan_repositories=$(jq -r '.components[] |
-          select(.repository |
-            test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/") | not) |
-          select(.repository |
-            test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/") | not) |
-          .repository' "$SNAPSHOT_FILE")
+          .repositories[]?.url |
+          select(. != null and . != "") |
+          select(test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/") | not) |
+          select(test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/") | not)' "$SNAPSHOT_FILE")
         foundPendingRepositories=false
         [ -n "${pending_repositories}" ] && foundPendingRepositories=true
         foundProdRepositories=false
@@ -299,11 +301,11 @@ spec:
         echo "- Pipeline run: ${internalRequestPipelineRunName}"
         echo "- Task run: ${internalRequestTaskRunName}"
 
-        if [[ "$(echo "$results" | jq -r '.result')" == "Success" ]]; then
+        if [[ "$(jq -r '.result' <<< "$results")" == "Success" ]]; then
           echo "Image filtering successful"
 
           # Get the unreleased components list
-          UNRELEASED_COMPONENTS_RAW=$(echo "$results" | jq -r '.unreleased_components // ""')
+          UNRELEASED_COMPONENTS_RAW=$(jq -r '.unreleased_components // ""' <<< "$results")
           if [ -z "$UNRELEASED_COMPONENTS_RAW" ]; then
             echo "No unreleased components list found in results. Results:"
             echo "$results"
