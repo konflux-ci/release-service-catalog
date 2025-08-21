@@ -83,9 +83,9 @@ function oras() {
     # Match the reference within the full argument string (last arg may be --format json)
     if [[ " $* " == *" reg.io/test@sha256:abcdefg "* ]]; then
       # Simulate one attached artifact for this image
-      echo '{"manifests": [{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:deadbeef","size":123}]}'
+      echo '{"referrers": [{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:deadbeef","size":123}]}'
     else
-      echo '{"manifests": []}'
+      echo '{"referrers": []}'
     fi
     return 0
   fi
