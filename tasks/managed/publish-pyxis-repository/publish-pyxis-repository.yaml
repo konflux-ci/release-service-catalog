@@ -209,31 +209,6 @@ spec:
             COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
             PAYLOAD='{"published":true}'
             COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
-            REPOSITORY=$(jq -r '.repository' <<< "$COMPONENT")
-            PYXIS_REPOSITORY=${REPOSITORY##*/}
-            # Replace "----" with "/"
-            PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
-            PYXIS_REPOSITORY_JSON=$(curl --retry 5 --key /tmp/key --cert /tmp/crt \
-                "${PYXIS_URL}/v1/repositories/registry/${PYXIS_REGISTRY}/repository/${PYXIS_REPOSITORY}" -X GET)
-
-            PYXIS_REPOSITORY_ID=$(jq -r '._id // ""' <<< "$PYXIS_REPOSITORY_JSON")
-            if [ -z "$PYXIS_REPOSITORY_ID" ]; then
-                echo Error: Unable to get Container Repository object id from Pyxis
-                echo "Pyxis response for ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY}:"
-                echo "$PYXIS_REPOSITORY_JSON"
-                exit 1
-            fi
-
-            PYXIS_REPOSITORY_REQUIRES_TERMS=$(jq '.requires_terms' <<< "$PYXIS_REPOSITORY_JSON")
-            if [ "$PYXIS_REPOSITORY_REQUIRES_TERMS" = false ]; then
-              echo "$PYXIS_REPOSITORY" >> "$SIGN_REGISTRY_ACCESS_PATH"
-            fi
-
-            # Default to false
-            if [ "$skipRepoPublishing" = true ] ; then
-                echo "skipRepoPublishing is set to true, skipping publishing..."
-                continue
-            fi
 
             # Set source_container_image_enabled based on pushSourceContainer value in components or use default if
             # it is not set in the component
@@ -243,33 +218,63 @@ spec:
                 PAYLOAD=$(jq -c '. += {"source_container_image_enabled":true}' <<< "$PAYLOAD")
             fi
 
-            # verify that publish_on_push is set to true.
-            # otherwise, do not publish the image.
-            PYXIS_REPOSITORY_PUBLISH_ON_PUSH=$(jq -r '.publish_on_push // "false"' <<< "$PYXIS_REPOSITORY_JSON")
-            if [ "${PYXIS_REPOSITORY_PUBLISH_ON_PUSH}" != "true" ] ; then
-              echo "WARNING: repository ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY} is marked as publish_on_push = false"
-              echo "Skipping the setting of the published flag."
-              continue
-            fi
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$COMPONENT")
+            for ((j = 0; j < NUM_REPOSITORIES; j++))
+            do
+                REPOSITORY=$(jq -r --argjson j "$j" '.repositories[$j].url' <<< "$COMPONENT")
+                PYXIS_REPOSITORY=${REPOSITORY##*/}
+                # Replace "----" with "/"
+                PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
+                PYXIS_REPOSITORY_JSON=$(curl --retry 5 --key /tmp/key --cert /tmp/crt \
+                    "${PYXIS_URL}/v1/repositories/registry/${PYXIS_REGISTRY}/repository/${PYXIS_REPOSITORY}" -X GET)
 
-            curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
-                -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
+                PYXIS_REPOSITORY_ID=$(jq -r '._id // ""' <<< "$PYXIS_REPOSITORY_JSON")
+                if [ -z "$PYXIS_REPOSITORY_ID" ]; then
+                    echo Error: Unable to get Container Repository object id from Pyxis
+                    echo "Pyxis response for ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY}:"
+                    echo "$PYXIS_REPOSITORY_JSON"
+                    exit 1
+                fi
 
-            # Determine the correct CATALOG_BASE_URL based on the repository prefix
-            if [[ "$REPOSITORY" == quay.io/redhat-prod/* ]]
-            then
-              CATALOG_BASE_URL="https://catalog.redhat.com/software/containers"
-            elif [[ "$REPOSITORY" == quay.io/redhat-pending/* ]]
-            then
-              CATALOG_BASE_URL="https://catalog.stage.redhat.com/software/containers"
-            else
-              echo "Unknown repository prefix. Exiting..."
-              exit 1
-            fi
+                PYXIS_REPOSITORY_REQUIRES_TERMS=$(jq '.requires_terms' <<< "$PYXIS_REPOSITORY_JSON")
+                if [ "$PYXIS_REPOSITORY_REQUIRES_TERMS" = false ]; then
+                  echo "$PYXIS_REPOSITORY" >> "$SIGN_REGISTRY_ACCESS_PATH"
+                fi
 
-            URL="${CATALOG_BASE_URL}/${PYXIS_REPOSITORY}/${PYXIS_REPOSITORY_ID}"
-            RESULTS_JSON=$(jq --arg name "$COMPONENT_NAME" --arg url "$URL" \
-              '.catalog_urls += [{"name": $name, "url": $url}]' <<< "$RESULTS_JSON")
+                # Default to false
+                if [ "$skipRepoPublishing" = true ] ; then
+                    echo "skipRepoPublishing is set to true, skipping publishing..."
+                    continue
+                fi
+
+                # verify that publish_on_push is set to true.
+                # otherwise, do not publish the image.
+                PYXIS_REPOSITORY_PUBLISH_ON_PUSH=$(jq -r '.publish_on_push // "false"' <<< "$PYXIS_REPOSITORY_JSON")
+                if [ "${PYXIS_REPOSITORY_PUBLISH_ON_PUSH}" != "true" ] ; then
+                  echo "WARNING: repository ${PYXIS_REGISTRY}/${PYXIS_REPOSITORY} is marked as publish_on_push = false"
+                  echo "Skipping the setting of the published flag."
+                  continue
+                fi
+
+                curl --retry 5 --key /tmp/key --cert /tmp/crt "${PYXIS_URL}/v1/repositories/id/${PYXIS_REPOSITORY_ID}" \
+                    -X PATCH -H 'Content-Type: application/json' --data-binary "${PAYLOAD}"
+
+                # Determine the correct CATALOG_BASE_URL based on the repository prefix
+                if [[ "$REPOSITORY" == quay.io/redhat-prod/* ]]
+                then
+                  CATALOG_BASE_URL="https://catalog.redhat.com/software/containers"
+                elif [[ "$REPOSITORY" == quay.io/redhat-pending/* ]]
+                then
+                  CATALOG_BASE_URL="https://catalog.stage.redhat.com/software/containers"
+                else
+                  echo "Unknown repository prefix. Exiting..."
+                  exit 1
+                fi
+
+                URL="${CATALOG_BASE_URL}/${PYXIS_REPOSITORY}/${PYXIS_REPOSITORY_ID}"
+                RESULTS_JSON=$(jq --arg name "$COMPONENT_NAME" --arg url "$URL" \
+                  '.catalog_urls += [{"name": $name, "url": $url}]' <<< "$RESULTS_JSON")
+            done
         done
 
         jq <<< "${RESULTS_JSON}" | tee "$RESULTS_FILE"
