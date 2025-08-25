@@ -83,6 +83,9 @@ function get-image-architectures() {
   elif [[ "$1" == *"registry.io/oci-artifact@sha256:mydigest"* ]]; then
     # This represents the OCI artifact test case - will include configMediaType
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg", "configMediaType": "application/vnd.oci.artifact.config.v1+json"}'
+  elif [[ "$1" == *"helm-chart"* ]]; then
+    # This represents Helm charts - will include Helm configMediaType
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg", "multiarch": false, "configMediaType": "application/vnd.cncf.helm.config.v1+json"}'
   else
     # Regular container images - no configMediaType in output
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'

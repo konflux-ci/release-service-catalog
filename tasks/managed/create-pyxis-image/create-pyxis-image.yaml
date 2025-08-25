@@ -239,6 +239,17 @@ spec:
 
                 ARCHITECTURES=$(get-image-architectures "${PULLSPEC}")
 
+                # Check if this is a Helm chart - skip Helm artifacts
+                config_media_type="$(jq -rs '.[0].configMediaType // ""' <<< "$ARCHITECTURES")"
+                if [[ "$config_media_type" == "application/vnd.cncf.helm.config.v1+json" ]]; then
+                    echo "Detected Helm chart artifact for component ${component_index}, skipping Pyxis image creation"
+
+                    # Create a minimal component JSON to indicate this was skipped
+                    local JSON='{"skipped": true, "reason": "helm_chart", "componentIndex": '${component_index}'}'
+                    echo "$JSON" | tee "$output_file"
+                    return
+                fi
+
                 # Initialize component JSON structure
                 local COMPONENT_JSON='{}'
                 COMPONENT_JSON=$(jq --argjson id "$component_index" --arg image "${CONTAINER_IMAGE}" \
@@ -450,12 +461,23 @@ spec:
         for (( i=0; i < COMPONENTS; i++ )); do
             if [ -f "/tmp/component_${i}.json" ]; then
                 component_data=$(cat "/tmp/component_${i}.json")
+
+                # Skip components that were marked as skipped (e.g., Helm charts)
+                if [ "$(jq -r '.skipped // false' <<< "$component_data")" = "true" ]; then
+                    echo "Skipping component $i ($(jq -r '.reason' <<< "$component_data"))"
+                    continue
+                fi
+
                 component_index=$(jq -r '.componentIndex' <<< "$component_data")
                 JSON_OUTPUT=$(jq --argjson component_index "$component_index" --argjson \
                   component_data "$component_data" \
                   '.components[$component_index] = $component_data' <<< "$JSON_OUTPUT")
             fi
         done
+
+        # Filter out null entries (from skipped artifacts) to ensure downstream compatibility
+        JSON_OUTPUT=$(jq '.components |= map(select(. != null))' <<< "$JSON_OUTPUT")
+
         echo "$JSON_OUTPUT" | tee "$(params.dataDir)/${PYXIS_DATA_PATH}"
     - name: create-trusted-artifact
       computeResources:
