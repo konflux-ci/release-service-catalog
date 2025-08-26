@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-populate-release-notes-rhsa-references
+  name: test-populate-release-notes-multiple-repositories
 spec:
   description: |
-    Run the populate-release-notes task with a RHSA type. Ensure that references are added for each
-    CVE, existing ones are maintained, and there are no duplicates.
+    Run the populate-release-notes task with multiple repositories in the snapshot JSON and verify
+    the data JSON has the proper content
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -58,36 +58,6 @@ spec:
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "releaseNotes": {
-                  "cves": [
-                    {
-                      "component": "comp",
-                      "packages": [
-                        "pkg1",
-                        "pkg2"
-                      ],
-                      "key": "CVE-123",
-                      "summary": "",
-                      "uploadDate": "01-01-1980",
-                      "url": ""
-                    },
-                    {
-                      "component": "comp",
-                      "key": "CVE-123",
-                      "summary": "",
-                      "uploadDate": "01-01-1980",
-                      "url": ""
-                    },
-                    {
-                      "component": "comp",
-                      "packages": [
-                        "pkg3"
-                      ],
-                      "key": "CVE-456",
-                      "summary": "",
-                      "uploadDate": "01-01-1980",
-                      "url": ""
-                    }
-                  ],
                   "product_id": [
                     123
                   ],
@@ -112,7 +82,6 @@ spec:
                   "description": "test description",
                   "solution": "test solution",
                   "references": [
-                    "https://docs.example.com/some/example/release-notes",
                     "https://docs.example.com/some/example/release-notes"
                   ]
                 }
@@ -130,6 +99,16 @@ spec:
                       {
                         "url": "quay.io/redhat-prod/product----repo",
                         "rh-registry-repo": "registry.redhat.io/product/repo",
+                        "tags": [
+                          "9.4-1723436855",
+                          "9.4.0-1723436855",
+                          "foo",
+                          "bar"
+                        ]
+                      },
+                      {
+                        "url": "quay.io/redhat-prod/product----repo2",
+                        "rh-registry-repo": "registry.redhat.io/product/repo2",
                         "tags": [
                           "foo",
                           "bar"
@@ -215,22 +194,48 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              # There should be 4 references. The one provided (not duplicated), the generic classification one,
-              # and ones for CVE-123 and CVE-456
-              test "$(jq '.releaseNotes.references | length' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")" \
-                == 4
-              test "$(jq -jr '.releaseNotes.references[0]' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")" == \
-                "https://access.redhat.com/security/cve/CVE-123"
-              test "$(jq -jr '.releaseNotes.references[1]' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")" == \
-                "https://access.redhat.com/security/cve/CVE-456"
-              test "$(jq -jr '.releaseNotes.references[2]' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")" == \
-                "https://access.redhat.com/security/updates/classification/"
-              test "$(jq -jr '.releaseNotes.references[3]' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")" == \
-                "https://docs.example.com/some/example/release-notes"
+              echo Checking image1repo1arch1...
+              image1repo1arch1=$(jq '.releaseNotes.content.images[0]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
+              test "$(jq -r '.architecture' <<< "$image1repo1arch1")" == "amd64"
+              test "$(jq -r '.containerImage' <<< "$image1repo1arch1")" == \
+                "registry.redhat.io/product/repo@sha256:abcdefg"
+              test "$(jq -r '.purl' <<< "$image1repo1arch1")" == \
+                "pkg:oci/repo@sha256%3Aabcdefg?arch=amd64&repository_url=registry.redhat.io/product&tag=9.4.0-1723436855"
+              test "$(jq -r '.repository' <<< "$image1repo1arch1")" == "registry.redhat.io/product/repo"
+              test "$(jq -rc '.tags' <<< "$image1repo1arch1")" == '["9.4-1723436855","9.4.0-1723436855","foo","bar"]'
+
+              echo Checking image1repo1arch2...
+              image1repo1arch2=$(jq '.releaseNotes.content.images[1]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
+              test "$(jq -r '.architecture' <<< "$image1repo1arch2")" == "s390x"
+              test "$(jq -r '.containerImage' <<< "$image1repo1arch2")" == \
+                "registry.redhat.io/product/repo@sha256:deadbeef"
+              test "$(jq -r '.purl' <<< "$image1repo1arch2")" == \
+               "pkg:oci/repo@sha256%3Adeadbeef?arch=s390x&repository_url=registry.redhat.io/product&tag=9.4.0-1723436855"
+              test "$(jq -r '.repository' <<< "$image1repo1arch2")" == "registry.redhat.io/product/repo"
+              test "$(jq -rc '.tags' <<< "$image1repo1arch2")" == '["9.4-1723436855","9.4.0-1723436855","foo","bar"]'
+              
+              echo Checking image1repo2arch1...
+              image1repo2arch1=$(jq '.releaseNotes.content.images[2]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
+              test "$(jq -r '.architecture' <<< "$image1repo2arch1")" == "amd64"
+              test "$(jq -r '.containerImage' <<< "$image1repo2arch1")" == \
+                "registry.redhat.io/product/repo2@sha256:abcdefg"
+              test "$(jq -r '.purl' <<< "$image1repo2arch1")" == \
+                "pkg:oci/repo2@sha256%3Aabcdefg?arch=amd64&repository_url=registry.redhat.io/product"
+              test "$(jq -r '.repository' <<< "$image1repo2arch1")" == "registry.redhat.io/product/repo2"
+              test "$(jq -rc '.tags' <<< "$image1repo2arch1")" == '["foo","bar"]'
+
+              echo Checking image1repo2arch2...
+              image1repo2arch2=$(jq '.releaseNotes.content.images[3]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
+              test "$(jq -r '.architecture' <<< "$image1repo2arch2")" == "s390x"
+              test "$(jq -r '.containerImage' <<< "$image1repo2arch2")" == \
+                "registry.redhat.io/product/repo2@sha256:deadbeef"
+              test "$(jq -r '.purl' <<< "$image1repo2arch2")" == \
+               "pkg:oci/repo2@sha256%3Adeadbeef?arch=s390x&repository_url=registry.redhat.io/product"
+              test "$(jq -r '.repository' <<< "$image1repo2arch2")" == "registry.redhat.io/product/repo2"
+              test "$(jq -rc '.tags' <<< "$image1repo2arch2")" == '["foo","bar"]'
       runAfter:
         - run-task
