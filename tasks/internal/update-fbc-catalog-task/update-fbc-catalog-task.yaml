@@ -8,11 +8,11 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task to submit a IIB build request to add/update a fbc-fragment to an index image
+    Tekton task to submit a IIB build request to add/update fbc-fragments to an index image
   params:
-    - name: fbcFragment
+    - name: fbcFragments
       type: string
-      description: FBC fragment built by HACBS
+      description: FBC fragments built by HACBS as JSON array (e.g. ["fragment1", "fragment2"])
     - name: fromIndex
       type: string
       description: >-
@@ -118,17 +118,21 @@ spec:
           jq -e -r '.fbc_opt_in //false' "${TMPFILE}" && rm -f "${TMPFILE}"
         }
 
-        # checks if there is any previous build for the same fbc_fragment.
+        # checks if there is any previous build for the same fbc_fragments.
         # in case multiple builds are found, returns only the last one.
         check_previous_build() {
           user="${1}"
           from_index="${2}"
-          fbc_fragment="${3}"
+          fbc_fragments_json="${3}"
 
           # fetch only builds in progress or completed
+          # check if any fragment in the array has an existing build
           build=$(curl -s "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}" | \
-            jq --arg fbc_fragment "${fbc_fragment}" \
-              '[.items[] |select(.fbc_fragment==$fbc_fragment and .state!="failed")][0] // empty')
+            jq --argjson fbc_fragments "${fbc_fragments_json}" \
+              '[.items[] | select(.state!="failed") | select(
+                (.fbc_fragments != null and ((.fbc_fragments | sort) == ($fbc_fragments | sort))) or
+                (.fbc_fragment != null and (.fbc_fragment | IN($fbc_fragments[])))
+              )] | sort_by(.updated) | last // empty')
 
           # if a previous build is found, but from_index and index_image are different, it means that the
           # previous build was a staging index build, then we should return here causing the task to call
@@ -197,10 +201,16 @@ spec:
         retry 5 kinit -V "${KRB5_PRINCIPAL}" -k -t "/tmp/keytab"
 
         set -x
-        # check if this fbc fragment is opt-in
-        echo "Fetching the image bundle from $(params.fbcFragment)..."
-        PULL_SPEC_LIST=$(opm render "$(params.fbcFragment)" | jq -r \
-        'select(.schema == "olm.bundle") | "\(.image)" | split("@")[0]' |uniq)
+        # validate fbcFragments parameter is valid JSON array
+        if ! jq -e . <<<'$(params.fbcFragments)' >/dev/null 2>&1; then
+          echo "Error: fbcFragments parameter must be a valid JSON array"
+          exit 1
+        fi
+        
+        # check if these fbc fragments are opt-in
+        echo "Processing fragments: $(params.fbcFragments)"
+        # Extract pull specs from all fragments and remove duplicates
+        PULL_SPEC_LIST=$(echo '$(params.fbcFragments)' | jq -r '.[]' | xargs -I {} sh -c 'opm render "$1" | jq -r "select(.schema == \"olm.bundle\") | \"\(.image)\" | split(\"@\")[0]"' _ {} | sort | uniq)
 
         fbcOptIn="true"
         for PULL_SPEC in ${PULL_SPEC_LIST}; do
@@ -249,7 +259,7 @@ spec:
 
         # if it finds a build which is completed or in progress, it should exit this step and jump to
         # the next step `s-wait-for-build-state` which will watch the build until it is completed.
-        build=$(check_previous_build "${KRB5_PRINCIPAL}" "$(params.fromIndex)" "$(params.fbcFragment)")
+        build=$(check_previous_build "${KRB5_PRINCIPAL}" "$(params.fromIndex)" '$(params.fbcFragments)')
         if [ -n "${build}" ]; then
           echo "=== A previous build for this fragment was found ==="
           echo "${build}" |tee "$(results.jsonBuildInfo.path)"
@@ -263,7 +273,7 @@ spec:
 
         cat > "$json_raw_input" <<JSON
         {
-          "fbc_fragment": "$(params.fbcFragment)",
+          "fbc_fragments": $(params.fbcFragments),
           "from_index": "$(params.fromIndex)",
           "build_tags": $(params.buildTags),
           "add_arches": $(params.addArches),

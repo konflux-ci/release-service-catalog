@@ -8,7 +8,7 @@ Tekton pipeline add/update FBC fragments to the FBC catalog by interacting with 
 |-------------------------|---------------------------------------------------------------------------------------|----------|-----------------------------------------------------------|
 | iibServiceAccountSecret | Secret containing the credentials for IIB service                                     | Yes      | iib-service-account                                       |
 | publishingCredentials   | Secret containing the publishing credentials used to fetch the image config           | No       | -                                                         |
-| fbcFragment             | FBC fragment built by HACBS                                                           | No       | -                                                         |
+| fbcFragments            | FBC fragments built by HACBS as JSON array (e.g. ["fragment1", "fragment2"])          | No       | -                                                         |
 | fromIndex               | Index image (catalog of catalogs) the FBC fragment will be added to                   | No       | -                                                         |
 | targetIndex             | Target index is the pullspec the FBC catalog will be pushed to                        | No       | -                                                         |
 | buildTags               | List of additional tags the internal index image copy should be tagged with           | Yes      | []                                                        |
