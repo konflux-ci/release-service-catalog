@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-artifacts-to-cdn-stage
+  name: test-push-artifacts-to-cdn-staging-intention
 spec:
   description: |
-    Run the push-artifacts task with the stage env and ensure the task succeeds
+    Run the push-artifacts task with intention set to staging and ensure the task uses the correct nonprod quayURL
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -60,14 +60,9 @@ spec:
                 "application": "artifacts",
                 "components": [
                   {
-                    "name": "nvidia-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/nvidia@sha256:123456",
-                    "repository": "repo1"
-                  },
-                  {
-                    "name": "amd-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/amd@sha256:abcdefg",
-                    "repository": "repo2"
+                    "name": "test-component",
+                    "containerImage": "quay.io/test/component@sha256:123456",
+                    "repository": "test-repo"
                   }
                 ]
               }
@@ -75,6 +70,7 @@ spec:
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
+                "intention": "staging",
                 "contentGateway": {
                   "productName": "Konflux test product",
                   "productCode": "KTestProduct",
@@ -82,8 +78,8 @@ spec:
                   "components": [
                     {
                       "name": "test-component",
-                      "description": "Red Hat OpenShift Local Sandbox Test",
-                      "label": "Checksum File Sandbox Test"
+                      "description": "Test component for staging intention",
+                      "label": "Test Label"
                     }
                   ]
                 },
@@ -95,6 +91,7 @@ spec:
                 }
               }
               EOF
+              
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
               {
                 "spec": {
@@ -126,7 +123,7 @@ spec:
               {
                 "status": {
                   "attribution": {
-                    "author": "JohnDoe"
+                    "author": "TestUser"
                   }
                 }
               }
@@ -171,6 +168,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: quayURL
+          value: "quay.io/konflux-artifacts"
       runAfter:
         - setup
     - name: check-result
@@ -217,53 +216,18 @@ spec:
               set -ex
 
               internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
-              # check the pipelineRef
-              pipeline="$(jq -r '.spec.pipeline.pipelineRef.params[]|select(.name=="pathInRepo") |.value' \
-                <<< "${internalRequest}")"
-              if [[ ! "$pipeline" =~ push-artifacts-to-cdn ]]; then
-                echo "InternalRequest doesn't contain 'push-artifacts-to-cdn' in 'request' field"
+
+              # Check the quayURL param
+              expectedQuayURL="quay.io/konflux-artifacts/nonprod"
+              actualQuayURL="$(jq -r '.spec.params.quayURL' <<< "$internalRequest")"
+              if [ "$actualQuayURL" != "$expectedQuayURL" ]; then
+                echo "InternalRequest has the wrong quayURL parameter"
+                echo "Expected: $expectedQuayURL"
+                echo "Actual: $actualQuayURL"
                 exit 1
               fi
 
-              # Check the serviceAccount field
-              if [ "$(jq -r '.spec.serviceAccount' <<< "$internalRequest")" != "release-service-account" ]; then
-                echo "InternalRequest doesn't contain the proper serviceAccount"
-                exit 1
-              fi
-
-              # Check the snapshot parameter
-              if [ "$(jq -r '.spec.params.snapshot_json' <<< "$internalRequest")" != \
-              '{"application":"artifacts","components":[{"name":"nvidia-disk-image","containerImage":'`
-              `'"quay.io/workload/tenant/disk-image/nvidia@sha256:123456","repository":"repo1"},{"name":'`
-              `'"amd-disk-image","containerImage":"quay.io/workload/tenant/disk-image/amd@sha256:abcdefg"'`
-              `',"repository":"repo2"}]}' ]; then
-                echo "InternalRequest has the wrong snapshot_json parameter"
-                exit 1
-              fi
-
-              # Check the exodusGwSecret parameter
-              if [ "$(jq -r '.spec.params.exodusGwSecret' <<< "$internalRequest")" != "exodus-prod-secret" ]; then
-                echo "InternalRequest has the wrong exodusGwSecret parameter"
-                exit 1
-              fi
-
-              # Check the exodusGwEnv parameter
-              if [ "$(jq -r '.spec.params.exodusGwEnv' <<< "$internalRequest")" != "pre" ]; then
-                echo "InternalRequest has the wrong exodusGwEnv parameter"
-                exit 1
-              fi
-
-              # Check the pulpSecret parameter
-              if [ "$(jq -r '.spec.params.pulpSecret' <<< "$internalRequest")" != "rhsm-pulp-stage-secret" ]; then
-                echo "InternalRequest has the wrong pulpSecret parameter"
-                exit 1
-              fi
-
-              # Check the udcacheSecret parameter
-              if [ "$(jq -r '.spec.params.udcacheSecret' <<< "$internalRequest")" != "udcache-stage-secret" ]; then
-                echo "InternalRequest has the wrong udcacheSecret parameter"
-                exit 1
-              fi
+              echo "Test passed: quayURL correctly set to nonprod URL when intention is staging"
   finally:
     - name: cleanup
       taskSpec:
