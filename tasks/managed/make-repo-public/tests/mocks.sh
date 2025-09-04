@@ -7,7 +7,7 @@ function curl() {
   echo Mock curl called with: $* >&2
   echo $* >> $(params.dataDir)/mock_curl.txt
 
-  if [[ "$*" == '-X POST --fail-with-body --retry 3 --header Authorization: Bearer myquaytoken --header Content-Type: application/json --data {"visibility": "public"} https://quay.io/api/v1/repository/redhat-services-prod/myrepo'*'/changevisibility' ]]
+  if [[ "$*" == '-X POST --fail-with-body --retry 3 --header Authorization: Bearer myquaytoken --header Content-Type: application/json --data {"visibility": "public"} https://quay.io/api/v1/repository/redhat-services-'*'/myrepo'*'/changevisibility' ]]
   then
     if [[ "$*" == *redhat-services-prod/myrepofailing* ]]
     then
