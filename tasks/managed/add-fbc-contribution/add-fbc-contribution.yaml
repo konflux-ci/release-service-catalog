@@ -338,9 +338,11 @@ spec:
           results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
           echo "${results}" > "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-${g}-result.json"
 
-          completion_time_raw="$(jq -r '.jsonBuildInfo | fromjson | .updated' <<< "${results}")"
+          # Decompress jsonBuildInfo for processing
+          decompressed_json_build_info="$(jq -r '.jsonBuildInfo' <<< "${results}" | base64 -d | gunzip)"
+          completion_time_raw="$(jq -r '.updated' <<< "${decompressed_json_build_info}")"
           completion_time=$(date +"${timestamp_format}" -d "${completion_time_raw}")
-
+          
           # Process results for each fragment in the batch
           fragments_array=$(jq -r '.fragments' <<< "$group")
           fragment_count=$(jq -r 'length' <<< "$fragments_array")
@@ -356,13 +358,14 @@ spec:
               --arg target_index "$group_target_index" \
               --arg ocp_version "$group_ocp_version" \
               --arg completion_time "$completion_time" \
+              --argjson decompressed_json "${decompressed_json_build_info}" \
             '{
               "fbc_fragment": $fragment,
               "target_index": $target_index,
               "ocp_version": $ocp_version,
               "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
-              "index_image": (.jsonBuildInfo | fromjson | .index_image),
-              "index_image_resolved": (.jsonBuildInfo | fromjson | .index_image_resolved),
+              "index_image": $decompressed_json.index_image,
+              "index_image_resolved": $decompressed_json.index_image_resolved,
               "completion_time": $completion_time,
               "iibLog": .iibLog
             }' <<< "${results}")

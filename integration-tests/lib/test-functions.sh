@@ -60,6 +60,20 @@ check_env_vars() {
         fi
     done
 
+    # Check for optional component2 variables (for multi-component tests)
+    local optional_component2_vars=(
+        "component2_name"
+        "component2_branch"
+        "component2_repo_name"
+        "component2_git_url"
+    )
+    
+    for var_name in "${optional_component2_vars[@]}"; do
+        if [ -n "${!var_name}" ]; then
+            echo "✅ $var_name is set (optional multi-component variable)"
+        fi
+    done
+
     # Special file validation
     if [ -n "$VAULT_PASSWORD_FILE" ] && [ ! -f "$VAULT_PASSWORD_FILE" ]; then
         echo "❌ error: env var VAULT_PASSWORD_FILE points to a non-existent file: $VAULT_PASSWORD_FILE"
@@ -137,6 +151,7 @@ get_build_pipeline_run_url() { # args are ns, app, name
 
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
+# Optional variables: component2_repo_name (for multi-component tests)
 cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
@@ -156,8 +171,15 @@ cleanup_resources() {
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
 
+    # Clean up component repository
     echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
     "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
+    
+    # Clean up component2 repository if it exists and is different from component repo
+    if [ -n "${component2_repo_name}" ] && [ "${component2_repo_name}" != "${component_repo_name}" ]; then
+      echo "Deleting Github repository ${component2_repo_name} ..." >> "${cleanup_log_file}"
+      "${SUITE_DIR}/../scripts/delete-repository.sh" "${component2_repo_name}"
+    fi
 
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
         echo "Deleting test resources..." | tee -a "${cleanup_log_file}"

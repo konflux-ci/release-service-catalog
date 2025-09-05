@@ -290,7 +290,7 @@ spec:
         build=$(check_previous_build "${KRB5_PRINCIPAL}" "$(params.fromIndex)" '$(params.fbcFragments)')
         if [ -n "${build}" ]; then
           echo "=== A previous build for this fragment was found ==="
-          echo "${build}" |tee "$(results.jsonBuildInfo.path)"
+          echo "${build}" | gzip -c | base64 -w0 | tee "$(results.jsonBuildInfo.path)"
           exit 0
         fi
 
@@ -318,16 +318,10 @@ spec:
 
         jq -n '{ "state": "in_progress", "state_reason": "Calling IIB endpoint" }' | tee "$(results.buildState.path)"
         # adds image to the index.
-        curl -u : --negotiate -s -X POST -H "Content-Type: application/json" -d@"${json_input}" --insecure \
-        "${IIB_SERVICE_URL}/builds/fbc-operations" |tee "$(results.jsonBuildInfo.path)"
+        iib_response=$(curl -u : --negotiate -s -X POST \
+          -H "Content-Type: application/json" -d@"${json_input}" --insecure \
+          "${IIB_SERVICE_URL}/builds/fbc-operations")
 
-<<<<<<< Updated upstream
-        # checks if the previous call returned an error.
-        ! jq -e -r ".error | select( . != null )" "$(results.jsonBuildInfo.path)"
-=======
-        # compress and store the response for downstream processing
-        echo "${iib_response}" | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
-        
         # checks if the previous call returned an error and exits if so
         if jq -e -r ".error | select( . != null )" <<< "${iib_response}" >/dev/null; then
             jq -n '{ "state": "failed", "state_reason": "IIB service error" }' | tee "$(results.buildState.path)"
@@ -336,7 +330,9 @@ spec:
             echo -n 1 > "$(results.exitCode.path)"
             exit 1
         fi
->>>>>>> Stashed changes
+        
+        # compress and store the response only after error check passes
+        echo "${iib_response}" | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
       volumeMounts:
         - name: service-account-secret
           mountPath: /mnt/service-account-secret
@@ -361,7 +357,7 @@ spec:
         set -x
 
         watch_build_state() {
-            build_id="$(jq -r ".id" "$(results.jsonBuildInfo.path)")"
+            build_id="$(base64 -d < "$(results.jsonBuildInfo.path)" | gunzip | jq -r ".id")"
             state=""
             while true; do
                 #
@@ -370,7 +366,8 @@ spec:
                 # get state from the build information.
                 state="$(jq -r ".state" <<< "${build_info}")"
                 # remove the history as it breaks the results build up
-                jq -r 'del(.state_history)' <<< "${build_info}" | jq -c . > "$(results.jsonBuildInfo.path)"
+                jq -r 'del(.state_history)' <<< "${build_info}" | jq -c . | \
+                  gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
                 url="$(jq -r ".logs.url" <<< "${build_info}")"
                 echo IIB log url is: "${url}" > "$(results.iibLog.path)"
                 case ${state} in
@@ -380,7 +377,8 @@ spec:
                 esac
             done
             echo
-            jq -cr '{ "state": .state, "state_reason": .state_reason }' "$(results.jsonBuildInfo.path)" \
+            base64 -d < "$(results.jsonBuildInfo.path)" | gunzip | \
+              jq -cr '{ "state": .state, "state_reason": .state_reason }' \
             | tee "$(results.buildState.path)"
             test "${state}" = "complete" && exit 0 || exit 1
         }
@@ -397,7 +395,8 @@ spec:
             echo -n 0 > "$(results.exitCode.path)"
 
             # get the manifest digests
-            indexImageCopy=$(jq -cr .internal_index_image_copy < "$(results.jsonBuildInfo.path)")
+            indexImageCopy=$(base64 -d < "$(results.jsonBuildInfo.path)" | gunzip | \
+              jq -cr .internal_index_image_copy)
             # Use this to obtain the manifest digests for each arch in manifest list
             indexImageDigestsRaw=$(skopeo inspect --retry-times 3 --raw "docker://${indexImageCopy}")
             # according the IIB team,

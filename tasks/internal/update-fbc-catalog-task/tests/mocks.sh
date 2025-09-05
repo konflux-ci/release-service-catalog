@@ -92,7 +92,8 @@ function curl() {
         mock_error="true"
     fi
 
-    buildJson="$(cat $(results.jsonBuildInfo.path))"
+    # Decompress the jsonBuildInfo since task now uses compression
+    buildJson="$(base64 -d < $(results.jsonBuildInfo.path) | gunzip)"
     mock_build_progress "$(awk 'END{ print NR }' mock_build_progress_calls)" "$(base64 <<< "${buildJson}")" "$mock_error" | tee build_json
     export -n buildJson
     buildJson=$(cat build_json)
@@ -126,7 +127,8 @@ function curl() {
     esac
     # Export the updated buildJson for use in subsequent calls
     export buildJson
-    echo "${buildJson}"
+    # Compress the output since task expects compressed results
+    echo "${buildJson}" | gzip -c | base64 -w0
   else
     echo ""
   fi
