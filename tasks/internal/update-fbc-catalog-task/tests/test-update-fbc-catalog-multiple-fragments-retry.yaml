@@ -2,24 +2,24 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-update-fbc-catalog-retry-in-progress
+  name: test-update-fbc-catalog-multiple-fragments-retry
 spec:
-  description: Tests the retry of the pipeline considering a fragment that is being built by IIB (in_progress) using a
-    set of parameters in consonance with a production fbc release, hence for this test the mocked commands and functions
-    emulates the behavior of a fbc opt in fragment that is being built by IIB, so it skips the build phase and sets the
-    results, including the non-pipeline one "mock_case", to determine if the proper scenario was executed.
-    The behavior of the mocks in this test is determined by the test name.
+  description: |
+    Tests the retry scenario of the pipeline when using multiple fragments in the fbcFragments array. This test
+    validates the retry logic when there's an existing build for one of the fragments in the array, ensuring that
+    the task can detect previous builds using any fragment from the array and handle retry appropriately. The behavior
+    in this test is determined by the test name.
   tasks:
     - name: run-task
       taskRef:
         name: update-fbc-catalog-task
       params:
         - name: fbcFragments
-          value: '["registry.io/image0@sha256:0000"]'
+          value: '["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"]'
         - name: fromIndex
           value: "quay.io/scoheb/fbc-index-testing:latest"
         - name: targetIndex
-          value: "quay.io/fbc/catalog:test"
+          value: "quay.io/fbc/catalog:complete"
         - name: buildTags
           value: "[]"
         - name: addArches
@@ -70,7 +70,7 @@ spec:
               #!/bin/bash
               set -x
 
-              # the jsonBuild mockes has 13 keys on it
+              # the jsonBuild mocks has 13 keys on it for retry scenarios
               keyLength=$(jq '. | length' <<< "${JSON_BUILDINFO}")
               if [ "$keyLength" -ne 13 ]; then
                 echo "The task did not save a valid json in jsonBuildInfo result"
@@ -78,8 +78,9 @@ spec:
               fi
 
               mock_case=$(jq -r '.mock_case' <<< "${JSON_BUILDINFO}")
-              if [[ ! "${mock_case}" =~ .*retry-in-progress.* ]]; then
-                echo "The task did not test the correct case for in progress retries"
+              if [[ ! "${mock_case}" =~ .*retry-complete.* ]]; then
+                echo "The task did not test the correct case for multiple fragments retry" \
+                  "(expected: retry-complete, got: $mock_case)"
                 exit 1
               fi
 
@@ -93,7 +94,7 @@ spec:
                 '. |[.fbc_opt_in, .overwrite_fromindex_image, .publish_index_image,.sign_index_image] |@csv' \
                 <<< "${GENERIC_RESULT}")
               if [ "$genericResult" != '"true","true","true","true"' ]; then
-                echo "The stask did not save the correct values in genericResult result"
+                echo "The task did not save the correct values in genericResult result"
                 exit 1
               fi
 
@@ -111,6 +112,17 @@ spec:
               if [ "$(params.exitCode)" != "0" ]; then
                 echo "The task did not finish with a successful exit code"
                 exit 1
+              fi
+
+              # Verify that the retry logic worked for multiple fragments
+              # Check that either fbc_fragments array matches or one of the individual fragments matches
+              fbc_fragments=$(jq -r '.fbc_fragments' <<< "${JSON_BUILDINFO}")
+              if [ "$fbc_fragments" != "null" ]; then
+                fragment_count=$(jq '. | length' <<< "$fbc_fragments")
+                if [ "$fragment_count" -lt 1 ]; then
+                  echo "The task retry did not preserve fragment information correctly"
+                  exit 1
+                fi
               fi
       runAfter:
         - run-task

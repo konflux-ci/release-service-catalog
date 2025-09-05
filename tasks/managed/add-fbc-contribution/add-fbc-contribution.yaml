@@ -151,8 +151,6 @@ spec:
         default_build_timeout_seconds="3600"
         default_request_timeout_seconds="3600"
 
-        build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
-        add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
         hotfix=$(jq -r '.fbc.hotfix // "false"' "${DATA_FILE}")
         pre_ga=$(jq -r '.fbc.preGA // "false"' "${DATA_FILE}")
         staged_index=$(jq -r '.fbc.stagedIndex // "false"' "${DATA_FILE}")
@@ -216,6 +214,10 @@ spec:
         
         # Build enriched components with resolved target_index
         enriched_components='[]'
+        # Read global buildTags and addArches from data file
+        build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
+        add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
+        
         for((i=0; i<LENGTH; i++)); do
           ocp_version=$(jq -cr --argjson i "$i" '.components[$i].ocpVersion' "${SNAPSHOT_PATH}")
           fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
@@ -258,13 +260,15 @@ spec:
               addArches: $addArches
             }')
           
-          enriched_components=$(jq --argjson component "$enriched_component" '. += [$component]' <<< "$enriched_components")
+          enriched_components=$(jq --argjson component "$enriched_component" \
+            '. += [$component]' <<< "$enriched_components")
         done
 
-        # Group components by (fromIndex, targetIndex, ocpVersion, buildTags, addArches)
+        # Group components by (fromIndex, targetIndex, ocpVersion)
+        # buildTags and addArches are global IIB parameters, not per-fragment
         echo "Grouping components by batching criteria..."
         groups=$(jq -r '
-          group_by([.fromIndex, .targetIndex, .ocpVersion, (.buildTags | tostring), (.addArches | tostring)]) |
+          group_by([.fromIndex, .targetIndex, .ocpVersion]) |
           to_entries |
           map({
             key: .key,
@@ -272,12 +276,12 @@ spec:
             fromIndex: .value[0].fromIndex,
             targetIndex: .value[0].targetIndex,
             ocpVersion: .value[0].ocpVersion,
-            buildTags: .value[0].buildTags,
-            addArches: .value[0].addArches,
+            buildTags: $buildTags,
+            addArches: $addArches,
             fragments: [.value[].fbcFragment],
             count: (.value | length)
           })
-        ' <<< "$enriched_components")
+        ' --argjson buildTags "$build_tags" --argjson addArches "$add_arches" <<< "$enriched_components")
 
         echo "Created $(jq -r 'length' <<< "$groups") batch groups"
         
@@ -290,9 +294,8 @@ spec:
           group_from_index=$(jq -r '.fromIndex' <<< "$group")
           group_target_index=$(jq -r '.targetIndex' <<< "$group")
           group_ocp_version=$(jq -r '.ocpVersion' <<< "$group")
-          group_build_tags=$(jq -r '.buildTags' <<< "$group")
-          group_add_arches=$(jq -r '.addArches' <<< "$group")
-          group_fragments=$(jq -r '.fragments' <<< "$group")
+          # buildTags and addArches are global, use values from data file
+          group_fragments=$(jq '.fragments' <<< "$group")
           group_fragment_count=$(jq -r '.count' <<< "$group")
           
           echo "Processing batch group $((g+1))/$group_count:"
@@ -311,12 +314,12 @@ spec:
           internal-request --pipeline "update-fbc-catalog" \
               -p fromIndex="${group_from_index}" \
               -p targetIndex="${group_target_index}" \
-              -p fbcFragments="${group_fragments}" \
+              -p fbcFragments="$(printf '%s' "${group_fragments}" | jq -c .)" \
               -p iibServiceAccountSecret="${iib_service_account_secret}" \
               -p publishingCredentials="${publishing_credentials}" \
               -p buildTimeoutSeconds="${build_timeout_seconds}" \
-              -p buildTags="${group_build_tags}" \
-              -p addArches="${group_add_arches}" \
+              -p buildTags="$(jq -c . <<< "${build_tags}")" \
+              -p addArches="$(jq -c . <<< "${add_arches}")" \
               -p hotfix="${hotfix}" \
               -p stagedIndex="${staged_index}" \
               -p taskGitUrl="$(params.taskGitUrl)" \
@@ -396,7 +399,8 @@ spec:
           if [ "$mustPublishIndexImage" = "true" ]; then
             echo "Index image will be published for batch group $((g+1))."
           elif [ "$fbc_opt_in" = "false" ]; then
-            echo "Index image will not be published for batch group $((g+1)) because fbc_opt_in is set to false in Pyxis."
+            echo "Index image will not be published for batch group $((g+1)) because" \
+              "fbc_opt_in is set to false in Pyxis."
             echo "If this is the first time you are releasing, make sure you request fbc_opt_in in Pyxis."
           elif [ "${staged_index}" = "true" ]; then
             echo "Index image will not be published for batch group $((g+1)) because this is a staging release."
@@ -452,7 +456,8 @@ spec:
         if [[ "$LENGTH" -gt 1 && "$VERSIONS_COUNT" == 1 ]]; then
           # keep only the most up to date build index_image (use completion_time since .updated may not exist)
           RESULTS_TEMP_FILE="/tmp/results-temp.json"
-          jq -r  '.components = [ .components | sort_by(.completion_time) | last ]' "$RESULTS_FILE" > "$RESULTS_TEMP_FILE"
+          jq -r '.components = [ .components | sort_by(.completion_time) | last ]' \
+            "$RESULTS_FILE" > "$RESULTS_TEMP_FILE"
           mv "$RESULTS_TEMP_FILE" "$RESULTS_FILE"
         fi
         echo "Results file:"

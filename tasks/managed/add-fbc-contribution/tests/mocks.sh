@@ -3,10 +3,10 @@ set -eux
 
 # mocks to be injected into task step scripts
 function internal-request() {
-  echo $* >> $(params.dataDir)/mock_internal-request.txt
+  printf '%s\n' "$*" >> $(params.dataDir)/mock_internal-request.txt
 
   # set to async
-  /home/utils/internal-request $@ -s false
+  /home/utils/internal-request "$@" -s false
 
   sleep 1
   NAME=$(kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
@@ -19,7 +19,7 @@ function internal-request() {
       exit 1
   fi
 
-  if [[ "$*" == *"fbcFragment=fail.io"* ]]; then
+  if [[ "$*" == *"fbcFragments="*"fail.io"* ]]; then
       set_ir_status $NAME 1
   else
       set_ir_status $NAME 0

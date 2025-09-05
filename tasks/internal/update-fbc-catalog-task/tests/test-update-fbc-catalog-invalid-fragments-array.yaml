@@ -2,18 +2,18 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-update-fbc-catalog-staged-index
+  name: test-update-fbc-catalog-invalid-fragments-array
 spec:
-  description: Tests the pipeline using a set of parameters in consonance with a stage fbc release. In this test
-    the mocked commands and functions emulates the behavior of a fbc opt in fragment, but with the stagedIndex parameter
-    set to "true", mocking a successful build but with the keys the "genericResult" set to "false" but the "fbc_opt_in".
+  description: Tests the pipeline error handling when fbcFragments parameter contains invalid JSON (not a JSON array).
+    This test validates that the task fails gracefully with proper error message when given a malformed fbcFragments
+    parameter that is not a valid JSON array format.
   tasks:
     - name: run-task
       taskRef:
         name: update-fbc-catalog-task
       params:
         - name: fbcFragments
-          value: '["registry.io/image0@sha256:0000"]'
+          value: 'registry.io/image0@sha256:0000'  # Invalid - not a JSON array
         - name: fromIndex
           value: "quay.io/scoheb/fbc-index-testing:latest"
         - name: targetIndex
@@ -26,8 +26,6 @@ spec:
           value: "iib-service-account-secret"
         - name: publishingCredentials
           value: "publishing-credentials"
-        - name: stagedIndex
-          value: true
     - name: check-result
       params:
         - name: jsonBuildInfo
@@ -70,42 +68,28 @@ spec:
               #!/bin/bash
               set -x
 
-              # the jsonBuild mockes has 12 keys on it
-              keyLength=$(jq '. | length' <<< '$(params.jsonBuildInfo)')
-              if [ "$keyLength" -ne 12 ]; then
-                echo "The task did not save a valid json in jsonBuildInfo result"
+              # This test expects the task to fail due to invalid JSON array
+              if [ "$(params.exitCode)" = "0" ]; then
+                echo "The task should have failed with invalid fbcFragments parameter but succeeded"
                 exit 1
               fi
 
-              state="$(jq -cr .state <<< "${BUILD_STATE}")"
-              if [ "$state" != "complete" ]; then
-                echo "The task did not save a completed IIB build in buildState result"
+              # The task should fail early due to JSON validation, so most results should be empty
+              if [ "$(params.exitCode)" != "1" ]; then
+                echo "The task did not exit with the expected error code (expected: 1, got: $(params.exitCode))"
                 exit 1
               fi
 
-              genericResult=$(jq -cr \
-                '. |[.fbc_opt_in, .overwrite_fromindex_image, .publish_index_image,.sign_index_image] |@csv' \
-                <<< "${GENERIC_RESULT}")
-
-              if [ "$genericResult" != '"true","false","false","false"' ]; then
-                echo "The stask did not save the correct values in genericResult result"
-                exit 1
+              # Check that the task failed early and didn't proceed to IIB API call
+              # The JSON_BUILDINFO should be empty or contain error information
+              if [ -n "${JSON_BUILDINFO}" ] && [ "${JSON_BUILDINFO}" != "null" ] && [ "${JSON_BUILDINFO}" != "" ]; then
+                # If there's build info, it shouldn't be a successful IIB response
+                if jq -e '.id' <<< "${JSON_BUILDINFO}" >/dev/null 2>&1; then
+                  echo "The task should not have made a successful IIB API call with invalid fbcFragments"
+                  exit 1
+                fi
               fi
 
-              if [ "$(params.indexImageDigests)" != "sha256:000 sha256:001" ]; then
-                echo "The task did not save a valid digest image in the indexImageDigests result"
-                exit 1
-              fi
-
-              iibLog=$(awk '{match($0, /https.*/); print(substr($0, RSTART)) }' <<< "$(params.iibLog)")
-              if [  "$iibLog" != "https://fakeiib.host/api/v1/builds/1/logs" ]; then
-                echo "The task did not save a valid iib log url in the iibLog result"
-                exit 1
-              fi
-
-              if [ "$(params.exitCode)" != "0" ]; then
-                echo "The task did not finish with a successful exit code"
-                exit 1
-              fi
+              echo "Task correctly failed with invalid fbcFragments JSON array parameter"
       runAfter:
         - run-task

@@ -12,7 +12,7 @@ spec:
   params:
     - name: fbcFragments
       type: string
-      description: FBC fragments built by HACBS as JSON array (e.g. ["fragment1", "fragment2"])
+      description: FBC fragments built by Konflux as JSON array (e.g. ["fragment1", "fragment2"])
     - name: fromIndex
       type: string
       description: >-
@@ -202,15 +202,42 @@ spec:
 
         set -x
         # validate fbcFragments parameter is valid JSON array
+        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
         if ! jq -e . <<<'$(params.fbcFragments)' >/dev/null 2>&1; then
           echo "Error: fbcFragments parameter must be a valid JSON array"
+          jq -n '{ "state": "failed", "state_reason": "Invalid fbcFragments parameter" }' \
+            | tee "$(results.buildState.path)"
+          echo '{}' | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
+          jq -n '{ "fbc_opt_in": "false", "overwrite_fromindex_image": "false", \
+            "publish_index_image": "false", "sign_index_image": "false" }' > "$(results.genericResult.path)"
+          echo -n "" > "$(results.indexImageDigests.path)"
+          echo -n "" > "$(results.iibLog.path)"
+          echo -n 1 > "$(results.exitCode.path)"
+          exit 1
+        fi
+        
+        # check if fbcFragments array is empty
+        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
+        if [ "$(echo '$(params.fbcFragments)' | jq 'length')" -eq 0 ]; then
+          echo "Error: fbcFragments array is empty - no fragments to process"
+          jq -n '{ "state": "failed", "state_reason": "Empty fbcFragments array" }' | tee "$(results.buildState.path)"
+          echo '{}' | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
+          jq -n '{ "fbc_opt_in": "false", "overwrite_fromindex_image": "false", \
+            "publish_index_image": "false", "sign_index_image": "false" }' > "$(results.genericResult.path)"
+          echo -n "" > "$(results.indexImageDigests.path)"
+          echo -n "" > "$(results.iibLog.path)"
+          echo -n 1 > "$(results.exitCode.path)"
           exit 1
         fi
         
         # check if these fbc fragments are opt-in
         echo "Processing fragments: $(params.fbcFragments)"
         # Extract pull specs from all fragments and remove duplicates
-        PULL_SPEC_LIST=$(echo '$(params.fbcFragments)' | jq -r '.[]' | xargs -I {} sh -c 'opm render "$1" | jq -r "select(.schema == \"olm.bundle\") | \"\(.image)\" | split(\"@\")[0]"' _ {} | sort | uniq)
+        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
+        PULL_SPEC_LIST=$(echo '$(params.fbcFragments)' | jq -r '.[]' | \
+          xargs -I {} sh -c 'opm render "$1" | jq -r \
+            "select(.schema == \"olm.bundle\") | \"\(.image)\" | split(\"@\")[0]"' _ {} | \
+          sort | uniq)
 
         fbcOptIn="true"
         for PULL_SPEC in ${PULL_SPEC_LIST}; do
@@ -259,6 +286,7 @@ spec:
 
         # if it finds a build which is completed or in progress, it should exit this step and jump to
         # the next step `s-wait-for-build-state` which will watch the build until it is completed.
+        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
         build=$(check_previous_build "${KRB5_PRINCIPAL}" "$(params.fromIndex)" '$(params.fbcFragments)')
         if [ -n "${build}" ]; then
           echo "=== A previous build for this fragment was found ==="
@@ -288,13 +316,27 @@ spec:
           if(.add_arches | length) == 0 then del(.add_arches) else . end |
           if(.build_tags | length) == 0 then del(.build_tags) else . end' "${json_raw_input}" > "${json_input}"
 
-        echo "Calling IIB endpoint" > "$(results.buildState.path)"
+        jq -n '{ "state": "in_progress", "state_reason": "Calling IIB endpoint" }' | tee "$(results.buildState.path)"
         # adds image to the index.
         curl -u : --negotiate -s -X POST -H "Content-Type: application/json" -d@"${json_input}" --insecure \
         "${IIB_SERVICE_URL}/builds/fbc-operations" |tee "$(results.jsonBuildInfo.path)"
 
+<<<<<<< Updated upstream
         # checks if the previous call returned an error.
         ! jq -e -r ".error | select( . != null )" "$(results.jsonBuildInfo.path)"
+=======
+        # compress and store the response for downstream processing
+        echo "${iib_response}" | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
+        
+        # checks if the previous call returned an error and exits if so
+        if jq -e -r ".error | select( . != null )" <<< "${iib_response}" >/dev/null; then
+            jq -n '{ "state": "failed", "state_reason": "IIB service error" }' | tee "$(results.buildState.path)"
+            echo -n "" > "$(results.indexImageDigests.path)"
+            echo -n "" > "$(results.iibLog.path)"
+            echo -n 1 > "$(results.exitCode.path)"
+            exit 1
+        fi
+>>>>>>> Stashed changes
       volumeMounts:
         - name: service-account-secret
           mountPath: /mnt/service-account-secret
@@ -373,7 +415,12 @@ spec:
         else
             if [ ${BUILDEXIT} -eq 124 ]; then
                 echo "Timeout while waiting for the build to finish"
-                echo "Build timeout" > "$(results.buildState.path)"
+                jq -n '{ "state": "failed", "state_reason": "Build timeout" }' | tee "$(results.buildState.path)"
+            else
+                echo "Build failed with exit code ${BUILDEXIT}"
+                jq -n --arg exit_code "$BUILDEXIT" \
+                  '{ "state": "failed", "state_reason": ("Build failed with exit code " + $exit_code) }' \
+                  | tee "$(results.buildState.path)"
             fi
             echo -n "" > "$(results.indexImageDigests.path)"
             echo -n "$BUILDEXIT" > "$(results.exitCode.path)"

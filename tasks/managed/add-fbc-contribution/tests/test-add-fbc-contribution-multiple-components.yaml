@@ -195,47 +195,60 @@ spec:
               internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
                 | xargs)"
 
+              # With different OCP versions (v4.12 vs v4.13), we expect 2 separate InternalRequests
+              num_requests=$(wc -w <<< "$internalRequests")
+              if [ "$num_requests" -ne 2 ]; then
+                echo "Expected 2 separate InternalRequests, but got $num_requests"
+                exit 1
+              fi
+
+              # Verify target indexes in results file
+              if [ "$(jq -r '.components[0].target_index' "$RESULTS_FILE")" != \
+                "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
+                echo "targetIndex #1 does not match"
+                exit 1
+              fi
+
+              if [ "$(jq -r '.components[1].target_index' "$RESULTS_FILE")" != \
+                "quay.io/scoheb/fbc-target-index-testing:v4.13" ]; then
+                echo "targetIndex #2 does not match"
+                exit 1
+              fi
+
+              # Check each InternalRequest
               i=0
               for internalRequest in $internalRequests; do
                 requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
 
-                if [ "$(jq -r '.components[0].target_index' "$RESULTS_FILE")" != \
-                  "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
-                  echo "targetIndex #1 does not match"
-                  exit 1
-                fi
-
-                if [ "$(jq -r '.components[1].target_index' "$RESULTS_FILE")" != \
-                  "quay.io/scoheb/fbc-target-index-testing:v4.13" ]; then
-                  echo "targetIndex #2 does not match"
-                  exit 1
-                fi
-
                 fromIndex="quay.io/scoheb/fbc-index-testing:latest"
                 if [ "$(jq -r '.fromIndex' <<< "${requestParams}")" != "${fromIndex}" ]; then
-                  echo "fromIndex does not match"
+                  echo "fromIndex does not match for request $i"
                   exit 1
                 fi
 
                 if [ "$(jq -r '.buildTimeoutSeconds' <<< "${requestParams}")" != "420" ]
                 then
-                  echo "buildTimeoutSeconds does not match"
+                  echo "buildTimeoutSeconds does not match for request $i"
                   exit 1
                 fi
 
-                if [ "$(jq -r '.fbcFragment' <<< "${requestParams}")" != "registry.io/image${i}@sha256:0000" ]
-                then
-                  echo "fbcFragment does not match"
+                # Check fbcFragments array (each request should have 1 fragment since different criteria)
+                fbcFragments=$(jq -r '.fbcFragments' <<< "${requestParams}" | jq -c .)
+                expected_fragment="registry.io/image${i}@sha256:0000"
+                expected_array="[\"$expected_fragment\"]"
+                
+                if [ "$(jq -c -S '.' <<< "$fbcFragments")" != "$(jq -c -S '.' <<< "$expected_array")" ]; then
+                  echo "fbcFragments array does not match for request $i. Expected: $expected_array, Got: $fbcFragments"
                   exit 1
                 fi
 
                 if [ "$(jq -r '.taskGitUrl' <<< "${requestParams}")" != "http://localhost" ]; then
-                  echo "taskGitUrl image does not match"
+                  echo "taskGitUrl does not match for request $i"
                   exit 1
                 fi
 
                 if [ "$(jq -r '.taskGitRevision' <<< "${requestParams}")" != "main" ]; then
-                  echo "taskGitRevision image does not match"
+                  echo "taskGitRevision does not match for request $i"
                   exit 1
                 fi
 

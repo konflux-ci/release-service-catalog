@@ -2,11 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-add-fbc-contribution-multiple-components-hotfix
+  name: test-add-fbc-contribution-mixed-batching
 spec:
   description: >
-    Tests running the add-fbc-contribution when the snapshot has multi-components and the FBC data
-    is for a hotfix fbc catalog
+    Tests running the add-fbc-contribution with mixed batching criteria.
+    Components 1, 2, & 3 should batch together (same fromIndex, targetIndex, ocpVersion).
+    Component 4 should be separate (different ocpVersion).
+    Should create 2 total InternalRequests.
+    buildTags and addArches are global parameters, not batching criteria.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -70,7 +73,23 @@ spec:
                   {
                     "name": "comp1",
                     "containerImage": "registry.io/image1@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0",
+                    "repository": "prod-registry.io/prod-location1",
+                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
+                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12",
+                    "ocpVersion": "v4.12"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2@sha256:0000",
+                    "repository": "prod-registry.io/prod-location2",
+                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
+                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12",
+                    "ocpVersion": "v4.12"
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "registry.io/image3@sha256:0000",
+                    "repository": "prod-registry.io/prod-location3",
                     "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
                     "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.13",
                     "ocpVersion": "v4.13"
@@ -84,9 +103,9 @@ spec:
                 "fbc": {
                   "fbcPublishingCredentials": "test-fbc-publishing-credentials",
                   "buildTimeoutSeconds": 420,
-                  "hotfix": true,
-                  "issueId": "bz123456",
-                  "buildTimeoutSeconds": 420
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["tag1", "tag2"],
+                  "addArches": ["amd64", "arm64"]
                 }
               }
               EOF
@@ -198,69 +217,111 @@ spec:
               internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
                 | xargs)"
 
-              i=0
-              for internalRequest in $internalRequests; do
-                requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
+              # Mixed batching should create exactly 2 InternalRequests
+              # Batch 1: comp0 + comp1 + comp2 (same fromIndex, targetIndex, ocpVersion v4.12)
+              # Batch 2: comp3 (different ocpVersion v4.13)
+              num_requests=$(wc -w <<< "$internalRequests")
+              if [ "$num_requests" -ne 2 ]; then
+                echo "Expected 2 InternalRequests with mixed batching, but got $num_requests"
+                exit 1
+              fi
 
-                TS=1696946200 # ts set in the mocked `date`
-                if [ "$(jq -r '.components[0].target_index' "$RESULTS_FILE")" != \
-                  "quay.io/scoheb/fbc-target-index-testing:v4.12-bz123456-${TS}" ]; then
-                  echo "targetIndex #1 does not match"
-                  exit 1
-                fi
-                if [ "$(jq -r '.components[1].target_index' "$RESULTS_FILE")" != \
-                  "quay.io/scoheb/fbc-target-index-testing:v4.13-bz123456-${TS}" ]; then
-                  echo "targetIndex #2 does not match"
-                  exit 1
-                fi
+              # Create array of requests sorted by creation time
+              read -ra requests_array <<< "$internalRequests"
 
-                fromIndex="quay.io/scoheb/fbc-index-testing:latest"
-                if [ "$(jq -r '.fromIndex' <<< "${requestParams}")" != "${fromIndex}" ]; then
-                  echo "fromIndex does not match"
-                  exit 1
-                fi
+              # Check first request - should contain comp0, comp1, and comp2 batched together (v4.12)
+              request1="${requests_array[0]}"
+              params1=$(kubectl get internalrequest "$request1" -o jsonpath="{.spec.params}")
+              
+              fromIndex="quay.io/scoheb/fbc-index-testing:latest"
+              if [ "$(jq -r '.fromIndex' <<< "$params1")" != "$fromIndex" ]; then
+                echo "fromIndex does not match for batch 1"
+                exit 1
+              fi
 
-                if [ "$(jq -r '.buildTimeoutSeconds' <<< "${requestParams}")" != "420" ]
-                then
-                  echo "buildTimeoutSeconds does not match"
-                  exit 1
-                fi
+              # Check fbcFragments for first batch (should contain 3 fragments)
+              fragments1=$(jq -r '.fbcFragments' <<< "$params1" | jq -c .)
+              expected_batch1='["registry.io/image0@sha256:0000","registry.io/image1@sha256:0000","registry.io/image2@sha256:0000"]'
+              sorted_actual1=$(jq -c -S '.' <<< "$fragments1")
+              sorted_expected1=$(jq -c -S '.' <<< "$expected_batch1")
+              
+              if [ "$sorted_actual1" != "$sorted_expected1" ]; then
+                echo "fbcFragments for batch 1 do not match. Expected: $sorted_expected1, Got: $sorted_actual1"
+                exit 1
+              fi
 
-                fragments=$(jq -r '.fbcFragments' <<< "${requestParams}" | jq -c .)
-                expected_fragment="registry.io/image${i}@sha256:0000"
-                expected_fragments="[\"${expected_fragment}\"]"
-                if [ "$(jq -c -S '.' <<< "$fragments")" != "$(jq -c -S '.' <<< "$expected_fragments")" ]; then
-                  echo "fbcFragments does not match for request $i. Expected: $expected_fragments, Got: $fragments"
-                  exit 1
-                fi
+              # Check second request - should contain only comp3 (v4.13)
+              request2="${requests_array[1]}"
+              params2=$(kubectl get internalrequest "$request2" -o jsonpath="{.spec.params}")
+              
+              fragments2=$(jq -r '.fbcFragments' <<< "$params2" | jq -c .)
+              expected_batch2='["registry.io/image3@sha256:0000"]'
+              
+              if [ "$(jq -c -S '.' <<< "$fragments2")" != "$(jq -c -S '.' <<< "$expected_batch2")" ]; then
+                echo "fbcFragments for batch 2 do not match. Expected: $expected_batch2, Got: $fragments2"
+                exit 1
+              fi
 
-                if [ "$(jq -r '.taskGitUrl' <<< "${requestParams}")" != "http://localhost" ]; then
-                  echo "taskGitUrl image does not match"
-                  exit 1
-                fi
-
-                if [ "$(jq -r '.taskGitRevision' <<< "${requestParams}")" != "main" ]; then
-                  echo "taskGitRevision image does not match"
-                  exit 1
-                fi
-
-                if [ "$(params.mustPublishIndexImage)" != "false" ]; then
-                  echo "Unexpected value for mustPublishIndexImage: $(params.mustPublishIndexImage)"
-                  exit 1
-                fi
-
-                if [ "$(params.isFbcOptIn)" != "true" ]; then
-                  echo "Unexpected value for fbc_opt_in: $(params.isFbcOptIn)"
+              # Verify common parameters for all requests
+              for request in "${requests_array[@]}"; do
+                params=$(kubectl get internalrequest "$request" -o jsonpath="{.spec.params}")
+                
+                if [ "$(jq -r '.buildTimeoutSeconds' <<< "$params")" != "420" ]; then
+                  echo "buildTimeoutSeconds does not match for request $request"
                   exit 1
                 fi
 
-                num_images="$(wc -w <<< "$(jq -r '.components[].image_digests[]' "$RESULTS_FILE")")"
-                if [ "$num_images" -ne 4 ]; then
-                  echo "Unexpected value for number of image digests: $num_images"
+                if [ "$(jq -r '.taskGitUrl' <<< "$params")" != "http://localhost" ]; then
+                  echo "taskGitUrl does not match for request $request"
                   exit 1
                 fi
-                i=$(( i+1 ))
+
+                if [ "$(jq -r '.taskGitRevision' <<< "$params")" != "main" ]; then
+                  echo "taskGitRevision does not match for request $request"
+                  exit 1
+                fi
               done
+
+              # Verify pipeline results
+              if [ "$(params.mustPublishIndexImage)" != "false" ]; then
+                echo "Unexpected value for mustPublishIndexImage: $(params.mustPublishIndexImage)"
+                exit 1
+              fi
+
+              if [ "$(params.isFbcOptIn)" != "true" ]; then
+                echo "Unexpected value for fbc_opt_in: $(params.isFbcOptIn)"
+                exit 1
+              fi
+
+              # Verify results file has correct number of components
+              num_components=$(jq -r '.components | length' "$RESULTS_FILE")
+              if [ "$num_components" -ne 4 ]; then
+                echo "Expected 4 components in results file, but got $num_components"
+                exit 1
+              fi
+
+              # Verify that global buildTags and addArches are used for both batches
+              for request in "${requests_array[@]}"; do
+                params=$(kubectl get internalrequest "$request" -o jsonpath="{.spec.params}")
+                
+                # Check global buildTags
+                buildTags=$(jq -r '.buildTags' <<< "$params" | jq -c .)
+                expected_build_tags='["tag1","tag2"]'
+                if [ "$(jq -c -S '.' <<< "$buildTags")" != "$(jq -c -S '.' <<< "$expected_build_tags")" ]; then
+                  echo "buildTags do not match for request $request. Expected: $expected_build_tags, Got: $buildTags"
+                  exit 1
+                fi
+                
+                # Check global addArches
+                addArches=$(jq -r '.addArches' <<< "$params" | jq -c .)
+                expected_add_arches='["amd64","arm64"]'
+                if [ "$(jq -c -S '.' <<< "$addArches")" != "$(jq -c -S '.' <<< "$expected_add_arches")" ]; then
+                  echo "addArches do not match for request $request. Expected: $expected_add_arches, Got: $addArches"
+                  exit 1
+                fi
+              done
+
+              echo "Mixed batching test passed successfully!"
       runAfter:
         - run-task
   finally:

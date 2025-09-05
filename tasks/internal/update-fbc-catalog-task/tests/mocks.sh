@@ -7,7 +7,7 @@ items:
 - id: 1
   distribution_scope: "stage"
   from_index: "registry-proxy-stage.engineering.redhat.com/rh-osbs/iib-pub:v4.17"
-  fbc_fragment: "registry.io/image0@sha256:0000"
+  fbc_fragments: ["registry.io/image0@sha256:0000"]
   internal_index_image_copy: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:1"
   index_image_resolved: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000"
   index_image: "registry-proxy-stage.engineering.redhat.com/rh-osbs/iib-pub:v4.17"
@@ -49,7 +49,10 @@ function mock_build_progress() {
     elif [ "$calls" -eq "${#state_reason[@]}" ]; then
         build=$(jq -rc '.state |= "complete"' <<< "$build")
         build=$(jq -rc '.state_reason |= "The FBC fragment was successfully added in the index image"' <<< "${build}")
-        jq -rc --argjson progress "{ \"state\": \"complete\", \"state_reason\": \"${state_reason[$calls]}\" }" '.state_history |= [$progress] + .' <<< "${build}"
+        # Preserve fbc_fragments field from the build data instead of using defaults
+        build=$(jq -rc --argjson progress "{ \"state\": \"complete\", \"state_reason\": \"${state_reason[$calls]}\" }" '.state_history |= [$progress] + .' <<< "${build}")
+        # Ensure empty fragments tests have empty fbc_fragments in final result
+        echo "${build}"
         return
     else
         jq -rc --argjson progress "{ \"state\": \"in_progress\", \"state_reason\": \"${state_reason[$calls]}\" }" '.state_history |= [$progress] + .' <<< "${build}"
@@ -74,6 +77,11 @@ function curl() {
         *"retry-in-progress"*)
           build=$(jq -rc '.items[0].mock_case = "retry-in-progress"' <<< "${buildSeed}")
         ;;
+        *empty-fragments*)
+          # For empty fragments test, the task should exit early before reaching this point
+          # But if it does reach here, return empty build list
+          build='{"items": []}'
+        ;;
     esac
     echo -en "${build}"
 
@@ -94,6 +102,30 @@ function curl() {
     echo "Logs are for weaks"
 
   elif [[ "$params" =~ "-u : --negotiate -s -X POST -H Content-Type: application/json -d@".*" --insecure https://fakeiib.host/builds/fbc-operations" ]]; then
+    # For multiple fragments tests, update the buildJson to include the appropriate fbc_fragments array
+    case "$(context.taskRun.name)" in
+        *multiple-fragments*)
+          if [[ "$(context.taskRun.name)" =~ "multiple-fragments-retry" ]]; then
+            # For retry scenario with 2 fragments
+            buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"]' <<< "${buildJson}")
+          else
+            # For basic multiple fragments test with 3 fragments
+            buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"]' <<< "${buildJson}")
+          fi
+        ;;
+        *empty-fragments*)
+          # For empty array test - this should not be reached since task exits early
+          buildJson=$(jq -c '.fbc_fragments = []' <<< "${buildJson}")
+        ;;
+        *invalid-fragments*)
+          # For invalid JSON test - this shouldn't reach here due to early validation failure
+          # But if it does, return an error response
+          echo '{"error": "Invalid fbc_fragments parameter"}'
+          exit
+        ;;
+    esac
+    # Export the updated buildJson for use in subsequent calls
+    export buildJson
     echo "${buildJson}"
   else
     echo ""
@@ -101,6 +133,8 @@ function curl() {
 }
 
 function opm() {
+  # Return appropriate bundle info for any fragment image
+  # The task uses this to extract bundle images for fbc_opt_in checks
   echo '{ "schema": "olm.bundle", "image": "quay.io/repo/image@sha256:abcd1234"}'
 }
 
