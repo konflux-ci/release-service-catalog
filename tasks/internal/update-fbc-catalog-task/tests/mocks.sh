@@ -40,8 +40,9 @@ function mock_build_progress() {
     if [ -n "$mock_error" ]; then
         build=$(jq -rc '.state |= "failed"' <<< "$build")
         build=$(jq -rc '.state_reason |= "IIB Mocked Error"' <<< "${build}")
-        jq -rc --argjson progress "{ \"state\": \"failed\", \"state_reason\": \"IIB Mocked Error\" }" '.state_history |= [$progress] + .' <<< "${build}"
-        exit
+        build=$(jq -rc --argjson progress "{ \"state\": \"failed\", \"state_reason\": \"IIB Mocked Error\" }" '.state_history |= [$progress] + .' <<< "${build}")
+        echo "${build}"
+        return
     fi
 
     if [ "$calls" -gt "${#state_reason[@]}" ]; then
@@ -124,6 +125,10 @@ function curl() {
           echo '{"error": "Invalid fbc_fragments parameter"}'
           exit
         ;;
+        *error*)
+          # For error test - return successful API response, but build will fail in step 2
+          buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000"]' <<< "${buildJson}")
+        ;;
     esac
     # Export the updated buildJson for use in subsequent calls
     export buildJson
@@ -141,7 +146,13 @@ function opm() {
 }
 
 function base64() {
-    echo "decrypted-keytab"
+    # Only mock the keytab decryption, use real base64 for other operations
+    if [[ "$*" == "-d /mnt/service-account-secret/keytab" ]]; then
+        echo "decrypted-keytab"
+    else
+        # Use the real base64 command for all other operations
+        command base64 "$@"
+    fi
 }
 
 function kinit() {

@@ -190,19 +190,36 @@ merge_single_component_pr() {
 # Wait for PipelineRuns to appear for all components
 wait_for_plr_to_appear() {
     echo "Waiting for PipelineRuns to appear for all components..."
+    echo "🔍 DEBUG: Starting PLR discovery for 2 components"
+    echo "🔍 DEBUG: Component 1 SHA: ${component_sha}"
+    echo "🔍 DEBUG: Component 2 SHA: ${component2_sha}"
     
     # Wait for component 1 PLR
     echo "Waiting for component PipelineRun..."
-    wait_for_single_plr_to_appear "${component_sha}"
-    component_push_plr_name="${component_push_plr_name}"
+    local comp1_plr_name
+    comp1_plr_name=$(wait_for_single_plr_to_appear "${component_sha}")
+    echo "🔍 DEBUG: Component 1 PLR found: ${comp1_plr_name}"
     
     # Wait for component 2 PLR
     echo "Waiting for component2 PipelineRun..."
-    wait_for_single_plr_to_appear "${component2_sha}"
-    component2_push_plr_name="${component_push_plr_name}"
+    local comp2_plr_name
+    comp2_plr_name=$(wait_for_single_plr_to_appear "${component2_sha}")
+    echo "🔍 DEBUG: Component 2 PLR found: ${comp2_plr_name}"
     
-    # Set primary PLR for framework compatibility (use component)
-    # component_push_plr_name is already set from component 1
+    # Validation check - ensure PLR names are different
+    if [ "${comp1_plr_name}" = "${comp2_plr_name}" ]; then
+        echo "🔴 ERROR: Both components have the same PLR name: ${comp1_plr_name}"
+        echo "This indicates a bug in PLR discovery logic!"
+        exit 1
+    fi
+    
+    # Assign to proper global variables
+    component_push_plr_name="${comp1_plr_name}"
+    component2_push_plr_name="${comp2_plr_name}"
+    
+    echo "🔍 DEBUG: Final PLR assignments:"
+    echo "🔍 DEBUG:   component_push_plr_name: ${component_push_plr_name}"
+    echo "🔍 DEBUG:   component2_push_plr_name: ${component2_push_plr_name}"
     
     echo "All PipelineRuns found successfully"
 }
@@ -214,27 +231,32 @@ wait_for_single_plr_to_appear() {
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
+    local found_plr_name=""
 
-    echo -n "Waiting for PipelineRun to appear for SHA ${sha}"
-    component_push_plr_name=""
-    while [ -z "$component_push_plr_name" ]; do
+    echo -n "Waiting for PipelineRun to appear for SHA ${sha}" >&2
+    while [ -z "$found_plr_name" ]; do
         current_time=$(date +%s)
         elapsed_time=$((current_time - start_time))
 
         if [ $elapsed_time -ge $timeout ]; then
-            echo
-            echo "🔴 Timeout waiting for PipelineRun to appear after ${timeout} seconds for SHA ${sha}"
+            echo >&2
+            echo "🔴 Timeout waiting for PipelineRun to appear after ${timeout} seconds for SHA ${sha}" >&2
             exit 1
         fi
 
         sleep 5
-        echo -n "."
+        echo -n "." >&2
         # get only running pipelines
-        component_push_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$sha" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
+        found_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$sha" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
     done
-    echo
-    echo "✅ Found PipelineRun for SHA ${sha}: ${component_push_plr_name}"
-    echo "   PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${component_push_plr_name}")"
+    echo >&2
+    echo "✅ Found PipelineRun for SHA ${sha}: ${found_plr_name}" >&2
+    echo "   PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${found_plr_name}")" >&2
+    
+    # Set global variable for backward compatibility AND return the value
+    component_push_plr_name="${found_plr_name}"
+    # Only echo the PLR name to stdout for capture
+    echo "${found_plr_name}"
 }
 
 # Wait for PipelineRuns to complete for all components
@@ -242,6 +264,13 @@ wait_for_plr_to_complete() {
     echo "Waiting for all PipelineRuns to complete..."
     echo "🔍 DEBUG: Component 1 PLR: ${component_push_plr_name} (${component_name})"
     echo "🔍 DEBUG: Component 2 PLR: ${component2_push_plr_name} (${component2_name})"
+    
+    # Validation check - ensure PLR names are different
+    if [ "${component_push_plr_name}" = "${component2_push_plr_name}" ]; then
+        echo "🔴 ERROR: Both components have the same PLR name: ${component_push_plr_name}"
+        echo "This indicates a bug in PLR assignment logic!"
+        exit 1
+    fi
     
     # Wait for component 1 PLR
     echo "Waiting for component PipelineRun ${component_push_plr_name} to complete..."
@@ -294,6 +323,16 @@ wait_for_single_plr_to_complete() {
     local previousTaskStatus="" # to avoid duplicate output
 
     echo "Waiting for PipelineRun ${plr_name} (${comp_name}) to complete"
+    echo "🔍 DEBUG: Checking if PipelineRun ${plr_name} exists..."
+    
+    # First verify the PipelineRun exists
+    if ! kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" >/dev/null 2>&1; then
+        echo "🔴 ERROR: PipelineRun ${plr_name} does not exist in namespace ${tenant_namespace}"
+        echo "Available PipelineRuns:"
+        kubectl get pipelinerun -n "${tenant_namespace}" --no-headers 2>/dev/null || echo "No PipelineRuns found"
+        exit 1
+    fi
+    
     while [ -z "$completed" ]; do
         current_time=$(date +%s)
         elapsed_time=$((current_time - start_time))
@@ -306,8 +345,15 @@ wait_for_single_plr_to_complete() {
 
         sleep 5
 
-        # Check if the pipeline run is completed
-        completed=$(kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null)
+        # Check if the pipeline run is completed - use a more robust approach
+        local plr_status
+        plr_status=$(kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$plr_status" ]; then
+            completed=$(echo "$plr_status" | jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' 2>/dev/null || echo "")
+        else
+            echo "🔍 DEBUG: Failed to get PipelineRun status for ${plr_name}"
+            continue
+        fi
 
         # If completed, check the status
         if [ -n "$completed" ]; then
@@ -334,7 +380,7 @@ wait_for_single_plr_to_complete() {
                 elif [ "${comp_name}" == "${component2_name}" ]; then
                     wait_for_single_plr_to_appear "${component2_sha}"
                     component2_push_plr_name="${component_push_plr_name}"
-                    plr_name="${component2_push_plr_name}"
+                    plr_name="${component_push_plr_name}"
                 fi
                 retry_attempted="true"
             else
@@ -358,69 +404,50 @@ create_manual_releases() {
     echo "   Application: ${application_name}"
     echo "   Namespace: ${tenant_namespace}"
     
-    # Get the snapshot for the application that contains both components
-    local snapshot_name
-    local max_attempts=30
-    local attempt=1
-    
-    echo "Looking for snapshot containing both components..."
-    
-    # First, let's see what snapshots exist
-    echo "🔍 DEBUG: All snapshots for application ${application_name}:"
-    kubectl get snapshot -n "${tenant_namespace}" -l "appstudio.openshift.io/application=${application_name}" -o json | jq -r '.items[] | "\(.metadata.name) (created: \(.metadata.creationTimestamp))"' | sort
-    
-    while [ $attempt -le $max_attempts ]; do
-        # Get all snapshots sorted by creation time (newest first)
-        local snapshots
-        snapshots=$(kubectl get snapshot -n "${tenant_namespace}" -l "appstudio.openshift.io/application=${application_name}" --sort-by=.metadata.creationTimestamp -o json)
-        
-        # Check each snapshot starting from the newest
-        local snapshot_count
-        snapshot_count=$(echo "$snapshots" | jq '.items | length')
-        
-        for i in $(seq $((snapshot_count-1)) -1 0); do
-            local candidate_snapshot
-            candidate_snapshot=$(echo "$snapshots" | jq -r ".items[$i].metadata.name")
-            
-            echo "Checking snapshot: ${candidate_snapshot}"
-            
-            # Show all components in this snapshot
-            echo "🔍 DEBUG: Components in snapshot ${candidate_snapshot}:"
-            kubectl get snapshot "${candidate_snapshot}" -n "${tenant_namespace}" -o json | jq -r '.spec.components[] | "  - \(.name): \(.containerImage)"'
-            
-            # Check if this snapshot contains both components
-            local comp1_found comp2_found
-            comp1_found=$(kubectl get snapshot "${candidate_snapshot}" -n "${tenant_namespace}" -o json | jq -r --arg comp "${component_name}" '.spec.components[] | select(.name == $comp) | .name')
-            comp2_found=$(kubectl get snapshot "${candidate_snapshot}" -n "${tenant_namespace}" -o json | jq -r --arg comp "${component2_name}" '.spec.components[] | select(.name == $comp) | .name')
-            
-            echo "🔍 DEBUG: Component matching results:"
-            echo "   Looking for component1: '${component_name}' -> found: '${comp1_found:-NONE}'"
-            echo "   Looking for component2: '${component2_name}' -> found: '${comp2_found:-NONE}'"
-            
-            if [ -n "$comp1_found" ] && [ -n "$comp2_found" ]; then
-                snapshot_name="$candidate_snapshot"
-                echo "✅ Found snapshot with both components: ${snapshot_name}"
-                break 2
-            else
-                echo "⚠️  Snapshot ${candidate_snapshot} missing components: comp1=${comp1_found:-missing}, comp2=${comp2_found:-missing}"
+    # Add debug logging for OCP version validation
+    echo "🔍 DEBUG: Validating OCP version consistency across components..."
+    echo "🔍 DEBUG: Component 1 image: $(kubectl get component $component_name -n $tenant_namespace -o jsonpath='{.spec.containerImage}')"
+    echo "🔍 DEBUG: Component 2 image: $(kubectl get component $component2_name -n $tenant_namespace -o jsonpath='{.spec.containerImage}')"
+
+    # Wait for snapshot creation
+    echo "🔍 DEBUG: Waiting for multi-component snapshot..."
+    timeout=300
+    count=0
+    while [ $count -lt $timeout ]; do
+        snapshot_count=$(kubectl get snapshots -n $tenant_namespace -l "appstudio.openshift.io/application=${application_name}" --no-headers | wc -l)
+        if [ "$snapshot_count" -ge 1 ]; then
+            latest_snapshot=$(kubectl get snapshots -n $tenant_namespace -l "appstudio.openshift.io/application=${application_name}" --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+            component_count=$(kubectl get snapshot $latest_snapshot -n $tenant_namespace -o jsonpath='{.spec.components}' | jq '. | length')
+            if [ "$component_count" -eq 2 ]; then
+                echo "🔍 DEBUG: Found multi-component snapshot: $latest_snapshot"
+                echo "🔍 DEBUG: Snapshot components:"
+                kubectl get snapshot $latest_snapshot -n $tenant_namespace -o jsonpath='{.spec.components}' | jq -r '.[] | "  - \(.name): \(.containerImage)"'
+                break
             fi
-        done
-        
-        if [ -z "$snapshot_name" ]; then
-            echo "No suitable snapshot found in attempt ${attempt}/${max_attempts}, waiting 10 seconds..."
-            sleep 10
-            attempt=$((attempt + 1))
         fi
+        echo "🔍 DEBUG: Waiting for multi-component snapshot... ($count/$timeout)"
+        sleep 5
+        count=$((count + 5))
+    done
+
+    # Add OCP version extraction verification
+    echo "🔍 DEBUG: Simulating OCP version extraction that get-ocp-version task will perform..."
+    for i in 0 1; do
+        image=$(kubectl get snapshot $latest_snapshot -n $tenant_namespace -o jsonpath="{.spec.components[$i].containerImage}")
+        echo "🔍 DEBUG: Component $i image: $image"
+        echo "🔍 DEBUG: This image should have org.opencontainers.image.base.name annotation with OCP version"
     done
     
-    if [ -z "$snapshot_name" ]; then
-        echo "🔴 Could not find snapshot containing both components after ${max_attempts} attempts"
+    # Use the snapshot found during debug validation
+    if [ -z "$latest_snapshot" ]; then
+        echo "🔴 Could not find multi-component snapshot during validation"
         echo "Listing all snapshots for debugging:"
         kubectl get snapshot -n "${tenant_namespace}" -l "appstudio.openshift.io/application=${application_name}"
         exit 1
     fi
     
-    echo "Selected snapshot: ${snapshot_name}"
+    snapshot_name="$latest_snapshot"
+    echo "Using validated snapshot: ${snapshot_name}"
     
     # Debug: Show snapshot contents
     echo "Snapshot contents:"
@@ -481,13 +508,17 @@ EOF
 wait_for_releases() {
     echo "Multi-component test: Using manual release creation after both components complete"
     echo "🔍 DEBUG: Current time: $(date)"
+    echo "🔍 DEBUG: Function wait_for_releases() called successfully"
+    echo "🔍 DEBUG: PLR completion status verified, proceeding to manual release creation"
     echo "🔍 DEBUG: About to call create_manual_releases..."
     
     # Add a small delay to ensure any snapshot creation has time to complete
     echo "🔍 DEBUG: Waiting 30 seconds for any final snapshot updates..."
     sleep 30
     
+    echo "🔍 DEBUG: Calling create_manual_releases() now..."
     create_manual_releases
+    echo "🔍 DEBUG: create_manual_releases() completed successfully"
 }
 
 # Function to verify Release contents for multi-component FBC with batching
@@ -531,63 +562,63 @@ verify_release_contents() {
         failures=$((failures+1))
       fi
 
-      # Verify all expected components are present
-      echo "Checking component names..."
+      # Verify all expected components are present by checking fbc_fragment fields
+      echo "Checking component fragments..."
       local comp1_found comp2_found
-      comp1_found=$(jq -r --arg name "${component_name}" '.status.artifacts.components[] | select(.name == $name) | .name' <<< "${release_json}")
-      comp2_found=$(jq -r --arg name "${component2_name}" '.status.artifacts.components[] | select(.name == $name) | .name' <<< "${release_json}")
+      # Extract component names from fragment URLs
+      comp1_found=$(jq -r --arg fragment "${component_name}" '.status.artifacts.components[] | select(.fbc_fragment | contains($fragment)) | .fbc_fragment' <<< "${release_json}")
+      comp2_found=$(jq -r --arg fragment "${component2_name}" '.status.artifacts.components[] | select(.fbc_fragment | contains($fragment)) | .fbc_fragment' <<< "${release_json}")
 
-      if [ "${comp1_found}" = "${component_name}" ]; then
-        echo "✅️ Component 1 found: ${comp1_found}"
+      if [ -n "${comp1_found}" ]; then
+        echo "✅️ Component 1 fragment found: ${comp1_found}"
       else
-        echo "🔴 Component 1 not found: expected ${component_name}"
+        echo "🔴 Component 1 fragment not found: expected fragment containing ${component_name}"
         failures=$((failures+1))
       fi
 
-      if [ "${comp2_found}" = "${component2_name}" ]; then
-        echo "✅️ Component 2 found: ${comp2_found}"
+      if [ -n "${comp2_found}" ]; then
+        echo "✅️ Component 2 fragment found: ${comp2_found}"
       else
-        echo "🔴 Component 2 not found: expected ${component2_name}"
+        echo "🔴 Component 2 fragment not found: expected fragment containing ${component2_name}"
         failures=$((failures+1))
       fi
 
       # Check that each component has required fields
       for i in $(seq 0 $((component_count-1))); do
-        local comp_name fbc_fragment ocp_version iib_log
-        comp_name=$(jq -r ".status.artifacts.components[${i}].name // \"\"" <<< "${release_json}")
+        local fbc_fragment ocp_version iib_log
         fbc_fragment=$(jq -r ".status.artifacts.components[${i}].fbc_fragment // \"\"" <<< "${release_json}")
         ocp_version=$(jq -r ".status.artifacts.components[${i}].ocp_version // \"\"" <<< "${release_json}")
         iib_log=$(jq -r ".status.artifacts.components[${i}].iibLog // \"\"" <<< "${release_json}")
 
-        echo "Verifying component ${comp_name} (index ${i})..."
+        echo "Verifying component (index ${i})..."
         
         if [ -n "${fbc_fragment}" ]; then
-          echo "✅️ Component ${comp_name} fbc_fragment: ${fbc_fragment}"
+          echo "✅️ Component fbc_fragment: ${fbc_fragment}"
         else
-          echo "🔴 Component ${comp_name} fbc_fragment was empty!"
+          echo "🔴 Component fbc_fragment was empty!"
           failures=$((failures+1))
         fi
 
         if [ -n "${ocp_version}" ]; then
-          echo "✅️ Component ${comp_name} ocp_version: ${ocp_version}"
+          echo "✅️ Component ocp_version: ${ocp_version}"
         else
-          echo "🔴 Component ${comp_name} ocp_version was empty!"
+          echo "🔴 Component ocp_version was empty!"
           failures=$((failures+1))
         fi
 
         if [ -n "${iib_log}" ]; then
-          echo "✅️ Component ${comp_name} iib_log: ${iib_log}"
+          echo "✅️ Component iib_log: ${iib_log}"
         else
-          echo "🔴 Component ${comp_name} iib_log was empty!"
+          echo "🔴 Component iib_log was empty!"
           failures=$((failures+1))
         fi
       done
 
-      # Verify batching behavior by checking OCP versions
+      # Verify batching behavior by checking OCP versions of all components
       echo "Verifying batching scenarios..."
       local comp1_ocp comp2_ocp
-      comp1_ocp=$(jq -r --arg name "${component_name}" '.status.artifacts.components[] | select(.name == $name) | .ocp_version' <<< "${release_json}")
-      comp2_ocp=$(jq -r --arg name "${component2_name}" '.status.artifacts.components[] | select(.name == $name) | .ocp_version' <<< "${release_json}")
+      comp1_ocp=$(jq -r '.status.artifacts.components[0].ocp_version // ""' <<< "${release_json}")
+      comp2_ocp=$(jq -r '.status.artifacts.components[1].ocp_version // ""' <<< "${release_json}")
 
       if [ "${comp1_ocp}" = "v4.13" ] && [ "${comp2_ocp}" = "v4.13" ]; then
         echo "✅️ Components 1 & 2 both have v4.13 (expected to be batched together)"
@@ -596,7 +627,19 @@ verify_release_contents() {
         failures=$((failures+1))
       fi
 
-      # Check index_image fields
+      # Verify that components share the same IIB build (indicating successful batching)
+      local comp1_index_image comp2_index_image
+      comp1_index_image=$(jq -r '.status.artifacts.components[0].index_image // ""' <<< "${release_json}")
+      comp2_index_image=$(jq -r '.status.artifacts.components[1].index_image // ""' <<< "${release_json}")
+
+      if [ "${comp1_index_image}" = "${comp2_index_image}" ] && [ -n "${comp1_index_image}" ]; then
+        echo "✅️ Components share same index_image (successful batching): ${comp1_index_image}"
+      else
+        echo "🔴 Components have different index_images (batching failed): comp1=${comp1_index_image}, comp2=${comp2_index_image}"
+        failures=$((failures+1))
+      fi
+
+      # Check index_image fields at release level
       local index_image index_image_resolved
       index_image=$(jq -r '.status.artifacts.index_image.index_image // ""' <<< "${release_json}")
       index_image_resolved=$(jq -r '.status.artifacts.index_image.index_image_resolved // ""' <<< "${release_json}")

@@ -8,7 +8,8 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task to collect OCP version tag from FBC fragment using `skopeo inspect`.
+    Tekton task to collect and validate OCP version tags from all FBC fragments using `skopeo inspect`.
+    Ensures all fragments target the same OCP version for consistent release batching.
   params:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
@@ -87,6 +88,8 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+        - name: orasOptions
+          value: $(params.orasOptions)
     - name: get-ocp-version
       image: quay.io/konflux-ci/release-service-utils:c11bda9ba25f1a2008dadac3d2f9925a8da3bac1
       computeResources:
@@ -105,43 +108,74 @@ spec:
             exit 1
         fi
 
-        echo -e "\nFetching fbcFragment"
-        fbc_fragment="$(jq -r '.components[0].containerImage' < "${SNAPSHOT_SPEC_FILE}" | tr -d "\n")"
+        echo -e "\nValidating OCP versions across all components"
 
-        # get image metadata
-        image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${fbc_fragment}")
+        # Get number of components
+        num_components=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        echo "Found $num_components FBC components to validate"
 
-        media_type=$(jq -r .mediaType <<< "${image_metadata}")
-        image_base_name=$(jq '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
-          | cut -d: -f2 | sed 's/"//g')
-
-        # multiplatform images will not contain the base name with the OCP version, so it should fetch
-        # the manifest image
-        if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]]; then
-          # image is an index of multiplatform components
-          arch_json=$(get-image-architectures "${fbc_fragment}")
-
-          # it is not required to loop all images as they are all built for the same OCP version
-          manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
-
-          # replace the image sha with the manifests's one
-          fbc_fragment="${fbc_fragment%@*}@${manifest_image_sha}"
-
-          # fetch the image base name containing the version for the found manifest image
-          image_base_name=$(skopeo inspect --retry-times 3 --raw docker://"${fbc_fragment}" \
-           | jq '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
-        fi
-
-        # Define the regular expression
-        pattern="^v[0-9]\.[0-9]+$"
-
-        # Check if the value matches the pattern
-        if ! echo "${image_base_name}" | grep -Eq "${pattern}"; then
-            echo "Invalid format or value does not exist or does not match the required pattern."
+        if [ "$num_components" -eq 0 ]; then
+            echo "Error: No components found in snapshot"
             exit 1
         fi
-        echo "Valid format."
-        printf "%s" "$image_base_name" | tee "$(results.stored-version.path)"
+
+        first_ocp_version=""
+        validated_version=""
+
+        for ((i=0; i<num_components; i++)); do
+            echo "Processing component $i..."
+            fbc_fragment="$(jq -r ".components[$i].containerImage" < "${SNAPSHOT_SPEC_FILE}" | tr -d "\n")"
+            echo "  Container image: $fbc_fragment"
+            
+            # Get image metadata
+            image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${fbc_fragment}")
+            
+            media_type=$(jq -r .mediaType <<< "${image_metadata}")
+            image_base_name=$(jq '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
+              | cut -d: -f2 | sed 's/"//g')
+            
+            # Handle multiplatform images
+            if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]]; then
+                echo "  Multiplatform image detected, extracting manifest"
+                arch_json=$(get-image-architectures "${fbc_fragment}")
+                manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
+                fbc_fragment="${fbc_fragment%@*}@${manifest_image_sha}"
+                
+                image_base_name=$(skopeo inspect --retry-times 3 --raw docker://"${fbc_fragment}" \
+                 | jq '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+            fi
+            
+            # Validate OCP version format
+            pattern="^v[0-9]\.[0-9]+$"
+            if ! echo "${image_base_name}" | grep -Eq "${pattern}"; then
+                echo "ERROR: Invalid OCP version format in component $i: '$image_base_name'"
+                echo "Expected format: vX.Y (e.g., v4.12)"
+                exit 1
+            fi
+            
+            echo "  Extracted OCP version: $image_base_name"
+            
+            # Validate all components have same OCP version
+            if [ $i -eq 0 ]; then
+                first_ocp_version="$image_base_name"
+                validated_version="$first_ocp_version"
+                echo "  ✓ First component OCP version: $first_ocp_version"
+            else
+                if [ "$image_base_name" != "$first_ocp_version" ]; then
+                    echo "ERROR: OCP version mismatch detected!"
+                    echo "  Component 0 OCP version: $first_ocp_version"
+                    echo "  Component $i OCP version: $image_base_name"
+                    echo "All FBC fragments in a release must target the same OCP version"
+                    exit 1
+                fi
+                echo "  ✓ Component $i OCP version matches: $image_base_name"
+            fi
+        done
+
+        echo ""
+        echo "✅ All $num_components components validated successfully"
+        echo "Unified OCP version: $validated_version"
+        printf "%s" "$validated_version" | tee "$(results.stored-version.path)"
     - name: create-trusted-artifact
       computeResources:
         limits:

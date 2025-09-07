@@ -4,11 +4,20 @@ set -eux
 function skopeo() {
     if [[ "$*" == "inspect --retry-times 3 --raw docker://quay.io/fbc/multi-arch@sha256:index" ]]; then
         echo '{ "mediaType": "application/vnd.oci.image.index.v1+json" }'
-    else
+    elif [[ "$*" == *"quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component"* ]]; then
+        # First component returns v4.12
         echo '{ "mediaType": "application/vnd.oci.image.manifest.v1+json",
                 "annotations": {
                   "org.opencontainers.image.base.digest": "sha256:manifest",
                   "org.opencontainers.image.base.name": "registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.12"
+                }
+              }'
+    else
+        # Second component returns v4.13 to create a mismatch
+        echo '{ "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "annotations": {
+                  "org.opencontainers.image.base.digest": "sha256:manifest",
+                  "org.opencontainers.image.base.name": "registry.redhat.io/openshift4/ose-operator-registry-rhel9:v4.13"
                 }
               }'
     fi

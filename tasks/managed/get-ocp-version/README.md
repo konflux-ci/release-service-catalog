@@ -1,6 +1,7 @@
 # get-ocp-version
 
-Tekton task to collect OCP version tag from FBC fragment using `skopeo inspect`.
+Tekton task to collect and validate OCP version tags from all FBC fragments using `skopeo inspect`.
+Ensures all fragments target the same OCP version for consistent release batching.
 
 ## Parameters
 

@@ -25,6 +25,9 @@ spec:
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: ocpVersion
+      type: string
+      description: The OCP version for all components in this release
     - name: resultsDirPath
       type: string
       description: Path to the results directory in the data workspace
@@ -212,42 +215,44 @@ spec:
         LENGTH=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
         echo "Creating component groups for batching..."
         
-        # Build enriched components with resolved target_index
+        # Build enriched components using universal pipeline parameters
         enriched_components='[]'
         # Read global buildTags and addArches from data file
         build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
         add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
         
-        for((i=0; i<LENGTH; i++)); do
-          ocp_version=$(jq -cr --argjson i "$i" '.components[$i].ocpVersion' "${SNAPSHOT_PATH}")
-          fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
-          from_index=$(jq -cr --argjson i "$i" '.components[$i].updatedFromIndex' "${SNAPSHOT_PATH}")
-          base_target_index=$(jq -cr --argjson i "$i" '.components[$i].updatedTargetIndex' "${SNAPSHOT_PATH}")
-
-          # Apply same target_index resolution logic as before
-          resolved_target_index="$base_target_index"
-          if [ "${hotfix}" = "true" ]; then
-            issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
-            if [ -z "${issue_id}" ]; then
-              echo "Hotfix releases requires the issue id set in the 'fbc.issueId' key of the ReleasePlanAdmission " \
-                   "spec.data field"
-              exit 1
-            fi
-            resolved_target_index="${base_target_index}-${issue_id}-${timestamp}"
-          elif [ "${pre_ga}" = "true" ]; then
-            if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
-              echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the " \
-                   "ReleasePlanAdmission spec.data field"
-              exit 1
-            fi
-            resolved_target_index="${base_target_index}-${product_name}-${product_version}-${timestamp}"
+        # Use universal values from pipeline parameters
+        universal_from_index="$(params.fromIndex)"
+        universal_target_index="$(params.targetIndex)"  
+        universal_ocp_version="$(params.ocpVersion)"
+        
+        # Apply target_index resolution logic for hotfix/pre-GA
+        resolved_target_index="$universal_target_index"
+        if [ "${hotfix}" = "true" ]; then
+          issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
+          if [ -z "${issue_id}" ]; then
+            echo "Hotfix releases requires the issue id set in the 'fbc.issueId' key of the ReleasePlanAdmission " \
+                 "spec.data field"
+            exit 1
           fi
+          resolved_target_index="${universal_target_index}-${issue_id}-${timestamp}"
+        elif [ "${pre_ga}" = "true" ]; then
+          if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
+            echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the " \
+                 "ReleasePlanAdmission spec.data field"
+            exit 1
+          fi
+          resolved_target_index="${universal_target_index}-${product_name}-${product_version}-${timestamp}"
+        fi
+        
+        for((i=0; i<LENGTH; i++)); do
+          fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
 
           # Add enriched component to array
           enriched_component=$(jq -n \
-            --arg ocpVersion "$ocp_version" \
+            --arg ocpVersion "$universal_ocp_version" \
             --arg fbcFragment "$fbc_fragment" \
-            --arg fromIndex "$from_index" \
+            --arg fromIndex "$universal_from_index" \
             --arg targetIndex "$resolved_target_index" \
             --argjson buildTags "$build_tags" \
             --argjson addArches "$add_arches" \
@@ -272,7 +277,7 @@ spec:
         first_component=$(jq -r '.[0]' <<< "$enriched_components")
         batch_from_index=$(jq -r '.fromIndex' <<< "$first_component")
         batch_target_index=$(jq -r '.targetIndex' <<< "$first_component")
-        batch_ocp_version=$(jq -r '.ocpVersion' <<< "$first_component")
+        batch_ocp_version="$universal_ocp_version"  # From parameter, validated by get-ocp-version
         
         # Collect all fragments
         batch_fragments=$(jq '[.[].fbcFragment]' <<< "$enriched_components")
@@ -280,7 +285,7 @@ spec:
         echo "Batch details:"
         echo "  - fromIndex: $batch_from_index"
         echo "  - targetIndex: $batch_target_index"
-        echo "  - ocpVersion: $batch_ocp_version"
+        echo "  - ocpVersion: $batch_ocp_version (validated across all fragments)"
         echo "  - fragments: $LENGTH items"
         
         # Calculate timeout for this batch

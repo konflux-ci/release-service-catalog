@@ -62,18 +62,12 @@ spec:
                   {
                     "name": "comp0",
                     "containerImage": "registry.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0",
-                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
-                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12",
-                    "ocpVersion": "v4.12"
+                    "repository": "prod-registry.io/prod-location0"
                   },
                   {
                     "name": "comp1",
                     "containerImage": "registry.io/image1@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0",
-                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
-                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.13",
-                    "ocpVersion": "v4.13"
+                    "repository": "prod-registry.io/prod-location0"
                   }
                 ]
               }
@@ -130,6 +124,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: ocpVersion
+          value: "v4.13"
       runAfter:
         - setup
     - name: check-result
@@ -198,19 +194,23 @@ spec:
               internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
                 | xargs)"
 
-              i=0
               for internalRequest in $internalRequests; do
                 requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
 
                 TS=1696946200 # ts set in the mocked `date`
+                # With IIB batching, both components have the same target_index
+                # The target_index is based on the targetIndex parameter (v4.12), not ocpVersion (v4.13)
+                expected_target_index="quay.io/scoheb/fbc-target-index-testing:v4.12-bz123456-${TS}"
                 if [ "$(jq -r '.components[0].target_index' "$RESULTS_FILE")" != \
-                  "quay.io/scoheb/fbc-target-index-testing:v4.12-bz123456-${TS}" ]; then
-                  echo "targetIndex #1 does not match"
+                  "${expected_target_index}" ]; then
+                  echo "targetIndex #1 does not match. Expected: ${expected_target_index}," \
+                    "Got: $(jq -r '.components[0].target_index' "$RESULTS_FILE")"
                   exit 1
                 fi
                 if [ "$(jq -r '.components[1].target_index' "$RESULTS_FILE")" != \
-                  "quay.io/scoheb/fbc-target-index-testing:v4.13-bz123456-${TS}" ]; then
-                  echo "targetIndex #2 does not match"
+                  "${expected_target_index}" ]; then
+                  echo "targetIndex #2 does not match. Expected: ${expected_target_index}," \
+                    "Got: $(jq -r '.components[1].target_index' "$RESULTS_FILE")"
                   exit 1
                 fi
 
@@ -226,11 +226,12 @@ spec:
                   exit 1
                 fi
 
+                # With IIB batching, fragments are now grouped together in arrays
                 fragments=$(jq -r '.fbcFragments' <<< "${requestParams}" | jq -c .)
-                expected_fragment="registry.io/image${i}@sha256:0000"
-                expected_fragments="[\"${expected_fragment}\"]"
+                # Both components should be in the same batched request
+                expected_fragments='["registry.io/image0@sha256:0000","registry.io/image1@sha256:0000"]'
                 if [ "$(jq -c -S '.' <<< "$fragments")" != "$(jq -c -S '.' <<< "$expected_fragments")" ]; then
-                  echo "fbcFragments does not match for request $i. Expected: $expected_fragments, Got: $fragments"
+                  echo "fbcFragments does not match. Expected: $expected_fragments, Got: $fragments"
                   exit 1
                 fi
 
@@ -259,7 +260,8 @@ spec:
                   echo "Unexpected value for number of image digests: $num_images"
                   exit 1
                 fi
-                i=$(( i+1 ))
+                # With batching, we expect only ONE internal request instead of multiple
+                break
               done
       runAfter:
         - run-task
