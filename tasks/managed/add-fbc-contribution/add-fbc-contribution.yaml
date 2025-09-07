@@ -264,205 +264,136 @@ spec:
             '. += [$component]' <<< "$enriched_components")
         done
 
-        # Group components by (fromIndex, targetIndex, ocpVersion)
-        # buildTags and addArches are global IIB parameters, not per-fragment
-        echo "Grouping components by batching criteria..."
-        groups=$(jq -r '
-          group_by([.fromIndex, .targetIndex, .ocpVersion]) |
-          to_entries |
-          map({
-            key: .key,
-            group_id: (.key | tostring),
-            fromIndex: .value[0].fromIndex,
-            targetIndex: .value[0].targetIndex,
-            ocpVersion: .value[0].ocpVersion,
-            buildTags: $buildTags,
-            addArches: $addArches,
-            fragments: [.value[].fbcFragment],
-            count: (.value | length)
-          })
-        ' --argjson buildTags "$build_tags" --argjson addArches "$add_arches" <<< "$enriched_components")
-
-        echo "Created $(jq -r 'length' <<< "$groups") batch groups"
+        # With IIB batching, all components from the same release have identical fromIndex, targetIndex, 
+        # and ocpVersion due to upstream validation. Create single batch with all components.
+        echo "Creating single batch with all $LENGTH components..."
         
-        # Process each group with batched InternalRequest
-        group_count=$(jq -r 'length' <<< "$groups")
-        for((g=0; g<group_count; g++)); do
-          group=$(jq -r --argjson g "$g" '.[$g]' <<< "$groups")
-          
-          # Extract group parameters
-          group_from_index=$(jq -r '.fromIndex' <<< "$group")
-          group_target_index=$(jq -r '.targetIndex' <<< "$group")
-          group_ocp_version=$(jq -r '.ocpVersion' <<< "$group")
-          # buildTags and addArches are global, use values from data file
-          group_fragments=$(jq '.fragments' <<< "$group")
-          group_fragment_count=$(jq -r '.count' <<< "$group")
-          
-          echo "Processing batch group $((g+1))/$group_count:"
-          echo "  - fromIndex: $group_from_index"
-          echo "  - targetIndex: $group_target_index"
-          echo "  - ocpVersion: $group_ocp_version"
-          echo "  - fragments: $group_fragment_count items"
-          
-          # Calculate timeout for this batch
-          finally_task_timeout=300
-          pipeline_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds + finally_task_timeout )))
-          task_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds )))
-
-          # Create batched InternalRequest
-          echo "Creating batched InternalRequest for $group_fragment_count fragments..."
-          internal-request --pipeline "update-fbc-catalog" \
-              -p fromIndex="${group_from_index}" \
-              -p targetIndex="${group_target_index}" \
-              -p fbcFragments="$(printf '%s' "${group_fragments}" | jq -c .)" \
-              -p iibServiceAccountSecret="${iib_service_account_secret}" \
-              -p publishingCredentials="${publishing_credentials}" \
-              -p buildTimeoutSeconds="${build_timeout_seconds}" \
-              -p buildTags="$(jq -c . <<< "${build_tags}")" \
-              -p addArches="$(jq -c . <<< "${add_arches}")" \
-              -p hotfix="${hotfix}" \
-              -p stagedIndex="${staged_index}" \
-              -p taskGitUrl="$(params.taskGitUrl)" \
-              -p taskGitRevision="$(params.taskGitRevision)" \
-              --service-account "${internal_request_service_account}" \
-              -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
-              --pipeline-timeout "${pipeline_timeout}" \
-              --task-timeout "${task_timeout}" \
-              -t "${request_timeout_seconds}" |tee "$(params.dataDir)"/ir-"$(context.taskRun.uid)"-batch-${g}-output.log
-
-          internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-            "$(params.dataDir)"/ir-"$(context.taskRun.uid)"-batch-${g}-output.log)
-          echo "Batch request created: ${internalRequest}"
-
-          # Fetch batched results
-          results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
-          echo "${results}" > "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-${g}-result.json"
-
-          # Decompress jsonBuildInfo for processing
-          decompressed_json_build_info="$(jq -r '.jsonBuildInfo' <<< "${results}" | base64 -d | gunzip)"
-          completion_time_raw="$(jq -r '.updated' <<< "${decompressed_json_build_info}")"
-          completion_time=$(date +"${timestamp_format}" -d "${completion_time_raw}")
-          
-          # Process results for each fragment in the batch
-          fragments_array=$(jq -r '.fragments' <<< "$group")
-          fragment_count=$(jq -r 'length' <<< "$fragments_array")
-          
-          for((f=0; f<fragment_count; f++)); do
-            fragment=$(jq -r --argjson f "$f" '.[$f]' <<< "$fragments_array")
-            
-            echo "Processing result for fragment: $fragment"
-            
-            # Build individual component result
-            build_results=$(jq \
-              --arg fragment "$fragment" \
-              --arg target_index "$group_target_index" \
-              --arg ocp_version "$group_ocp_version" \
-              --arg completion_time "$completion_time" \
-              --argjson decompressed_json "${decompressed_json_build_info}" \
-            '{
-              "fbc_fragment": $fragment,
-              "target_index": $target_index,
-              "ocp_version": $ocp_version,
-              "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
-              "index_image": $decompressed_json.index_image,
-              "index_image_resolved": $decompressed_json.index_image_resolved,
-              "completion_time": $completion_time,
-              "iibLog": .iibLog
-            }' <<< "${results}")
-
-            # Add to results file
-            export build_results
-            yq -i '.components += [ env(build_results) ]' "$RESULTS_FILE"
-          done
-
-          # Extract flags from batch results (same for all fragments in batch)
-          mustSignIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
-            | jq -r '.sign_index_image' |tr -d "\n")
-          mustPublishIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
-            | jq -r '.publish_index_image' |tr -d "\n")
-          fbc_opt_in=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -cr '.fbc_opt_in')
-
-          # Store the results in Tekton's results files (last batch wins for compatibility)
-          echo -en "${mustPublishIndexImage}" | tee "$(results.mustPublishIndexImage.path)"
-          echo -en "${mustSignIndexImage}" | tee "$(results.mustSignIndexImage.path)"
-          echo -en "${fbc_opt_in}" | tee "$(results.isFbcOptIn.path)"
-
-          # Store deprecated results for compatibility
-          conditions=$(kubectl get internalrequest "${internalRequest}" \
-            -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
-          jq '.reason // "Unset"'  <<< "${conditions}" | tee "$(results.requestReason.path)"
-          jq '.message // "Unset"' <<< "${conditions}" | tee "$(results.requestMessage.path)"
-          jq -r '.indexImageDigests' <<< "${results}" |  tee "$(results.indexImageDigests.path)"
-
-          # Output batch logs for debugging
-          jq -r '.iibLog' <<< "${results}"
-          RC="$(jq -r '.exitCode' <<< "${results}")"
-
-          # Summarize batch results
-          if [ "$mustPublishIndexImage" = "true" ]; then
-            echo "Index image will be published for batch group $((g+1))."
-          elif [ "$fbc_opt_in" = "false" ]; then
-            echo "Index image will not be published for batch group $((g+1)) because" \
-              "fbc_opt_in is set to false in Pyxis."
-            echo "If this is the first time you are releasing, make sure you request fbc_opt_in in Pyxis."
-          elif [ "${staged_index}" = "true" ]; then
-            echo "Index image will not be published for batch group $((g+1)) because this is a staging release."
-          else
-            echo "Index image will not be published for batch group $((g+1)) for an unspecified reason."
-          fi
-
-          if [ "$RC" -ne 0 ]; then
-            echo "Batch group $((g+1)) failed to be processed, check the batch logs above to understand the reason"
-            exit "$RC"
-          fi
-          
-          echo "Batch group $((g+1))/$group_count completed successfully"
-        done
+        # Extract common values from first component (all are identical)
+        first_component=$(jq -r '.[0]' <<< "$enriched_components")
+        batch_from_index=$(jq -r '.fromIndex' <<< "$first_component")
+        batch_target_index=$(jq -r '.targetIndex' <<< "$first_component")
+        batch_ocp_version=$(jq -r '.ocpVersion' <<< "$first_component")
         
-        echo "All batch groups processed successfully"
+        # Collect all fragments
+        batch_fragments=$(jq '[.[].fbcFragment]' <<< "$enriched_components")
+        
+        echo "Batch details:"
+        echo "  - fromIndex: $batch_from_index"
+        echo "  - targetIndex: $batch_target_index"
+        echo "  - ocpVersion: $batch_ocp_version"
+        echo "  - fragments: $LENGTH items"
+        
+        # Calculate timeout for this batch
+        finally_task_timeout=300
+        pipeline_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds + finally_task_timeout )))
+        task_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds )))
 
-        # Consolidate flags from all batches - all batch results should match for signing and publishing
-        echo "Consolidating flags across all batch groups..."
-        all_batch_flags='[]'
-        for((g=0; g<group_count; g++)); do
-          batch_results_file="$(params.dataDir)/ir-$(context.taskRun.uid)-batch-${g}-result.json"
-          if [ -f "$batch_results_file" ]; then
-            batch_results=$(cat "$batch_results_file")
-            batch_flags=$(jq -r '.genericResult | fromjson' <<< "${batch_results}")
-            all_batch_flags=$(jq --argjson flags "$batch_flags" '. += [$flags]' <<< "$all_batch_flags")
-          fi
+        # Create single batched InternalRequest for all components
+        echo "Creating batched InternalRequest for $LENGTH fragments..."
+        internal-request --pipeline "update-fbc-catalog" \
+            -p fromIndex="${batch_from_index}" \
+            -p targetIndex="${batch_target_index}" \
+            -p fbcFragments="$(printf '%s' "${batch_fragments}" | jq -c .)" \
+            -p iibServiceAccountSecret="${iib_service_account_secret}" \
+            -p publishingCredentials="${publishing_credentials}" \
+            -p buildTimeoutSeconds="${build_timeout_seconds}" \
+            -p buildTags="$(jq -c . <<< "${build_tags}")" \
+            -p addArches="$(jq -c . <<< "${add_arches}")" \
+            -p hotfix="${hotfix}" \
+            -p stagedIndex="${staged_index}" \
+            -p taskGitUrl="$(params.taskGitUrl)" \
+            -p taskGitRevision="$(params.taskGitRevision)" \
+            --service-account "${internal_request_service_account}" \
+            -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
+            --pipeline-timeout "${pipeline_timeout}" \
+            --task-timeout "${task_timeout}" \
+            -t "${request_timeout_seconds}" |tee "$(params.dataDir)"/ir-"$(context.taskRun.uid)"-batch-output.log
+
+        internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+          "$(params.dataDir)"/ir-"$(context.taskRun.uid)"-batch-output.log)
+        echo "Batch request created: ${internalRequest}"
+
+        # Fetch batched results
+        results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
+        echo "${results}" > "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-result.json"
+
+        # Decompress jsonBuildInfo for processing
+        decompressed_json_build_info="$(jq -r '.jsonBuildInfo' <<< "${results}" | base64 -d | gunzip)"
+        completion_time_raw="$(jq -r '.updated' <<< "${decompressed_json_build_info}")"
+        completion_time=$(date +"${timestamp_format}" -d "${completion_time_raw}")
+        
+        # Process results for each fragment in the batch
+        fragment_count=$(jq -r 'length' <<< "$batch_fragments")
+        
+        for((f=0; f<fragment_count; f++)); do
+          fragment=$(jq -r --argjson f "$f" '.[$f]' <<< "$batch_fragments")
+          
+          echo "Processing result for fragment: $fragment"
+          
+          # Build individual component result
+          build_results=$(jq \
+            --arg fragment "$fragment" \
+            --arg target_index "$batch_target_index" \
+            --arg ocp_version "$batch_ocp_version" \
+            --arg completion_time "$completion_time" \
+            --argjson decompressed_json "${decompressed_json_build_info}" \
+          '{
+            "fbc_fragment": $fragment,
+            "target_index": $target_index,
+            "ocp_version": $ocp_version,
+            "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
+            "index_image": $decompressed_json.index_image,
+            "index_image_resolved": $decompressed_json.index_image_resolved,
+            "completion_time": $completion_time,
+            "iibLog": .iibLog
+          }' <<< "${results}")
+
+          # Add to results file
+          export build_results
+          yq -i '.components += [ env(build_results) ]' "$RESULTS_FILE"
         done
 
-        # Check if all batches have the same flag values
-        fbcPipelineFlags=$(jq '. | unique' <<< "$all_batch_flags")
-        unique_flag_sets=$(jq -r 'length' <<< "$fbcPipelineFlags")
-        
-        echo "Found $unique_flag_sets unique flag sets across $group_count batch groups"
-        
-        if [ "$unique_flag_sets" == 1 ]; then
-          echo "All batch groups have matching flags - enabling signing and publishing as appropriate"
-          jq -r '.[0].sign_index_image' <<< "$fbcPipelineFlags" | tr -d "\n" \
-            | tee "$(results.mustSignIndexImage.path)"
-          jq -r '.[0].publish_index_image' <<< "$fbcPipelineFlags" | tr -d "\n" \
-            | tee "$(results.mustPublishIndexImage.path)"
-          jq -r '.[0].fbc_opt_in' <<< "$fbcPipelineFlags" | tr -d "\n" | tee "$(results.isFbcOptIn.path)"
+        # Extract flags from batch results (same for all fragments in batch)
+        mustSignIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
+          | jq -r '.sign_index_image' |tr -d "\n")
+        mustPublishIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
+          | jq -r '.publish_index_image' |tr -d "\n")
+        fbc_opt_in=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -cr '.fbc_opt_in')
+
+        # Store the results in Tekton's results files
+        echo -en "${mustPublishIndexImage}" | tee "$(results.mustPublishIndexImage.path)"
+        echo -en "${mustSignIndexImage}" | tee "$(results.mustSignIndexImage.path)"
+        echo -en "${fbc_opt_in}" | tee "$(results.isFbcOptIn.path)"
+
+        # Store deprecated results for compatibility
+        conditions=$(kubectl get internalrequest "${internalRequest}" \
+          -o jsonpath='{.status.conditions[?(@.type=="Succeeded")]}')
+        jq '.reason // "Unset"'  <<< "${conditions}" | tee "$(results.requestReason.path)"
+        jq '.message // "Unset"' <<< "${conditions}" | tee "$(results.requestMessage.path)"
+        jq -r '.indexImageDigests' <<< "${results}" |  tee "$(results.indexImageDigests.path)"
+
+        # Output batch logs for debugging
+        jq -r '.iibLog' <<< "${results}"
+        RC="$(jq -r '.exitCode' <<< "${results}")"
+
+        # Summarize batch results
+        if [ "$mustPublishIndexImage" = "true" ]; then
+          echo "Index image will be published."
+        elif [ "$fbc_opt_in" = "false" ]; then
+          echo "Index image will not be published because fbc_opt_in is set to false in Pyxis."
+          echo "If this is the first time you are releasing, make sure you request fbc_opt_in in Pyxis."
+        elif [ "${staged_index}" = "true" ]; then
+          echo "Index image will not be published because this is a staging release."
         else
-          echo "Batch groups have mismatched flags - disabling signing and publishing for safety"
-          echo -en "false" | tee "$(results.mustSignIndexImage.path)"
-          echo -en "false" | tee "$(results.mustPublishIndexImage.path)"
-          echo -en "false" | tee "$(results.isFbcOptIn.path)"
+          echo "Index image will not be published for an unspecified reason."
         fi
 
-        # if there are multiple components but they are for the same ocp version, only a single index_image needs
-        # to be signed/published.
-        VERSIONS_COUNT="$(jq -r '[ .components[].ocp_version ] | unique | length' "$RESULTS_FILE")"
-        if [[ "$LENGTH" -gt 1 && "$VERSIONS_COUNT" == 1 ]]; then
-          # keep only the most up to date build index_image (use completion_time since .updated may not exist)
-          RESULTS_TEMP_FILE="/tmp/results-temp.json"
-          jq -r '.components = [ .components | sort_by(.completion_time) | last ]' \
-            "$RESULTS_FILE" > "$RESULTS_TEMP_FILE"
-          mv "$RESULTS_TEMP_FILE" "$RESULTS_FILE"
+        if [ "$RC" -ne 0 ]; then
+          echo "Batch processing failed, check the batch logs above to understand the reason"
+          exit "$RC"
         fi
+        
+        echo "Batch processing completed successfully with $LENGTH components"
         echo "Results file:"
         cat "$RESULTS_FILE"
     - name: create-trusted-artifact
