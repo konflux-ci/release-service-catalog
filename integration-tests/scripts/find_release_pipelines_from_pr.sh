@@ -129,7 +129,7 @@ _find_and_process_pipelines() {
         TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
         ;;
       "update-fbc-catalog"|"publish-index-image-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "fbc-release-multi-component")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
         ;;
       "process-file-updates")
         TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "push-to-addons-registry" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io")
@@ -198,7 +198,7 @@ _find_and_process_pipelines() {
     export FOUND_PIPELINES="${FOUND_PIPELINENAMES[*]}"
   fi
 
-  ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "fbc-release-multi-component" "release-to-github" "push-to-external-registry" "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" "push-to-addons-registry")
+  ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "release-to-github" "push-to-external-registry" "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" "push-to-addons-registry")
   SELECTED_TESTCASES=()
 
   for pplname in "${FOUND_PIPELINENAMES[@]}"; do

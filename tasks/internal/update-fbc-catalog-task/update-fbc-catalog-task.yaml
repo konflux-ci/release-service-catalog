@@ -71,6 +71,10 @@ spec:
           memory: 512Mi
           cpu: '1'
       env:
+        - name: FBC_FRAGMENTS
+          value: $(params.fbcFragments)
+        - name: FROM_INDEX
+          value: $(params.fromIndex)
         - name: IIB_SERVICE_URL
           valueFrom:
             secretKeyRef:
@@ -126,12 +130,14 @@ spec:
           from_index="${2}"
           fbc_fragments_json="${3}"
 
+          # fbc_fragments_json is already sorted by caller, use directly for consistent comparison
+
           # fetch only builds in progress or completed
           # check if any fragment in the array has an existing build
           build=$(curl -s "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}" | \
             jq --argjson fbc_fragments "${fbc_fragments_json}" \
               '[.items[] | select(.state!="failed") | select(
-                (.fbc_fragments != null and ((.fbc_fragments | sort) == ($fbc_fragments | sort))) or
+                (.fbc_fragments != null and ((.fbc_fragments | sort) == $fbc_fragments)) or
                 (.fbc_fragment != null and (.fbc_fragment | IN($fbc_fragments[])))
               )] | sort_by(.updated) | last // empty')
 
@@ -202,43 +208,39 @@ spec:
         retry 5 kinit -V "${KRB5_PRINCIPAL}" -k -t "/tmp/keytab"
 
         set -x
+        # Validate that required environment variables are set
+        : "${FBC_FRAGMENTS:?FBC_FRAGMENTS environment variable is required}"
+        : "${FROM_INDEX:?FROM_INDEX environment variable is required}"
+        
         # validate fbcFragments parameter is valid JSON array
-        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
-        if ! echo '$(params.fbcFragments)' | jq -e . >/dev/null 2>&1; then
+        if ! echo "${FBC_FRAGMENTS}" | jq -e . >/dev/null 2>&1; then
           echo "Error: fbcFragments parameter must be a valid JSON array"
           jq -n '{ "state": "failed", "state_reason": "Invalid fbcFragments parameter" }' \
             | tee "$(results.buildState.path)"
-          echo '{}' | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
-          jq -n '{ "fbc_opt_in": "false", "overwrite_fromindex_image": "false", \
-            "publish_index_image": "false", "sign_index_image": "false" }' > "$(results.genericResult.path)"
-          echo -n "" > "$(results.indexImageDigests.path)"
-          echo -n "" > "$(results.iibLog.path)"
           echo -n 1 > "$(results.exitCode.path)"
           exit 1
         fi
         
         # check if fbcFragments array is empty
-        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
-        if [ "$(echo '$(params.fbcFragments)' | jq 'length')" -eq 0 ]; then
+        if [ "$(echo "${FBC_FRAGMENTS}" | jq 'length')" -eq 0 ]; then
           echo "Error: fbcFragments array is empty - no fragments to process"
           jq -n '{ "state": "failed", "state_reason": "Empty fbcFragments array" }' | tee "$(results.buildState.path)"
-          echo '{}' | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
-          jq -n '{ "fbc_opt_in": "false", "overwrite_fromindex_image": "false", \
-            "publish_index_image": "false", "sign_index_image": "false" }' > "$(results.genericResult.path)"
-          echo -n "" > "$(results.indexImageDigests.path)"
-          echo -n "" > "$(results.iibLog.path)"
           echo -n 1 > "$(results.exitCode.path)"
           exit 1
         fi
         
         # check if these fbc fragments are opt-in
-        echo "Processing fragments: $(params.fbcFragments)"
+        echo "Processing fragments: ${FBC_FRAGMENTS}"
         # Extract pull specs from all fragments and remove duplicates
-        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
-        PULL_SPEC_LIST=$(echo '$(params.fbcFragments)' | jq -r '.[]' | \
-          xargs -I {} sh -c 'opm render "$1" | jq -r \
-            "select(.schema == \"olm.bundle\") | \"\(.image)\" | split(\"@\")[0]"' _ {} | \
-          sort | uniq)
+        PULL_SPEC_LIST=""
+        while IFS= read -r fragment; do
+          if [ -n "${fragment}" ]; then
+            fragment_pull_specs=$(opm render "${fragment}" | jq -r \
+              'select(.schema == "olm.bundle") | "\(.image)" | split("@")[0]')
+            PULL_SPEC_LIST="${PULL_SPEC_LIST}${fragment_pull_specs}"$'\n'
+          fi
+        done < <(echo "${FBC_FRAGMENTS}" | jq -r '.[]')
+        PULL_SPEC_LIST=$(echo "${PULL_SPEC_LIST}" | sort | uniq)
 
         fbcOptIn="true"
         for PULL_SPEC in ${PULL_SPEC_LIST}; do
@@ -285,10 +287,12 @@ spec:
              "sign_index_image": $sign_index_image
             } '| tee "$(results.genericResult.path)"
 
+        # Sort fragments once for consistent use throughout the script
+        sorted_fbc_fragments=$(echo "${FBC_FRAGMENTS}" | jq 'sort')
+
         # if it finds a build which is completed or in progress, it should exit this step and jump to
         # the next step `s-wait-for-build-state` which will watch the build until it is completed.
-        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
-        build=$(check_previous_build "${KRB5_PRINCIPAL}" "$(params.fromIndex)" '$(params.fbcFragments)')
+        build=$(check_previous_build "${KRB5_PRINCIPAL}" "${FROM_INDEX}" "${sorted_fbc_fragments}")
         if [ -n "${build}" ]; then
           echo "=== A previous build for this fragment was found ==="
           echo "${build}" | gzip -c | base64 -w0 | tee "$(results.jsonBuildInfo.path)"
@@ -300,11 +304,10 @@ spec:
         json_input="/tmp/$$.tmp"
         json_raw_input="/tmp/$$_raw.tmp"
 
-        # shellcheck disable=SC2016 # Tekton parameters should remain as literal strings
         cat > "$json_raw_input" <<JSON
         {
-          "fbc_fragments": $(echo '$(params.fbcFragments)' | jq 'sort'),
-          "from_index": "$(params.fromIndex)",
+          "fbc_fragments": ${sorted_fbc_fragments},
+          "from_index": "${FROM_INDEX}",
           "build_tags": $(params.buildTags),
           "add_arches": $(params.addArches),
           "overwrite_from_index": ${mustOverwriteFromIndexImage},
@@ -327,8 +330,6 @@ spec:
         # checks if the previous call returned an error and exits if so
         if jq -e -r ".error | select( . != null )" <<< "${iib_response}" >/dev/null; then
             jq -n '{ "state": "failed", "state_reason": "IIB service error" }' | tee "$(results.buildState.path)"
-            echo -n "" > "$(results.indexImageDigests.path)"
-            echo -n "" > "$(results.iibLog.path)"
             echo -n 1 > "$(results.exitCode.path)"
             exit 1
         fi

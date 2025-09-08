@@ -211,23 +211,16 @@ spec:
 
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        # Create component groups with enriched data for batching
+        # Create batch with all fragments - simplified approach
         LENGTH=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
-        echo "Creating component groups for batching..."
-        
-        # Build enriched components using universal pipeline parameters
-        enriched_components='[]'
+        echo "Creating single batch with all $LENGTH components..."
+
         # Read global buildTags and addArches from data file
         build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
         add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
-        
-        # Use universal values from pipeline parameters
-        universal_from_index="$(params.fromIndex)"
-        universal_target_index="$(params.targetIndex)"  
-        universal_ocp_version="$(params.ocpVersion)"
-        
+
         # Apply target_index resolution logic for hotfix/pre-GA
-        resolved_target_index="$universal_target_index"
+        resolved_target_index="$(params.targetIndex)"  # Use original targetIndex parameter
         if [ "${hotfix}" = "true" ]; then
           issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
           if [ -z "${issue_id}" ]; then
@@ -235,52 +228,27 @@ spec:
                  "spec.data field"
             exit 1
           fi
-          resolved_target_index="${universal_target_index}-${issue_id}-${timestamp}"
+          resolved_target_index="${resolved_target_index}-${issue_id}-${timestamp}"
         elif [ "${pre_ga}" = "true" ]; then
           if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
             echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the " \
                  "ReleasePlanAdmission spec.data field"
             exit 1
           fi
-          resolved_target_index="${universal_target_index}-${product_name}-${product_version}-${timestamp}"
+          resolved_target_index="${resolved_target_index}-${product_name}-${product_version}-${timestamp}"
         fi
-        
+
+        # Collect all fragments directly
+        batch_fragments='[]'
         for((i=0; i<LENGTH; i++)); do
           fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
-
-          # Add enriched component to array
-          enriched_component=$(jq -n \
-            --arg ocpVersion "$universal_ocp_version" \
-            --arg fbcFragment "$fbc_fragment" \
-            --arg fromIndex "$universal_from_index" \
-            --arg targetIndex "$resolved_target_index" \
-            --argjson buildTags "$build_tags" \
-            --argjson addArches "$add_arches" \
-            '{
-              ocpVersion: $ocpVersion,
-              fbcFragment: $fbcFragment,
-              fromIndex: $fromIndex,
-              targetIndex: $targetIndex,
-              buildTags: $buildTags,
-              addArches: $addArches
-            }')
-          
-          enriched_components=$(jq --argjson component "$enriched_component" \
-            '. += [$component]' <<< "$enriched_components")
+          batch_fragments=$(jq --arg fragment "$fbc_fragment" '. += [$fragment]' <<< "$batch_fragments")
         done
 
-        # With IIB batching, all components from the same release have identical fromIndex, targetIndex, 
-        # and ocpVersion due to upstream validation. Create single batch with all components.
-        echo "Creating single batch with all $LENGTH components..."
-        
-        # Extract common values from first component (all are identical)
-        first_component=$(jq -r '.[0]' <<< "$enriched_components")
-        batch_from_index=$(jq -r '.fromIndex' <<< "$first_component")
-        batch_target_index=$(jq -r '.targetIndex' <<< "$first_component")
-        batch_ocp_version="$universal_ocp_version"  # From parameter, validated by get-ocp-version
-        
-        # Collect all fragments
-        batch_fragments=$(jq '[.[].fbcFragment]' <<< "$enriched_components")
+        # Use universal values from pipeline parameters directly
+        batch_from_index="$(params.fromIndex)"
+        batch_target_index="$resolved_target_index"
+        batch_ocp_version="$(params.ocpVersion)"
         
         echo "Batch details:"
         echo "  - fromIndex: $batch_from_index"

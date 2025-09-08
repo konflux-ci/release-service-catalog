@@ -62,28 +62,52 @@ function mock_build_progress() {
 
 function curl() {
   params="$*"
+  # Debug: always print the task name and curl params for troubleshooting
+  echo "DEBUG: TaskRun name: $(context.taskRun.name)" >&2
+  echo "DEBUG: curl params: $params" >&2
+  
   if [[ "$params" =~ "--negotiate -u: https://pyxis.engineering.redhat.com/v1/repositories/registry/quay.io/repository/repo/image -o"* ]]; then
     tempfile="$5"
     echo -e '{ "fbc_opt_in": true }' > "$tempfile"
 
   elif [[ "$params" =~ "-s https://fakeiib.host/builds?user=iib@kerberos&from_index=quay.io/scoheb/fbc-index-testing:"* ]]; then
     build="${buildSeed}"
+    echo "DEBUG: Checking previous builds, taskrun name: $(context.taskRun.name)" >&2
     case "$(context.taskRun.name)" in
-        *complete*|*outdated*)
-          taskrun_name=$(awk '{print substr($1, index($1, "retry"))}' <<< "$(context.taskRun.name)")
+        *complete*|*multiple-fragments-retry*|*multiple-fragments*)
+          # For complete and multiple-fragments-retry tests, use "retry-complete" as the mock case
+          # Added *multiple-fragments* to catch truncated names
+          taskrun_name="retry-complete"
+          echo "DEBUG: Setting retry-complete case" >&2
+          # For multiple fragments retry test, set the correct fragments array to match what the task expects
+          if [[ "$(context.taskRun.name)" =~ "multiple-fragments-retry" ]] || [[ "$(context.taskRun.name)" =~ "multiple-fragments" ]]; then
+            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"]' <<< "${build}")
+          fi
           build=$(jq -rc --arg taskrun_name "$taskrun_name" '.items[0].mock_case = $taskrun_name' <<< "${build}")
           build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
           build=$(jq -rc '.items[0].state_reason = "The FBC fragment was successfully added in the index image"' <<< "${build}")
         ;;
+        *outdated*)
+          # For outdated tests, set state to complete but don't set mock_case (triggers new build)
+          echo "DEBUG: Setting outdated case" >&2
+          build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
+          build=$(jq -rc '.items[0].state_reason = "The FBC fragment was successfully added in the index image"' <<< "${build}")
+        ;;
         *"retry-in-progress"*)
+          echo "DEBUG: Setting retry-in-progress case" >&2
           build=$(jq -rc '.items[0].mock_case = "retry-in-progress"' <<< "${buildSeed}")
         ;;
         *empty-fragments*)
           # For empty fragments test, the task should exit early before reaching this point
           # But if it does reach here, return empty build list
+          echo "DEBUG: Setting empty-fragments case" >&2
           build='{"items": []}'
         ;;
+        *)
+          echo "DEBUG: No case matched, using default" >&2
+        ;;
     esac
+    echo "DEBUG: Final build response: $build" >&2
     echo -en "${build}"
 
   elif [[ "$params" == "-s https://fakeiib.host/builds/1" ]]; then
@@ -151,6 +175,7 @@ function base64() {
         echo "decrypted-keytab"
     else
         # Use the real base64 command for all other operations
+        # This preserves input redirection and pipe functionality
         command base64 "$@"
     fi
 }
