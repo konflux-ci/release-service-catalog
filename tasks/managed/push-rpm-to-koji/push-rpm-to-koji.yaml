@@ -52,15 +52,13 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: $(workspaces.data.path)
+      default: /var/workdir/release
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-  workspaces:
-    - name: data
   results:
     - name: sourceDataArtifact
       type: string
@@ -85,27 +83,6 @@ spec:
     securityContext:
       runAsUser: 1001
   steps:
-    - name: skip-trusted-artifact-operations
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
     - name: use-trusted-artifact
       computeResources:
         limits:
@@ -180,16 +157,18 @@ spec:
             RELEASE_COMPONENTS=$(jq -r '.mapping.components[].name' "$DATA_FILE")
         fi
 
-        KRB5CCNAME=FILE:/tmp/krb5cc_"$(id -u)"
+        KRB5CCNAME=$(mktemp)
         export KRB5CCNAME
 
         cd "$(params.dataDir)/$(dirname "$(params.snapshotPath)")"
 
         # The secrets are base64 when it is mounted as remote secrets otherwise we can directly use.
-        if [ -f /tmp/secret/base64_keytab ]; then
-            base64 -d /tmp/secret/base64_keytab > ./"$KEYTAB_FILE"
+        if [ -f /etc/secret/base64_keytab ]; then
+            set +x  # Avoid leaking the secret
+            base64 -d /etc/secret/base64_keytab > ./"$KEYTAB_FILE"
+            set -x
         else
-            cp /tmp/secret/"$KEYTAB_FILE" ./"$KEYTAB_FILE"
+            cp /etc/secret/"$KEYTAB_FILE" ./"$KEYTAB_FILE"
         fi
 
         TRIES=10
@@ -307,7 +286,7 @@ spec:
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$APPLICATION"
       volumeMounts:
-        - mountPath: /tmp/secret
+        - mountPath: /etc/secret
           name: secret-volume
           readOnly: true
     - name: create-trusted-artifact
@@ -331,26 +310,5 @@ spec:
           value: $(params.ociStorage)
         - name: workDir
           value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)
-    - name: patch-source-data-artifact-result
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)

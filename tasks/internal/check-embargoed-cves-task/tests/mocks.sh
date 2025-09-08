@@ -27,3 +27,6 @@ function curl() {
     exit 1
   fi
 }
+
+# The retry script won't see the kinit function unless we export it
+export -f kinit

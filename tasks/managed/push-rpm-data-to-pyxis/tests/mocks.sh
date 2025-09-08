@@ -29,7 +29,10 @@ function cosign() {
     SBOM_JSON='{"spdxVersion": "SPDX-2.3"}'
   fi
 
-  echo "$SBOM_JSON" > "$(params.dataDir)/$(params.subdirectory)/downloaded-sboms/${4}"
+  echo "$SBOM_JSON" > "/var/workdir/downloaded-sboms/${4}"
+  # Also save a copy in the dataDir for test verification
+  mkdir -p "$(params.dataDir)/downloaded-sboms"
+  echo "$SBOM_JSON" > "$(params.dataDir)/downloaded-sboms/${4}"
 }
 
 function upload_rpm_data() {

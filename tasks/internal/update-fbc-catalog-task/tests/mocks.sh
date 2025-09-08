@@ -141,3 +141,6 @@ function skopeo() {
 # the watch_build_state can't reach some mocks by default, so exporting them fixes it.
 export -f curl
 export -f mock_build_progress
+
+# The retry script won't see the kinit function unless we export it
+export -f kinit

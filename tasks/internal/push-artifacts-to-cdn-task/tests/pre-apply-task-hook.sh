@@ -40,19 +40,19 @@ kubectl create secret generic redhat-workloads-token --from-literal=.dockerconfi
 # create ssh secrets
 
 # cleaning up secrets first
-for secret in checksum-fingerprint-secret checksum-keytab-secret quay-credentials windows-credentials mac-host-credentials mac-signing-credentials; do
+for secret in checksum-fingerprint checksum-keytab quay-credentials windows-credentials mac-host-credentials mac-signing-credentials; do
     kubectl delete secret "$secret" --ignore-not-found
 done
 
 TMPDIR=$(mktemp -d /tmp/XXXX.tmp)
 for OS in windows mac; do
     ssh-keygen -f "${TMPDIR}/${OS}" -N ""
-    kubectl delete secret "${OS}-ssh-key-secret" --ignore-not-found
-    kubectl create secret generic "${OS}-ssh-key-secret" --from-file="${OS}_id_rsa=${TMPDIR}/${OS}" --from-literal="${OS}"_fingerprint="$(ssh-keygen -lf "${TMPDIR}/${OS}.pub")"
+    kubectl delete secret "${OS}-ssh-key" --ignore-not-found
+    kubectl create secret generic "${OS}-ssh-key" --from-file="${OS}_id_rsa=${TMPDIR}/${OS}" --from-literal="${OS}"_fingerprint="$(ssh-keygen -lf "${TMPDIR}/${OS}.pub")"
 done
 ssh-keygen -f "${TMPDIR}/checksum" -N ""
-kubectl create secret generic "checksum-fingerprint-secret" --from-literal=fingerprint="$(ssh-keygen -lf "${TMPDIR}/checksum.pub")"
-kubectl create secret generic "checksum-keytab-secret" --from-literal=keytab=""
+kubectl create secret generic "checksum-fingerprint" --from-literal=fingerprint="$(ssh-keygen -lf "${TMPDIR}/checksum.pub")"
+kubectl create secret generic "checksum-keytab" --from-literal=keytab=""
 
 # create quay, windows and mac secrets
 kubectl create secret generic quay-credentials --from-literal=username="testuser" --from-literal=password="testpass"

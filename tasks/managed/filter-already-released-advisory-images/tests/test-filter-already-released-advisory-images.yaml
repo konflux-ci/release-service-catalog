@@ -6,8 +6,6 @@ metadata:
 spec:
   description: |
     Run the filter-already-released-advisory-images managed task and validate it creates an InternalRequest correctly.
-  workspaces:
-    - name: tests-workspace
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -34,8 +32,6 @@ spec:
         results:
           - name: sourceDataArtifact
             type: string
-        workspaces:
-          - name: data
         volumes:
           - name: workdir
             emptyDir: {}
@@ -52,7 +48,7 @@ spec:
               value: $(params.trustedArtifactsDebug)
         steps:
           - name: create-inputs
-            image: quay.io/konflux-ci/release-service-utils:6a1df8c94948c3f1e83eb9e92a38a8e6431baa3b
+            image: quay.io/konflux-ci/release-service-utils:c11bda9ba25f1a2008dadac3d2f9925a8da3bac1
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -80,12 +76,22 @@ spec:
                 "components": [
                   {
                     "name": "old-component",
-                    "repository": "quay.io/redhat-pending/repo",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-pending/repo",
+                        "rh-registry-repo": "quay.io/redhat-pending/repo"
+                      }
+                    ],
                     "containerImage": "quay.io/redhat-pending/repo@sha256:abc123"
                   },
                   {
                     "name": "new-component",
-                    "repository": "quay.io/redhat-pending/repo2",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-pending/repo2",
+                        "rh-registry-repo": "quay.io/redhat-pending/repo2"
+                      }
+                    ],
                     "containerImage": "quay.io/redhat-pending/repo2@sha256:def456"
                   }
                 ]
@@ -95,14 +101,6 @@ spec:
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" <<EOF
               {}
               EOF
-          - name: skip-trusted-artifact-operations
-            ref:
-              name: skip-trusted-artifact-operations
-            params:
-              - name: ociStorage
-                value: $(params.ociStorage)
-              - name: workDir
-                value: $(params.dataDir)
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -113,17 +111,6 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
-          - name: patch-source-data-artifact-result
-            ref:
-              name: patch-source-data-artifact-result
-            params:
-              - name: ociStorage
-                value: $(params.ociStorage)
-              - name: sourceDataArtifact
-                value: $(results.sourceDataArtifact.path)
-      workspaces:
-        - name: data
-          workspace: tests-workspace
     - name: run-task
       taskRef:
         name: filter-already-released-advisory-images
@@ -156,9 +143,6 @@ spec:
           value: "$(context.pipelineRun.uid)/data.json"
       runAfter:
         - setup
-      workspaces:
-        - name: data
-          workspace: tests-workspace
     - name: check-result
       params:
         - name: result
@@ -174,8 +158,6 @@ spec:
       runAfter:
         - run-task
       taskSpec:
-        workspaces:
-          - name: data
         params:
           - name: environment
             type: string
@@ -202,14 +184,6 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: skip-trusted-artifact-operations
-            ref:
-              name: skip-trusted-artifact-operations
-            params:
-              - name: ociStorage
-                value: $(params.ociStorage)
-              - name: workDir
-                value: $(params.dataDir)
           - name: use-trusted-artifact
             ref:
               name: use-trusted-artifact
@@ -219,7 +193,7 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: verify
-            image: quay.io/konflux-ci/release-service-utils:6a1df8c94948c3f1e83eb9e92a38a8e6431baa3b
+            image: quay.io/konflux-ci/release-service-utils:c11bda9ba25f1a2008dadac3d2f9925a8da3bac1
             script: |
               #!/usr/bin/env bash
               set -ex
@@ -243,10 +217,55 @@ spec:
                 exit 1
               fi
 
-              # Check the snapshot parameter
-              snapshotJson=$(echo "$internalRequest" | jq -r '.spec.params.snapshot' | base64 --decode | gzip -d)
-              if [ "$(jq -r '.application' <<< "$snapshotJson")" != "myapp" ]; then
-                echo "InternalRequest has the wrong application in snapshot"
+              # Check the transformedSnapshot parameter exists and decodes
+              transformedSnapshotB64=$(echo "$internalRequest" | jq -r '.spec.params.transformedSnapshot // empty')
+              if [ -z "$transformedSnapshotB64" ]; then
+                echo "InternalRequest missing transformedSnapshot parameter"
+                exit 1
+              fi
+              transformedSnapshotJson=$(echo "$transformedSnapshotB64" | base64 --decode | gzip -d)
+              if ! jq -e 'type=="array"' <<< "$transformedSnapshotJson" >/dev/null; then
+                echo "transformedSnapshot should be a JSON array"
+                exit 1
+              fi
+              if [ "$(jq 'length' <<< "$transformedSnapshotJson")" -lt 2 ]; then
+                echo "transformedSnapshot should contain at least one entry per component"
+                exit 1
+              fi
+              # Validate per-component transformed entries
+              oldEntry=$(jq -c '.[] | select(.originalComponent=="old-component")' <<< "$transformedSnapshotJson")
+              if [ -z "$oldEntry" ]; then
+                echo "Missing transformed entry for old-component"
+                exit 1
+              fi
+              if [ "$(jq -r '.repository' <<< "$oldEntry")" != "quay.io/redhat-pending/repo" ]; then
+                echo "Unexpected repository for old-component in transformedSnapshot"
+                exit 1
+              fi
+              if [[ "$(jq -r '.containerImage' <<< "$oldEntry")" != *"@sha256:amd64digest_abc123" ]]; then
+                echo "Unexpected digest for old-component in transformedSnapshot"
+                exit 1
+              fi
+              if [ "$(jq -r '.architecture' <<< "$oldEntry")" != "amd64" ]; then
+                echo "Unexpected architecture for old-component in transformedSnapshot"
+                exit 1
+              fi
+
+              newEntry=$(jq -c '.[] | select(.originalComponent=="new-component")' <<< "$transformedSnapshotJson")
+              if [ -z "$newEntry" ]; then
+                echo "Missing transformed entry for new-component"
+                exit 1
+              fi
+              if [ "$(jq -r '.repository' <<< "$newEntry")" != "quay.io/redhat-pending/repo2" ]; then
+                echo "Unexpected repository for new-component in transformedSnapshot"
+                exit 1
+              fi
+              if [[ "$(jq -r '.containerImage' <<< "$newEntry")" != *"@sha256:amd64digest_def456" ]]; then
+                echo "Unexpected digest for new-component in transformedSnapshot"
+                exit 1
+              fi
+              if [ "$(jq -r '.architecture' <<< "$newEntry")" != "amd64" ]; then
+                echo "Unexpected architecture for new-component in transformedSnapshot"
                 exit 1
               fi
 
@@ -305,15 +324,12 @@ spec:
                 echo "The environment task result was not set properly"
                 exit 1
               fi
-      workspaces:
-        - name: data
-          workspace: tests-workspace
   finally:
     - name: cleanup
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils:6a1df8c94948c3f1e83eb9e92a38a8e6431baa3b
+            image: quay.io/konflux-ci/release-service-utils:c11bda9ba25f1a2008dadac3d2f9925a8da3bac1
             script: |
               #!/usr/bin/env bash
               set -eux

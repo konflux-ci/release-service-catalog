@@ -54,16 +54,13 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: $(workspaces.data.path)
+      default: /var/workdir/release
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-  workspaces:
-    - name: data
-      description: Workspace to read and save files
   results:
     - description: Produced trusted data artifact
       name: sourceDataArtifact
@@ -83,27 +80,6 @@ spec:
       - name: "DEBUG"
         value: "$(params.trustedArtifactsDebug)"
   steps:
-    - name: skip-trusted-artifact-operations
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
     - name: use-trusted-artifact
       computeResources:
         limits:
@@ -230,7 +206,7 @@ spec:
           verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
           found_signatures=$(echo "$verify_output" | jq -j '['\
         '.[]|select(.critical.image."docker-manifest-digest"| contains("'"$digest"'"))'\
-        '|select(.critical.identity."docker-reference"| contains("'"$identity"'"))'\
+        '|select(.critical.identity."docker-reference" == "'"$identity"'")'\
         ']|length')
           echo "$found_signatures"
         }
@@ -275,45 +251,66 @@ spec:
             COMPONENT_NAME=$(jq -r ".components[${COMPONENTS_INDEX}].name" "${SNAPSHOT_PATH}")
             echo "Processing component ${COMPONENT_NAME}"
 
-            # Get public image references
-            INTERNAL_CONTAINER_REF=$(jq -r ".components[${COMPONENTS_INDEX}].repository" "${SNAPSHOT_PATH}")
-            rh_registry_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"rh-registry-repo\"]" "${SNAPSHOT_PATH}")
-            registry_access_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"registry-access-repo\"]" \
-              "${SNAPSHOT_PATH}")
-            repository="${rh_registry_repo#*/}"
-
-            # Sign rh-registry-repo references (always) and registry-access-repo references
-            # (only if signatures for this registry are required)
-            REGISTRY_REFERENCES=("${rh_registry_repo}")
-            if grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
-              REGISTRY_REFERENCES+=("${registry_access_repo}")
-            fi
+            COMPONENT=$(jq -c ".components[${COMPONENTS_INDEX}]" "${SNAPSHOT_PATH}")
 
             # Check if image is manifest list
             BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
             DIGEST="${BUILD_CONTAINER_IMAGE/*@}"
             IMAGE=$(skopeo inspect --raw "docker://${BUILD_CONTAINER_IMAGE}")
             MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
-            TAGS=$(jq -r ".components[${COMPONENTS_INDEX}].tags|.[]" "${SNAPSHOT_PATH}")
             LIST=0
             if [ "$MEDIA_TYPE" = "application/vnd.docker.distribution.manifest.list.v2+json" ]; then LIST=1; fi
             if [ "$MEDIA_TYPE" = "application/vnd.oci.image.index.v1+json" ]; then LIST=1; fi
 
-            # Collect data for signing
-            # Sign each manifest in the manifest list
-            if [ $LIST -eq 1 ]; then
-                for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                    for MDIGEST in $(echo "$IMAGE" | jq -r '.manifests[]|.digest'); do
-                        for TAG in $TAGS; do
-                            to_sign+=("${REGISTRY_REF}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
+            # Process repositories array (apply-mapping guarantees this exists)
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$COMPONENT")
+            for (( i = 0; i < NUM_REPOSITORIES; i++ )); do
+                REPOSITORY_OBJECT=$(jq -c ".repositories[${i}]" <<< "$COMPONENT")
+
+                # Get repository URL and use it as INTERNAL_CONTAINER_REF
+                INTERNAL_CONTAINER_REF=$(jq -r '.url' <<< "$REPOSITORY_OBJECT")
+                rh_registry_repo=$(jq -r '."rh-registry-repo" // empty' <<< "$REPOSITORY_OBJECT")
+                registry_access_repo=$(jq -r '."registry-access-repo" // empty' <<< "$REPOSITORY_OBJECT")
+
+                # Skip if no rh-registry-repo (not applicable for signing)
+                if [ "$rh_registry_repo" = "" ] || [ "$rh_registry_repo" = "null" ]; then
+                    echo "No rh-registry-repo found for repository ${INTERNAL_CONTAINER_REF}, skipping signing"
+                    continue
+                fi
+
+                repository="${rh_registry_repo#*/}"
+
+                # Get tags from repository object
+                REPO_TAGS=$(jq -r '.tags[]? // empty' <<< "$REPOSITORY_OBJECT")
+                if [ -z "$REPO_TAGS" ]; then
+                    echo "No tags found for repository ${INTERNAL_CONTAINER_REF}, skipping signing"
+                    continue
+                fi
+
+                # Sign rh-registry-repo references (always) and registry-access-repo references
+                # (only if signatures for this registry are required)
+                REGISTRY_REFERENCES=("${rh_registry_repo}")
+                if [ "$registry_access_repo" != "" ] && [ "$registry_access_repo" != "null" ] && \
+                   grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
+                    REGISTRY_REFERENCES+=("${registry_access_repo}")
+                fi
+
+                # Collect data for signing
+                # Sign each manifest in the manifest list
+                if [ $LIST -eq 1 ]; then
+                    for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
+                        for MDIGEST in $(jq -r '.manifests[]|.digest' <<< "$IMAGE"); do
+                            for TAG in $REPO_TAGS; do
+                                to_sign+=("${REGISTRY_REF}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
+                            done
                         done
                     done
-                done
-            fi
-            # Sign manifest list itself or manifest if it's not list
-            for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                for TAG in $TAGS; do
-                    to_sign+=("${REGISTRY_REF}:${TAG}@${DIGEST}#${INTERNAL_CONTAINER_REF}")
+                fi
+                # Sign manifest list itself or manifest if it's not list
+                for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
+                    for TAG in $REPO_TAGS; do
+                        to_sign+=("${REGISTRY_REF}:${TAG}@${DIGEST}#${INTERNAL_CONTAINER_REF}")
+                    done
                 done
             done
         done
@@ -378,26 +375,5 @@ spec:
           value: $(params.ociStorage)
         - name: workDir
           value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)
-    - name: patch-source-data-artifact-result
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)

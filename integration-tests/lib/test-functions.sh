@@ -189,25 +189,28 @@ cleanup_resources() {
 }
 
 # Function to decrypt secrets if they don't exist
-# Relies on global variables: SUITE_DIR, VAULT_PASSWORD_FILE
+# Relies on global variable: VAULT_PASSWORD_FILE
+# Arguments:
+#   $1: location of test suite directory
 decrypt_secrets() {
+    local suite_dir=$1
     echo "Checking and decrypting secrets..."
-    mkdir -p "${SUITE_DIR}/resources/tenant/secrets"
-    mkdir -p "${SUITE_DIR}/resources/managed/secrets"
+    mkdir -p "${suite_dir}/resources/tenant/secrets"
+    mkdir -p "${suite_dir}/resources/managed/secrets"
 
-    local tenant_secrets_file="${SUITE_DIR}/resources/tenant/secrets/tenant-secrets.yaml"
-    local managed_secrets_file="${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
+    local tenant_secrets_file="${suite_dir}/resources/tenant/secrets/tenant-secrets.yaml"
+    local managed_secrets_file="${suite_dir}/resources/managed/secrets/managed-secrets.yaml"
 
     if [ ! -f "${tenant_secrets_file}" ]; then
-      echo "Tenant secrets missing...decrypting ${SUITE_DIR}/vault/tenant-secrets.yaml"
-      ansible-vault decrypt "${SUITE_DIR}/vault/tenant-secrets.yaml" --output "${tenant_secrets_file}" --vault-password-file "$VAULT_PASSWORD_FILE"
+      echo "Tenant secrets missing...decrypting ${suite_dir}/vault/tenant-secrets.yaml"
+      ansible-vault decrypt "${suite_dir}/vault/tenant-secrets.yaml" --output "${tenant_secrets_file}" --vault-password-file "$VAULT_PASSWORD_FILE"
     else
       echo "Tenant secrets already exist."
     fi
 
     if [ ! -f "${managed_secrets_file}" ]; then
-      echo "Managed secrets missing...decrypting ${SUITE_DIR}/vault/managed-secrets.yaml"
-      ansible-vault decrypt "${SUITE_DIR}/vault/managed-secrets.yaml" --output "${managed_secrets_file}" --vault-password-file "$VAULT_PASSWORD_FILE"
+      echo "Managed secrets missing...decrypting ${suite_dir}/vault/managed-secrets.yaml"
+      ansible-vault decrypt "${suite_dir}/vault/managed-secrets.yaml" --output "${managed_secrets_file}" --vault-password-file "$VAULT_PASSWORD_FILE"
     else
       echo "Managed secrets already exist."
     fi
@@ -249,8 +252,6 @@ create_kubernetes_resources() {
     tmpDir=$(mktemp -d)
     echo "Temporary directory for resources: ${tmpDir}"
 
-    timestamp=$(date +%Y%m%d-%H%M%S)
-
     echo "Building and applying tenant resources..."
     kustomize build "${SUITE_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
     kubectl create -f "$tmpDir/tenant-resources.yaml"
@@ -260,9 +261,6 @@ create_kubernetes_resources() {
     kubectl create -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."
-    echo "Cleanup commands:"
-    echo "kubectl delete -f $tmpDir/tenant-resources.yaml"
-    echo "kubectl delete -f $tmpDir/managed-resources.yaml"
 }
 
 # Function to wait for component initialization and get PR details
@@ -368,7 +366,7 @@ merge_github_pr() {
             fi
         fi
         set -e
-        
+
         attempt=$((attempt + 1))
     done
 
@@ -424,8 +422,10 @@ wait_for_plr_to_complete() {
     local elapsed_time
     local completed=""
     local retry_attempted="false"
+    local taskStatus="" # taskrun status from last output
+    local previousTaskStatus="" # to avoid duplicate output
 
-    echo -n "Waiting for PipelineRun ${component_push_plr_name} to complete"
+    echo "Waiting for PipelineRun ${component_push_plr_name} to complete"
     while [ -z "$completed" ]; do
         current_time=$(date +%s)
         elapsed_time=$((current_time - start_time))
@@ -443,13 +443,17 @@ wait_for_plr_to_complete() {
 
         # If completed, check the status
         if [ -n "$completed" ]; then
-          echo -n "."
+          taskStatus=$("${SUITE_DIR}/../scripts/print-taskrun-status.sh" "${component_push_plr_name}" "${tenant_namespace}" compact)
+          if [ "${taskStatus}" != "${previousTaskStatus}" ]; then
+            echo -e "${taskStatus}"
+            previousTaskStatus="${taskStatus}"
+          fi
           if [ "$completed" == "True" ]; then
-            echo "" 
+            echo ""
             echo "✅ PipelineRun completed successfully"
             break
           elif [ "$completed" == "False" ]; then
-            echo "" 
+            echo ""
             echo "❌ PipelineRun failed"
             if [ "${retry_attempted}" == "false" ]; then
                 echo "Attempting retry for PR ${pr_number} in repo ${component_repo_name}..."

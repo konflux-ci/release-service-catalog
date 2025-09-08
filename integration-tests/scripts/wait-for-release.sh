@@ -32,6 +32,9 @@
 #              containing "namespace/name" of the PipelineRun.
 #
 # **Deps**: jq, tkn, grep, cut, sed.
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+
 function describeFailedPipelineRun() {
   local json=$1
   conditions=$(jq -r '.status.conditions[] | [.type, .status, .reason, .message] | @csv' <<< "${json}")
@@ -144,6 +147,21 @@ function getConsoleLogFromPLR() { # args are json, statusSection
   echo "${prLogUrl}"
 }
 
+function printTaskRunDetails() { # args are pipelineRun, statusReason and optional mode
+  PLR_NAME=$(cut -f2 -d/ <<< "$1")
+  PLR_NS=$(cut -f1 -d/ <<< "$1")
+
+  # This will print out:
+  # Running: 1, Pending: 2, etc.
+  mode="${3:-compact}"
+
+  # we only want to print the taskrun details if the status is "Progressing"
+  if [ "$2" == "\"Progressing\"" ]; then
+    ${SCRIPT_DIR}/print-taskrun-status.sh "${PLR_NAME}" "${PLR_NS}" "${mode}"
+  fi
+
+}
+
 function getLogs() { # args are json, statusSection
   json=$1
   statusSection=$2
@@ -211,6 +229,8 @@ do
   TENANT_COLLECTOR_PIPELINERUN=$(getPipelinerunFromStatus "${RELEASE_JSON}" "collectorsProcessing?.tenantCollectorsProcessing?")
   TENANT_COLLECTOR_PIPELINERUN_URL=$(getConsoleLogFromPLR "${RELEASE_JSON}" "collectorsProcessing?.tenantCollectorsProcessing?")
 
+  TENANT_COLLECTOR_PIPELINERUN_DETAILS=$(printTaskRunDetails "${TENANT_COLLECTOR_PIPELINERUN}" "${TENANT_COLLECTOR_REASON}")
+
   MANAGED_COLLECTOR_PROCESSED=$(jq -r '.status.conditions[] | select(.type=="ManagedCollectorsPipelineProcessed") | [.status, .reason, .message] | @csv' \
     <<< "${RELEASE_JSON}" )
   MANAGED_COLLECTOR_STATUS=$(cut -f1 -d, <<< "${MANAGED_COLLECTOR_PROCESSED}")
@@ -218,6 +238,8 @@ do
   MANAGED_COLLECTOR_MESSAGE=$(cut -f3 -d, <<< "${MANAGED_COLLECTOR_PROCESSED}")
   MANAGED_COLLECTOR_PIPELINERUN=$(getPipelinerunFromStatus "${RELEASE_JSON}" "collectorsProcessing?.managedCollectorsProcessing?")
   MANAGED_COLLECTOR_PIPELINERUN_URL=$(getConsoleLogFromPLR "${RELEASE_JSON}" "collectorsProcessing?.managedCollectorsProcessing?")
+
+  MANAGED_COLLECTOR_PIPELINERUN_DETAILS=$(printTaskRunDetails "${MANAGED_COLLECTOR_PIPELINERUN}" "${MANAGED_COLLECTOR_REASON}")
 
   TENANT_PROCESSED=$(jq -r '.status.conditions[] | select(.type=="TenantPipelineProcessed") | [.status, .reason, .message] | @csv' \
     <<< "${RELEASE_JSON}" )
@@ -227,6 +249,8 @@ do
   TENANT_PIPELINERUN=$(getPipelinerunFromStatus "${RELEASE_JSON}" "tenantProcessing?")
   TENANT_PIPELINERUN_URL=$(getConsoleLogFromPLR "${RELEASE_JSON}" "tenantProcessing?")
 
+  TENANT_PIPELINERUN_DETAILS=$(printTaskRunDetails "${TENANT_PIPELINERUN}" "${TENANT_REASON}")
+
   MANAGED_PROCESSED=$(jq -r '.status.conditions[] | select(.type=="ManagedPipelineProcessed") | [.status, .reason, .message] | @csv' \
     <<< "${RELEASE_JSON}" )
   MANAGED_STATUS=$(cut -f1 -d, <<< "${MANAGED_PROCESSED}")
@@ -235,6 +259,8 @@ do
   MANAGED_PIPELINERUN=$(getPipelinerunFromStatus "${RELEASE_JSON}" "managedProcessing?")
   MANAGED_PIPELINERUN_URL=$(getConsoleLogFromPLR "${RELEASE_JSON}" "managedProcessing?")
 
+  MANAGED_PIPELINERUN_DETAILS=$(printTaskRunDetails "${MANAGED_PIPELINERUN}" "${MANAGED_REASON}")
+
   FINAL_PROCESSED=$(jq -r '.status.conditions[] | select(.type=="FinalPipelineProcessed") | [.status, .reason, .message] | @csv' \
     <<< "${RELEASE_JSON}" )
   FINAL_STATUS=$(cut -f1 -d, <<< "${FINAL_PROCESSED}")
@@ -242,6 +268,8 @@ do
   FINAL_MESSAGE=$(cut -f3 -d, <<< "${FINAL_PROCESSED}")
   FINAL_PIPELINERUN=$(getPipelinerunFromStatus "${RELEASE_JSON}" "finalProcessing?")
   FINAL_PIPELINERUN_URL=$(getConsoleLogFromPLR "${RELEASE_JSON}" "finalProcessing?")
+
+  FINAL_PIPELINERUN_DETAILS=$(printTaskRunDetails "${FINAL_PIPELINERUN}" "${FINAL_REASON}")
 
   overAllStatus="Overall Status    : ${RELEASED_REASON} ${RELEASED_MESSAGE} ${RELEASE_NAMESPACE}/${RELEASE_NAME}"
   overAllStatusCount=$(echo "${overAllStatus}" | wc -c)
@@ -256,25 +284,32 @@ Release Plan      : 📋 ${RELEASE_PLAN}
 ${overAllStatusLine}
 Tenant Collector  : ${TENANT_COLLECTOR_REASON} ${TENANT_COLLECTOR_MESSAGE} ${TENANT_COLLECTOR_PIPELINERUN}
   -> ${TENANT_COLLECTOR_PIPELINERUN_URL}
+  ** ${TENANT_COLLECTOR_PIPELINERUN_DETAILS}
 Managed Collector : ${MANAGED_COLLECTOR_REASON} ${MANAGED_COLLECTOR_MESSAGE} ${MANAGED_COLLECTOR_PIPELINERUN}
   -> ${MANAGED_COLLECTOR_PIPELINERUN_URL}
+  ** ${MANAGED_COLLECTOR_PIPELINERUN_DETAILS}
 Tenant            : ${TENANT_REASON} ${TENANT_MESSAGE} ${TENANT_PIPELINERUN}
   -> ${TENANT_PIPELINERUN_URL}
+  ** ${TENANT_PIPELINERUN_DETAILS}
 Managed           : ${MANAGED_REASON} ${MANAGED_MESSAGE} ${MANAGED_PIPELINERUN}
   -> ${MANAGED_PIPELINERUN_URL}
+  ** ${MANAGED_PIPELINERUN_DETAILS}
 Final             : ${FINAL_REASON} ${FINAL_MESSAGE} ${FINAL_PIPELINERUN}
   -> ${FINAL_PIPELINERUN_URL}
+  ** ${FINAL_PIPELINERUN_DETAILS}
 ${overAllStatusLine}"
 
   message=$(sed 's/""//g' <<< "$message")
   message=$(sed 's/->[[:space:]]*$//g' <<< "$message")
+  message=$(sed 's/\*\*[[:space:]]*$//g' <<< "$message")
+  message=$(sed 's/^.*:[[:space:]]*$//g' <<< "$message")
   message=$(sed '/^[[:space:]]*$/d' <<< "$message")
   message=$(sed 's/"Skipped"/⏭️/g' <<< "$message")
   message=$(sed 's/"Succeeded"/✅️/g' <<< "$message")
   message=$(sed 's/"Progressing"/⏳️/g' <<< "$message")
 
   if [ "${preMessage}" != "${message}" ]; then
-    echo "$message"
+    echo -e "$message"
     echo ""
     preMessage=$message
   fi

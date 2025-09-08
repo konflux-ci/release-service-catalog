@@ -21,6 +21,11 @@ function git() {
     touch -d "@1704012342" "$gitRepo"/data/advisories/dev-tenant/2024/1442
   elif [[ "$1" == "sparse-checkout" ]]; then
     : # no-op
+  elif [[ "$1" == "ls-tree" ]]; then
+    echo data/advisories/dev-tenant/2025/1602/advisory.yaml
+    echo data/advisories/dev-tenant/2025/1601/advisory.yaml
+    echo data/advisories/dev-tenant/2024/1452/advisory.yaml
+    echo data/advisories/dev-tenant/2024/1442/advisory.yaml
   elif [[ "$*" == *"failing-tenant"* ]]; then
     echo "Mocking failing git command" && false
   else
@@ -129,3 +134,6 @@ function check-jsonschema() {
     /usr/local/bin/check-jsonschema $*
   fi
 }
+
+# The retry script won't see the kinit function unless we export it
+export -f kinit

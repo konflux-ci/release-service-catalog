@@ -57,12 +57,12 @@ if [ $? -ne 0 ]; then
 fi
 
 if [ -z "${REPO_CHECK}" ]; then
-  echo "🔴 error: repository ${repo_name} not found or not accessible"
+  echo "⚠️ warning: repository ${repo_name} not found or not accessible"
   echo "   Check that:"
   echo "   1. Repository name is correct"
   echo "   2. Repository exists"
   echo "   3. GITHUB_TOKEN has access to the repository"
-  exit 1
+  exit 0
 fi
 
 # Perform the deletion

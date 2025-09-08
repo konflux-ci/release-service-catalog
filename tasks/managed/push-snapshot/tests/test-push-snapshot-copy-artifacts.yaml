@@ -2,14 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-publish-pyxis-repository-source-multiple-components
+  name: test-push-snapshot-copy-artifacts
 spec:
   description: |
-    Run the publish-pyxis-repository task with multiple components and pushSourceContainer
-    set in the snapshot. A curl call should be executed to set the source_container_image_enabled
-    to the proper values for the components.
-  workspaces:
-    - name: tests-workspace
+    Run the push-snapshot task with copyAttachedArtifacts enabled to test artifact copying functionality.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -32,15 +28,10 @@ spec:
       type: string
   tasks:
     - name: setup
-      workspaces:
-        - name: data
-          workspace: tests-workspace
       taskSpec:
         results:
           - name: sourceDataArtifact
             type: string
-        workspaces:
-          - name: data
         volumes:
           - name: workdir
             emptyDir: {}
@@ -57,49 +48,51 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            image: quay.io/konflux-ci/release-service-utils:1d0f44656336b012945d5f4af5e289b0dfe176ba
             script: |
               #!/usr/bin/env bash
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
               {
-                "application": "my-app",
+                "application": "myapp",
                 "components": [
                   {
-                    "repository": "quay.io/redhat-prod/my-product----my-image1",
-                    "pushSourceContainer": "true"
+                    "name": "comp1",
+                    "containerImage": "reg.io/test@sha256:abcdefg",
+                    "repository": "registry.com/repository",
+                    "tags": [ "tag1", "tag2" ]
                   },
                   {
-                    "repository": "quay.io/redhat-prod/my-product----my-image2",
-                    "pushSourceContainer": "false"
-                  }, 
-                  {
-                    "repository": "quay.io/redhat-prod/my-product----my-image3"
+                    "name": "comp2",
+                    "containerImage": "reg.io/test@sha256:hijklmn",
+                    "repository": "registry.com/repository",
+                    "tags": [ "tag3" ]
                   }
                 ]
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/mydata.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "mapping": {
                   "defaults": {
-                    "pushSourceContainer": "true"
-                  }
+                    "pushSourceContainer": false
+                  },
+                  "components": [
+                    {
+                      "name": "comp1",
+                      "repository": "registry.com/repository"
+                    },
+                    {
+                      "name": "comp2",
+                      "repository": "registry.com/repository"
+                    }
+                  ]
                 }
               }
               EOF
-          - name: skip-trusted-artifact-operations
-            ref:
-              name: skip-trusted-artifact-operations
-            params:
-              - name: ociStorage
-                value: $(params.ociStorage)
-              - name: workDir
-                value: $(params.dataDir)
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -110,24 +103,16 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
-          - name: patch-source-data-artifact-result
-            ref:
-              name: patch-source-data-artifact-result
-            params:
-              - name: ociStorage
-                value: $(params.ociStorage)
-              - name: sourceDataArtifact
-                value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: publish-pyxis-repository
+        name: push-snapshot
       params:
-        - name: pyxisSecret
-          value: test-publish-pyxis-repository-cert
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot_spec.json
+          value: $(context.pipelineRun.uid)/snapshot.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/mydata.json
+          value: $(context.pipelineRun.uid)/data.json
+        - name: retries
+          value: "0"
         - name: resultsDirPath
           value: $(context.pipelineRun.uid)/results
         - name: ociStorage
@@ -144,9 +129,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-      workspaces:
-        - name: data
-          workspace: tests-workspace
+        - name: copyAttachedArtifacts
+          value: "true"
       runAfter:
         - setup
     - name: check-result
@@ -155,17 +139,16 @@ spec:
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
-      workspaces:
-        - name: data
-          workspace: tests-workspace
+        - name: ociStorage
+          value: $(params.ociStorage)
       taskSpec:
         params:
           - name: sourceDataArtifact
             type: string
           - name: dataDir
             type: string
-        workspaces:
-          - name: data
+          - name: ociStorage
+            type: string
         volumes:
           - name: workdir
             emptyDir: {}
@@ -181,14 +164,6 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: skip-trusted-artifact-operations
-            ref:
-              name: skip-trusted-artifact-operations
-            params:
-              - name: ociStorage
-                value: $(params.ociStorage)
-              - name: workDir
-                value: $(params.dataDir)
           - name: use-trusted-artifact
             ref:
               name: use-trusted-artifact
@@ -197,31 +172,35 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
-          - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+          - name: check
+            image: quay.io/konflux-ci/release-service-utils:1d0f44656336b012945d5f4af5e289b0dfe176ba
             script: |
               #!/usr/bin/env bash
-              set -eux
-
-              if [ "$(wc -l < "$(params.dataDir)/mock_curl.txt")" != 6 ]; then
-                  echo Error: curl was expected to be called 6 times. Actual calls:
-                  cat "$(params.dataDir)/mock_curl.txt"
-                  exit 1
-              fi
-
-              [[ "$(head -n 1 "$(params.dataDir)/mock_curl.txt")" \
-                  == *"/my-product/my-image1 "* ]]
-              [[ "$(head -n 2 "$(params.dataDir)/mock_curl.txt" | tail -n 1)" \
-                  == *'"source_container_image_enabled":true}' ]]
-
-              [[ "$(head -n 3 "$(params.dataDir)/mock_curl.txt" | tail -n 1)" \
-                  == *"/my-product/my-image2 "* ]]
-              [[ "$(head -n 4 "$(params.dataDir)/mock_curl.txt" | tail -n 1)" \
-                  != *'"source_container_image_enabled":true}' ]]
-
-              [[ "$(head -n 5 "$(params.dataDir)/mock_curl.txt" | tail -n 1)" \
-                  == *"/my-product/my-image3 "* ]]
-              [[ "$(tail -n 1 "$(params.dataDir)/mock_curl.txt")" \
-                  == *'"source_container_image_enabled":true}' ]]
+              set -eu
+              # Verify oras discover was called on both source images
+              grep 'discover --registry-config .* reg.io/test@sha256:abcdefg --format json' \
+                "$(params.dataDir)/mock_oras.txt"
+              grep 'discover --registry-config .* reg.io/test@sha256:hijklmn --format json' \
+                "$(params.dataDir)/mock_oras.txt"
+              # Since mock returns 1 artifact for sha256:abcdefg, task should use oras cp -r for its tags
+              grep -E \
+                'cp -r( --from-registry-config [^ ]+ --to-registry-config [^ ]+)?' \
+                "$(params.dataDir)/mock_oras.txt" | \
+              grep -E 'reg.io/test@sha256:abcdefg'
+              # For hijklmn (no artifacts), it should fall back to cosign copy
+              # Count cosign copy calls (tag1, tag2, tag3)
+              COPIES=$(grep -c \
+                '^copy -f reg.io/test@sha256:abcdefg registry.com/repository:tag[12]$' \
+                "$(params.dataDir)/mock_cosign.txt" || true)
+              COPIES2=$(grep -c \
+                '^copy -f reg.io/test@sha256:hijklmn registry.com/repository:tag3$' \
+                "$(params.dataDir)/mock_cosign.txt" || true)
+              TOTAL=$((COPIES + COPIES2))
+              # We expect 1 cosign copy (tag3) and 0 for tag1/tag2 (handled by oras cp -r)
+              test "$TOTAL" -eq 1 || {
+                echo "Unexpected cosign copies: $TOTAL (expected 1 for tag3 only)"
+                cat "$(params.dataDir)/mock_cosign.txt"
+                exit 1
+              }
       runAfter:
         - run-task

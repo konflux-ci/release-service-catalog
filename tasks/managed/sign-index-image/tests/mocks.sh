@@ -27,7 +27,7 @@ function internal-pipelinerun() {
 }
 
 function find_signatures() {
-  echo $* >> $(workspaces.data.path)/mock_find_signatures.txt
+  echo $* >> "$(params.dataDir)/mock_find_signatures.txt"
 
   reference=$(echo $* | grep -oP 'repository \K\w+')
   file=$(echo $* | grep -oP 'output_file (.+)$' | cut -f2 -d' ')

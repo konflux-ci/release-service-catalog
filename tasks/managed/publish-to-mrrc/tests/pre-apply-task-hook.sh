@@ -22,8 +22,8 @@ kubectl create secret generic test-ca \
   --from-literal=mrrc-signing.crt="testca"
 
 # Add mocks to the beginning of scripts
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
 yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
-yq -i '.spec.steps[3].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[3].script' "$TASK_PATH"
 
 # Create a dummy configmap (and delete it first if it exists)
 kubectl delete configmap trusted-ca --ignore-not-found

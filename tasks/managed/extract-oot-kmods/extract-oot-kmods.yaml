@@ -46,7 +46,7 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: $(workspaces.input-data.path)
+      default: /var/workdir/release
     - name: taskGitUrl
       type: string
       description: The git repository URL for task and StepAction resolution
@@ -55,8 +55,6 @@ spec:
       type: string
       description: The git revision for task and StepAction resolution
       default: main
-  workspaces:
-    - name: input-data
   results:
     - name: sourceDataArtifact
       type: string
@@ -76,27 +74,6 @@ spec:
       - name: "DEBUG"
         value: "$(params.trustedArtifactsDebug)"
   steps:
-    - name: skip-trusted-artifact-operations
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
     - name: use-trusted-artifact
       computeResources:
         limits:
@@ -137,26 +114,27 @@ spec:
         KMODS_PATH=$(params.kmodsPath)
         SIGNED_KMODS_PATH=$(params.signedKmodsPath)
         snapshot_json=$(cat "$(params.dataDir)/$(params.snapshotPath)")
-        sha_image=$(jq -r '.metadata.annotations["build.appstudio.redhat.com/commit_sha"]' <<< "$snapshot_json")
-        source_image=$(jq -r '.spec.components[].containerImage' <<< "$snapshot_json" | sed 's/@.*$//')
-        jq -r '.spec.components[].containerImage' <<< "$snapshot_json"
-        SRC_IMAGE="$source_image:$sha_image"
-        TMP_DIR=$(mktemp -d)
-        echo "Copying $SRC_IMAGE to $TMP_DIR..."
-        skopeo copy docker://"$SRC_IMAGE" dir:"$TMP_DIR"
+        source_image=$(jq -r '.components[0].containerImage' <<< "$snapshot_json")
+        tmp_dir=$(mktemp -d)
+        echo "Copying $source_image to $tmp_dir..."
+        skopeo copy docker://"$source_image" dir:"$tmp_dir"
         echo "Inspecting layers to find OOT kernel modules and envfile"
-        for LAYER in $(jq -r '.layers[].digest' "$TMP_DIR/manifest.json"); do
+        for LAYER in $(jq -r '.layers[].digest' "$tmp_dir/manifest.json"); do
             LAYER=${LAYER#sha256:}
-            tar -xf "$TMP_DIR/$LAYER" -C "$TMP_DIR"
-            if [ -d "$TMP_DIR$KMODS_PATH" ]; then
-                echo "Found $KMODS_PATH in layer: $LAYER"
+            # Check if the archive contains the KMODS_PATH directory
+            if tar -tf "$tmp_dir/$LAYER" | grep -q "^${KMODS_PATH#/}/"; then
+                echo "Extracting $KMODS_PATH/ from $LAYER..."
+                tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "${KMODS_PATH#/}" --no-same-owner
                 mkdir -p "$(params.dataDir)/$SIGNED_KMODS_PATH/"
-                cp -r "$TMP_DIR$KMODS_PATH"/*.ko "$(params.dataDir)/$SIGNED_KMODS_PATH/"
+                cp -r "$tmp_dir$KMODS_PATH"/*.ko "$(params.dataDir)/$SIGNED_KMODS_PATH/"
                 echo "Copying envfile to get versions data..."
-                cp "$TMP_DIR/envfile" "$(params.dataDir)/$SIGNED_KMODS_PATH/"
+                # Also extract envfile if it exists in this layer
+                if tar -tf "$tmp_dir/$LAYER" | grep -q "^envfile$"; then
+                   tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "envfile" --no-same-owner
+                    cp "$tmp_dir/envfile" "$(params.dataDir)/$SIGNED_KMODS_PATH/"
+                fi
             else
-                echo "$KMODS_PATH not found in $LAYER so deleting layer..."
-                rm -rf "${TMP_DIR:?}/${LAYER:?}"
+                echo "$KMODS_PATH not found in $LAYER so skipping layer..."
             fi
         done
     - name: create-trusted-artifact
@@ -180,26 +158,5 @@ spec:
           value: $(params.ociStorage)
         - name: workDir
           value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)
-    - name: patch-source-data-artifact-result
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)

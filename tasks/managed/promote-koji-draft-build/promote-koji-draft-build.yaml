@@ -1,0 +1,243 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: promote-koji-draft-build
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: promote-koji
+spec:
+  description: |-
+    Tekton task to promote draft build in koji instance.
+  params:
+    - name: snapshotPath
+      type: string
+      description: |
+        Path to the JSON file of the mapped Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace
+    - name: pushSecret
+      type: string
+      description: |
+        The secret that is used for login koji instance
+    - name: pipelineImage
+      type: string
+      description: |
+        The image url with koji (1.34 or higher), jq and kinit installed for
+        running the promote-koji-draft-build task, please make sure you have such image
+        or you build this image first
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: secret-volume
+      secret:
+        secretName: $(params.pushSecret)
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: promote-koji-draft-build
+      # The pipelineImage will be fetching from get-secrets task with koji installed there
+      image: "$(params.pipelineImage)"
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 250m
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+
+        PRINCIPAL=$(jq --exit-status -r '.pushOptions.pushKeytab.principal' "${DATA_FILE}")
+        KEYTAB_FILE=$(jq --exit-status -r '.pushOptions.pushKeytab.name' "${DATA_FILE}")
+        KOJI_PROFILE=$(jq --exit-status -r '.pushOptions.koji_profile' "${DATA_FILE}")
+
+        koji-cmd() {
+            koji --profile="$KOJI_PROFILE" "$@"
+        }
+
+        # Fetch the component list from data.pushOptions.components by default, if there is no such list
+        # fetch from data.mapping.components.
+        RELEASE_COMPONENTS=$(jq -r '
+            if .pushOptions.components then
+                .pushOptions.components[]
+            else
+                empty
+            end' "${DATA_FILE}")
+        if [ -z "$RELEASE_COMPONENTS" ]; then
+            RELEASE_COMPONENTS=$(jq -r '.mapping.components[].name' "$DATA_FILE")
+        fi
+
+        KRB5CCNAME=$(mktemp)
+        export KRB5CCNAME
+
+        cd "$(params.dataDir)/$(dirname "$(params.snapshotPath)")"
+
+        # The secrets are base64 when it is mounted as remote secrets otherwise we can directly use.
+        if [ -f /etc/secret/base64_keytab ]; then
+            set +x  # Avoid leaking the secret
+            base64 -d /etc/secret/base64_keytab > ./"$KEYTAB_FILE"
+            set -x
+        else
+            cp /etc/secret/"$KEYTAB_FILE" ./"$KEYTAB_FILE"
+        fi
+
+        TRIES=10
+        while [ $TRIES -gt 0 ] ; do
+            if kinit -kt ./"$KEYTAB_FILE" "$PRINCIPAL"; then
+                break
+            fi
+            TRIES=$((TRIES - 1))
+        done
+
+        USER_NAME=$(echo "$PRINCIPAL" | cut -d'@' -f1)
+
+        # Test the koji connection
+        koji-cmd hello
+
+        printf 'Start task "%s" for Application "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+          componentName=$(jq -r '.name' <<< "$component")
+          gitUrl=$(jq -r '.source.git.url' <<< "$component")
+          commitHash=$(jq -r '.source.git.revision' <<< "$component")
+          commitUrl="git+$gitUrl#$commitHash"
+
+          # Use printf to join the array elements and grep to check for the presence of the variable
+          if ! printf "%s\n" "${RELEASE_COMPONENTS[@]}" | grep -q -x "$componentName"; then
+              printf "Skip the component %s as it is not in the release list.\n" "$componentName"
+              continue
+          fi
+
+          builds=$(
+            koji-cmd call --json-output listBuilds \
+              userID="$USER_NAME" \
+              packageID="$componentName" \
+              state=1 \
+              source="$commitUrl" \
+              draft=True
+          )
+          # Get the latest build ID
+          build_id=$(jq -r 'max_by(".creation_time").build_id' <<< "$builds")
+
+          printf "Promoting build %s ...\n" "$build_id"
+          koji-cmd call promoteBuild "$build_id"
+        done
+
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+      volumeMounts:
+        - mountPath: /etc/secret
+          name: secret-volume
+          readOnly: true
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

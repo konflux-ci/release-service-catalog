@@ -83,6 +83,7 @@ spec:
           - name: PR_GIT_REVISION
           - name: VAULT_PASSWORD_SECRET_NAME
           - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
         results:
           - name: TEST_OUTPUT
             description: Test output
@@ -115,6 +116,8 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.annotations['pac.test.appstudio.openshift.io/branch']
+              - name: uuid
+                value: $(context.pipelineRun.uid)
             script: |
               #!/usr/bin/env bash
 
@@ -224,14 +227,8 @@ spec:
               if string_has_word "${PIPELINE}" "${AFFECTED_PIPELINES}" || \
                 [[ "${AFFECTED_PIPELINES}" == "release-pipelines" ]]; then
                 echo "This Test Suite is affected by changes in PR ${PR_NUMBER}"
-                # initially, there was a run-test.sh in every test suite directory.
-                # then we moved to have a generic run-test.sh in the root.
-                # support both cases.
-                if [ -f "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/run-test.sh" ]; then
-                  "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/run-test.sh"
-                else
-                  "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
-                fi
+  
+                "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
               else
                 echo "This Test Suite is not affected by changes in PR ${PR_NUMBER}"
                 exit 99
@@ -239,3 +236,120 @@ spec:
 
       runAfter:
         - get-snapshot-data
+  finally:
+    - name: cleanup-resources
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+          - name: VAULT_PASSWORD_SECRET_NAME
+        steps:
+          - name: cleanup-resources
+            image: $(params.STEP_IMAGE)
+            env:
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+            script: |
+              #
+              # Why are we doing this?
+              # - When pushing new changes to a PR, the integration-service
+              #   will attempt to cancel any in-flight PR checks.
+              # - The trap catches the EXIT signal but sometimes the cleanup
+              #   function has not completed yet before the pod is killed.
+              # - This leaves many orphaned GH repos and k8s resources.
+              #
+              # Plan of attack
+              # - First, we need to know what the resources are.
+              # - The KRW tests are designed to be self-contained and therefore
+              #   there is uniqueness in resource names. We need to either store
+              #   the unique names generated in run-test or control how the uniqueness
+              #   is generated so we can accurately delete the resources.
+              #
+              # What other avenues were explored?
+              # - storing the resource names in a result created in run-test
+              #   (X) does not work since Tekton will not allow access to results
+              #       coming from a cancelled task.
+              # - using a workspace to store names in a file
+              #   (X) does not work since the integration service does not allow
+              #       a workspace to be passed to a pipeline.
+
+              # The solution involves:
+              # 1-) re-generating the variables needed by injecting
+              #     the uuid using a pipelinerun.uuid from tekton since that guarantees that
+              #     the same uuid is available in all tasks.
+              # 2-) re-generating the k8s resource files on disk (without applying)
+              #     and using those resources to perform a delete operation.
+
+              # source the test suite env file to get variables needed for resource deletion
+              #
+              # shellcheck source=/dev/null
+              . "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+
+              # source the lib functions
+              #
+              # shellcheck source=/dev/null
+              . "/home/e2e/tests/lib/test-functions.sh"
+              
+              # delete GH repo
+              "/home/e2e/tests/scripts/delete-repository.sh" "${component_repo_name:?}"
+
+              # prepare what's needed to delete k8s resources
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+              KUBECONFIG_FILE=$(mktemp)
+              set +x
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              set -x
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              # decrypt the secrets since they are part of the resources to be deleted
+              #
+              decrypt_secrets "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)"
+
+              tmpDir=$(mktemp -d)
+              # we need to rebuild the resources (without applying them)
+              # so that we can use their names to delete them
+              #
+              echo "Building tenant resources to prepare for deletion..."
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant" \
+                | envsubst > "$tmpDir/tenant-resources.yaml"
+
+              echo "Building managed resources to prepare for deletion..."
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed" \
+                | envsubst > "$tmpDir/managed-resources.yaml"
+
+              # actually delete the k8s resources and ignore failures since
+              # they might be already deleted from the cleanup trap
+              #
+              echo "Deleting resources..."
+              kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found
+              kubectl delete -f "$tmpDir/managed-resources.yaml" --ignore-not-found

@@ -6,18 +6,11 @@ echo "Creating snapshot.json file for task to read..."
 mkdir -p "$(params.dataDir)"
 cat > "$(params.dataDir)/snapshot.json" << 'EOF'
 {
-  "metadata": {
-    "annotations": {
-      "build.appstudio.redhat.com/commit_sha": "mocksha123"
+  "components": [
+    {
+      "containerImage": "quay.io/mock/image@sha256:dummy"
     }
-  },
-  "spec": {
-    "components": [
-      {
-        "containerImage": "quay.io/mock/image@sha256:dummy"
-      }
-    ]
-  }
+  ]
 }
 EOF
 
@@ -26,18 +19,11 @@ function get-resource() {
    case "$1" in
      "snapshot")
        echo '{
-         "metadata": {
-           "annotations": {
-             "build.appstudio.redhat.com/commit_sha": "mocksha123"
+         "components": [
+           {
+             "containerImage": "quay.io/mock/image@sha256:dummy"
            }
-         },
-         "spec": {
-           "components": [
-             {
-               "containerImage": "quay.io/mock/image@sha256:dummy"
-             }
-           ]
-         }
+         ]
        }'
        ;;
      *)
@@ -53,12 +39,12 @@ export -f get-resource
 skopeo() {
   echo "Mock skopeo called with: $*"
   # Write to workspace since the task runs there initially
-  echo "$*" >> /workspace/input-data/mock_skopeo.txt
+  echo "$*" >> "$(params.dataDir)/mock_skopeo.txt"
 
   case "$*" in
-    "copy docker://quay.io/mock/image@sha256:dummy dir:"* | "copy docker://quay.io/mock/image:mocksha123 dir:"*)
+    "copy docker://quay.io/mock/image@sha256:dummy dir:"*)
       # Create a proper manifest.json with layers
-      cat > "$TMP_DIR/manifest.json" << 'EOF'
+      cat > "$tmp_dir/manifest.json" << 'EOF'
 {
   "layers": [
     {"digest": "sha256:mocklayer123"}
@@ -83,14 +69,14 @@ EOF
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
       
       # Create the layer tar file with the complete structure
-      (cd "$LAYER_BUILD_DIR" && tar -cf "$TMP_DIR/mocklayer123" .)
+      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/mocklayer123" .)
       
       # Clean up the temporary build directory
       rm -rf "$LAYER_BUILD_DIR"
       
       # Debug: Let's see what we actually created
-      echo "Debug: Contents of TMP_DIR after tar creation:"
-      ls -la "$TMP_DIR/"
+      echo "Debug: Contents of tmp_dir after tar creation:"
+      ls -la "$tmp_dir/"
       ;;
     *)
       echo "Error: Unexpected skopeo call: $*"

@@ -1,0 +1,76 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-already-released-advisory-images-multi-arch
+spec:
+  description: |
+    Test the filter-already-released-advisory-images-task with a multi-arch Image Index.
+    Verify that the task resolves Image Index to architecture-specific digests and 
+    correctly filters out components that are already in advisories.
+  tasks:
+    - name: run-filter-task
+      taskRef:
+        name: filter-already-released-advisory-images-task
+      params:
+        - name: snapshot
+          # Snapshot with multi-arch image before `gzip -c|base64 -w 0` encoding:
+          # '{"components":[{"name":"multi-arch-component","version":"1.0.0","containerImage":"quay.io/test/multi-arch-image@sha256:indexdigest789","tags":["v1.0"],"repository":"quay.io/test","rh-registry-repo":"registry.redhat.io/test"}]}'
+          value: 'H4sIABaakWgAA13NzQ6CMAzA8buP0TMMNPGLk1efwXBYoNmauA27QiSEd3c7SIzHtb/+t0AX3BA8eonQPBbw2iE04ManUKm5s+UGoIAJOVLwCexVreo06YIXTR757rTJl69Rz4pCJRil+slQ3t+i1YfjqSHf47snk8z5ck0Z0Sb/D1PqQlsA4xAiSeD5L5ks25LRUBSey+yS+L4VY2+1bHht190HL/cbTeMAAAA='
+        - name: transformedSnapshot
+          # Transformed snapshot with multi-arch component resolved to
+          # arch-specific images before `gzip -c|base64 -w 0` encoding:
+          # '[
+          #   {"name":"multi-arch-component","containerImage":"registry.redhat.io/test@sha256:amd64digest123",
+          #    "tags":["v1.0"],"repository":"registry.redhat.io/test","rh-registry-repo":"registry.redhat.io/test",
+          #    "originalComponent":"multi-arch-component","architecture":"amd64"},
+          #   {"name":"multi-arch-component","containerImage":"registry.redhat.io/test@sha256:arm64digest456",
+          #    "tags":["v1.0"],"repository":"registry.redhat.io/test","rh-registry-repo":"registry.redhat.io/test",
+          #    "originalComponent":"multi-arch-component","architecture":"arm64"}
+          # ]'
+          value: 'H4sIAA1tk2gAA81Quw6CQBDs/YytORQECioTK7+BUGzgcmzC3Zm9xYQY/l3OBDusLGznlZlpnuDQaqjBTqOQQu4G1Xl79047gQQ67wTJab5ZNFHH2lAQnlPW/YCSkj+KDnIJA+ZlVaPtq6Ins0JZfl4DBE2AuoFHlp6gTVb/3QcSz/N+2GrjQW2kipavYs9kyOF4/RTf3RMBEt3JxHHNuy4syc9vYLvdUJTV/98Q68LSHl78/+B/EAIAAA=='
+        - name: origin
+          value: "test-origin"
+        - name: advisory_secret_name
+          value: "filter-already-released-advisory-images-secret"
+        - name: internalRequestPipelineRunName
+          value: "$(context.pipelineRun.name)"
+    - name: validate-result
+      runAfter:
+        - run-filter-task
+      params:
+        - name: result
+          value: "$(tasks.run-filter-task.results.result)"
+        - name: unreleased_components
+          value: "$(tasks.run-filter-task.results.unreleased_components)"
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: unreleased_components
+            type: string
+        steps:
+          - name: validate
+            image: quay.io/konflux-ci/release-service-utils:26e22ecf2c23e7ec8134fede3b40a6e6aef8ac20
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "Validating multi-arch filter task result..."
+
+              if [[ "$(params.result)" != "Success" ]]; then
+                echo "Task result was not Success: $(params.result)"
+                exit 1
+              fi
+
+              # The multi-arch component should be filtered out (matches advisory),
+              # expect zero unreleased components since both resolved arch digests match advisory
+              UNRELEASED_COMPONENTS=$(base64 -d <<< "$(params.unreleased_components)" | gunzip)
+              UNRELEASED_COUNT=$(jq 'length' <<< "$UNRELEASED_COMPONENTS")
+              if [[ "$UNRELEASED_COUNT" -ne 0 ]]; then
+                echo "Expected 0 unreleased components, but found $UNRELEASED_COUNT"
+                echo "Components: $UNRELEASED_COMPONENTS"
+                exit 1
+              fi
+
+              echo "Multi-arch filtering validation successful!"

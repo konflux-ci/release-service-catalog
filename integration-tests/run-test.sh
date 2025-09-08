@@ -124,7 +124,7 @@ trap 'cleanup_resources $? $LINENO "$BASH_COMMAND"' EXIT
 check_env_vars "$@" # Pass all args for consistency, though check_env_vars doesn't use them
 parse_options "$@" # Parses options and sets CLEANUP, NO_CVE
 
-decrypt_secrets
+decrypt_secrets "${SUITE_DIR}"
 create_github_repository
 patch_component_source
 setup_namespaces # Ensures correct context before resource creation

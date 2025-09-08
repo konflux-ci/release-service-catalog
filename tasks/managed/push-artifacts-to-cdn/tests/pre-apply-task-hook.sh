@@ -59,4 +59,4 @@ EOF
 kubectl apply -f /tmp/configmap.json
 
 # Add mocks to the beginning of task step script
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"

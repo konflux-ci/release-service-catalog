@@ -9,7 +9,7 @@ metadata:
 spec:
   description: |-
     Tekton task to update trusted-tasks list OCI artifact.
-    Once a task is released as a bundle, the list of trusted-tasks should be 
+    Once a task is released as a bundle, the list of trusted-tasks should be
     updated with the new task.
     The OCI artifact containing the trusted-tasks list is named `acceptable-data-bundles` and should reside in the same
     org in the registry. If it is already in place, it will be used as an input to which the results will be appended,
@@ -38,7 +38,7 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: $(workspaces.data.path)
+      default: /var/workdir/release
     - name: sourceDataArtifact
       description: The source data artifact to use for trusted artifacts
       type: string
@@ -49,9 +49,6 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-  workspaces:
-    - name: data
-      description: The workspace where the snapshot json reside
   results:
     - name: sourceDataArtifact
       type: string
@@ -78,27 +75,6 @@ spec:
     securityContext:
       runAsUser: 1001
   steps:
-    - name: skip-trusted-artifact-operations
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
     - name: use-trusted-artifact
       computeResources:
         limits:
@@ -121,7 +97,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: update-trusted-tasks
-      image: quay.io/konflux-ci/appstudio-utils@sha256:591af845d7c700a178b3738e9725880e79cf63521a906325185bfe74d2a28407
+      image: quay.io/konflux-ci/appstudio-utils@sha256:8381b83a22b71fe5efad5dcc093352b17a62920743a7b578e2f523eb3f1aef9c
       computeResources:
         limits:
           memory: 1Gi
@@ -131,7 +107,7 @@ spec:
       script: |
         #!/bin/bash
         set -eux
-        
+
         SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
         TAG="latest"
 
@@ -150,46 +126,54 @@ spec:
         printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
         for ((i = 0; i < NUM_COMPONENTS; i++))
         do
-            # extract the component from the snapshot 
+            # Extract the component from the snapshot
             component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
-
-            # Extract the repository from the snapshot
-            repository=$(jq -r '.repository' <<< "$component")
-
-            # The data-acceptable-bundles repo should reside in the same org in the registry.
-            # Fetch the repository and replace the repo with data-acceptable-bundles
-            # for example: quay.io/myorg/myrepo -> quay.io/myorg/data-acceptable-bundles
-            ACCEPTABLE_BUNDLES=$(echo "${repository}" | awk -F'/' '{$NF="data-acceptable-bundles"; print $0}' OFS='/')
 
             # Extract the image sha
             sha=$(jq -r '.containerImage' <<< "$component" | awk -F'@' '{print "@" $2}')
-            
-            # Get the number of tags from the component
-            NUM_TAGS=$(jq '.tags | length' <<< "$component")
 
-            # update the tasks list OCI artifact for each tag in the component
-            for ((j = 0; j < NUM_TAGS; j++))
+            # Get the number of repositories from the component
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$component")
+
+            # Iterate through each repository in the component
+            for ((j = 0; j < NUM_REPOSITORIES; j++))
             do
-                imageTag=$(jq -c -r --argjson j "$j" '.tags[$j]' <<< "$component")
-                
-                set +e
-                # Check if ACCEPTABLE_BUNDLES OCI artifact has a latest tag
-                skopeo list-tags docker://"${ACCEPTABLE_BUNDLES}" | jq -r '.Tags[]' | grep "^${TAG}$" &> /dev/null
-                RESULT=$?
-                set -e
+                # Extract the repository URL from the snapshot
+                repository=$(jq -r --argjson j "$j" '.repositories[$j].url' <<< "$component")
 
-                # If it has a latest tag, use it as an --input for the ec track bundle command
-                if [ $RESULT -eq 0 ]; then
-                    echo "${ACCEPTABLE_BUNDLES}:${TAG} exists - using it as an input"
-                    ec track bundle --bundle "${repository}:${imageTag}${sha}" \
-                    --input oci:"${ACCEPTABLE_BUNDLES}:${TAG}" --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
+                # The data-acceptable-bundles repo should reside in the same org in the registry.
+                # Fetch the repository and replace the repo with data-acceptable-bundles
+                # for example: quay.io/myorg/myrepo -> quay.io/myorg/data-acceptable-bundles
+                ACCEPTABLE_BUNDLES=$(echo "${repository}" \
+                  | awk -F'/' '{$NF="data-acceptable-bundles"; print $0}' OFS='/')
 
-                # Else - Do not use it as an --input
-                else
-                    echo "${ACCEPTABLE_BUNDLES}:${TAG} does not exist"
-                    ec track bundle --bundle "${repository}:${imageTag}${sha}" \
-                    --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
-                fi        
+                # Get the number of tags from the repository
+                NUM_TAGS=$(jq --argjson j "$j" '.repositories[$j].tags | length' <<< "$component")
+
+                # update the tasks list OCI artifact for each tag in the repository
+                for ((k = 0; k < NUM_TAGS; k++))
+                do
+                    imageTag=$(jq -c -r --argjson j "$j" --argjson k "$k" '.repositories[$j].tags[$k]' <<< "$component")
+
+                    set +e
+                    # Check if ACCEPTABLE_BUNDLES OCI artifact has a latest tag
+                    skopeo list-tags docker://"${ACCEPTABLE_BUNDLES}" | jq -r '.Tags[]' | grep "^${TAG}$" &> /dev/null
+                    RESULT=$?
+                    set -e
+
+                    # If it has a latest tag, use it as an --input for the ec track bundle command
+                    if [ $RESULT -eq 0 ]; then
+                        echo "${ACCEPTABLE_BUNDLES}:${TAG} exists - using it as an input"
+                        ec track bundle --bundle "${repository}:${imageTag}${sha}" \
+                        --input oci:"${ACCEPTABLE_BUNDLES}:${TAG}" --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
+
+                    # Else - Do not use it as an --input
+                    else
+                        echo "${ACCEPTABLE_BUNDLES}:${TAG} does not exist"
+                        ec track bundle --bundle "${repository}:${imageTag}${sha}" \
+                        --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
+                    fi
+                done
             done
         done
     - name: create-trusted-artifact
@@ -213,26 +197,5 @@ spec:
           value: $(params.ociStorage)
         - name: workDir
           value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)
-    - name: patch-source-data-artifact-result
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)

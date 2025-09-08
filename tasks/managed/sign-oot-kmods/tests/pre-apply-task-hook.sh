@@ -4,7 +4,7 @@ TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 # Add test setup and mocks to the beginning of the sign-files step script (step[2])
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/test-setup.sh") + load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/test-setup.sh") + load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
 
 # Create dummy secrets
 kubectl delete secret my-mocked-secret --ignore-not-found

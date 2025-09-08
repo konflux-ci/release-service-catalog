@@ -1,0 +1,253 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-apply-mapping-helm-chart
+spec:
+  description: |
+    Run the apply-mapping task with a snapshot containing both container image components
+    and Helm chart components. Verify that oci_version expansion works for Helm charts.
+  workspaces:
+    - name: tests-workspace
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        workspaces:
+          - name: data
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:a58dc96cb28b54cdef2564a346d43a6d7bd4d656
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "web-app",
+                      "repository": "registry.redhat.io/myorg/web-app",
+                      "tags": [
+                        "{{ timestamp }}",
+                        "build-{{ digest_sha }}",
+                        "{{ git_short_sha }}"
+                      ]
+                    },
+                    {
+                      "name": "helm-chart",
+                      "repository": "registry.redhat.io/myorg/helm-chart",
+                      "tags": [
+                        "{{ oci_version }}",
+                        "chart-{{ oci_version }}",
+                        "v{{ oci_version }}-stable"
+                      ]
+                    }
+                  ],
+                  "defaults": {
+                    "timestampFormat": "%Y.%m.%d",
+                    "tags": ["default"]
+                  }
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
+              {
+                "application": "mixed-app",
+                "components": [
+                  {
+                    "name": "web-app",
+                    "containerImage": "quay.io/myorg/web-app@sha256:abcdef123456789",
+                    "source": {
+                      "git": {
+                        "revision": "commit123abc",
+                        "url": "https://github.com/myorg/web-app.git"
+                      }
+                    }
+                  },
+                  {
+                    "name": "helm-chart",
+                    "containerImage": "quay.io/myorg/helm-chart@sha256:789abcdef123456",
+                    "source": {
+                      "git": {
+                        "revision": "commit789xyz",
+                        "url": "https://github.com/myorg/helm-chart.git"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: apply-mapping
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/test_data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:a58dc96cb28b54cdef2564a346d43a6d7bd4d656
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo Test that SNAPSHOT contains web-app component with expected tags
+              test "$(
+                jq -r '[ .components[] | select(.name=="web-app") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" -eq 1
+
+              web_app_tags="$(
+                jq -c '.components[] | select(.name=="web-app") | .tags' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )"
+              echo "Web-app tags: $web_app_tags"
+              test "$web_app_tags" == '["build-abcdef123456789","default","commit1","2024.07.29"]'
+
+              echo Test that SNAPSHOT contains helm-chart component with oci_version tags
+              test "$(
+                jq -r '[ .components[] | select(.name=="helm-chart") ] | length' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" -eq 1
+
+              helm_tags="$(
+                jq -c '.components[] | select(.name=="helm-chart") | .tags' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )"
+              echo "Helm chart tags: $helm_tags"
+              test "$helm_tags" == '["chart-2.0.1_alpha","default","v2.0.1_alpha-stable","2.0.1_alpha"]'
+
+              echo Test that repositories were mapped correctly to Red Hat registry format
+              test "$(
+                jq -r '.components[] | select(.name=="web-app") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == "quay.io/redhat-prod/myorg----web-app"
+
+              test "$(
+                jq -r '.components[] | select(.name=="helm-chart") | .repository' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == "quay.io/redhat-prod/myorg----helm-chart"
+
+              echo Test that rh-registry-repo fields were set correctly
+              test "$(
+                jq -r '.components[] | select(.name=="web-app") | ."rh-registry-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == "registry.redhat.io/myorg/web-app"
+
+              test "$(
+                jq -r '.components[] | select(.name=="helm-chart") | ."rh-registry-repo"' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == "registry.redhat.io/myorg/helm-chart"
+
+              echo All tests passed!

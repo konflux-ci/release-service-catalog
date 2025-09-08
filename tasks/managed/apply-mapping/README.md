@@ -21,21 +21,23 @@ This task supports variable expansion in tag values from the mapping. The curren
 * "{{ digest_sha }}" -> The image digest of the respective component
 * "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the
   repository and generates the next sequential tag (e.g., if the highest tag is v1.0.0-2, it will generate v1.0.0-3)
+* "{{ oci_version }}" -> The version from OCI image annotations
+  (extracts org.opencontainers.image.version annotation and converts + to _ for tag compliance)
 
 You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
 
 ## Parameters
 
-| Name                    | Description                                                                                                                | Optional | Default value           |
-|-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-------------------------|
-| snapshotPath            | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to                               | No       | -                       |
-| dataPath                | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                       |
-| failOnEmptyResult       | Fail the task if the resulting snapshot contains 0 components                                                              | Yes      | false                   |
-| ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                   |
-| ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                      |
-| trustedArtifactsDebug   | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                     | Yes      | ""                      |
-| orasOptions             | oras options to pass to Trusted Artifacts calls                                                                            | Yes      | ""                      |
-| sourceDataArtifact      | Location of trusted artifacts to be used to populate data directory                                                        | Yes      | ""                      |
-| dataDir                 | The location where data will be stored                                                                                     | Yes      | $(workspaces.data.path) |
-| taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                       |
-| taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                       |
+| Name                    | Description                                                                                                                | Optional | Default value        |
+|-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------|
+| snapshotPath            | Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to                               | No       | -                    |
+| dataPath                | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                    |
+| failOnEmptyResult       | Fail the task if the resulting snapshot contains 0 components                                                              | Yes      | false                |
+| ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
+| ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                   |
+| trustedArtifactsDebug   | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                     | Yes      | ""                   |
+| orasOptions             | oras options to pass to Trusted Artifacts calls                                                                            | Yes      | ""                   |
+| sourceDataArtifact      | Location of trusted artifacts to be used to populate data directory                                                        | Yes      | ""                   |
+| dataDir                 | The location where data will be stored                                                                                     | Yes      | /var/workdir/release |
+| taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
+| taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |

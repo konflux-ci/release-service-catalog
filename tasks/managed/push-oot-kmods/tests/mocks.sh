@@ -11,11 +11,7 @@ function git() {
         clone)
             echo "Mocking clone command: $*"
             mkdir local-artifacts
-            
-            # Write to both locations to support both modes
-            if [ -d /workspace/signed-kmods ]; then
-                echo "$*" >> /workspace/signed-kmods/mock_git_clone.txt
-            fi
+
             if [ -d "$(params.dataDir)" ]; then
                 echo "$*" >> "$(params.dataDir)"/mock_git_clone.txt
             fi

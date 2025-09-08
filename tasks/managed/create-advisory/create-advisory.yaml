@@ -68,7 +68,7 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: $(workspaces.data.path)
+      default: /var/workdir/release
     - name: cgwHostname
       type: string
       description: >
@@ -86,9 +86,6 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-  workspaces:
-    - name: data
-      description: Workspace where the json files are stored
   results:
     - name: advisory_url
       description: The advisory url if one was created
@@ -114,27 +111,6 @@ spec:
     securityContext:
       runAsUser: 1001
   steps:
-    - name: skip-trusted-artifact-operations
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/skip-trusted-artifact-operations/skip-trusted-artifact-operations.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
     - name: use-trusted-artifact
       computeResources:
         limits:
@@ -202,6 +178,17 @@ spec:
           exit 0
         fi
 
+        if [ "$content_type" = "binary" ]; then
+          echo "Processing binary artifacts for PURL updates..."
+        elif [ "$content_type" = "generic" ]; then
+          echo "Processing generic artifacts for PURL updates..."
+        elif [ "$content_type" = "disk-image" ]; then
+          echo "Processing disk-image artifacts for PURL updates..."
+        else
+          echo "Unknown content type '$content_type'. Skipping update-purl."
+          exit 0
+        fi
+
         COMPONENTS=$(jq -c '.mapping.components[] | select(.contentGateway)' "$DATA_FILE")
 
         UPDATED_ENTRIES=()
@@ -226,13 +213,25 @@ spec:
             # Error if any declared file is missing from the CGW response
             #   If a file is listed in the RPA to be released to CGW, but isn't returned from our API call
             #   then we probably should exit as that shouldn't happen.
-            for declared_file in $(jq -r '.files[].source' <<< "$component"); do
-              declared_basename=$(basename "$declared_file")
-              if [[ -z "${FILE_URL_MAP[$declared_basename]}" ]]; then
-                echo "Warning: file '$declared_basename' (from $COMPONENT_NAME) was not returned by CGW" >&2
-                exit 1
-              fi
-            done
+            if [ "$content_type" = "disk-image" ]; then
+              # Disk-images use .staged.files[] structure
+              for declared_file in $(jq -r '.staged.files[].filename' <<< "$component"); do
+                declared_basename=$(basename "$declared_file")
+                if [[ -z "${FILE_URL_MAP[$declared_basename]}" ]]; then
+                  echo "Warning: file '$declared_basename' (from $COMPONENT_NAME) was not returned by CGW" >&2
+                  exit 1
+                fi
+              done
+            else
+              # Binary/generic use .files[] structure
+              for declared_file in $(jq -r '.files[].source' <<< "$component"); do
+                declared_basename=$(basename "$declared_file")
+                if [[ -z "${FILE_URL_MAP[$declared_basename]}" ]]; then
+                  echo "Warning: file '$declared_basename' (from $COMPONENT_NAME) was not returned by CGW" >&2
+                  exit 1
+                fi
+              done
+            fi
 
             # Get all advisory entries that match this component
             MATCHING_ENTRIES=$(jq -c --arg name "$COMPONENT_NAME" \
@@ -247,8 +246,21 @@ spec:
                 ARCH=$(jq -r '.architecture' <<< "$entry")
                 OS=$(jq -r '.os' <<< "$entry")
 
-                FILENAME=$(jq -r --arg arch "$ARCH" --arg os "$OS" \
-                  '.files[] | select(.arch == $arch and .os == $os) | .source' <<< "$component")
+                if [ "$content_type" = "disk-image" ]; then
+                  # For disk-images, we need to match the filename from the populate-release-notes step
+                  # with the staged.files[].filename that has the same architecture
+                  FILENAME=$(jq -r --arg arch "$ARCH" \
+                    '.staged.files[] | select(.filename | contains($arch)) | .filename' <<< "$component")
+
+                  if [ -z "$FILENAME" ] || [ "$FILENAME" = "null" ]; then
+                    echo "Warning: No filename found for arch $ARCH in component $COMPONENT_NAME" >&2
+                    continue
+                  fi
+                else
+                  # Binary/generic files have arch/os matching
+                  FILENAME=$(jq -r --arg arch "$ARCH" --arg os "$OS" \
+                    '.files[] | select(.arch == $arch and .os == $os) | .source' <<< "$component")
+                fi
 
                 FILENAME_BASENAME=$(basename "$FILENAME")
                 URL="https://access.cdn.redhat.com${FILE_URL_MAP[$FILENAME_BASENAME]}"
@@ -329,7 +341,7 @@ spec:
           fi
         fi
 
-        if [ "$content_type" = "binary" ] || [ "$content_type" = "generic" ]; then
+        if [ "$content_type" = "binary" ] || [ "$content_type" = "generic" ] || [ "$content_type" = "disk-image" ]; then
           content_path=".content.artifacts"
         else
           content_path=".content.images"
@@ -456,26 +468,5 @@ spec:
           value: $(params.ociStorage)
         - name: workDir
           value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)
-    - name: patch-source-data-artifact-result
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 20m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/patch-source-data-artifact-result/patch-source-data-artifact-result.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)

@@ -17,3 +17,4 @@ Tekton Pipeline to push artifacts to CDN and/or Dev Portal
 | signingKeyName  | signing key name to be used for checksum signing                                      | No       | -                                                         |
 | taskGitUrl      | The url to the git repo where the release-service-catalog tasks to be used are stored | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision | The revision in the taskGitUrl repo to be used                                        | No       | -                                                         |
+| quayURL         | Quay URL of the repo where content will be shared between tasks                       | Yes      | quay.io/konflux-artifacts                                 |

@@ -55,6 +55,13 @@ EOF
 /content/origin/files/sha256/e1/e147d6d9c9940389790084fcbff749600dbeafd5f4495320ba1a09ea0ddcef3c/odo-windows-amd64.exe
 /content/origin/files/sha256/04/04b0a14eb0ef13c0d8ac862cd2abeea9de74e26624c6d38fc6bc8a5759a8f9e8/odo-windows-amd64.exe.zip
 EOF
+    elif [[ "$3" == "RHELAI" ]]; then
+      dir1="/content/origin/files/sha256/ae/aea86cd520f01d3b9c488fe11de9a6241c825018ff834cebce8d988046a1a8ac"
+      file1="rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz"
+      echo "$dir1/$file1"
+      dir2="/content/origin/files/sha256/f7/f7dc49d369465abebb6aebf60a9962f49af854a4960d61ff6aa1f02325cee26d"
+      file2="rhel-ai-intel-1.5.1-1749643939-x86_64-kvm.qcow2"
+      echo "$dir2/$file2"
     else
       echo "Unknown product: $3" >&2
       return 1
