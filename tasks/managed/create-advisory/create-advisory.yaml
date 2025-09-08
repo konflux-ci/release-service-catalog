@@ -97,6 +97,10 @@ spec:
   volumes:
     - name: workdir
       emptyDir: {}
+    - name: cgw-secret
+      secret:
+        secretName: $(params.cgwSecret)
+        optional: true
   stepTemplate:
     volumeMounts:
       - mountPath: /var/workdir
@@ -140,17 +144,11 @@ spec:
         requests:
           memory: 256Mi
           cpu: 100m
+      volumeMounts:
+        - name: cgw-secret
+          mountPath: /var/secrets/cgw
+          readOnly: true
       env:
-        - name: CGW_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: $(params.cgwSecret)
-              key: username
-        - name: CGW_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: $(params.cgwSecret)
-              key: token
         - name: CGW_HOST
           value: $(params.cgwHostname)
       script: |
@@ -182,6 +180,22 @@ spec:
             exit 0
           fi
           echo "content type is not a generic artifact, skipping update-purl"
+          exit 0
+        elif [ "$content_type" = "binary" ] || [ "$content_type" = "generic" ] || \
+             [ "$content_type" = "disk-image" ]; then
+          # These content types require CGW credentials
+          if [ -f "/var/secrets/cgw/username" ] && [ -f "/var/secrets/cgw/token" ]; then
+            echo "CGW credentials found, setting environment variables..."
+            CGW_USERNAME=$(cat /var/secrets/cgw/username)
+            CGW_TOKEN=$(cat /var/secrets/cgw/token)
+            export CGW_USERNAME
+            export CGW_TOKEN
+          else
+            echo "Error: CGW credentials not found but content type '$content_type' requires CGW access."
+            exit 1
+          fi
+        else
+          echo "Content type '$content_type'. Skipping update-purl."
           exit 0
         fi
 
