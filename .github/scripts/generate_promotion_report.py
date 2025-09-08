@@ -47,14 +47,57 @@ SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT") or "587")
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-EMAIL_FROM = os.getenv("EMAIL_FROM", "release-reports@konflux-ci.com")
-EMAIL_TO = os.getenv("EMAIL_TO", "").split(",") if os.getenv("EMAIL_TO") else []
+EMAIL_FROM = os.getenv("EMAIL_FROM", "konflux-announce@redhat.com")
+EMAIL_TO = os.getenv("EMAIL_TO", "konflux-announce@redhat.com").split(",") if os.getenv("EMAIL_TO") else ["konflux-announce@redhat.com"]
 
 class CommitCollector:
     """Collects and analyzes commits between branches."""
     
     def __init__(self, repo_root: Path):
         self.repo_root = repo_root
+        
+    def _should_include_commit(self, summary: str, message: str, files: List[str]) -> bool:
+        """Filter out chore, docs, and test commits to focus on important changes."""
+        # Convert to lowercase for case-insensitive matching
+        summary_lower = summary.lower()
+        message_lower = message.lower()
+        
+        # Skip commits that are purely routine maintenance
+        skip_patterns = [
+            r'^chore\s*:',  # chore: prefix
+            r'^docs\s*:',   # docs: prefix  
+            r'^test\s*:',   # test: prefix
+            r'^ci\s*:',     # ci: prefix
+            r'^style\s*:',  # style: prefix
+            r'^refactor\s*:', # refactor: prefix (unless it's significant)
+            r'^bump\s+',    # version bumps
+            r'^update\s+deps', # dependency updates
+            r'^update\s+.*docker\s+digest', # docker digest updates
+            r'^chore\(deps\)', # dependency chore
+        ]
+        
+        # Check if commit matches skip patterns
+        for pattern in skip_patterns:
+            if re.match(pattern, summary_lower) or re.match(pattern, message_lower):
+                return False
+        
+        # Check if commit only affects documentation or test files
+        if files:
+            non_doc_test_files = [
+                f for f in files 
+                if not (f.endswith('.md') or 
+                       f.startswith('docs/') or 
+                       f.startswith('test') or 
+                       f.endswith('_test.yaml') or
+                       f.endswith('.test.yaml') or
+                       f.startswith('integration-tests/') or
+                       f.endswith('.md'))
+            ]
+            # If all files are docs/tests, skip the commit
+            if not non_doc_test_files:
+                return False
+        
+        return True
         
     def run_git_command(self, cmd: List[str]) -> str:
         """Run a git command and return stdout."""
@@ -112,17 +155,19 @@ class CommitCollector:
             # Build GitHub link
             commit_url = f"{GITHUB_REPO_URL}/commit/{full_hash}"
             
-            commits.append({
-                "hash": full_hash,
-                "summary": summary,
-                "message": message.strip(),
-                "author": author,
-                "email": email,
-                "date": date,
-                "files": file_list,
-                "diffstat": diffstat,
-                "url": commit_url
-            })
+            # Filter out routine commits (chore, docs, test)
+            if self._should_include_commit(summary, message.strip(), file_list):
+                commits.append({
+                    "hash": full_hash,
+                    "summary": summary,
+                    "message": message.strip(),
+                    "author": author,
+                    "email": email,
+                    "date": date,
+                    "files": file_list,
+                    "diffstat": diffstat,
+                    "url": commit_url
+                })
         
         return commits
 
@@ -165,33 +210,26 @@ class AISummarizer:
     def _get_system_prompt(self, promotion_type: str) -> str:
         """Get system prompt for AI summarization."""
         return f"""
-You are a professional DevOps engineer creating a weekly promotion report for the {promotion_type} deployment.
+You are a professional DevOps engineer creating a concise changelog for the {promotion_type} deployment.
 
-Your task is to create a comprehensive, human-readable summary of the changes being promoted. Follow these guidelines:
+Your task is to create a SHORT, focused summary highlighting only the most important changes. Follow these guidelines:
 
-1. **Executive Summary** (2-3 paragraphs):
-   - Highlight the most significant changes and their business impact
-   - Mention key features, bug fixes, or improvements
-   - Use professional, non-technical language when possible
+1. **Focus on Pipeline Changes**: Prioritize changes to pipelines, tasks, and core functionality
+2. **Ignore Routine Changes**: Skip chore, docs, test, and dependency update commits
+3. **Keep it Concise**: Maximum 2-3 bullet points per category, 1-2 sentences each
+4. **Business Impact**: Focus on what users/operators need to know
 
-2. **Change Categories** (use these exact headings):
-   - 🚀 **New Features & Enhancements**
-   - 🐛 **Bug Fixes & Improvements** 
-   - 🛠 **Refactoring & Technical Debt**
-   - 🧪 **Testing & Quality Assurance**
-   - 🔧 **Infrastructure & Configuration**
+**Format** (use these exact headings):
+- 🚀 **Key Features**: New functionality or significant enhancements
+- 🐛 **Important Fixes**: Critical bug fixes or improvements
+- 🔧 **Pipeline Updates**: Changes to tasks, pipelines, or infrastructure
 
-3. **For each change**:
-   - Use bullet points with clear, concise descriptions
-   - Include the commit title as a hyperlink to the GitHub commit
-   - Add 1-2 sentences explaining the impact or reasoning
-   - Avoid technical jargon unless necessary
-
-4. **Style Guidelines**:
-   - Use active voice and present tense
-   - Be consistent with formatting
-   - Focus on business value and user impact
-   - Keep descriptions concise but informative
+**Style Guidelines**:
+- Use active voice and present tense
+- Be concise and direct
+- Focus on business value and operational impact
+- Avoid technical jargon
+- Maximum 150 words total
 
 Respond only with the markdown content for the changelog section.
 """
@@ -320,47 +358,37 @@ class EmailGenerator:
     
     def generate_email_content(self, promotion_type: str, commits: List[Dict], 
                              summary: str, task_analysis: Dict) -> str:
-        """Generate complete HTML email content."""
+        """Generate complete HTML email content - simplified for changelog focus."""
         html_template = self._get_html_template()
-        
-        # Generate task-pipeline table
-        task_table = self._generate_task_table(task_analysis)
-        
-        # Format commit statistics
-        stats = self._calculate_stats(commits)
         
         # Convert markdown summary to HTML for better formatting
         summary_html = markdown.markdown(summary, extensions=['extra', 'sane_lists'])
         
-        # Fill template
+        # Fill template with simplified data
         content = html_template.format(
             promotion_type=promotion_type.replace("-", " ").title(),
             date=datetime.now().strftime("%B %d, %Y"),
-            commit_count=len(commits),
-            author_count=stats["unique_authors"],
-            file_count=stats["total_files"],
             summary=summary_html,
-            task_table=task_table,
             repo_url=GITHUB_REPO_URL
         )
         
         return content
     
     def _get_html_template(self) -> str:
-        """Get HTML email template."""
+        """Get HTML email template - unified format for both production and staging."""
         return """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Release Service Catalog - {promotion_type} Promotion Report</title>
+    <title>Konflux Release Service Catalog - {promotion_type} Changelog</title>
     <style>
         body {{
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
+            line-height: 1.5;
             color: #333;
-            max-width: 800px;
+            max-width: 700px;
             margin: 0 auto;
             padding: 20px;
             background-color: #f8f9fa;
@@ -368,131 +396,80 @@ class EmailGenerator:
         .container {{
             background: white;
             border-radius: 8px;
-            padding: 30px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 25px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }}
         .header {{
-            border-bottom: 3px solid #0366d6;
-            padding-bottom: 20px;
-            margin-bottom: 30px;
+            border-bottom: 2px solid #0366d6;
+            padding-bottom: 15px;
+            margin-bottom: 20px;
         }}
         .header h1 {{
             color: #0366d6;
             margin: 0;
-            font-size: 28px;
+            font-size: 24px;
         }}
         .header .subtitle {{
             color: #666;
-            font-size: 16px;
+            font-size: 14px;
             margin-top: 5px;
         }}
-        .stats {{
-            display: flex;
-            justify-content: space-around;
-            background: #f6f8fa;
-            border-radius: 6px;
-            padding: 20px;
+        .changelog {{
             margin: 20px 0;
         }}
-        .stat {{
-            text-align: center;
-        }}
-        .stat .number {{
-            font-size: 24px;
-            font-weight: bold;
+        .changelog h2 {{
             color: #0366d6;
+            font-size: 18px;
+            margin: 20px 0 10px 0;
+            border-bottom: 1px solid #e1e4e8;
+            padding-bottom: 5px;
         }}
-        .stat .label {{
-            font-size: 14px;
-            color: #666;
-            margin-top: 5px;
+        .changelog ul {{
+            margin: 10px 0;
+            padding-left: 20px;
         }}
-        .summary {{
-            background: #f8f9fa;
-            border-left: 4px solid #28a745;
-            padding: 20px;
-            margin: 20px 0;
+        .changelog li {{
+            margin: 8px 0;
+            line-height: 1.4;
         }}
-        .summary h2 {{
-            color: #28a745;
-            margin-top: 0;
-        }}
-        .task-table {{
-            margin: 30px 0;
-        }}
-        .task-table h2 {{
-            color: #0366d6;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 15px 0;
-        }}
-        th, td {{
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }}
-        th {{
-            background-color: #f6f8fa;
-            font-weight: 600;
-        }}
-        tr:hover {{
-            background-color: #f8f9fa;
-        }}
-        .footer {{
-            margin-top: 40px;
-            padding-top: 20px;
-            border-top: 1px solid #ddd;
-            color: #666;
-            font-size: 14px;
-        }}
-        a {{
+        .changelog a {{
             color: #0366d6;
             text-decoration: none;
+            font-weight: 500;
         }}
-        a:hover {{
+        .changelog a:hover {{
             text-decoration: underline;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 15px;
+            border-top: 1px solid #e1e4e8;
+            color: #666;
+            font-size: 12px;
         }}
         .no-changes {{
             text-align: center;
             color: #666;
             font-style: italic;
-            padding: 40px;
+            padding: 30px;
+            background: #f6f8fa;
+            border-radius: 6px;
         }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Release Service Catalog</h1>
-            <div class="subtitle">{promotion_type} Promotion Report - {date}</div>
+            <h1>🚀 Konflux Release Service Catalog</h1>
+            <div class="subtitle">{promotion_type} Changelog - {date}</div>
         </div>
         
-        <div class="stats">
-            <div class="stat">
-                <div class="number">{commit_count}</div>
-                <div class="label">Commits</div>
-            </div>
-            <div class="stat">
-                <div class="number">{author_count}</div>
-                <div class="label">Contributors</div>
-            </div>
-            <div class="stat">
-                <div class="number">{file_count}</div>
-                <div class="label">Files Changed</div>
-            </div>
-        </div>
-        
-        <div class="summary">
-            <h2>📋 Executive Summary</h2>
+        <div class="changelog">
             {summary}
         </div>
         
-        {task_table}
-        
         <div class="footer">
-            <p>This report was automatically generated by the Release Service Catalog promotion system.</p>
+            <p>This changelog was automatically generated by the Konflux Release Service Catalog promotion system.</p>
             <p>Repository: <a href="{repo_url}">{repo_url}</a></p>
         </div>
     </div>
@@ -687,7 +664,7 @@ def main():
         # Send email if configured
         if EMAIL_TO:
             print("📤 Sending email report...")
-            subject = f"Release Service Catalog - {promotion_type.replace('-', ' ').title()} Promotion Report"
+            subject = f"Konflux Release Service Catalog - {promotion_type.replace('-', ' ').title()} Changelog"
             
             try:
                 sender = EmailSender()
