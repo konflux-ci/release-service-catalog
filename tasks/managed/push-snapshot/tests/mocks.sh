@@ -101,6 +101,14 @@ function oras() {
     fi
     if [[ "$4" == "reg.io/test@sha256:abcdefg" ]]; then
       echo "sha256:abcdefg"
+    elif [[ "$4" == "registry.io/image1:tag1" ]]; then
+      echo "sha256:6ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15e"
+    elif [[ "$4" == "registry.io/image2:tag2" ]]; then
+      echo "sha256:7ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15f"
+    elif [[ "$4" == "registry.io/image1:sha256-6ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15e.src" ]]; then
+      echo "sha256:6ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15e"
+    elif [[ "$4" == "registry.io/image2:sha256-7ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15f.src" ]]; then
+      echo "sha256:7ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15f"
     elif [[ "$4" == "reg.io/test:sha256-abcdefg.src" ]]; then
       echo "sha256:abcdefg"
     elif [[ "$4" == "prod.io/loc:sha256-abcdefg.src" ]]; then

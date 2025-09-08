@@ -124,7 +124,7 @@ spec:
           memory: 1Gi
         requests:
           memory: 1Gi
-          cpu: '2'
+          cpu: "2"
       script: |
         #!/usr/bin/env bash
         set -eux
@@ -234,7 +234,8 @@ spec:
             exit 1
         fi
 
-        if [ "$(jq '.components | map(select((has("tags")|not) or (.tags | IN([])))) | length' \
+        if [ "$(jq '.components | map(select(.repositories |
+          map(select((has("tags")|not) or (.tags | IN([])))) | length > 0)) | length' \
           "${SNAPSHOT_SPEC_FILE}")" -ne 0 ] ; then
             echo "Found components in the snapshot file that do not contain tags. Failing"
             cat "${SNAPSHOT_SPEC_FILE}"
@@ -270,8 +271,6 @@ spec:
         do
           component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
           containerImage=$(jq -r '.containerImage' <<< "$component")
-          repository=$(jq -r '.repository' <<< "$component")
-          imageTags=$(jq '.tags' <<< "$component")
 
           # oras has very limited support for selecting the right auth entry,
           # so create a custom auth file with just one entry.
@@ -310,10 +309,11 @@ spec:
           # Push source container if the component has pushSourceContainer: true or if the
           # pushSourceContainer key is missing from the component and the defaults has
           # pushSourceContainer: true
-          if [[ $(jq -r '.pushSourceContainer' <<< "$component") == "true" ]] \
-            || [[ $(jq 'has("pushSourceContainer")' <<< "$component") == "false" && \
-                  ${defaultPushSourceContainer} == "true" ]] ; then
+          pushSourceContainer=$(jq -r '.pushSourceContainer' <<< "$component")
+          hasPushSourceContainer=$(jq 'has("pushSourceContainer")' <<< "$component")
 
+          if [[ "${pushSourceContainer}" == "true" ]] || [[ "${hasPushSourceContainer}" == "false" && \
+                  ${defaultPushSourceContainer} == "true" ]] ; then
             source_tag=${origin_digest/:/-}.src
             # Calculate the source container image based on the provided container image
             sourceContainer="${source_repo}:${source_tag}"
@@ -325,32 +325,42 @@ spec:
               echo "Error: Source container ${sourceContainer} not found!"
               exit 1
             fi
-            # Push the source image with the source tag here. The source image will be
-            # pushed with the provided tags below in the loop
-            wait_for_slot
-            push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-              "${repository}" "${source_tag}" "" > "$TMP_RESULTS_DIR/${name}-${source_tag}.out" 2>&1 &
-            ((++REQUEST_COUNT))
-            echo "Request Count: $REQUEST_COUNT"
           fi
 
-          for tag in $(jq -r '.[]' <<< "$imageTags") ; do
-            wait_for_slot
-            # Push the container image
-            push_image "${origin_digest}" "${name}" "${containerImage}" "${repository}" "${tag}" \
-            "$platform" > "$TMP_RESULTS_DIR/${name}-${tag}.out" 2>&1 &
-            ((++REQUEST_COUNT))
-            echo "Request Count: $REQUEST_COUNT"
-
-            # This variable will only exist if the above logic determined the source container should
-            # be pushed for this component
+          NUM_REPOS=$(jq -c '.repositories | length' <<< "$component")           
+          for ((j = 0; j < NUM_REPOS; j++)); do 
+            repository=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
+            imageTags=$(jq '.tags' <<< "$repository")
+            repository_url=$(jq -r '.url' <<< "$repository")
+          
             if [ -n "${source_container_digest-}" ] ; then
+              # Push the source image with the source tag here. The source image will be
+              # pushed with the provided tags below in the loop
               wait_for_slot
               push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
-                "${repository}" "${tag}-source" "" > "$TMP_RESULTS_DIR/${name}-${tag}-source.out" 2>&1 &
+                "${repository_url}" "${source_tag}" "" > "$TMP_RESULTS_DIR/${name}-${source_tag}.out" 2>&1 &
               ((++REQUEST_COUNT))
               echo "Request Count: $REQUEST_COUNT"
             fi
+
+            for tag in $(jq -r '.[]' <<< "$imageTags") ; do
+              wait_for_slot
+              # Push the container image
+              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository_url}" "${tag}" \
+              "$platform" > "$TMP_RESULTS_DIR/${name}-${tag}.out" 2>&1 &
+              ((++REQUEST_COUNT))
+              echo "Request Count: $REQUEST_COUNT"
+
+              # This variable will only exist if the above logic determined the source container should
+              # be pushed for this component
+              if [ -n "${source_container_digest-}" ] ; then
+                wait_for_slot
+                push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
+                  "${repository_url}" "${tag}-source" "" > "$TMP_RESULTS_DIR/${name}-${tag}-source.out" 2>&1 &
+                ((++REQUEST_COUNT))
+                echo "Request Count: $REQUEST_COUNT"
+              fi
+            done
           done
         done
 

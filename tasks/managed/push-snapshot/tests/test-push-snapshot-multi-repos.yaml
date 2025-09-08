@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-snapshot-pushsourcecontainer-defaults
+  name: test-push-snapshot-multi-repos
 spec:
   description: |
-    Run the push-snapshot task with pushSourceContainer enabled via the defaults
+    Run the push-snapshot task with a component that has multiple repositories.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -59,22 +59,51 @@ spec:
                 "application": "myapp",
                 "components": [
                   {
-                    "name": "comp",
-                    "containerImage": "registry.io/image@sha256:abcdefg",
+                    "name": "comp1",
+                    "containerImage": "registry.io/image1:tag1",
                     "repositories": [
                       {
-                        "url": "prod-registry.io/prod-location",
+                        "url": "prod-registry.io/prod-location1",
                         "tags": [
-                          "testtag"
+                          "tag1-12345",
+                          "tag2-zyxw"
+                        ]
+                      },
+                      {
+                        "url": "backup-registry.io/backup-location1",
+                        "tags": [
+                          "backup-tag1",
+                          "backup-tag2"
                         ]
                       }
                     ],
-                    "source": {
-                      "git": {
-                        "revision": "a51005b614c359b17a24317fdb264d76b2706a5a",
-                        "url": "https://github.com/abc/python-basic"
+                    "pushSourceContainer": false
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2:tag2",
+                    "repositories": [
+                      {
+                        "url": "prod-registry.io/prod-location2",
+                        "tags": [
+                          "some-cool-tag"
+                        ]
+                      },
+                      {
+                        "url": "mirror-registry.io/mirror-location2",
+                        "tags": [
+                          "mirror-tag"
+                        ]
+                      },
+                      {
+                        "url": "dev-registry.io/dev-location2",
+                        "tags": [
+                          "dev-tag1",
+                          "dev-tag2",
+                          "dev-tag3"
+                        ]
                       }
-                    }
+                    ]
                   }
                 ]
               }
@@ -168,42 +197,62 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              # The sha 570fd5a1e41b5545a24828be5a3df2e85e4a5a67703385f39594837e77e2478e is calculated
-              # from the origin image pull spec - see mocks.sh
-              cat > "$(params.dataDir)/cosign_expected_calls.txt" << EOF
-              copy -f registry.io/image:sha256-4c0020cf1fd28563704fb5f05396899faf8ae642b94950c72c6282a507df1a03.src\
-               prod-registry.io/prod-location:sha256-4c0020cf1fd28563704fb5f05396899faf8ae642b94950c72c6282a507df1a03.src
-              copy -f registry.io/image@sha256:abcdefg prod-registry.io/prod-location:testtag
-              copy -f registry.io/image:sha256-4c0020cf1fd28563704fb5f05396899faf8ae642b94950c72c6282a507df1a03.src\
-               prod-registry.io/prod-location:testtag-source
-              EOF
-
-              # Sort to ignore the cosign call orders as it differs from parallel execution.
-              sort "$(params.dataDir)/cosign_expected_calls.txt" > \
-              "$(params.dataDir)/cosign_expected_calls_sorted.txt"
-              sort "$(params.dataDir)/mock_cosign.txt" > \
-              "$(params.dataDir)/mock_cosign_sorted.txt"
-
-              if [ "$(md5sum < "$(params.dataDir)/cosign_expected_calls_sorted.txt")" \
-                != "$(md5sum < "$(params.dataDir)/mock_cosign_sorted.txt")" ]; then
-                echo "Error: Expected cosign calls do not match actual calls"
-                echo Actual calls:
-                cat "$(params.dataDir)/mock_cosign_sort.txt"
-                echo Expected calls:
-                cat "$(params.dataDir)/cosign_expected_calls_sort.txt"
+              if [ "$(wc -l < "$(params.dataDir)/mock_cosign.txt")" != 17 ]; then
+                echo Error: cosign was expected to be called 17 times. Actual calls:
+                cat "$(params.dataDir)/mock_cosign.txt"
                 exit 1
               fi
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_skopeo.txt")" != 1 ]; then
-                echo Error: skopeo was expected to be called 1 time. Actual calls:
+              if [ "$(wc -l < "$(params.dataDir)/mock_skopeo.txt")" != 2 ]; then
+                echo Error: skopeo was expected to be called 2 times. Actual calls:
                 cat "$(params.dataDir)/mock_skopeo.txt"
                 exit 1
               fi
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 5 ]; then
-                echo Error: oras was expected to be called 5 times. Actual calls:
+              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" -lt 7 ]; then
+                echo Error: oras was expected to be called at least 7 times. Actual calls:
                 cat "$(params.dataDir)/mock_oras.txt"
                 exit 1
               fi
+
+              test "$(jq -r '.images[0].name' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" == "comp1"
+
+              test "$(jq -r '.images[0].shasum' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" == \
+                "sha256:6ff029b0b6cf82e3df2a2360dc88cd527c51132b557207d64634d9c245e0d15e"
+
+              test "$(jq -r '.images[0].urls | length' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" \
+                == "4"
+              test "$(jq -r '.images[0].arches | length' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" \
+                == "2"
+
+              test "$(jq -r '.images[1].name' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" == "comp2"
+
+              test "$(jq -r '.images[1].urls | length' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" \
+                == "11"
+              test "$(jq -r '.images[1].arches | length' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")" \
+                == "2"
+
+              # Verify specific URLs are present
+              urls_comp1=$(jq -r '.images[0].urls[]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")
+              echo "$urls_comp1" | grep -q "prod-registry.io/prod-location1:tag1-12345"
+              echo "$urls_comp1" | grep -q "prod-registry.io/prod-location1:tag2-zyxw"
+              echo "$urls_comp1" | grep -q "backup-registry.io/backup-location1:backup-tag1"
+              echo "$urls_comp1" | grep -q "backup-registry.io/backup-location1:backup-tag2"
+
+              urls_comp2=$(jq -r '.images[1].urls[]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-snapshot-results.json")
+              echo "$urls_comp2" | grep -q "prod-registry.io/prod-location2:some-cool-tag"
+              echo "$urls_comp2" | grep -q "mirror-registry.io/mirror-location2:mirror-tag"
+              echo "$urls_comp2" | grep -q "dev-registry.io/dev-location2:dev-tag1"
+              echo "$urls_comp2" | grep -q "dev-registry.io/dev-location2:dev-tag2"
+              echo "$urls_comp2" | grep -q "dev-registry.io/dev-location2:dev-tag3"
       runAfter:
         - run-task
