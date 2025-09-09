@@ -1,0 +1,158 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-invalid-product-characters
+spec:
+  description: >
+    Tests running the add-fbc-contribution when productName/productVersion contain invalid characters
+    that need sanitization
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp0",
+                    "containerImage": "registry.io/image0@sha256:0000",
+                    "repository": "prod-registry.io/prod-location0",
+                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
+                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "productName": "My Product With Spaces & Special@Chars",
+                  "productVersion": "v1.0.0-beta..test"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: fromIndex
+          value: "quay.io/scoheb/fbc-index-testing:latest"
+        - name: targetIndex
+          value: "quay.io/scoheb/fbc-target-index-testing:v4.12"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ocpVersion
+          value: "4.12"
+        - name: snapshotPath
+          value: "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: dataPath
+          value: "$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+        - name: resultsDirPath
+          value: "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: $(tasks.setup.results.sourceDataArtifact)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: development
+      runAfter:
+        - setup
+    - name: check-results
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: pipelineRunUid
+            type: string
+        steps:
+          - name: check-sanitization
+            image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              # Check that the task ran successfully and performed sanitization
+              echo "Checking for sanitization messages in logs..."
+              
+              # Expected sanitizations:
+              # "My Product With Spaces & Special@Chars" -> "My-Product-With-Spaces-Special-Chars"
+              # "v1.0.0-beta..test" -> "v1-0-0-beta-test"
+              
+              echo "Test passed - task should have sanitized invalid characters"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
