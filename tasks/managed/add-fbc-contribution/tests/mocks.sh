@@ -5,24 +5,48 @@ set -eux
 function internal-request() {
   printf '%s\n' "$*" >> $(params.dataDir)/mock_internal-request.txt
 
-  # set to async
-  /home/utils/internal-request "$@" -s false
+  # Extract unique identifier from the task context that we can use for labeling
+  PIPELINE_UID=""
+  for arg in "$@"; do
+    if [[ "$arg" == *"pipelinerun-uid="* ]]; then
+      PIPELINE_UID=$(echo "$arg" | sed 's/.*pipelinerun-uid=//')
+      break
+    fi
+  done
+
+  # set to async and capture output
+  /home/utils/internal-request "$@" -s false | tee $(params.dataDir)/ir-output-${PIPELINE_UID:-default}.tmp
 
   sleep 1
-  NAME=$(kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
-      --sort-by=.metadata.creationTimestamp | tail -1)
-  if [ -z $NAME ]; then
-      echo Error: Unable to get IR name
-      echo Internal requests:
+  
+  # Extract the IR name from the captured output specific to this pipeline
+  IR_NAME=$(awk -F"'" '/created/ { print $2 }' $(params.dataDir)/ir-output-${PIPELINE_UID:-default}.tmp)
+  
+  if [ -z "$IR_NAME" ]; then
+      # Fallback: try to find IR with matching pipeline UID label
+      if [ -n "$PIPELINE_UID" ]; then
+        IR_NAME=$(kubectl get internalrequest -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" --no-headers -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp | tail -1)
+      fi
+      
+      # Final fallback to the original method
+      if [ -z "$IR_NAME" ]; then
+        IR_NAME=$(kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
+            --sort-by=.metadata.creationTimestamp | tail -1)
+      fi
+  fi
+  
+  if [ -z "$IR_NAME" ]; then
+      echo "Error: Unable to get IR name for pipeline UID: ${PIPELINE_UID:-none}"
+      echo "Internal requests:"
       kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
           --sort-by=.metadata.creationTimestamp
       exit 1
   fi
 
   if [[ "$*" == *"fbcFragments="*"fail.io"* ]]; then
-      set_ir_status $NAME 1
+      set_ir_status $IR_NAME 1
   else
-      set_ir_status $NAME 0
+      set_ir_status $IR_NAME 0
   fi
 }
 
@@ -43,7 +67,22 @@ function set_ir_status() {
   }
 }
 EOF
-    kubectl patch internalrequest $NAME --type=merge --subresource status --patch-file $PATCH_FILE
+    # Add retry logic for the patch operation to handle timing issues
+    for attempt in 1 2 3 4 5; do
+        if kubectl patch internalrequest $NAME --type=merge --subresource status --patch-file $PATCH_FILE; then
+            echo "Successfully patched InternalRequest $NAME on attempt $attempt"
+            break
+        else
+            echo "Patch attempt $attempt failed for InternalRequest $NAME, retrying in 2 seconds..."
+            if [ $attempt -eq 5 ]; then
+                echo "ERROR: Failed to patch InternalRequest $NAME after 5 attempts"
+                echo "Available InternalRequests:"
+                kubectl get internalrequest --no-headers -o custom-columns=":metadata.name"
+                exit 1
+            fi
+            sleep 2
+        fi
+    done
 }
 
 function date() {
@@ -68,3 +107,8 @@ function date() {
           ;;
   esac
 }
+
+# Export functions so they're available to the task scripts
+export -f internal-request
+export -f set_ir_status
+export -f date

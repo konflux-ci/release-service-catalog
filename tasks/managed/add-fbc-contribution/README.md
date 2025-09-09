@@ -21,3 +21,4 @@ Task to create an internalrequest to add fbc contributions to index images
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | /var/workdir/release |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
+| maxBatchSize            | Maximum number of FBC fragments to process in a single batch                                                               | Yes      | 5                    |

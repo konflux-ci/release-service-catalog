@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -x
 
+echo "CLAUDE_DEBUGGING: mocks.sh file loaded successfully with fix attempt $(date)" >&2
+
 # seed for the build status
 yq -o json <<< '
 items:
 - id: 1
   distribution_scope: "stage"
-  from_index: "registry-proxy-stage.engineering.redhat.com/rh-osbs/iib-pub:v4.17"
+  from_index: "quay.io/scoheb/fbc-index-testing:latest"
   fbc_fragments: ["registry.io/image0@sha256:0000"]
   internal_index_image_copy: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:1"
   index_image_resolved: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000"
-  index_image: "registry-proxy-stage.engineering.redhat.com/rh-osbs/iib-pub:v4.17"
+  index_image: "quay.io/scoheb/fbc-index-testing:latest"
   logs:
     url: "https://fakeiib.host/api/v1/builds/1/logs"
   request_type: "fbc-operations"
@@ -80,8 +82,12 @@ function curl() {
           taskrun_name="retry-complete"
           echo "DEBUG: Setting retry-complete case" >&2
           # For multiple fragments retry test, set the correct fragments array to match what the task expects
-          if [[ "$(context.taskRun.name)" =~ "multiple-fragments-retry" ]] || [[ "$(context.taskRun.name)" =~ "multiple-fragments" ]]; then
-            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"]' <<< "${build}")
+          if [[ "$(context.taskRun.name)" =~ "multiple-fragments-retry" ]]; then
+            # Retry scenario with 2 fragments, ensure from_index and index_image match task parameters
+            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
+          elif [[ "$(context.taskRun.name)" =~ "multiple-fragments" ]]; then
+            # Basic multiple fragments test with 3 fragments, ensure from_index and index_image match task parameters  
+            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
           fi
           build=$(jq -rc --arg taskrun_name "$taskrun_name" '.items[0].mock_case = $taskrun_name' <<< "${build}")
           build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
@@ -128,6 +134,8 @@ function curl() {
     echo "Logs are for weaks"
 
   elif [[ "$params" =~ "-u : --negotiate -s -X POST -H Content-Type: application/json -d@".*" --insecure https://fakeiib.host/builds/fbc-operations" ]]; then
+    # For POST requests, use the buildSeed template as the base
+    buildJson=$(jq -cr '.items[0]' <<< "${buildSeed}")
     # For multiple fragments tests, update the buildJson to include the appropriate fbc_fragments array
     case "$(context.taskRun.name)" in
         *multiple-fragments*)
@@ -156,8 +164,8 @@ function curl() {
     esac
     # Export the updated buildJson for use in subsequent calls
     export buildJson
-    # Compress the output since task expects compressed results
-    echo "${buildJson}" | gzip -c | base64 -w0
+    # Return uncompressed JSON - the task will handle compression
+    echo "${buildJson}"
   else
     echo ""
   fi
@@ -216,3 +224,6 @@ export -f mock_build_progress
 
 # The retry script won't see the kinit function unless we export it
 export -f kinit
+
+# The second step needs the skopeo function for indexImageDigests calculation
+export -f skopeo

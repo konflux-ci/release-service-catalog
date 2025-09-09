@@ -184,8 +184,22 @@ spec:
               set -eux
 
               RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                tac | tail -1)"
+              
+              # Use pipeline UID to find the correct InternalRequest for parallel execution safety
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # First try to find by pipeline UID label, fallback to timestamp method
+              internalRequest="$(kubectl get internalrequest \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp | tail -1)"
+              
+              if [ -z "$internalRequest" ]; then
+                echo "ERROR: No InternalRequest found"
+                echo "Available InternalRequests:"
+                kubectl get internalrequest --no-headers \
+                  -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp
+                exit 1
+              fi
 
               internalRequest=$(echo "${internalRequest}" | xargs)
               requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
@@ -255,4 +269,6 @@ spec:
               #!/usr/bin/env sh
               set -eux
               
-              kubectl delete internalrequests --all
+              # Only delete InternalRequests created by this specific pipeline run
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
