@@ -29,6 +29,19 @@ if [ -z "$repo_name" ] ; then
   exit 1
 fi
 
+# Check if component_base_repo_name is set for protection
+if [ -z "${component_base_repo_name}" ]; then
+  echo "🔴 error: component_base_repo_name environment variable not set"
+  echo "   This variable is required to protect base repositories from deletion"
+  exit 1
+fi
+
+# Protect the base repository from deletion
+if [[ "$repo_name" == "${component_base_repo_name}" ]]; then
+  echo "🔴 error: cannot delete protected base repository: ${component_base_repo_name}"
+  exit 1
+fi
+
 # Verify repository exists before attempting deletion
 echo "Verifying repository ${repo_name} exists..."
 REPO_RESPONSE=$(curl -L \
