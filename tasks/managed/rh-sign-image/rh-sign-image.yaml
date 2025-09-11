@@ -132,7 +132,7 @@ spec:
           memory: 4Gi
         requests:
           memory: 4Gi
-          cpu: '2'
+          cpu: "2"
       env:
         - name: pyxisCert
           valueFrom:
@@ -232,16 +232,9 @@ spec:
         declare -a component_data=()
 
         # First pass: collect all find_signatures calls and start them in parallel
-        for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
-
-            referenceContainerImage=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
-
-            rh_registry_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"rh-registry-repo\"]" "${SNAPSHOT_PATH}")
-            registry_access_repo=$(jq -r ".components[${COMPONENTS_INDEX}][\"registry-access-repo\"]" \
-              "${SNAPSHOT_PATH}")
-            repository="${rh_registry_repo#*/}"
-
-            TAGS=$(jq -r ".components[${COMPONENTS_INDEX}].tags | join(\" \")" "${SNAPSHOT_PATH}")
+        for (( i = 0; i < COMPONENTS_LENGTH; i++ )); do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_PATH}")
+            referenceContainerImage=$(jq -r '.containerImage' <<< "$component")
 
             # check if multi-arch
             RAW_OUTPUT=$(skopeo inspect --retry-times 3 --no-tags --raw "docker://${referenceContainerImage}")
@@ -259,8 +252,8 @@ spec:
             # Push source container if the component has pushSourceContainer: true or if the
             # pushSourceContainer key is missing from the component and the defaults has
             # pushSourceContainer: true
-            if [[ $(jq -r ".components[$COMPONENTS_INDEX].pushSourceContainer" "${SNAPSHOT_PATH}") == "true" ]] || \
-               [[ $(jq ".components[$COMPONENTS_INDEX] | has(\"pushSourceContainer\")" "${SNAPSHOT_PATH}") == "false" \
+            if [[ $(jq -r '.pushSourceContainer' <<< "$component") == "true" ]] || \
+               [[ $(jq 'has("pushSourceContainer")' <<< "$component") == "false" \
                 && ${defaultPushSourceContainer} == "true" ]] ; then
               source_repo=${referenceContainerImage%%@sha256:*}
               source_reference_tag=sha256-${referenceContainerImage#*@sha256:}.src
@@ -273,36 +266,47 @@ spec:
               select-oci-auth "${sourceContainer}" > "$AUTH_FILE"
               sourceContainerDigest=$(oras resolve --registry-config "$AUTH_FILE" "${sourceContainer}")
             fi
+            
+            NUM_REPOS=$(jq -c '.repositories | length' <<< "$component")           
+            for ((j = 0; j < NUM_REPOS; j++)); do 
+              repo=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
+              TAGS=$(jq -r '.tags | join(" ")' <<< "$repo")
+              
+              rh_registry_repo=$(jq -er '."rh-registry-repo"' <<< "$repo" )
+              registry_access_repo=$(jq -er '."registry-access-repo"' <<< "$repo" )
+              repository="${rh_registry_repo#*/}"
 
-            # Sign rh-registry-repo references (always) and registry-access-repo references
-            # (only if signatures for this registry are required)
-            REGISTRY_REFERENCES=("${rh_registry_repo}")
-            if grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
-              REGISTRY_REFERENCES+=("${registry_access_repo}")
-            fi
+              # Sign rh-registry-repo references (always) and registry-access-repo references
+              # (only if signatures for this registry are required)
+              REGISTRY_REFERENCES=("${rh_registry_repo}")
+              if grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
+                REGISTRY_REFERENCES+=("${registry_access_repo}")
+              fi
 
-            # Store component data for later processing
-            component_data+=("${COMPONENTS_INDEX}|${repository}|${TAGS}|${manifest_digests}|${sourceContainerDigest}|${rh_registry_repo}|${registry_access_repo}")
+              # Store component data for later processing
+              component_data+=("${i}|${repository}|${TAGS}|${manifest_digests}|${sourceContainerDigest}|${rh_registry_repo}|${registry_access_repo}")
 
-            # Start find_signatures jobs in parallel for manifest digests
-            for manifest_digest in $manifest_digests; do
-              echo "Starting find_signatures job for manifest digest: ${manifest_digest}"
-              find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                  --manifest_digest "${manifest_digest}" \
-                  --repository "${repository}" \
-                  --output_file "/tmp/${manifest_digest}" &
-              find_signatures_jobs+=($!)
+              # Start find_signatures jobs in parallel for manifest digests
+              for manifest_digest in $manifest_digests; do
+                echo "Starting find_signatures job for manifest digest: ${manifest_digest}"
+                find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
+                --manifest_digest "${manifest_digest}" \
+                --repository "${repository}" \
+                --output_file "/tmp/${manifest_digest}" &
+                find_signatures_jobs+=($!)
+              done
+
+              # Start find_signatures job for source container digest if it exists
+              if [ "${sourceContainerDigest}" != "" ] ; then
+                echo "Starting find_signatures job for source container digest: ${sourceContainerDigest}"
+                find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
+                --manifest_digest "${sourceContainerDigest}" \
+                --repository "${repository}" \
+                --output_file "/tmp/${sourceContainerDigest}" &
+                find_signatures_jobs+=($!)
+              fi
+
             done
-
-            # Start find_signatures job for source container digest if it exists
-            if [ "${sourceContainerDigest}" != "" ] ; then
-              echo "Starting find_signatures job for source container digest: ${sourceContainerDigest}"
-              find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                  --manifest_digest "${sourceContainerDigest}" \
-                  --repository "${repository}" \
-                  --output_file "/tmp/${sourceContainerDigest}" &
-              find_signatures_jobs+=($!)
-            fi
         done
 
         # Wait for all find_signatures jobs to complete
@@ -316,7 +320,7 @@ spec:
         for component_info in "${component_data[@]}"; do
             echo "Processing component_info: ${component_info}"
 
-            IFS='|' read -r COMPONENTS_INDEX repository TAGS manifest_digests sourceContainerDigest \
+            IFS='|' read -r i repository TAGS manifest_digests sourceContainerDigest \
               rh_registry_repo registry_access_repo <<< "$component_info"
 
             echo "repository: ${repository}"
