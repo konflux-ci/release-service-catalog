@@ -24,7 +24,7 @@ function ssh() {
   echo "$*" >> "$(params.dataDir)/mock_ssh.txt"
 
   case "$*" in
-    "-o UserKnownHostsFile=/root/.ssh/known_hosts -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes"*)
+    "-o UserKnownHostsFile=~/.ssh/known_hosts -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes"*)
       ;;
     *)
       echo "Error: Incorrect ssh parameters"
@@ -39,7 +39,7 @@ function scp() {
   echo "$*" >> "$(params.dataDir)/mock_scp.txt"
 
   case "$*" in
-    "-o UserKnownHostsFile=/root/.ssh/known_hosts -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes"*)
+    "-o UserKnownHostsFile=~/.ssh/known_hosts -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes"*)
       ;;
     *)
       echo "Error: Incorrect scp parameters"
