@@ -1,6 +1,9 @@
-# check-fbc-packages
+# prepare-fbc-parameters
 
-Task to check that the packages being shipped in an fbc contribution are in the allow list provided in the dataPath.
+Task to prepare FBC parameters from all fragments with comprehensive validation.
+
+Includes package validation, version consistency checking, opt-in status collection,
+and strategy-aware publishing decisions (hotfix, staging, etc.).
 
 ## Parameters
 
@@ -16,3 +19,5 @@ Task to check that the packages being shipped in an fbc contribution are in the 
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | /var/workdir/release |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
+| pyxisSecret             | Name of secret which contains the required credentials for authentication to pyxis                                         | No       | -                    |
+| pyxisServer             | Pyxis server to use                                                                                                        | Yes      | production           |

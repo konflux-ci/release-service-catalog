@@ -66,6 +66,10 @@ spec:
       type: string
       description: Maximum number of FBC fragments to process in a single batch
       default: "5"
+    - name: validationResults
+      type: string
+      description: JSON containing pre-determined validation results from prepare-fbc-parameters task
+      default: ""
   results:
     - name: buildTimestamp
       description: Build timestamp used in the tag
@@ -158,11 +162,7 @@ spec:
         default_build_timeout_seconds="3600"
         default_request_timeout_seconds="3600"
 
-        hotfix=$(jq -r '.fbc.hotfix // "false"' "${DATA_FILE}")
-        pre_ga=$(jq -r '.fbc.preGA // "false"' "${DATA_FILE}")
         staged_index=$(jq -r '.fbc.stagedIndex // "false"' "${DATA_FILE}")
-        product_name=$(jq -r '.fbc.productName // ""' "${DATA_FILE}")
-        product_version=$(jq -r '.fbc.productVersion // ""' "${DATA_FILE}")
         build_timeout_seconds=$(jq -r --arg build_timeout_seconds ${default_build_timeout_seconds} \
             '.fbc.buildTimeoutSeconds // $build_timeout_seconds' "${DATA_FILE}")
         request_timeout_seconds=$(jq -r --arg request_timeout_seconds ${default_request_timeout_seconds} \
@@ -180,121 +180,47 @@ spec:
         timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
         timestamp=$(date "+${timestamp_format}")
 
-        # Tag validation and sanitization function
-        validate_and_sanitize_tag_component() {
-          local component="$1"
-          local component_name="$2"
-          local max_length="$3"
-          
-          # Validate not empty
-          if [ -z "$component" ]; then
-            echo "ERROR: ${component_name} cannot be empty"
-            exit 1
-          fi
-          
-          # Sanitize invalid characters by replacing with hyphens
-          sanitized="${component//[^a-zA-Z0-9._-]/-}"
-          
-          # Collapse consecutive special characters to single hyphen
-          while [[ "$sanitized" =~ [._-][._-] ]]; do
-            sanitized="${sanitized//[._-][._-]/-}"
-          done
-          
-          # Remove leading and trailing special characters
-          sanitized=$(echo "$sanitized" | sed 's/^[-._]*//;s/[-._]*$//')
-          
-          # Check if sanitization resulted in empty string
-          if [ -z "$sanitized" ]; then
-            echo "ERROR: ${component_name} '$component' sanitization resulted in empty string"
-            exit 1
-          fi
-          
-          # Check for reserved names
-          case "$sanitized" in
-            "latest"|"main"|"master"|"HEAD")
-              echo "ERROR: ${component_name} cannot use reserved name: '$sanitized' (from '$component')"
-              exit 1
-              ;;
-          esac
-          
-          # Report sanitization if changes were made
-          if [ "$component" != "$sanitized" ]; then
-            echo "INFO: ${component_name} sanitized from '$component' to '$sanitized'"
-          fi
-          
-          # Check length and truncate if necessary
-          if [ ${#sanitized} -gt "$max_length" ]; then
-            truncated=$(echo "$sanitized" | cut -c1-"$max_length")
-            # Ensure truncated version doesn't end with special char
-            truncated="${truncated%[._-]}"
-            while [[ "$truncated" =~ [._-]$ ]]; do
-              truncated="${truncated%[._-]}"
-            done
-            echo "WARNING: ${component_name} truncated from '$sanitized' to '$truncated' (max ${max_length} chars)"
-            echo "$truncated"
+        # Extract results from prepare-fbc-parameters
+        validation_results="$(params.validationResults)"
+        if [ -n "${validation_results}" ] && [ "${validation_results}" != "null" ]; then
+          echo "INFO: Using pre-determined results from prepare-fbc-parameters:"
+          echo "${validation_results}" | jq .
+
+          # Extract target index components
+          sanitized_tag=$(jq -r '.sanitizedTag // ""' <<< "${validation_results}")
+          if [ -n "$sanitized_tag" ] && [ "$sanitized_tag" != "null" ]; then
+            # Replace the existing tag with the sanitized tag
+            base_repo=$(echo "$(params.targetIndex)" | cut -d: -f1)
+            target_index="${base_repo}:${sanitized_tag}"
+            echo "INFO: Using sanitized tag: ${sanitized_tag}"
           else
-            echo "$sanitized"
-          fi
-        }
-
-        # default target_index
-        target_index=$(params.targetIndex)
-
-        # Calculate tag length limits - will be set per release type
-        max_tag_length=128
-        max_product_name_length=0
-        max_product_version_length=0
-
-        if [ "${hotfix}" = "true" ] && [ "${pre_ga}" = "true" ]; then
-          echo "fbc.preGA and fbc.hotfix are mutually exclusive. Please set just one in the ReleasePlanAdmission"
-          exit 1
-        fi
-
-        # the target_index is modified when the pipelinerun is a for `hotfix` or a `pre-GA` release
-        if [ "${hotfix}" = "true" ]; then
-          issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
-          if [ -z "${issue_id}" ]; then
-            echo "Hotfix releases requires the issue id set in the 'fbc.issueId' key of the ReleasePlanAdmission " \
-                 "spec.data field"
-            exit 1
-          fi
-          target_index="${target_index}-${issue_id}-${timestamp}"
-        elif [ "${pre_ga}" = "true" ]; then
-          if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
-            echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the ReleasePlanAdmission " \
-                 "spec.data field"
-            exit 1
-          fi
-          
-          # Sanitize product version first (assume shorter, max 20 chars)
-          max_product_version_length=20
-          sanitized_product_version=$(validate_and_sanitize_tag_component "$product_version" \
-                                              "fbc.productVersion" "$max_product_version_length")
-          
-          # Calculate remaining space for product name after all other components
-          # Format: ${target_index}-${product_name}-${sanitized_product_version}-${timestamp}
-          base_target_length=${#target_index}
-          version_length=${#sanitized_product_version}
-          timestamp_length=${#timestamp}
-          separator_chars=3  # Three hyphens
-          reserved_space=$((base_target_length + version_length + timestamp_length + separator_chars))
-          available_space=$((max_tag_length - reserved_space))
-
-          # Check if we have minimum space for product name
-          min_product_name_length=8
-          if [ $available_space -lt $min_product_name_length ]; then
-            echo "ERROR: Not enough space for product name in pre-GA tag. " \
-                 "Available: ${available_space}, needed: ${min_product_name_length}"
-            echo "Base components use ${reserved_space} of ${max_tag_length} characters"
-            exit 1
+            target_index="$(params.targetIndex)"
+            echo "INFO: Using standard target index"
           fi
 
-          # Use all remaining space for product name
-          max_product_name_length=$available_space
-          sanitized_product_name=$(validate_and_sanitize_tag_component "$product_name" \
-                                           "fbc.productName" "$max_product_name_length")
-          
-          target_index="${target_index}-${sanitized_product_name}-${sanitized_product_version}-${timestamp}"
+          # Extract publishing decisions
+          mustPublishIndexImage=$(jq -r '.mustPublishIndexImage' <<< "${validation_results}")
+          mustSignIndexImage=$(jq -r '.mustSignIndexImage' <<< "${validation_results}")
+          fbcOptIn=$(jq -r '.fbcOptIn' <<< "${validation_results}")
+
+          # Convert fbcOptIn to mustOverwriteFromIndexImage (same logic as before)
+          if [ "${fbcOptIn}" = "true" ]; then
+            mustOverwriteFromIndexImage="true"
+          else
+            mustOverwriteFromIndexImage="false"
+          fi
+
+          echo "INFO: Publishing decisions:"
+          echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
+          echo "  - mustSignIndexImage: ${mustSignIndexImage}"
+          echo "  - mustOverwriteFromIndexImage: ${mustOverwriteFromIndexImage}"
+        else
+          target_index="$(params.targetIndex)"
+          mustPublishIndexImage="true"
+          mustSignIndexImage="true"
+          mustOverwriteFromIndexImage="true"
+          fbcOptIn="true"
+          echo "INFO: No validation results provided, using defaults"
         fi
 
         # to keep compatibility with current single component mode
@@ -315,25 +241,8 @@ spec:
         build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
         add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
 
-        # Apply target_index resolution logic for hotfix/pre-GA
-        resolved_target_index="$(params.targetIndex)"  # Use original targetIndex parameter
-        if [ "${hotfix}" = "true" ]; then
-          issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
-          if [ -z "${issue_id}" ]; then
-            echo "Hotfix releases requires the issue id set in the 'fbc.issueId' key of the ReleasePlanAdmission " \
-                 "spec.data field"
-            exit 1
-          fi
-          resolved_target_index="${resolved_target_index}-${issue_id}-${timestamp}"
-        elif [ "${pre_ga}" = "true" ]; then
-          if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
-            echo "Pre-GA releases require 'fbc.productName' and 'fbc.productVersion' set in the " \
-                 "ReleasePlanAdmission spec.data field"
-            exit 1
-          fi
-          # Reuse already sanitized values from above
-          resolved_target_index="${resolved_target_index}-${sanitized_product_name}-${sanitized_product_version}-${timestamp}"
-        fi
+        # Use the same target_index for batch processing (already resolved above)
+        resolved_target_index="$target_index"
 
         # Calculate number of batches needed
         NUM_BATCHES=$(( (LENGTH + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE ))
@@ -390,8 +299,9 @@ spec:
               -p buildTimeoutSeconds="${build_timeout_seconds}" \
               -p buildTags="$(jq -c . <<< "${build_tags}")" \
               -p addArches="$(jq -c . <<< "${add_arches}")" \
-              -p hotfix="${hotfix}" \
-              -p stagedIndex="${staged_index}" \
+              -p mustPublishIndexImage="${mustPublishIndexImage}" \
+              -p mustSignIndexImage="${mustSignIndexImage}" \
+              -p mustOverwriteFromIndexImage="${mustOverwriteFromIndexImage}" \
               -p taskGitUrl="$(params.taskGitUrl)" \
               -p taskGitRevision="$(params.taskGitRevision)" \
               --service-account "${internal_request_service_account}" \
@@ -460,12 +370,14 @@ spec:
           fi
         done
 
-        # Extract flags from batch results (same for all fragments in batch)
-        mustSignIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
-          | jq -r '.sign_index_image' |tr -d "\n")
-        mustPublishIndexImage=$(jq -r '.genericResult | fromjson' <<< "${results}" \
-          | jq -r '.publish_index_image' |tr -d "\n")
-        fbc_opt_in=$(jq -r '.genericResult | fromjson' <<< "${results}" | jq -cr '.fbc_opt_in')
+        # Use the publishing decisions we already extracted from prepare-fbc-parameters
+        echo "Using publishing decisions from prepare-fbc-parameters:"
+        echo "  - mustSignIndexImage: ${mustSignIndexImage}"
+        echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
+        echo "  - fbcOptIn: ${fbcOptIn}"
+
+        # For backward compatibility, assign to legacy variable names
+        fbc_opt_in="${fbcOptIn}"
 
         # Store the results in Tekton's results files
         echo -en "${mustPublishIndexImage}" | tee "$(results.mustPublishIndexImage.path)"

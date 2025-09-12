@@ -1,0 +1,161 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-fbc-opt-in
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Simple task to check FBC opt-in status in Pyxis for container images.
+    Returns opt-in status for each provided container image.
+  params:
+    - name: containerImages
+      description: JSON array of container images to check for FBC opt-in status
+      type: string
+    - name: pyxisSecret
+      description: Name of secret which contains the required credentials for authentication to pyxis
+      type: string
+    - name: pyxisServer
+      description: Pyxis server to use
+      type: string
+      default: production
+  results:
+    - name: optInResults
+      type: string
+      description: |-
+        JSON array containing opt-in status for each container image.
+
+        Schema:
+        [
+          {
+            "containerImage": "registry.io/image:tag",
+            "fbcOptIn": boolean
+          }
+        ]
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: pyxis-secret
+      secret:
+        secretName: $(params.pyxisSecret)
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+  steps:
+    - name: check-opt-in
+      image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 200m
+      env:
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/ssl/certs/ca-bundle.crt
+        - name: SSL_CERT_DIR
+          value: /etc/ssl/certs
+        - name: PYXIS_URL
+          value: https://pyxis.engineering.redhat.com/v1
+        - name: PYXIS_SECRET_NAME
+          value: $(params.pyxisSecret)
+        - name: PYXIS_SERVER
+          value: $(params.pyxisServer)
+        - name: CONTAINER_IMAGES
+          value: $(params.containerImages)
+        - name: KRB5_CONF_CONTENT
+          valueFrom:
+            secretKeyRef:
+              name: iib-services-config
+              key: krb5.conf
+      volumeMounts:
+        - name: pyxis-secret
+          mountPath: /etc/pyxis
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        # Initialize Kerberos authentication for Pyxis queries
+        echo "INFO: Initializing Kerberos authentication for Pyxis..."
+
+        # Setup KRB5 configuration
+        KRB5_TEMP_CONF=$(mktemp)
+        echo "${KRB5_CONF_CONTENT}" > "${KRB5_TEMP_CONF}"
+        export KRB5_CONFIG="${KRB5_TEMP_CONF}"
+        export KRB5_TRACE=/dev/stderr
+
+        kinit -k -t /etc/pyxis/krb5.keytab "$(cat /etc/pyxis/krb5.principal)"
+
+        # Function to check FBC opt-in status in Pyxis
+        # This queries the Pyxis registry API to determine if a container image
+        # has been marked as opted-in for FBC (File-Based Catalog) processing
+        isFBCOptIn() {
+          local pull_spec="${1}"
+          local tmpfile
+          tmpfile=$(mktemp)
+
+          # Replace public registry with internal for Pyxis queries
+          pull_spec="${pull_spec//registry.redhat.io/registry.access.redhat.com}"
+
+          IFS="/" read -r REGISTRY REPO IMAGE <<< "${pull_spec}"
+          IFS=":" read -r IMAGE TAG <<< "${IMAGE}"
+
+          local fetch_url="${PYXIS_URL}/repositories/registry/${REGISTRY}/repository/${REPO}/${IMAGE}/tag/${TAG}"
+
+          # strips the last "/tag" in case $TAG is not set
+          [ -z "${TAG}" ] && fetch_url=${fetch_url%/tag*}
+
+          echo "INFO: Checking opt-in status for: ${pull_spec}" >&2
+
+          if curl --negotiate -u: "${fetch_url}" -o "${tmpfile}" -s; then
+            # prints "false" in case .fbc_opt_in entry is missing
+            local opt_in_status
+            opt_in_status=$(jq -e -r '.fbc_opt_in //false' "${tmpfile}")
+            rm -f "${tmpfile}"
+            echo "${opt_in_status}"
+          else
+            echo "WARNING: Failed to query Pyxis for ${pull_spec}, assuming opt-out" >&2
+            rm -f "${tmpfile}"
+            echo "false"
+          fi
+        }
+
+        # shellcheck disable=SC2153
+        container_images=$(echo "$CONTAINER_IMAGES" | jq -r '.[]')
+
+        echo "INFO: Checking FBC opt-in status for provided container images..."
+
+        # Initialize results array
+        opt_in_results='[]'
+
+        # Check each container image
+        while IFS= read -r container_image; do
+            if [ -n "$container_image" ]; then
+                echo "INFO: Checking opt-in status for: ${container_image}"
+
+                opt_in_status=$(isFBCOptIn "${container_image}")
+                echo "INFO: Container ${container_image} opt-in status: ${opt_in_status}"
+
+                # Record opt-in result for this container image
+                opt_in_result=$(jq -n \
+                  --arg image "$container_image" \
+                  --arg status "$opt_in_status" \
+                  '{
+                    "containerImage": $image,
+                    "fbcOptIn": ($status == "true")
+                  }')
+                opt_in_results=$(jq '. += [$result]' --argjson result "$opt_in_result" <<< "$opt_in_results")
+            fi
+        done <<< "$container_images"
+
+        echo "INFO: FBC opt-in check completed"
+        echo "INFO: Results:"
+        echo "$opt_in_results" | jq .
+
+        # Store results for downstream tasks
+        echo -n "$opt_in_results" | tee "$(results.optInResults.path)"

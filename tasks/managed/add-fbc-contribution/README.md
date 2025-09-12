@@ -22,3 +22,4 @@ Task to create an internalrequest to add fbc contributions to index images
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
 | maxBatchSize            | Maximum number of FBC fragments to process in a single batch                                                               | Yes      | 5                    |
+| validationResults       | JSON containing pre-determined validation results from prepare-fbc-parameters task                                         | Yes      | ""                   |

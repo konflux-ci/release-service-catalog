@@ -1,0 +1,543 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-fbc-parameters
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Task to prepare FBC parameters from all fragments with comprehensive validation.
+    
+    Includes package validation, version consistency checking, opt-in status collection,
+    and strategy-aware publishing decisions (hotfix, staging, etc.).
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: pyxisSecret
+      description: Name of secret which contains the required credentials for authentication to pyxis
+      type: string
+    - name: pyxisServer
+      description: Pyxis server to use  
+      type: string
+      default: production
+  results:
+    - name: validationResults
+      type: string
+      description: |-
+        JSON containing FBC validation results for use by downstream tasks.
+
+        Schema:
+        {
+          "fbcOptIn": boolean,              // Unified opt-in status (false if any component opts out)
+          "mustPublishIndexImage": boolean, // Whether index should be published (strategy applied)
+          "mustSignIndexImage": boolean,    // Whether index should be signed (strategy applied)
+          "validationPassed": boolean,      // Whether all validations succeeded
+          "sanitizedTag": string            // Optional sanitized tag component for target index
+        }
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: collect-parameters
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: 500m
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "ERROR: No valid data file was provided."
+            exit 1
+        fi
+
+        if [ ! -f "${SNAPSHOT_PATH}" ] ; then
+            echo "ERROR: No valid snapshot file was provided."
+            exit 1
+        fi
+
+        echo "INFO: Starting comprehensive FBC parameter collection..."
+
+        # Get release-level configuration for strategy decisions
+        # Release modes: hotfix, preGA, stagedIndex (environment flag), or default production
+        # - hotfix: emergency patch release (always publish/sign)
+        # - preGA: pre-general-availability release (always publish/sign)
+        # - stagedIndex: staging environment deployment (never publish/sign)
+        # - default (all false): standard production release (use opt-in status)
+        hotfix=$(jq -r '.fbc.hotfix // false' "${DATA_FILE}")
+        pre_ga=$(jq -r '.fbc.preGA // false' "${DATA_FILE}")
+        staged_index=$(jq -r '.fbc.stagedIndex // false' "${DATA_FILE}")
+
+        echo "INFO: Release configuration:"
+        echo "  - hotfix: ${hotfix}"
+        echo "  - preGA: ${pre_ga}"
+        echo "  - stagedIndex: ${staged_index}"
+
+        # Validate mutually exclusive release modes
+        mode_count=0
+        [ "${hotfix}" = "true" ] && ((mode_count++))
+        [ "${pre_ga}" = "true" ] && ((mode_count++))
+        [ "${staged_index}" = "true" ] && ((mode_count++))
+
+        if [ ${mode_count} -gt 1 ]; then
+            echo "ERROR: Only one release mode can be active. Found: hotfix=${hotfix}, " \
+                 "preGA=${pre_ga}, stagedIndex=${staged_index}"
+            exit 1
+        fi
+
+        # Tag validation and sanitization function (moved from add-fbc-contribution)
+        validate_and_sanitize_tag_component() {
+          local component="$1"
+          local component_name="$2"
+          local max_length="$3"
+
+          # Validate not empty
+          if [ -z "$component" ]; then
+            echo "ERROR: ${component_name} cannot be empty"
+            exit 1
+          fi
+
+          # Sanitize invalid characters by replacing with hyphens
+          sanitized="${component//[^a-zA-Z0-9._-]/-}"
+
+          # Collapse consecutive special characters to single hyphen
+          while [[ "$sanitized" =~ [._-][._-] ]]; do
+            sanitized="${sanitized//[._-][._-]/-}"
+          done
+
+          # Remove leading and trailing special characters
+          sanitized=$(echo "$sanitized" | sed 's/^[-._]*//;s/[-._]*$//')
+
+          # Check if sanitization resulted in empty string
+          if [ -z "$sanitized" ]; then
+            echo "ERROR: ${component_name} '$component' sanitization resulted in empty string"
+            exit 1
+          fi
+
+          # Check for reserved names
+          case "$sanitized" in
+            "latest"|"main"|"master"|"HEAD")
+              echo "ERROR: ${component_name} cannot use reserved name: '$sanitized' (from '$component')"
+              exit 1
+              ;;
+          esac
+
+          # Report sanitization if changes were made
+          if [ "$component" != "$sanitized" ]; then
+            echo "INFO: ${component_name} sanitized from '$component' to '$sanitized'"
+          fi
+
+          # Check length and truncate if necessary
+          if [ ${#sanitized} -gt "$max_length" ]; then
+            truncated=$(echo "$sanitized" | cut -c1-"$max_length")
+            # Ensure truncated version doesn't end with special char
+            truncated="${truncated%[._-]}"
+            while [[ "$truncated" =~ [._-]$ ]]; do
+              truncated="${truncated%[._-]}"
+            done
+            echo "WARNING: ${component_name} truncated from '$sanitized' to '$truncated' (max ${max_length} chars)"
+            echo "$truncated"
+          else
+            echo "$sanitized"
+          fi
+        }
+
+        # Read all components from snapshot for comprehensive validation
+        component_count=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
+        echo "INFO: Found ${component_count} components to process"
+
+        if [ "${component_count}" -eq 0 ]; then
+            echo "ERROR: No components found in snapshot"
+            exit 1
+        fi
+
+        # Extract container images for opt-in checking
+        container_images=$(jq -r '[.components[].containerImage]' "${SNAPSHOT_PATH}")
+        echo "INFO: Container images to check:"
+        echo "${container_images}" | jq .
+
+        # Call simplified internal task to check FBC opt-in status
+        echo "INFO: Checking FBC opt-in status via internal task..."
+        # Try internal-request with error handling for local testing
+        internal-request -r "check-fbc-opt-in" \
+            -p containerImages="${container_images}" \
+            -p pyxisSecret="$(params.pyxisSecret)" \
+            -p pyxisServer="$(params.pyxisServer)" \
+            -t 3600 \
+            | tee "$(params.dataDir)/check-fbc-opt-in-output.log" 2>&1
+        
+        # Extract the InternalRequest name and check if request creation succeeded
+        internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+            "$(params.dataDir)/check-fbc-opt-in-output.log")
+        echo "Opt-in check request created: ${internalRequest}"
+
+        # Check if internal request creation failed
+        if [ -z "${internalRequest}" ] || [ ! -s "$(params.dataDir)/check-fbc-opt-in-output.log" ]; then
+            echo "ERROR: Failed to create internal request for FBC opt-in check"
+            echo "This may indicate a configuration issue or missing permissions"
+            exit 1
+        fi
+
+        # Internal request was created successfully, proceed normally
+        echo "INFO: Internal request created successfully"
+
+        # Wait for completion and check if internal request succeeded
+        request_status=$(kubectl get internalrequest "${internalRequest}" \
+            -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
+        if [ "${request_status}" != "True" ]; then
+            echo "ERROR: Internal opt-in check request failed"
+            request_reason=$(kubectl get internalrequest "${internalRequest}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}')
+            request_message=$(kubectl get internalrequest "${internalRequest}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
+            echo "Reason: ${request_reason}"
+            echo "Message: ${request_message}"
+            exit 1
+        fi
+
+        # Extract opt-in results only after confirming success
+        results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
+        opt_in_results=$(jq -r '.optInResults' <<< "${results}")
+
+        # Verify opt-in results are not empty/null
+        if [ -z "${opt_in_results}" ] || [ "${opt_in_results}" = "null" ]; then
+            echo "ERROR: Internal request succeeded but returned empty opt-in results"
+            echo "Internal request status: ${request_status}"
+            echo "Raw results: ${results}"
+            exit 1
+        fi
+        
+        echo "INFO: FBC opt-in check completed successfully"
+        echo "Opt-in results:"
+        echo "${opt_in_results}" | jq .
+
+        # Initialize result tracking arrays for comprehensive validation
+        validation_failed=false
+        package_validation_results='[]'
+        target_versions='[]'
+        
+        echo "INFO: Processing all ${component_count} components for validation..."
+        
+        for ((i=0; i<component_count; i++)); do
+            fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
+            echo "INFO: Processing component $((i+1))/${component_count}: ${fbc_fragment}"
+            
+            # === PACKAGE VALIDATION ===
+            # Validate that all packages in this fragment are in the allowedPackages list
+            echo "  INFO: Validating packages in fragment..."
+            actual_packages=$(opm render "${fbc_fragment}" | jq -r 'select(.schema=="olm.package") | .name')
+            
+            component_package_valid=true
+            disallowed_packages='[]'
+            
+            for package in ${actual_packages}; do
+              if jq -e --arg pkg "$package" '.fbc.allowedPackages | index($pkg)' "${DATA_FILE}" > /dev/null
+              then
+                echo "    SUCCESS: ${package} is allowed"
+              else
+                echo "    ERROR: ${package} is NOT in allowedPackages list"
+                disallowed_packages=$(jq --arg pkg "$package" '. += [$pkg]' <<< "$disallowed_packages")
+                component_package_valid=false
+                validation_failed=true
+              fi
+            done
+            
+            # Record package validation result for this component
+            package_result=$(jq -n \
+              --arg fragment "$fbc_fragment" \
+              --argjson valid "$component_package_valid" \
+              --argjson disallowed "$disallowed_packages" \
+              '{
+                "fragment": $fragment,
+                "packageValidationPassed": $valid,
+                "disallowedPackages": $disallowed
+              }')
+            package_validation_results=$(jq '. += [$result]' \
+              --argjson result "$package_result" <<< "$package_validation_results")
+            
+            # === OCP VERSION VALIDATION ===
+            # Extract OCP target version from fragment base image per ADR-0026
+            echo "  INFO: Extracting OCP target version from fragment base image annotation..."
+
+            # Get image metadata
+            image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${fbc_fragment}")
+            media_type=$(jq -r .mediaType <<< "${image_metadata}")
+            ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
+              | cut -d: -f2 | sed 's/"//g')
+
+            # Handle multiplatform images
+            if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]] || \
+               [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+                echo "    INFO: Multiplatform image detected, extracting manifest"
+                arch_json=$(get-image-architectures "${fbc_fragment}")
+                manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
+                single_arch_fragment="${fbc_fragment%@*}@${manifest_image_sha}"
+
+                ocp_version=$(skopeo inspect --retry-times 3 --raw "docker://${single_arch_fragment}" \
+                 | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+            fi
+
+            # Validate OCP version format
+            ocp_version_pattern="^v[0-9]\.[0-9]+$"
+            if ! echo "${ocp_version}" | grep -Eq "${ocp_version_pattern}"; then
+                echo "    ERROR: Invalid OCP version format: '${ocp_version}'"
+                echo "    Expected format: vX.Y (e.g., v4.12)"
+                validation_failed=true
+                ocp_version="invalid"
+            else
+                echo "    SUCCESS: Found valid OCP version: ${ocp_version}"
+                target_versions=$(jq --arg version "$ocp_version" '. += [$version]' <<< "$target_versions")
+            fi
+        done
+
+        # === VALIDATION SUMMARY ===
+        echo "INFO: Summarizing validation results..."
+
+        # Check OCP version consistency across all fragments per ADR-0026
+        unique_versions=$(jq 'unique' <<< "$target_versions")
+        version_count=$(jq 'length' <<< "$unique_versions")
+
+        if [ "$version_count" -gt 1 ]; then
+          echo "ERROR: Inconsistent OCP target versions found: $(jq -c . <<< "$unique_versions")"
+          echo "All FBC fragments in a release must target the same OCP version per ADR-0026"
+          validation_failed=true
+        elif [ "$version_count" -eq 1 ]; then
+          unified_ocp_version=$(jq -r '.[0]' <<< "$unique_versions")
+          echo "SUCCESS: All fragments target consistent OCP version: ${unified_ocp_version}"
+        else
+          echo "ERROR: No valid OCP versions found in any fragments"
+          validation_failed=true
+        fi
+
+        # === SANITIZED TAG GENERATION ===
+        # Generate sanitized tag for special release modes using unified OCP version
+        echo "INFO: Generating sanitized tag for special release modes..."
+        timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
+        timestamp=$(date "+${timestamp_format}")
+        sanitized_tag=""
+
+        if [ "${hotfix}" = "true" ]; then
+          issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
+          if [ -z "${issue_id}" ]; then
+            echo "ERROR: Hotfix releases require the issue id set in the 'fbc.issueId' key"
+            exit 1
+          fi
+
+          # Calculate space allocation including OCP version
+          max_tag_length=128
+          timestamp_length=${#timestamp}
+          ocp_length=${#unified_ocp_version}
+          separator_chars=3  # Three hyphens: ocp-issueId-timestamp
+
+          available_space=$((max_tag_length - timestamp_length - ocp_length - separator_chars))
+          max_issue_id_length=$((available_space > 50 ? 50 : available_space))
+          [ $max_issue_id_length -lt 5 ] && max_issue_id_length=5
+
+          sanitized_issue_id=$(validate_and_sanitize_tag_component "$issue_id" "fbc.issueId" "$max_issue_id_length")
+          sanitized_tag="${unified_ocp_version}-${sanitized_issue_id}-${timestamp}"
+          echo "INFO: Generated hotfix tag: ${sanitized_tag}"
+        elif [ "${pre_ga}" = "true" ]; then
+          product_name=$(jq -r '.fbc.productName // ""' "${DATA_FILE}")
+          product_version=$(jq -r '.fbc.productVersion // ""' "${DATA_FILE}")
+          if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
+            echo "ERROR: Pre-GA releases require 'fbc.productName' and 'fbc.productVersion'"
+            exit 1
+          fi
+
+          # Calculate optimal length allocation including OCP version
+          max_tag_length=128
+          timestamp_length=${#timestamp}
+          ocp_length=${#unified_ocp_version}
+          separator_chars=4  # Four hyphens: ocp-productName-productVersion-timestamp
+
+          available_space=$((max_tag_length - timestamp_length - ocp_length - separator_chars))
+
+          # Allocate space: 60% for product name, 40% for product version
+          max_product_name_length=$((available_space * 6 / 10))
+          max_product_version_length=$((available_space * 4 / 10))
+          [ $max_product_name_length -lt 8 ] && max_product_name_length=8
+          [ $max_product_version_length -lt 8 ] && max_product_version_length=8
+
+          sanitized_product_name=$(validate_and_sanitize_tag_component "$product_name" \
+                                           "fbc.productName" "$max_product_name_length")
+          sanitized_product_version=$(validate_and_sanitize_tag_component "$product_version" \
+                                              "fbc.productVersion" "$max_product_version_length")
+
+          sanitized_tag="${unified_ocp_version}-${sanitized_product_name}-${sanitized_product_version}-${timestamp}"
+          echo "INFO: Generated pre-GA tag: ${sanitized_tag}"
+        fi
+
+        # Determine unified opt-in status: if ANY component is opted out, entire release is opted out
+        any_opted_out=$(jq '[.[] | select(.fbcOptIn == false)] | length > 0' <<< "$opt_in_results")
+        if [ "$any_opted_out" = "true" ]; then
+            unified_fbc_opt_in="false"
+            echo "INFO: Unified opt-in status: false (at least one component opted out)"
+        else
+            unified_fbc_opt_in="true"
+            echo "SUCCESS: Unified opt-in status: true (all components opted in)"
+        fi
+
+        # === STRATEGY-AWARE PUBLISHING DECISIONS ===
+        # Apply release strategy to determine final publishing decisions
+        echo "INFO: Applying release strategy to determine publishing decisions..."
+        
+        if [ "${staged_index}" = "true" ]; then
+            # Staging releases: never publish or sign regardless of opt-in status
+            must_publish="false"
+            must_sign="false"
+            echo "INFO: Staging release: publishing disabled regardless of opt-in status"
+        elif [ "${hotfix}" = "true" ] || [ "${pre_ga}" = "true" ]; then
+            # Hotfix and pre-GA releases: always publish and sign regardless of opt-in status
+            must_publish="true"
+            must_sign="true"
+            echo "INFO: Special release (hotfix/preGA): publishing enabled " \
+                 "(overriding opt-in status: ${unified_fbc_opt_in})"
+        else
+            # Standard production releases: use opt-in status
+            must_publish="${unified_fbc_opt_in}"
+            must_sign="${unified_fbc_opt_in}"
+            echo "INFO: Standard production release: publishing based on opt-in status (${unified_fbc_opt_in})"
+        fi
+
+        # === RESULTS COMPILATION ===
+        # Create streamlined results for downstream consumption (only essential fields)
+        echo "INFO: Compiling essential results for downstream tasks..."
+        validation_summary=$(jq -n \
+          --arg unified_opt_in "$unified_fbc_opt_in" \
+          --arg must_publish "$must_publish" \
+          --arg must_sign "$must_sign" \
+          --arg validation_failed "$validation_failed" \
+          --arg sanitized_tag "$sanitized_tag" \
+          '{
+            "fbcOptIn": ($unified_opt_in == "true"),
+            "mustPublishIndexImage": ($must_publish == "true"),
+            "mustSignIndexImage": ($must_sign == "true"),
+            "validationPassed": ($validation_failed == "false"),
+            "sanitizedTag": (if $sanitized_tag != "" then $sanitized_tag else null end)
+          }')
+
+        if [ "$validation_failed" = "true" ]; then
+            echo "ERROR: Parameter collection completed with validation failures"
+            echo "INFO: Final results (including failures for analysis):"
+            echo "$validation_summary" | jq .
+            exit 1
+        else
+            echo "SUCCESS: Parameter collection completed successfully"
+        fi
+        
+        echo "INFO: Final FBC parameter preparation results:"
+        echo "$validation_summary" | jq .
+
+        echo "INFO: Publishing decisions:"
+        echo "  - FBC Opt-in: ${unified_fbc_opt_in}"
+        echo "  - Must Publish Index: ${must_publish}"
+        echo "  - Must Sign Index: ${must_sign}"
+        echo "  - Release Mode: hotfix=${hotfix}, preGA=${pre_ga}, staged=${staged_index}"
+        if [ -n "$sanitized_tag" ]; then
+          echo "  - Sanitized Tag: ${sanitized_tag}"
+        fi
+
+        # Store streamlined results for downstream tasks
+        echo -n "$validation_summary" | tee "$(results.validationResults.path)"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

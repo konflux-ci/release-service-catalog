@@ -39,14 +39,18 @@ spec:
     - name: publishingCredentials
       type: string
       description: Secret containing the publishing credentials used to fetch the image config
-    - name: hotfix
+    - name: mustPublishIndexImage
       type: string
-      default: "false"
-      description: Whether this build is a hotfix build
-    - name: stagedIndex
+      default: "true"
+      description: Whether the index image should be published (pre-determined by prepare-fbc-parameters)
+    - name: mustSignIndexImage
       type: string
-      default: "false"
-      description: Whether this build is for a staged index build
+      default: "true"
+      description: Whether the index image should be signed (pre-determined by prepare-fbc-parameters)
+    - name: mustOverwriteFromIndexImage
+      type: string
+      default: "true"
+      description: Whether to overwrite the from index image (pre-determined by prepare-fbc-parameters)
   results:
     - name: jsonBuildInfo
       description: JSON build information for the requested build
@@ -104,24 +108,6 @@ spec:
       script: |
         #!/usr/bin/env bash
 
-        isFBCOptIn() {
-          TMPFILE=$(mktemp)
-          PYXIS_URL="https://pyxis.engineering.redhat.com/v1"
-
-          IFS="/" read -r REGISTRY REPO IMAGE <<< "${1}"
-          IFS=":" read -r IMAGE TAG <<< "${IMAGE}"
-
-          FETCH_URL="${PYXIS_URL}/repositories/registry/${REGISTRY}/repository/${REPO}/${IMAGE}/tag/${TAG}"
-
-          # strips the last "/tag" in case $TAG is not set
-          [ -z "${TAG}" ] && FETCH_URL=${FETCH_URL%/tag*}
-
-          curl --negotiate -u: "${FETCH_URL}" -o "${TMPFILE}"
-
-          # prints "false" in case .fbc_opt_in entry is missing
-          jq -e -r '.fbc_opt_in //false' "${TMPFILE}" && rm -f "${TMPFILE}"
-        }
-
         # checks if there is any previous build for the same set of fbc_fragments.
         # fragments are sorted for comparison to ensure consistent matching.
         # in case multiple builds are found, returns only the last one.
@@ -144,9 +130,9 @@ spec:
           # if a previous build is found, but from_index and index_image are different, it means that the
           # previous build was a staging index build, then we should return here causing the task to call
           # IIB again, but with overwrite_from_index set to true.
-          # However, if we are pushing to a stagedIndex, we want to ignore this condition and continue
+          # However, if we are not publishing the index image, we want to ignore this condition and continue
           # to determine whether we should reuse a previous build.
-          if [ "$(params.stagedIndex)" != "true" ] && \
+          if [ "$(params.mustPublishIndexImage)" = "true" ] && \
              [ "$(jq '.from_index != .index_image' <<< "${build}")" = true ]; then
             return 0
           fi
@@ -235,54 +221,20 @@ spec:
           exit 1
         fi
         
-        # check if these fbc fragments are opt-in
+        # Use pre-determined publishing decisions from prepare-fbc-parameters
         echo "Processing fragments: ${FBC_FRAGMENTS}"
-        # Extract pull specs from all fragments and remove duplicates
-        PULL_SPEC_LIST=""
-        while IFS= read -r fragment; do
-          if [ -n "${fragment}" ]; then
-            fragment_pull_specs=$(opm render "${fragment}" | jq -r \
-              'select(.schema == "olm.bundle") | "\(.image)" | split("@")[0]')
-            PULL_SPEC_LIST="${PULL_SPEC_LIST}${fragment_pull_specs}"$'\n'
-          fi
-        done < <(echo "${FBC_FRAGMENTS}" | jq -r '.[]')
-        PULL_SPEC_LIST=$(echo "${PULL_SPEC_LIST}" | sort | uniq)
+        mustOverwriteFromIndexImage="$(params.mustOverwriteFromIndexImage)"
+        mustPublishIndexImage="$(params.mustPublishIndexImage)"
+        mustSignIndexImage="$(params.mustSignIndexImage)"
 
-        fbcOptIn="true"
-        for PULL_SPEC in ${PULL_SPEC_LIST}; do
-            # make sure they query is done using the internal name instead of the public
-            PULL_SPEC="${PULL_SPEC//registry.redhat.io/registry.access.redhat.com}"
-            echo "Attempting to fetch from ${FETCH_URL} to check if fragment is \`fbc_opt_in==true\`..."
-            if [ "$(isFBCOptIn "${PULL_SPEC}")" = "false" ]; then
-              fbcOptIn="false"
-              break
-            fi
-        done
-        mustOverwriteFromIndexImage="${fbcOptIn}"
-        mustPublishIndexImage="${fbcOptIn}"
-        mustSignIndexImage="${fbcOptIn}"
-
-        if [ "$(params.hotfix)" == "true" ]; then
-            echo "Hotfix build"
-            mustOverwriteFromIndexImage="false"
-            mustSignIndexImage="true"
-            mustPublishIndexImage="true"
-        elif [ "$(params.stagedIndex)" == "true" ]; then
-            echo "Staged Index build"
-            mustOverwriteFromIndexImage="false"
-            mustSignIndexImage="false"
-            mustPublishIndexImage="false"
-        fi
-
-        echo "Fragment has \`fbc_opt_in==${fbcOptIn}\`"
+        echo "Using pre-determined publishing decisions:"
         echo "             \`mustOverwriteFromIndexImage==${mustOverwriteFromIndexImage}\`"
         echo "             \`mustPublishIndexImage==${mustPublishIndexImage}\`"
         echo "             \`mustSignIndexImage==${mustSignIndexImage}\`"
 
-        # these results will be used by add-fbc-contribution to control
-        # signing and publishing of the built fragment
+        # Store results for add-fbc-contribution (maintaining backward compatibility)
         jq -n -c \
-           --arg fbc_opt_in "${fbcOptIn}" \
+           --arg fbc_opt_in "${mustPublishIndexImage}" \
            --arg overwrite_fromindex_image "${mustOverwriteFromIndexImage}" \
            --arg publish_index_image "${mustPublishIndexImage}" \
            --arg sign_index_image "${mustSignIndexImage}" \

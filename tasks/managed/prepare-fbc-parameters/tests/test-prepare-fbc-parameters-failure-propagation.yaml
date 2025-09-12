@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-check-fbc-packages-negative
+  name: test-validate-fbc-fragments-failure-propagation
   annotations:
     test/assert-task-failure: "run-task"
 spec:
-  description: Test checking fbc allowedPackages when the packages do not match; task should fail as expected.
+  description: Test managed validate-fbc-fragments task properly propagates validation failures.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -52,32 +52,43 @@ spec:
             image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
             script: |
               #!/usr/bin/env bash
-              set -eux
-
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              
+              # Ensure data directory exists
+              mkdir -p "$(params.dataDir)"
+              
+              # Create test data that should cause validation failure (using restrictive allowedPackages)
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
               {
-                "application": "myapp",
                 "components": [
                   {
-                    "name": "comp0",
-                    "containerImage": "registry.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0"
+                    "name": "test-component-invalid-package",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297"
                   }
                 ]
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              cat > "$(params.dataDir)/data.json" << 'EOF'
               {
                 "fbc": {
-                  "allowedPackages": ["test-package-2"]
+                  "allowedPackages": ["non-matching-package"],
+                  "hotfix": false,
+                  "stagedIndex": false
                 }
               }
               EOF
+              
+              echo "Test data created for failure propagation test"
           - name: create-trusted-artifact
             ref:
-              name: create-trusted-artifact
+              resolver: "git"
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/release-service-catalog.git
+                - name: revision
+                  value: development
+                - name: pathInRepo
+                  value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
             params:
               - name: ociStorage
                 value: $(params.ociStorage)
@@ -87,25 +98,31 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: check-fbc-packages
+        name: prepare-fbc-parameters
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot_spec.json
+          value: snapshot.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/data.json
+          value: data.json
+        - name: pyxisSecret
+          value: test-pyxis-secret
+        - name: pyxisServer
+          value: production
         - name: ociStorage
           value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
         - name: orasOptions
           value: $(params.orasOptions)
         - name: sourceDataArtifact
-          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+          value: $(tasks.setup.results.sourceDataArtifact)
         - name: dataDir
           value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: "http://localhost"
+          value: https://github.com/konflux-ci/release-service-catalog.git
         - name: taskGitRevision
-          value: "main"
+          value: development
       runAfter:
         - setup
