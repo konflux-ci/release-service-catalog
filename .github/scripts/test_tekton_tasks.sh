@@ -236,7 +236,7 @@ do
         echo "  Pipeline $TEST_NAME failed (expected). Checking that it failed in task ${ASSERT_TASK_FAILURE}..."
 
         # Check that the pipelinerun failed on the tested task and not somewhere else
-        TASKRUN=$(kubectl get pr $PIPELINERUN -o json|jq -r ".status.childReferences[] | select(.pipelineTaskName == \"${ASSERT_TASK_FAILURE}\") | .name")
+        TASKRUN=$(kubectl get pr $PIPELINERUN -o json|jq -r "(.status.childReferences // [])[] | select(.pipelineTaskName == \"${ASSERT_TASK_FAILURE}\") | .name")
         if [ -z "$TASKRUN" ]
         then
           echo "    Unable to find task $ASSERT_TASK_FAILURE in childReferences of pipelinerun $PIPELINERUN. Pipelinerun failed earlier?"
