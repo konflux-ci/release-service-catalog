@@ -313,62 +313,41 @@ Note: The approach described above shows the recommended approach. But there may
 depending on your needs. For example, you could have several mocks files and inject different
 files to different steps in your task.
 
-#### Running Tekton Task tests manually
+#### Running Tekton Task tests locally
 
-Requirements:
+Local testing provides fast feedback and mirrors the CI environment exactly. Test your changes before submitting PRs to avoid CI failures.
 
-* A k8s cluster running and kubectl default context pointing to it (e.g. [kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation))
-* Tekton installed in the cluster ([docs](https://tekton.dev/docs/pipelines/install/))
+##### Quick Start
 
-```
-kubectl apply --filename https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
-```
+```bash
+# One-time setup
+./scripts/local-test-env.sh setup
+source .env.testing
 
-* Enable StepActions in Tekton
-
-```
-kubectl get cm feature-flags -n tekton-pipelines -o yaml | \
-   sed -e 's|enable-step-actions: "false"|enable-step-actions: "true"|' > /tmp/ff.yaml
-kubectl apply -f /tmp/ff.yaml -n tekton-pipelines
+# Run tests
+./scripts/run-local-tests.sh                              # Auto-detect changes
+./scripts/run-local-tests.sh --pr-mode                    # Test PR changes  
+./scripts/run-local-tests.sh tasks/managed/add-fbc-contribution  # Specific task
 ```
 
-* Local Registry is installed in the Cluster
+**Prerequisites:** podman, kind, kubectl, yq, jq (setup script will check and guide installation)
+**Optional prerequisites:** gh (for `--pr-mode`)
 
-```
-. .github/scripts/deploy_registry.sh
-```
+##### Common Options
 
-**NOTE: This above command must be sourced.**
-
-* tkn cli installed ([docs](https://tekton.dev/docs/cli/))
-
-* jq installed
-
-* Optionally enable **Trusted Artifact** mode by setting the environment variable:
-
-```
-export USE_TRUSTED_ARTIFACTS=true
+```bash
+./scripts/run-local-tests.sh --parallel 2 tasks/managed/  # Parallel execution
+./scripts/run-local-tests.sh --remove-compute-resources   # Resource-constrained environments
+./scripts/run-local-tests.sh --dry-run                    # Preview what will be tested
 ```
 
-Note: if a task has not been converted, and you have enable Trusted Artifacts, you will see errors.
+##### Troubleshooting
 
-Once you have everything ready, you can run the test script and pass task version directories
-as arguments, e.g.
+- **"kubectl context not set"** → `source .env.testing`
+- **"Cannot access cluster"** → `kind get clusters` to verify cluster exists
+- **Registry issues** → Check port-forward: `ps aux | grep 30001`
 
-```
-./.github/scripts/test_tekton_tasks.sh tasks/managed/apply-mapping
-```
-
-This will install the task and run all test pipelines matching `tests/test*.yaml`.
-
-Another option is to run one or more tests directly:
-
-```
-./.github/scripts/test_tekton_tasks.sh tasks/managed/apply-mapping/tests/test-apply-mapping.yaml
-```
-
-This will still install the task and run `pre-apply-task-hook.sh` if present, but it will then
-run only the specified test pipeline.
+For detailed troubleshooting and advanced usage, see [docs/LOCAL_TESTING.md](docs/LOCAL_TESTING.md).
 
 ### Openshift CI Prow Tests
 
