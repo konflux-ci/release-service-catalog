@@ -623,6 +623,89 @@ EOF
     verify_all_releases
 }
 
+# Validate pipeline results to ensure they are accessible, single-line, and match release artifacts
+validate_pipeline_results() {
+    local release_name=$1
+    echo "🔍 Validating pipeline results for release: $release_name"
+    echo "🔍 DEBUG: Validating release artifacts (populated by managed pipeline)"
+    
+    local failures=0
+    
+    # Get release artifacts from the tenant namespace (populated by release service from managed pipeline)
+    local release_json
+    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
+    
+    if [ $? -ne 0 ] || [ -z "$release_json" ]; then
+        echo "🔴 Could not retrieve release ${release_name} from namespace ${RELEASE_NAMESPACE}"
+        return 1
+    fi
+    
+    echo "🔍 DEBUG: Release JSON retrieved successfully"
+    
+    # Extract index image artifacts (these should be populated by the managed pipeline)
+    local release_index_image release_index_image_resolved
+    release_index_image=$(jq -r '.status.artifacts.index_image.index_image // ""' <<< "${release_json}")
+    release_index_image_resolved=$(jq -r '.status.artifacts.index_image.index_image_resolved // ""' <<< "${release_json}")
+    
+    echo "🔍 DEBUG: Extracted index images from release:"
+    echo "🔍 DEBUG:   index_image: '$release_index_image'"
+    echo "🔍 DEBUG:   index_image_resolved: '$release_index_image_resolved'"
+    
+    # Validate index_image (equivalent to iibIndexImage pipeline result)
+    echo "Checking index_image artifact..."
+    if [ -z "$release_index_image" ]; then
+        echo "🔴 Release artifact index_image is empty or missing"
+        failures=$((failures+1))
+    elif [[ "$release_index_image" =~ $'\n' ]]; then
+        echo "🔴 Release artifact index_image contains newlines (indicates pipeline result issue)"
+        echo "    Value: '$release_index_image'"
+        echo "    This suggests the original multi-line pipeline result issue still exists"
+        failures=$((failures+1))
+    else
+        echo "✅ Release artifact index_image: $release_index_image"
+    fi
+    
+    # Validate index_image_resolved (equivalent to iibIndexImageResolved pipeline result)  
+    echo "Checking index_image_resolved artifact..."
+    if [ -z "$release_index_image_resolved" ]; then
+        echo "🔴 Release artifact index_image_resolved is empty or missing"
+        failures=$((failures+1))
+    elif [[ "$release_index_image_resolved" =~ $'\n' ]]; then
+        echo "🔴 Release artifact index_image_resolved contains newlines (indicates pipeline result issue)"
+        echo "    Value: '$release_index_image_resolved'"  
+        echo "    This suggests the original multi-line pipeline result issue still exists"
+        failures=$((failures+1))
+    else
+        echo "✅ Release artifact index_image_resolved: $release_index_image_resolved"
+    fi
+    
+    # Additional validation: check that both artifacts are consistent (should be the same image)
+    if [ -n "$release_index_image" ] && [ -n "$release_index_image_resolved" ]; then
+        # Extract just the registry and image parts (without digest) to compare base images
+        local base_image base_image_resolved
+        base_image=$(echo "$release_index_image" | cut -d'@' -f1 2>/dev/null || echo "$release_index_image")
+        base_image_resolved=$(echo "$release_index_image_resolved" | cut -d'@' -f1 2>/dev/null || echo "$release_index_image_resolved")
+        
+        if [ "$base_image" = "$base_image_resolved" ]; then
+            echo "✅ Index image artifacts are consistent (same base image)"
+        else
+            echo "⚠️  Index image artifacts have different base images:"
+            echo "    index_image base: $base_image"
+            echo "    index_image_resolved base: $base_image_resolved"
+            echo "    This may be expected if they reference the same image differently"
+        fi
+    fi
+    
+    if [ $failures -eq 0 ]; then
+        echo "✅ Pipeline results validation passed (release artifacts are single-line and properly populated)"
+    else
+        echo "🔴 Pipeline results validation failed with $failures error(s)"
+        echo "🔍 DEBUG: This indicates the managed pipeline may still be producing multi-line results"
+    fi
+    
+    return $failures
+}
+
 # Enhanced verification for single component releases
 verify_single_component_release() {
     local release_name=$1
@@ -806,6 +889,11 @@ verify_all_releases() {
             mode_result=$?
         fi
         
+        # Pipeline results validation (always runs for all releases)
+        echo "  📋 Validating pipeline results for $release_name..."
+        validate_pipeline_results "$release_name"
+        local pipeline_result=$?
+        
         # Scenario-specific verification
         local scenario_result=0
         case "$scenario" in
@@ -823,7 +911,7 @@ verify_all_releases() {
                 ;;
         esac
         
-        if [ $mode_result -eq 0 ] && [ $scenario_result -eq 0 ]; then
+        if [ $mode_result -eq 0 ] && [ $scenario_result -eq 0 ] && [ $pipeline_result -eq 0 ]; then
             echo "  ✅ $release_name verification passed"
         else
             echo "  🔴 $release_name verification failed"
