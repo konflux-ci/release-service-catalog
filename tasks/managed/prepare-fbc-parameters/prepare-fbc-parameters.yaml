@@ -54,23 +54,48 @@ spec:
       description: Name of secret which contains the required credentials for authentication to pyxis
       type: string
     - name: pyxisServer
-      description: Pyxis server to use  
+      description: Pyxis server to use
       type: string
       default: production
-  results:
-    - name: validationResults
+    - name: maxRetries
+      description: Maximum number of retry attempts for failed internal requests
       type: string
-      description: |-
-        JSON containing FBC validation results for use by downstream tasks.
-
-        Schema:
-        {
-          "fbcOptIn": boolean,              // Unified opt-in status (false if any component opts out)
-          "mustPublishIndexImage": boolean, // Whether index should be published (strategy applied)
-          "mustSignIndexImage": boolean,    // Whether index should be signed (strategy applied)
-          "validationPassed": boolean,      // Whether all validations succeeded
-          "sanitizedTag": string            // Optional sanitized tag component for target index
-        }
+      default: "3"
+    - name: retryDelaySeconds
+      description: Delay between retry attempts in seconds
+      type: string
+      default: "30"
+    - name: targetIndex
+      type: string
+      description: Target index pullspec for the catalog
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. It is only available at the pipeline level
+  results:
+    - name: fbcOptIn
+      type: string
+      description: Whether components have opted into FBC fragment-based catalog publishing
+    - name: validationPassed
+      type: string
+      description: Whether validation checks passed successfully
+    - name: sanitizedTag
+      type: string
+      description: Sanitized tag to use for target index (optional)
+    - name: mustPublishIndexImage
+      type: string
+      description: Whether the index image should be published (strategy-aware decision)
+    - name: mustSignIndexImage
+      type: string
+      description: Whether the index image should be signed (strategy-aware decision)
+    - name: mustOverwriteFromIndexImage
+      type: string
+      description: Whether to overwrite the from index image (based on opt-in status)
+    - name: iibServiceAccountSecret
+      type: string
+      description: IIB service account secret name (environment-aware)
+    - name: targetIndex
+      type: string
+      description: Resolved target index with sanitized tag if applicable
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
@@ -111,7 +136,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: collect-parameters
-      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
       computeResources:
         limits:
           memory: 1Gi
@@ -152,19 +177,51 @@ spec:
         echo "  - preGA: ${pre_ga}"
         echo "  - stagedIndex: ${staged_index}"
 
-        # Validate mutually exclusive release modes
-        mode_count=0
-        [ "${hotfix}" = "true" ] && ((mode_count++))
-        [ "${pre_ga}" = "true" ] && ((mode_count++))
-        [ "${staged_index}" = "true" ] && ((mode_count++))
+        echo "DEBUG: Beginning validation checks..."
+        echo "DEBUG: Current bash options: $(set +o)"
+        echo "DEBUG: Script PID: $$"
+        echo "DEBUG: Available shell functions: $(declare -F | head -10)"
 
-        if [ ${mode_count} -gt 1 ]; then
-            echo "ERROR: Only one release mode can be active. Found: hotfix=${hotfix}, " \
-                 "preGA=${pre_ga}, stagedIndex=${staged_index}"
+        # Validate mutually exclusive release modes
+        echo "DEBUG: Starting mode validation..."
+        echo "DEBUG: Release modes - hotfix: ${hotfix}, preGA: ${pre_ga}, stagedIndex: ${staged_index}"
+
+        # Count active release modes explicitly
+        active_modes=()
+        if [[ "${hotfix}" == "true" ]]; then
+            active_modes+=("hotfix")
+            echo "DEBUG: Hotfix mode is ACTIVE"
+        fi
+
+        if [[ "${pre_ga}" == "true" ]]; then
+            active_modes+=("preGA")
+            echo "DEBUG: PreGA mode is ACTIVE"
+        fi
+
+        if [[ "${staged_index}" == "true" ]]; then
+            active_modes+=("stagedIndex")
+            echo "DEBUG: StagedIndex mode is ACTIVE"
+        fi
+
+        # Validate mutual exclusivity
+        mode_count=${#active_modes[@]}
+        echo "DEBUG: Total active modes: ${mode_count} (${active_modes[*]})"
+
+        if [[ ${mode_count} -eq 0 ]]; then
+            echo "INFO: Standard production release mode (no special flags set)"
+        elif [[ ${mode_count} -eq 1 ]]; then
+            echo "INFO: Special release mode detected: ${active_modes[0]}"
+        else
+            echo "ERROR: Multiple release modes cannot be active simultaneously"
+            echo "ERROR: Active modes: ${active_modes[*]}"
+            echo "ERROR: Only one of hotfix, preGA, or stagedIndex can be true"
             exit 1
         fi
 
+        echo "DEBUG: Mode validation completed successfully"
+
         # Tag validation and sanitization function (moved from add-fbc-contribution)
+        echo "DEBUG: Defining validate_and_sanitize_tag_component function..."
         validate_and_sanitize_tag_component() {
           local component="$1"
           local component_name="$2"
@@ -221,70 +278,152 @@ spec:
           fi
         }
 
+        echo "DEBUG: Function validate_and_sanitize_tag_component defined successfully"
+
         # Read all components from snapshot for comprehensive validation
+        echo "DEBUG: About to read components from snapshot..."
+        echo "DEBUG: SNAPSHOT_PATH=${SNAPSHOT_PATH}"
+        echo "DEBUG: Checking if snapshot file exists and is readable..."
+        ls -la "${SNAPSHOT_PATH}" || echo "DEBUG: ls command failed"
+
+        echo "DEBUG: Attempting to read component count..."
         component_count=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
+        echo "DEBUG: jq command completed, component_count=${component_count}"
         echo "INFO: Found ${component_count} components to process"
 
         if [ "${component_count}" -eq 0 ]; then
             echo "ERROR: No components found in snapshot"
+            echo "DEBUG: Snapshot file contents:"
+            cat "${SNAPSHOT_PATH}" || echo "DEBUG: Failed to cat snapshot file"
             exit 1
         fi
 
         # Extract container images for opt-in checking
-        container_images=$(jq -r '[.components[].containerImage]' "${SNAPSHOT_PATH}")
+        echo "DEBUG: Extracting container images for opt-in checking..."
+        container_images=$(jq -c '[.components[].containerImage]' "${SNAPSHOT_PATH}")
+        echo "DEBUG: Container images extraction completed"
         echo "INFO: Container images to check:"
         echo "${container_images}" | jq .
 
-        # Call simplified internal task to check FBC opt-in status
-        echo "INFO: Checking FBC opt-in status via internal task..."
-        # Try internal-request with error handling for local testing
-        internal-request -r "check-fbc-opt-in" \
-            -p containerImages="${container_images}" \
-            -p pyxisSecret="$(params.pyxisSecret)" \
-            -p pyxisServer="$(params.pyxisServer)" \
-            -t 3600 \
-            | tee "$(params.dataDir)/check-fbc-opt-in-output.log" 2>&1
-        
-        # Extract the InternalRequest name and check if request creation succeeded
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-            "$(params.dataDir)/check-fbc-opt-in-output.log")
-        echo "Opt-in check request created: ${internalRequest}"
-
-        # Check if internal request creation failed
-        if [ -z "${internalRequest}" ] || [ ! -s "$(params.dataDir)/check-fbc-opt-in-output.log" ]; then
-            echo "ERROR: Failed to create internal request for FBC opt-in check"
-            echo "This may indicate a configuration issue or missing permissions"
-            exit 1
+        # === IIB SERVICE ACCOUNT SELECTION ===
+        # Select appropriate IIB service account based on environment (moved here to fix unbound variable)
+        echo "INFO: Selecting IIB service account based on environment..."
+        if [ "${staged_index}" = "true" ]; then
+            iib_service_account_secret="iib-service-account-stage"
+            echo "INFO: Using staging IIB service account"
+        else
+            iib_service_account_secret="iib-service-account-prod"
+            echo "INFO: Using production IIB service account"
         fi
 
-        # Internal request was created successfully, proceed normally
-        echo "INFO: Internal request created successfully"
+        # Add retry mechanism with proper failure detection
+        echo "DEBUG: Setting up retry mechanism..."
+        max_retries=$(params.maxRetries)
+        retry_delay=$(params.retryDelaySeconds)
+        echo "DEBUG: max_retries=${max_retries}, retry_delay=${retry_delay}"
 
-        # Wait for completion and check if internal request succeeded
-        request_status=$(kubectl get internalrequest "${internalRequest}" \
-            -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
-        if [ "${request_status}" != "True" ]; then
-            echo "ERROR: Internal opt-in check request failed"
-            request_reason=$(kubectl get internalrequest "${internalRequest}" \
-                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}')
-            request_message=$(kubectl get internalrequest "${internalRequest}" \
-                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
-            echo "Reason: ${request_reason}"
-            echo "Message: ${request_message}"
-            exit 1
-        fi
+        echo "DEBUG: Checking if internal-request command is available..."
+        which internal-request || echo "DEBUG: internal-request not found in PATH"
+        echo "DEBUG: PATH=${PATH}"
 
-        # Extract opt-in results only after confirming success
-        results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
-        opt_in_results=$(jq -r '.optInResults' <<< "${results}")
+        # Setup consistent labeling for FBC internal requests
+        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
+        TASK_ID=$(context.taskRun.uid)
+        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        # Verify opt-in results are not empty/null
-        if [ -z "${opt_in_results}" ] || [ "${opt_in_results}" = "null" ]; then
-            echo "ERROR: Internal request succeeded but returned empty opt-in results"
-            echo "Internal request status: ${request_status}"
-            echo "Raw results: ${results}"
-            exit 1
-        fi
+        for attempt in $(seq 1 "$max_retries"); do
+            echo "Validation attempt ${attempt}/${max_retries}..."
+
+            echo "DEBUG: About to create internal request with parameters:"
+            echo "DEBUG:   - containerImages=${container_images}"
+            echo "DEBUG:   - iibServiceAccountSecret=${iib_service_account_secret}"
+            echo "DEBUG:   - pyxisServer=$(params.pyxisServer)"
+            echo "DEBUG:   - taskGitUrl=$(params.taskGitUrl)"
+            echo "DEBUG:   - taskGitRevision=$(params.taskGitRevision)"
+
+            # Create internal request with proper error handling
+            echo "DEBUG: Executing internal-request command..."
+            if ! internal-request --pipeline "check-fbc-opt-in" \
+                                 -p containerImages="${container_images}" \
+                                 -p iibServiceAccountSecret="${iib_service_account_secret}" \
+                                 -p pyxisServer="$(params.pyxisServer)" \
+                                 -p taskGitUrl="$(params.taskGitUrl)" \
+                                 -p taskGitRevision="$(params.taskGitRevision)" \
+                                 -l ${TASK_LABEL}="${TASK_ID}" \
+                                 -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                                 -t 3600 \
+                                 | tee "$(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log" 2>&1; then
+                echo "ERROR: internal-request command failed on attempt ${attempt} (exit code: $?)"
+
+                if [ "${attempt}" -eq "${max_retries}" ]; then
+                    echo "ERROR: All ${max_retries} internal-request attempts failed"
+                    echo "ERROR: Check logs at $(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log"
+                    cat "$(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log"
+                    exit 1
+                fi
+                echo "Retrying internal-request in ${retry_delay} seconds..."
+                sleep "${retry_delay}"
+                continue
+            fi
+
+            echo "DEBUG: internal-request command completed successfully"
+
+            # Extract request name with validation
+            internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+                "$(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log")
+
+            if [ -z "${internalRequest}" ]; then
+                echo "ERROR: Failed to extract internal request name from output on attempt ${attempt}"
+                echo "DEBUG: Output file contents:"
+                cat "$(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log"
+
+                if [ "${attempt}" -eq "${max_retries}" ]; then
+                    echo "ERROR: Could not extract internal request name after ${max_retries} attempts"
+                    exit 1
+                fi
+                echo "Retrying in ${retry_delay} seconds..."
+                sleep "${retry_delay}"
+                continue
+            fi
+
+            echo "Validation request created: ${internalRequest}"
+
+            # Check if internal request succeeded BEFORE extracting results
+            request_status=$(kubectl get internalrequest "${internalRequest}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
+
+            if [ "${request_status}" = "True" ]; then
+                echo "Internal validation request succeeded on attempt ${attempt}"
+
+                # Extract and validate results
+                results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
+                opt_in_results=$(jq -r '.optInResults' <<< "${results}")
+
+                if [ -n "${opt_in_results}" ] && [ "${opt_in_results}" != "null" ]; then
+                    echo "Validation completed successfully on attempt ${attempt}"
+                    break
+                else
+                    echo "ERROR: Internal request succeeded but returned empty validation results"
+                    request_status="False"  # Treat as failure
+                fi
+            fi
+
+            if [ "${request_status}" != "True" ]; then
+                echo "Validation failed on attempt ${attempt}"
+                if [ "${attempt}" -eq "${max_retries}" ]; then
+                    echo "ERROR: All ${max_retries} validation attempts failed"
+                    request_reason=$(kubectl get internalrequest "${internalRequest}" \
+                        -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}')
+                    request_message=$(kubectl get internalrequest "${internalRequest}" \
+                        -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
+                    echo "Last failure reason: ${request_reason}"
+                    echo "Last failure message: ${request_message}"
+                    exit 1
+                fi
+                echo "Retrying in ${retry_delay} seconds..."
+                sleep "${retry_delay}"
+            fi
+        done
         
         echo "INFO: FBC opt-in check completed successfully"
         echo "Opt-in results:"
@@ -459,7 +598,7 @@ spec:
         # === STRATEGY-AWARE PUBLISHING DECISIONS ===
         # Apply release strategy to determine final publishing decisions
         echo "INFO: Applying release strategy to determine publishing decisions..."
-        
+
         if [ "${staged_index}" = "true" ]; then
             # Staging releases: never publish or sign regardless of opt-in status
             must_publish="false"
@@ -476,6 +615,29 @@ spec:
             must_publish="${unified_fbc_opt_in}"
             must_sign="${unified_fbc_opt_in}"
             echo "INFO: Standard production release: publishing based on opt-in status (${unified_fbc_opt_in})"
+        fi
+
+        # === OVERWRITE LOGIC ===
+        # Determine overwrite behavior based on opt-in status
+        echo "INFO: Determining overwrite behavior..."
+        if [ "${unified_fbc_opt_in}" = "true" ]; then
+            must_overwrite_from_index="true"
+            echo "INFO: FBC opt-in enabled: will overwrite from index"
+        else
+            must_overwrite_from_index="false"
+            echo "INFO: FBC opt-in disabled: will create new index"
+        fi
+
+        # === TARGET INDEX RESOLUTION ===
+        # Apply sanitized tag to target index if provided
+        echo "INFO: Resolving target index..."
+        if [ -n "$sanitized_tag" ] && [ "$sanitized_tag" != "null" ]; then
+            base_repo=$(printf '%s' "$(params.targetIndex)" | cut -d: -f1)
+            resolved_target_index="${base_repo}:${sanitized_tag}"
+            echo "INFO: Using sanitized tag for target index: ${resolved_target_index}"
+        else
+            resolved_target_index="$(params.targetIndex)"
+            echo "INFO: Using standard target index: ${resolved_target_index}"
         fi
 
         # === RESULTS COMPILATION ===
@@ -516,8 +678,16 @@ spec:
           echo "  - Sanitized Tag: ${sanitized_tag}"
         fi
 
-        # Store streamlined results for downstream tasks
-        echo -n "$validation_summary" | tee "$(results.validationResults.path)"
+        # Store individual results for downstream tasks
+        echo -n "$unified_fbc_opt_in" > "$(results.fbcOptIn.path)"
+        echo -n "$([ "$validation_failed" = "false" ] && echo "true" || echo "false")" \
+          > "$(results.validationPassed.path)"
+        echo -n "${sanitized_tag}" > "$(results.sanitizedTag.path)"
+        echo -n "${must_publish}" > "$(results.mustPublishIndexImage.path)"
+        echo -n "${must_sign}" > "$(results.mustSignIndexImage.path)"
+        echo -n "${must_overwrite_from_index}" > "$(results.mustOverwriteFromIndexImage.path)"
+        echo -n "${iib_service_account_secret}" > "$(results.iibServiceAccountSecret.path)"
+        echo -n "${resolved_target_index}" > "$(results.targetIndex.path)"
     - name: create-trusted-artifact
       computeResources:
         limits:

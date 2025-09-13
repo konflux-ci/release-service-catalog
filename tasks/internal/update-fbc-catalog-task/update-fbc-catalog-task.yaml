@@ -67,7 +67,7 @@ spec:
   steps:
     - name: update-fbc-catalog-prepare-and-call-iib-step
       image: >-
-        quay.io/konflux-ci/release-service-utils:7a1d88df0e5aa21f6219db2a8732af87eed7ed73
+        quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
       computeResources:
         limits:
           memory: 512Mi
@@ -75,10 +75,6 @@ spec:
           memory: 512Mi
           cpu: '1'
       env:
-        - name: FBC_FRAGMENTS
-          value: $(params.fbcFragments)
-        - name: FROM_INDEX
-          value: $(params.fromIndex)
         - name: IIB_SERVICE_URL
           valueFrom:
             secretKeyRef:
@@ -105,12 +101,15 @@ spec:
               key: targetIndexCredential
               name: $(params.publishingCredentials)
               optional: true
+        - name: FBC_FRAGMENTS
+          value: $(params.fbcFragments)
       script: |
         #!/usr/bin/env bash
 
         # checks if there is any previous build for the same set of fbc_fragments.
         # fragments are sorted for comparison to ensure consistent matching.
         # in case multiple builds are found, returns only the last one.
+        # shellcheck disable=SC2329 # function is called later in this script
         check_previous_build() {
           user="${1}"
           from_index="${2}"
@@ -194,6 +193,9 @@ spec:
         retry 5 kinit -V "${KRB5_PRINCIPAL}" -k -t "/tmp/keytab"
 
         set -x
+
+        FROM_INDEX="$(params.fromIndex)"
+
         # Validate that required environment variables are set
         if [ -z "${FBC_FRAGMENTS:-}" ]; then
             echo "Error: FBC_FRAGMENTS environment variable is required"
@@ -227,23 +229,24 @@ spec:
         mustPublishIndexImage="$(params.mustPublishIndexImage)"
         mustSignIndexImage="$(params.mustSignIndexImage)"
 
-        echo "Using pre-determined publishing decisions:"
+        echo "Using pre-determined publishing decisions from prepare-fbc-parameters:"
         echo "             \`mustOverwriteFromIndexImage==${mustOverwriteFromIndexImage}\`"
         echo "             \`mustPublishIndexImage==${mustPublishIndexImage}\`"
         echo "             \`mustSignIndexImage==${mustSignIndexImage}\`"
 
-        # Store results for add-fbc-contribution (maintaining backward compatibility)
-        jq -n -c \
-           --arg fbc_opt_in "${mustPublishIndexImage}" \
-           --arg overwrite_fromindex_image "${mustOverwriteFromIndexImage}" \
-           --arg publish_index_image "${mustPublishIndexImage}" \
-           --arg sign_index_image "${mustSignIndexImage}" \
-           '{
-             "fbc_opt_in": $fbc_opt_in,
-             "overwrite_fromindex_image": $overwrite_fromindex_image,
-             "publish_index_image": $publish_index_image,
-             "sign_index_image": $sign_index_image
-            } '| tee "$(results.genericResult.path)"
+        # Store execution-specific results only (FBC validation logic removed)
+        # Validation decisions are now made upstream by prepare-fbc-parameters
+        jq -n \
+          --arg fbc_opt_in "true" \
+          --arg overwrite_fromindex_image "${mustOverwriteFromIndexImage}" \
+          --arg publish_index_image "${mustPublishIndexImage}" \
+          --arg sign_index_image "${mustSignIndexImage}" \
+          '{
+            "fbc_opt_in": $fbc_opt_in,
+            "overwrite_fromindex_image": $overwrite_fromindex_image,
+            "publish_index_image": $publish_index_image,
+            "sign_index_image": $sign_index_image
+          }' | tee "$(results.genericResult.path)"
 
         # Sort fragments once for consistent use throughout the script
         sorted_fbc_fragments=$(echo "${FBC_FRAGMENTS}" | jq 'sort')
@@ -299,7 +302,7 @@ spec:
           mountPath: /mnt/service-account-secret
     - name: update-fbc-catalog-wait-for-iib-build-step
       image: >-
-        quay.io/konflux-ci/release-service-utils:7a1d88df0e5aa21f6219db2a8732af87eed7ed73
+        quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
       computeResources:
         limits:
           memory: 256Mi
@@ -317,6 +320,7 @@ spec:
         # shellcheck disable=SC2317 # shellcheck calls all the commands in the function unreachable
         set -x
 
+        # shellcheck disable=SC2329 # function is used with timeout command
         watch_build_state() {
             build_id="$(base64 -d < "$(results.jsonBuildInfo.path)" | gunzip | jq -r ".id")"
             state=""

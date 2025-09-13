@@ -14,8 +14,8 @@ spec:
     - name: containerImages
       description: JSON array of container images to check for FBC opt-in status
       type: string
-    - name: pyxisSecret
-      description: Name of secret which contains the required credentials for authentication to pyxis
+    - name: iibServiceAccountSecret
+      description: Secret with IIB service account credentials to be used for Pyxis authentication
       type: string
     - name: pyxisServer
       description: Pyxis server to use
@@ -37,14 +37,17 @@ spec:
   volumes:
     - name: workdir
       emptyDir: {}
-    - name: pyxis-secret
+    - name: service-account-secret
       secret:
-        secretName: $(params.pyxisSecret)
-        optional: true
+        secretName: $(params.iibServiceAccountSecret)
+        defaultMode:
+          0400
   stepTemplate:
     volumeMounts:
       - mountPath: /var/workdir
         name: workdir
+      - name: service-account-secret
+        mountPath: /mnt/service-account-secret
   steps:
     - name: check-opt-in
       image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
@@ -61,8 +64,6 @@ spec:
           value: /etc/ssl/certs
         - name: PYXIS_URL
           value: https://pyxis.engineering.redhat.com/v1
-        - name: PYXIS_SECRET_NAME
-          value: $(params.pyxisSecret)
         - name: PYXIS_SERVER
           value: $(params.pyxisServer)
         - name: CONTAINER_IMAGES
@@ -72,24 +73,24 @@ spec:
             secretKeyRef:
               name: iib-services-config
               key: krb5.conf
-      volumeMounts:
-        - name: pyxis-secret
-          mountPath: /etc/pyxis
-          readOnly: true
       script: |
         #!/usr/bin/env bash
         set -e
 
-        # Initialize Kerberos authentication for Pyxis queries
-        echo "INFO: Initializing Kerberos authentication for Pyxis..."
+        # Initialize Kerberos authentication for Pyxis queries (following update-fbc-catalog-task pattern)
+        echo "INFO: Setting up Kerberos authentication for Pyxis..."
 
-        # Setup KRB5 configuration
+        # Setup Kerberos authentication
+        base64 -d /mnt/service-account-secret/keytab > "/tmp/keytab"
+
         KRB5_TEMP_CONF=$(mktemp)
+        KRB5_PRINCIPAL=$(cat /mnt/service-account-secret/principal)
+
         echo "${KRB5_CONF_CONTENT}" > "${KRB5_TEMP_CONF}"
         export KRB5_CONFIG="${KRB5_TEMP_CONF}"
         export KRB5_TRACE=/dev/stderr
 
-        kinit -k -t /etc/pyxis/krb5.keytab "$(cat /etc/pyxis/krb5.principal)"
+        retry 5 kinit -V "${KRB5_PRINCIPAL}" -k -t "/tmp/keytab"
 
         # Function to check FBC opt-in status in Pyxis
         # This queries the Pyxis registry API to determine if a container image
@@ -112,7 +113,7 @@ spec:
 
           echo "INFO: Checking opt-in status for: ${pull_spec}" >&2
 
-          if curl --negotiate -u: "${fetch_url}" -o "${tmpfile}" -s; then
+          if curl -u : --negotiate "${fetch_url}" -o "${tmpfile}" -s; then
             # prints "false" in case .fbc_opt_in entry is missing
             local opt_in_status
             opt_in_status=$(jq -e -r '.fbc_opt_in //false' "${tmpfile}")

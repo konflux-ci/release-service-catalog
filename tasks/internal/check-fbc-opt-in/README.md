@@ -5,8 +5,8 @@ Returns opt-in status for each provided container image.
 
 ## Parameters
 
-| Name            | Description                                                                        | Optional | Default value |
-|-----------------|------------------------------------------------------------------------------------|----------|---------------|
-| containerImages | JSON array of container images to check for FBC opt-in status                      | No       | -             |
-| pyxisSecret     | Name of secret which contains the required credentials for authentication to pyxis | No       | -             |
-| pyxisServer     | Pyxis server to use                                                                | Yes      | production    |
+| Name                    | Description                                                                     | Optional | Default value |
+|-------------------------|---------------------------------------------------------------------------------|----------|---------------|
+| containerImages         | JSON array of container images to check for FBC opt-in status                   | No       | -             |
+| iibServiceAccountSecret | Secret with IIB service account credentials to be used for Pyxis authentication | No       | -             |
+| pyxisServer             | Pyxis server to use                                                             | Yes      | production    |

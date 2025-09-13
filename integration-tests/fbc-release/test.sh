@@ -425,21 +425,70 @@ wait_for_single_plr_to_complete() {
     echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${plr_name}")"
 }
 
-# Always wait for PLR completion for both components for simplicity and reliability
+# Wait for PLR completion for both components in parallel to avoid race conditions
 wait_for_plr_to_complete() {
-    echo "⏳ Waiting for PipelineRuns to complete for both components (always dual for reliability)..."
-    
-    # Always wait for component 1 PLR
-    echo "Waiting for component PipelineRun ${component_push_plr_name} to complete..."
-    wait_for_single_plr_to_complete "${component_push_plr_name}" "${component_name}"
-    echo "✅ Component 1 (${component_name}) PipelineRun completed: ${component_push_plr_name}"
-    
-    # Always wait for component 2 PLR
-    echo "Waiting for component2 PipelineRun ${component2_push_plr_name} to complete..."
-    wait_for_single_plr_to_complete "${component2_push_plr_name}" "${component2_name}"
-    echo "✅ Component 2 (${component2_name}) PipelineRun completed: ${component2_push_plr_name}"
-    
-    echo "All PipelineRuns completed successfully"
+    echo "⏳ Waiting for PipelineRuns to complete for both components in parallel (robustness improvement)..."
+
+    local comp1_plr="${component_push_plr_name}"
+    local comp2_plr="${component2_push_plr_name}"
+    local comp1_name="${component_name}"
+    local comp2_name="${component2_name}"
+
+    echo "🔄 Starting parallel monitoring of:"
+    echo "  - Component 1 PLR: ${comp1_plr} (${comp1_name})"
+    echo "  - Component 2 PLR: ${comp2_plr} (${comp2_name})"
+
+    # Create temporary files to capture results from background processes
+    local comp1_result=$(mktemp)
+    local comp2_result=$(mktemp)
+
+    # Start monitoring both PLRs in parallel
+    (
+        if wait_for_single_plr_to_complete "${comp1_plr}" "${comp1_name}"; then
+            echo "success" > "${comp1_result}"
+            echo "✅ Component 1 (${comp1_name}) PipelineRun completed: ${comp1_plr}" >&2
+        else
+            echo "failure" > "${comp1_result}"
+            echo "🔴 Component 1 (${comp1_name}) PipelineRun failed: ${comp1_plr}" >&2
+        fi
+    ) &
+    local pid1=$!
+
+    (
+        if wait_for_single_plr_to_complete "${comp2_plr}" "${comp2_name}"; then
+            echo "success" > "${comp2_result}"
+            echo "✅ Component 2 (${comp2_name}) PipelineRun completed: ${comp2_plr}" >&2
+        else
+            echo "failure" > "${comp2_result}"
+            echo "🔴 Component 2 (${comp2_name}) PipelineRun failed: ${comp2_plr}" >&2
+        fi
+    ) &
+    local pid2=$!
+
+    # Wait for both background processes to complete
+    echo "⏳ Waiting for both components to complete..."
+    wait $pid1
+    local exit1=$?
+    wait $pid2
+    local exit2=$?
+
+    # Check results
+    local comp1_status=$(cat "${comp1_result}" 2>/dev/null || echo "unknown")
+    local comp2_status=$(cat "${comp2_result}" 2>/dev/null || echo "unknown")
+
+    # Cleanup temp files
+    rm -f "${comp1_result}" "${comp2_result}"
+
+    # Report results
+    if [ "${comp1_status}" = "success" ] && [ "${comp2_status}" = "success" ]; then
+        echo "🎉 All PipelineRuns completed successfully in parallel"
+        return 0
+    else
+        echo "🔴 One or more PipelineRuns failed:"
+        echo "  - Component 1 (${comp1_name}): ${comp1_status}"
+        echo "  - Component 2 (${comp2_name}): ${comp2_status}"
+        return 1
+    fi
 }
 
 # --- Snapshot Management ---

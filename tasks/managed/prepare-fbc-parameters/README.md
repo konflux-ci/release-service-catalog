@@ -21,3 +21,7 @@ and strategy-aware publishing decisions (hotfix, staging, etc.).
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
 | pyxisSecret             | Name of secret which contains the required credentials for authentication to pyxis                                         | No       | -                    |
 | pyxisServer             | Pyxis server to use                                                                                                        | Yes      | production           |
+| maxRetries              | Maximum number of retry attempts for failed internal requests                                                              | Yes      | 3                    |
+| retryDelaySeconds       | Delay between retry attempts in seconds                                                                                    | Yes      | 30                   |
+| targetIndex             | Target index pullspec for the catalog                                                                                      | No       | -                    |
+| pipelineRunUid          | The uid of the current pipelineRun. It is only available at the pipeline level                                             | No       | -                    |

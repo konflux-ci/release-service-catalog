@@ -2,13 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-add-fbc-contribution-ir-failure
+  name: test-prepare-fbc-parameters-multiple-modes
   annotations:
     test/assert-task-failure: "run-task"
 spec:
-  description: |
-    Run the add-fbc-contribution task with an IR that has exitCode set to 1 in its status.
-    The task should fail.
+  description: Test that prepare-fbc-parameters task properly rejects multiple release modes.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -53,35 +51,48 @@ spec:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
             script: |
-              #!/usr/bin/env sh
-              set -eux
+              #!/usr/bin/env bash
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              # Ensure data directory exists
+              mkdir -p "$(params.dataDir)"
+
+              # Create test data with valid components
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
               {
-                "application": "myapp",
                 "components": [
                   {
-                    "name": "comp0",
-                    "containerImage": "fail.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0"
+                    "name": "test-fbc-component",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297"
                   }
                 ]
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              # Create test data with MULTIPLE release modes active (should cause failure)
+              cat > "$(params.dataDir)/data.json" << 'EOF'
               {
                 "fbc": {
-                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
-                  "buildTimeoutSeconds": 420,
-                  "requestTimeoutSeconds": 120
+                  "allowedPackages": [
+                    "test-operator", "example-operator", "test-package"
+                  ],
+                  "hotfix": true,
+                  "preGA": true,
+                  "stagedIndex": false
                 }
               }
               EOF
+
+              echo "Test data created for multiple modes validation test"
           - name: create-trusted-artifact
             ref:
-              name: create-trusted-artifact
+              resolver: "git"
+              params:
+                - name: url
+                  value: https://github.com/konflux-ci/release-service-catalog.git
+                - name: revision
+                  value: development
+                - name: pathInRepo
+                  value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
             params:
               - name: ociStorage
                 value: $(params.ociStorage)
@@ -91,57 +102,35 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: add-fbc-contribution
+        name: prepare-fbc-parameters
       params:
-        - name: fromIndex
-          value: "quay.io/scoheb/fbc-index-testing:latest"
-        - name: pipelineRunUid
-          value: $(context.pipelineRun.uid)
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot_spec.json
+          value: snapshot.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/data.json
-        - name: resultsDirPath
-          value: "$(context.pipelineRun.uid)/results"
+          value: data.json
+        - name: pyxisSecret
+          value: test-pyxis-secret
+        - name: pyxisServer
+          value: production
         - name: ociStorage
           value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
         - name: orasOptions
           value: $(params.orasOptions)
         - name: sourceDataArtifact
-          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+          value: $(tasks.setup.results.sourceDataArtifact)
         - name: dataDir
           value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: "http://localhost"
+          value: https://github.com/konflux-ci/release-service-catalog.git
         - name: taskGitRevision
-          value: "main"
-        - name: ocpVersion
-          value: "v4.13"
-        # Required parameters from prepare-fbc-parameters that don't have defaults
-        - name: mustPublishIndexImage
-          value: "true"
-        - name: mustSignIndexImage
-          value: "true"
-        - name: mustOverwriteFromIndexImage
-          value: "false"
-        - name: iibServiceAccountSecret
-          value: "test-iib-secret"
-        - name: resolvedTargetIndex
-          value: "quay.io/scoheb/fbc-target-index-testing:v4.13"
+          value: development
+        - name: targetIndex
+          value: "quay.io/test/target-index:latest"
+        - name: pipelineRunUid
+          value: "test-pipeline-run-uid"
       runAfter:
         - setup
-  finally:
-    - name: cleanup
-      taskSpec:
-        steps:
-          - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
-            script: |
-              #!/usr/bin/env sh
-              set -eux
-              
-              # Only delete InternalRequests created by this specific pipeline run
-              kubectl delete internalrequests -l \
-                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true

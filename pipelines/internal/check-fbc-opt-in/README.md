@@ -5,10 +5,10 @@ Uses the simplified check-fbc-opt-in task to query Pyxis for each provided conta
 
 ## Parameters
 
-| Name            | Description                                                                                           | Optional | Default value |
-|-----------------|-------------------------------------------------------------------------------------------------------|----------|---------------|
-| containerImages | JSON array of container images to check for FBC opt-in status                                         | No       | -             |
-| pyxisSecret     | Name of secret which contains the required credentials for authentication to pyxis                    | No       | -             |
-| pyxisServer     | Pyxis server to use                                                                                   | Yes      | production    |
-| taskGitUrl      | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored | No       | -             |
-| taskGitRevision | The revision in the taskGitUrl repo to be used                                                        | No       | -             |
+| Name                    | Description                                                                                           | Optional | Default value |
+|-------------------------|-------------------------------------------------------------------------------------------------------|----------|---------------|
+| containerImages         | JSON array of container images to check for FBC opt-in status                                         | No       | -             |
+| iibServiceAccountSecret | Secret with IIB service account credentials to be used for Pyxis authentication                       | No       | -             |
+| pyxisServer             | Pyxis server to use                                                                                   | Yes      | production    |
+| taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored | No       | -             |
+| taskGitRevision         | The revision in the taskGitUrl repo to be used                                                        | No       | -             |

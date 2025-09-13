@@ -6,8 +6,10 @@
 # Add RBAC so that the SA executing the tests can retrieve CRs
 kubectl apply -f .github/resources/crd_rbac.yaml
 
-# delete old InternalRequests
-kubectl delete internalrequests --all -A
+# delete old InternalRequests for this pipeline only to avoid conflicts
+kubectl delete internalrequests \
+  -l "internal-services.appstudio.openshift.io/pipelinerun-uid" \
+  --timeout=30s || true
 
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"

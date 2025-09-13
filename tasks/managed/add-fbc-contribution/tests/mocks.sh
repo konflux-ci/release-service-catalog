@@ -54,6 +54,19 @@ function set_ir_status() {
     NAME=$1
     EXITCODE=$2
     PATCH_FILE=$(params.dataDir)/${NAME}-patch.json
+
+    # Determine condition status based on exit code - matches internal-services behavior
+    if [ "${EXITCODE}" -eq 0 ]; then
+        CONDITION_STATUS="True"
+        CONDITION_REASON="Succeeded"
+        CONDITION_MESSAGE=""
+    else
+        CONDITION_STATUS="False"
+        CONDITION_REASON="Failed"
+        CONDITION_MESSAGE="Internal request failed with exit code ${EXITCODE}"
+    fi
+
+    # Match real internal-services behavior: results are extracted from PipelineRun and stored as map[string]string
     cat > $PATCH_FILE << EOF
 {
   "status": {
@@ -63,7 +76,16 @@ function set_ir_status() {
       "genericResult": "{\"fbc_opt_in\":\"true\",\"publish_index_image\":\"false\",\"sign_index_image\":\"false\"}",
       "iibLog": "Dummy IIB Log",
       "exitCode": "${EXITCODE}"
-    }
+    },
+    "conditions": [
+      {
+        "type": "Succeeded",
+        "status": "${CONDITION_STATUS}",
+        "reason": "${CONDITION_REASON}",
+        "message": "${CONDITION_MESSAGE}",
+        "lastTransitionTime": "$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+      }
+    ]
   }
 }
 EOF
