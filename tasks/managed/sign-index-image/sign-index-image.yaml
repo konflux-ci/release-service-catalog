@@ -83,14 +83,6 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-    - name: pyxisServer
-      type: string
-      description: The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'
-      default: production
-    - name: pyxisSecret
-      type: string
-      description: |
-        The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys: key and cert
     - name: batchLimit
       type: string
       description: |
@@ -147,16 +139,6 @@ spec:
           memory: 1Gi
           cpu: 250m
       env:
-        - name: pyxisCert
-          valueFrom:
-            secretKeyRef:
-              name: $(params.pyxisSecret)
-              key: cert
-        - name: pyxisKey
-          valueFrom:
-            secretKeyRef:
-              name: $(params.pyxisSecret)
-              key: key
         - name: BATCH_LIMIT
           value: $(params.batchLimit)
       script: |
@@ -182,32 +164,6 @@ spec:
             echo "No valid results file was provided."
             exit 1
         fi
-
-        if [[ "$(params.pyxisServer)" == "production" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql-pyxis.api.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "production-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
-        else
-          echo "Invalid pyxisServer parameter. Only 'production','production-internal,'stage-internal' \
-              and 'stage' allowed."
-          exit 1
-        fi
-
-        set +x
-        echo "${pyxisCert:?}" > /tmp/crt
-        echo "${pyxisKey:?}" > /tmp/key
-        set -x
-
-        export PYXIS_CERT_PATH=/tmp/crt
-        export PYXIS_KEY_PATH=/tmp/key
 
         requestType=$(jq -r '.requestType // "internal-request"' "${DATA_FILE}")
         if [ "${requestType}" == "internal-pipelinerun" ] ; then
@@ -237,7 +193,6 @@ spec:
         component_count=$(jq '.components | length' "$RESULTS_FILE")
         for ((i = 0; i < component_count; i++)); do
           reference_image=$(jq -r ".components[$i].target_index" "$RESULTS_FILE")
-
           # Translate direct quay.io reference to public facing registry reference
           # quay.io/redhat/product----repo -> registry.redhat.io/product/repo
           reference_image=$(translate-delivery-repo "$reference_image" \
@@ -246,24 +201,8 @@ spec:
           digest_count=$(jq ".components[$i].image_digests | length" "$RESULTS_FILE")
           for ((j = 0; j < digest_count; j++)); do
             manifest_digest=$(jq -r ".components[$i].image_digests[$j]" "$RESULTS_FILE")
-
-            rh_registry_repo=$(jq -r ".components[$i][\"rh-registry-repo\"]" "$RESULTS_FILE")
-            repository="${rh_registry_repo#*/}"
-
-            find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                --manifest_digest "${manifest_digest}" \
-                --repository "${repository}" \
-                --output_file "/tmp/${manifest_digest}"
-
-            if ! grep -q "^${reference_image}" "/tmp/${manifest_digest}" ; then
               to_sign_references+=("${reference_image}")
               to_sign_digests+=("${manifest_digest}")
-            else
-              echo "Signature already exists for:"
-              echo "- reference=${reference_image}"
-              echo "- manifest_digest=${manifest_digest}"
-            fi
-
           done
         done
 
