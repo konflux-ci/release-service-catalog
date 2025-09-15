@@ -667,9 +667,6 @@ EOF
     fi
     
     echo "✅ Created ${#RELEASES_TO_VERIFY[@]} releases, waiting for completion..."
-    
-    # Wait for all releases and verify
-    verify_all_releases
 }
 
 # Validate pipeline results to ensure they are accessible, single-line, and match release artifacts
@@ -912,8 +909,8 @@ wait_for_release() {
     "${SUITE_DIR}/../scripts/wait-for-release.sh"
 }
 
-# Enhanced verification of all releases
-verify_all_releases() {
+# Override main framework function to use our release verification
+verify_release_contents() {
     local failed_releases=()
     
     echo "🔍 Verifying all releases..."
@@ -974,11 +971,6 @@ verify_all_releases() {
     else
         echo "✅ All ${#RELEASES_TO_VERIFY[@]} releases verified successfully"
     fi
-}
-
-# Override main framework function to use our orchestration
-verify_release_contents() {
-    trigger_configured_releases
 }
 
 # Configure test matrix early for consistency (components always built as dual)
