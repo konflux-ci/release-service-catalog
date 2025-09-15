@@ -1,0 +1,84 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-fbc-catalog-index-mismatch
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  tasks:
+    - name: run-task
+      taskRef:
+        name: update-fbc-catalog-task
+      params:
+        - name: fbcFragments
+          value: '["registry.io/image0@sha256:0000"]'
+        - name: fromIndex
+          value: "quay.io/scoheb/fbc-index-testing:latest"
+        - name: targetIndex
+          value: "quay.io/fbc/catalog:mismatch"  # Different from what mock returns
+        - name: buildTags
+          value: "[]"
+        - name: addArches
+          value: "[]"
+        - name: iibServiceAccountSecret
+          value: "iib-service-account-secret"
+        - name: publishingCredentials
+          value: "publishing-credentials"
+        - name: mustOverwriteFromIndexImage
+          value: "true"   # This with mustPublishIndexImage=true triggers production logic
+        - name: mustPublishIndexImage
+          value: "true"   # This will trigger index_image validation
+        - name: mustSignIndexImage
+          value: "true"
+    - name: check-result
+      params:
+        - name: buildState
+          value: $(tasks.run-task.results.buildState)
+        - name: exitCode
+          value: $(tasks.run-task.results.exitCode)
+      taskSpec:
+        params:
+          - name: buildState
+            type: string
+          - name: exitCode
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
+            env:
+              - name: BUILD_STATE
+                value: $(params.buildState)
+              - name: EXIT_CODE
+                value: $(params.exitCode)
+            script: |
+              #!/bin/bash
+              set -x
+
+              # Verify the task failed as expected due to index_image mismatch
+              state="$(jq -cr .state <<< "${BUILD_STATE}")"
+              if [ "$state" != "failed" ]; then
+                echo "Expected task to fail due to index_image mismatch, but state was: $state"
+                exit 1
+              fi
+
+              # Verify the failure reason mentions index mismatch
+              state_reason="$(jq -cr .state_reason <<< "${BUILD_STATE}")"
+              if [[ "$state_reason" != *"Index image mismatch"* ]]; then
+                echo "Expected failure reason to mention 'Index image mismatch', but got: $state_reason"
+                exit 1
+              fi
+
+              # Verify the failure reason mentions parallel pipelines
+              if [[ "$state_reason" != *"multiple pipelines releasing to production in parallel"* ]]; then
+                echo "Expected failure reason to mention parallel pipelines, but got: $state_reason"
+                exit 1
+              fi
+
+              # Verify exit code is 1
+              if [ "$EXIT_CODE" != "1" ]; then
+                echo "Expected exit code 1, but got: $EXIT_CODE"
+                exit 1
+              fi
+
+              echo "Test passed: Task correctly failed with index_image mismatch validation"

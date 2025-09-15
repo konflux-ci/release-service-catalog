@@ -117,24 +117,25 @@ spec:
 
           # fbc_fragments_json is already sorted by caller, use directly for consistent comparison
 
+          # We filter between stage and (prod, preGA, hotfix) based on ${user}. We do not
+          # overwrite the target index for hotfix or preGA but we do publish the index image.
+          #
+          # We really only need to worry about hotfix/preGA vs. production releases. This is only
+          # tricky if builds are in progress. 
+          #
+          # Let's just reuse any in-progress release that matches. At the end, we will check to see
+          # if .index_image meets expectations. If it doesn't meet expectations, we return a failure
+          # for the internal request. Since we have retries on the outer loop, We can handle the
+          # occasional chance of collision which we expect to be rare as these pipelines will likely
+          # not be running in parallel for the same fragment set.
+
           # fetch only builds in progress or completed
           # check if any fragment in the array has an existing build
           build=$(curl -s "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}" | \
             jq --argjson fbc_fragments "${fbc_fragments_json}" \
               '[.items[] | select(.state!="failed") | select(
-                (.fbc_fragments != null and ((.fbc_fragments | sort) == $fbc_fragments)) or
-                (.fbc_fragment != null and (.fbc_fragment | IN($fbc_fragments[])))
+                (.fbc_fragments != null and ((.fbc_fragments | sort) == $fbc_fragments))
               )] | sort_by(.updated) | last // empty')
-
-          # if a previous build is found, but from_index and index_image are different, it means that the
-          # previous build was a staging index build, then we should return here causing the task to call
-          # IIB again, but with overwrite_from_index set to true.
-          # However, if we are not publishing the index image, we want to ignore this condition and continue
-          # to determine whether we should reuse a previous build.
-          if [ "$(params.mustPublishIndexImage)" = "true" ] && \
-             [ "$(jq '.from_index != .index_image' <<< "${build}")" = true ]; then
-            return 0
-          fi
 
           if [ "$(jq -r '.state' <<< "${build}")" = "complete" ]; then
             indexImageResolved="$(jq -r '.index_image_resolved' <<<  "${build}")"
@@ -147,6 +148,15 @@ spec:
               create_auth_file
               targetIndexCreated="$(skopeo inspect --retry-times 3 --config "docker://$(params.targetIndex)" | \
                 jq -r .created)"
+
+              # If we specify a target index for the operation, we must ensure that it matches
+              # the index_image in the previous build. This covers production builds as well as
+              # hotfix and preGA builds within the same pipeline run. This is only relevant for
+              # non-stage builds.
+              if [ "$(params.mustPublishIndexImage)" = "true" ] && \
+                 [ "$(jq -r '.index_image' <<< "${build}")" = "$(params.targetIndex)" ]; then
+                return 0
+              fi
 
               if [ -z "${targetIndexCreated}" ]; then
                 # we cannot determine the target index created date, stop here. This causes the task to trigger
@@ -336,7 +346,40 @@ spec:
                 url="$(jq -r ".logs.url" <<< "${build_info}")"
                 echo IIB log url is: "${url}" > "$(results.iibLog.path)"
                 case ${state} in
-                  "complete") break ;;
+                  "complete")
+                    # Determine final index image based on release strategy
+                    if [ "$(params.mustOverwriteFromIndexImage)" = "true" ] && \
+                       [ "$(params.mustPublishIndexImage)" = "true" ]; then
+                        # Production build: use IIB-generated index_image
+                        final_index_image=$(jq -r ".index_image" <<< "${build_info}")
+                        if [ "${final_index_image}" != "$(params.targetIndex)" ]; then
+                            echo "Error: Build completed but index_image '${final_index_image}' does not match" \
+                              "expected targetIndex '$(params.targetIndex)'"
+                            echo "This could be caused by multiple pipelines releasing to production" \
+                              "running in parallel"
+                            error_msg="Index image mismatch: expected $(params.targetIndex), got ${final_index_image}."
+                            jq -n --arg reason "${error_msg}" \
+                              '{ "state": "failed", "state_reason": $reason }' > "$(results.buildState.path)"
+                            return 1
+                        fi
+                    elif [ "$(params.mustOverwriteFromIndexImage)" = "false" ] && \
+                         [ "$(params.mustPublishIndexImage)" = "true" ]; then
+                        # Hotfix/preGA build: use targetIndex with custom tag
+                        final_index_image="$(params.targetIndex)"
+                    elif [ "$(params.mustOverwriteFromIndexImage)" = "false" ] && \
+                         [ "$(params.mustPublishIndexImage)" = "false" ]; then
+                        # Staging build: use IIB-generated index_image
+                        final_index_image=$(jq -r ".index_image" <<< "${build_info}")
+                    else
+                        echo "Error: Invalid combination of mustOverwriteFromIndexImage=true" \
+                             "and mustPublishIndexImage=false"
+                        echo "This could be caused by multiple pipelines releasing to production running in parallel"
+                        error_msg="Invalid release strategy combination."
+                        jq -n --arg reason "${error_msg}" \
+                          '{ "state": "failed", "state_reason": $reason }' > "$(results.buildState.path)"
+                        return 1
+                    fi
+                    break ;;
                   "failed") break ;;
                   *) echo -en "."; sleep 30; continue ;;
                 esac
@@ -393,7 +436,7 @@ spec:
         # to be useful, but still print it for debugging
         curl -s "$(awk '{print $NF}' < "$(results.iibLog.path)")"
 
-        exit 0
+        exit "${BUILDEXIT}"
   volumes:
     - name: service-account-secret
       secret:

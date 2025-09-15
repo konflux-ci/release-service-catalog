@@ -86,8 +86,8 @@ function curl() {
             # Retry scenario with 2 fragments, ensure from_index and index_image match task parameters
             build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
           elif [[ "$(context.taskRun.name)" =~ "multiple-fragments" ]]; then
-            # Basic multiple fragments test with 3 fragments, ensure from_index and index_image match task parameters  
-            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
+            # Basic multiple fragments test with 3 fragments, ensure from_index and index_image match task parameters
+            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/fbc/catalog:test"' <<< "${build}")
           fi
           build=$(jq -rc --arg taskrun_name "$taskrun_name" '.items[0].mock_case = $taskrun_name' <<< "${build}")
           build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
@@ -109,6 +109,13 @@ function curl() {
           echo "DEBUG: Setting empty-fragments case" >&2
           build='{"items": []}'
         ;;
+        *index-mismatch*)
+          # For index-mismatch test, return a completed build with wrong index_image
+          echo "DEBUG: Setting index-mismatch case" >&2
+          build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
+          build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
+          build=$(jq -rc '.items[0].state_reason = "The FBC fragment was successfully added in the index image"' <<< "${build}")
+        ;;
         *)
           echo "DEBUG: No case matched, using default" >&2
         ;;
@@ -125,6 +132,14 @@ function curl() {
 
     # Decompress the jsonBuildInfo since task now uses compression
     buildJson="$(base64 -d < $(results.jsonBuildInfo.path) | gunzip)"
+
+    # For index-mismatch test, keep default index_image to trigger validation failure
+    if [[ "$(context.taskRun.name)" =~ "index-mismatch" ]]; then
+        # Keep default index_image ("quay.io/scoheb/fbc-index-testing:latest")
+        # which won't match targetIndex ("quay.io/fbc/catalog:mismatch")
+        echo "DEBUG: index-mismatch test - keeping default index_image to trigger validation failure" >&2
+    fi
+
     mock_build_progress "$(awk 'END{ print NR }' mock_build_progress_calls)" "$(base64 <<< "${buildJson}")" "$mock_error" | tee build_json
     export -n buildJson
     buildJson=$(cat build_json)
@@ -143,8 +158,8 @@ function curl() {
             # For retry scenario with 2 fragments
             buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"]' <<< "${buildJson}")
           else
-            # For basic multiple fragments test with 3 fragments
-            buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"]' <<< "${buildJson}")
+            # For basic multiple fragments test with 3 fragments, set correct index_image for production build validation
+            buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .index_image = "quay.io/fbc/catalog:test"' <<< "${buildJson}")
           fi
         ;;
         *empty-fragments*)
