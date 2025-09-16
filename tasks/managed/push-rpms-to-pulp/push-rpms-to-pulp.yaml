@@ -1,0 +1,314 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-rpms-to-pulp
+spec:
+  description: |
+    A task to push rpm packages from an OCI artifact to a Pulp repository.
+  params:
+    - name: SNAPSHOT_PATH
+      type: string
+      description: Path to the snapshot spec file containing image information
+    - name: PULP_DOMAIN
+      type: string
+      description: The domain to use for Pulp operations
+    - name: PULP_SECRET_NAME
+      type: string
+      description: >-
+        The name of the secret containing the Pulp cli.toml file. It must have the cli.toml key
+    - name: DEFAULT_EXCLUDES
+      type: string
+      description: comma-delimited list of file patterns to exclude from the upload
+      default: "-debuginfo-, -debugsource-"
+    - name: resultsDirPath
+      description: Path to the results directory in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    env:
+      - name: SNAPSHOT_PATH
+        value: $(params.dataDir)/$(params.SNAPSHOT_PATH)
+      - name: DEFAULT_EXCLUDES
+        value: $(params.DEFAULT_EXCLUDES)
+      - name: DATA_DIR
+        value: $(params.dataDir)
+      - name: PULP_DOMAIN
+        value: $(params.PULP_DOMAIN)
+      - name: PULP_SECRET_NAME
+        value: $(params.PULP_SECRET_NAME)
+      - name: RESULTS_DIR_PATH
+        value: $(params.resultsDirPath)
+      - name: ociStorage
+        value: $(params.ociStorage)
+      - name: ociArtifactExpiresAfter
+        value: $(params.ociArtifactExpiresAfter)
+      - name: trustedArtifactsDebug
+        value: $(params.trustedArtifactsDebug)
+      - name: IMAGES_TXT
+        value: $(params.dataDir)/images.txt
+      - name: FILES_DIR
+        value: $(params.dataDir)/files
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: ORAS_OPTIONS
+        value: $(params.orasOptions)
+      - name: DEBUG
+        value: $(params.trustedArtifactsDebug)
+    volumeMounts:
+      - name: workdir
+        mountPath: "/var/workdir"
+    workingDir: "/var/workdir"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: push-rpms-to-pulp
+      image: quay.io/konflux-ci/release-service-utils:d39d3af868c7136f7e4bffb32d1e625398d6264a
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 250m
+      env:
+        - name: CONFIG_FILE_CONTENT
+          valueFrom:
+            secretKeyRef:
+              name: $(params.PULP_SECRET_NAME)
+              key: cli.toml
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        set +x
+        echo "${CONFIG_FILE_CONTENT:?}" > "/tmp/cli.toml"
+        export PULP_CONFIG_FILE="/tmp/cli.toml"
+        set -x
+
+        DOMAIN_EXISTS=$(pulp --config "$PULP_CONFIG_FILE" domain show --name "${PULP_DOMAIN}" \
+          | jq -r ".name // \"\"" || echo "")
+        if [[ "$DOMAIN_EXISTS" == "$PULP_DOMAIN" ]]; then
+            echo "Domain '${PULP_DOMAIN}' exists"
+        else
+            echo "Domain '${PULP_DOMAIN}' not found."
+            exit 1
+        fi
+
+        RESULTS_FILE="${DATA_DIR}/${RESULTS_DIR_PATH}/push-rpms-to-pulp-results.json"
+        mkdir -p "$(dirname "${RESULTS_FILE}")"
+
+        # Initialize results file with empty rpmfiles array
+        echo '{"rpmfiles": []}' > "$RESULTS_FILE"
+
+        < "${SNAPSHOT_PATH}" jq -r '.components[].containerImage' | tee "${IMAGES_TXT}"
+
+        AUTHFILE='/tmp/auth.json'
+        mkdir -p "${FILES_DIR}"
+        while read -r IMAGE; do
+          echo "Processing ${IMAGE}"
+          select-oci-auth "${IMAGE}" > "${AUTHFILE}"
+          oras pull --registry-config "${AUTHFILE}" "${IMAGE}" -o "${FILES_DIR}"
+        done < "${IMAGES_TXT}"
+
+        cd "${FILES_DIR}"
+
+        # Create filtered list of files to upload
+        FILES_TO_UPLOAD=()
+
+        # Convert comma-delimited exclude patterns to array
+        IFS=',' read -ra EXCLUDE_PATTERNS <<< "${DEFAULT_EXCLUDES}"
+
+        # Get all files and filter out excluded patterns
+        for file in *; do
+          if [ -f "$file" ]; then
+            # Only process .rpm files
+            if [[ "$file" != *.rpm ]]; then
+              echo "Skipping $file (not an RPM file)"
+              continue
+            fi
+
+            should_exclude=false
+
+            # Check if file matches any exclude pattern
+            for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+              # Remove leading/trailing whitespace from pattern
+              pattern=$(echo "$pattern" | xargs)
+              if [[ "$file" == *"$pattern"* ]]; then
+                echo "Excluding $file (matches pattern: $pattern)"
+                should_exclude=true
+                break
+              fi
+            done
+
+            # Add to upload list if not excluded
+            if [ "$should_exclude" = false ]; then
+              FILES_TO_UPLOAD+=("$file")
+              echo "Including $file for upload"
+            fi
+          fi
+        done
+
+        # Extract architectures from RPM filenames
+        ARCHES=()
+        for file in "${FILES_TO_UPLOAD[@]}"; do
+          # Skip .src.rpm and .noarch.rpm files
+          if [[ "$file" == *.src.rpm ]] || [[ "$file" == *.noarch.rpm ]]; then
+            continue
+          fi
+
+          # Extract architecture from filename (e.g., package-1.0-1.x86_64.rpm -> x86_64)
+          if [[ "$file" =~ \.([^.]+)\.rpm$ ]]; then
+            arch="${BASH_REMATCH[1]}"
+
+            # Add to ARCHES array if not already present
+            if [[ ! " ${ARCHES[*]} " == *" ${arch} "* ]]; then
+              ARCHES+=("$arch")
+              echo "Found architecture: $arch"
+            fi
+          fi
+        done
+
+        echo "Detected architectures: ${ARCHES[*]}"
+
+        # Map to the specific arch: *.x86_64.rpm -> x86_64 repo
+        # Map noarch rpm: *.noarch.rpm -> every arch repo
+        # Map source rpms: *.src.rpm -> source rpm repo
+
+        # Upload files organized by architecture
+        for arch in "${ARCHES[@]}"; do
+          echo "Processing architecture: $arch"
+
+          REPO_EXISTS=$(pulp  --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
+            rpm repository list --field name | jq -r ".[] | \
+            select(.name == \"${arch}\") | .name")
+
+          if [[ "$REPO_EXISTS" == "${arch}" ]]; then
+              echo "Repository '${arch}' exists"
+          else
+              echo "Repository '${arch}' does not exist."
+              exit 1
+          fi
+
+          # Upload arch-specific RPMs
+          for pkg in "${FILES_TO_UPLOAD[@]}"; do
+            if [[ "$pkg" == *."$arch".rpm ]]; then
+              echo "Uploading $pkg to $arch repository..."
+              set +e
+              pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+                --file "${pkg}" --relative-path "$(basename "${pkg}")" \
+                --repository "$arch"
+              set -e
+              jq --arg pkg "${pkg}" --arg arch "${arch}" --arg pulprepo "${PULP_DOMAIN}/${arch}" \
+                '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
+                "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
+            fi
+            # Upload .noarch.rpm files to this arch repository
+            if [[ "$pkg" == *.noarch.rpm ]]; then
+              echo "Uploading noarch $pkg to $arch repository..."
+              set +e
+              pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+                --file "${pkg}" --relative-path "$(basename "${pkg}")" \
+                --repository "$arch"
+              set -e
+              jq --arg pkg "${pkg}" --arg arch "noarch" --arg pulprepo "${PULP_DOMAIN}/${arch}" \
+                '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
+                "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
+            fi
+          done
+        done
+
+        # Upload .src.rpm files to source repository
+        for pkg in "${FILES_TO_UPLOAD[@]}"; do
+          if [[ "$pkg" == *.src.rpm ]]; then
+            echo "Uploading source $pkg to source repository..."
+            set +e
+            pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+              --file "${pkg}" --relative-path "$(basename "${pkg}")" \
+              --repository "source"
+            set -e
+            jq --arg pkg "${pkg}" --arg arch "source" --arg pulprepo "${PULP_DOMAIN}/source" \
+              '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
+              "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
+          fi
+        done
+
+        echo "Results written to: $RESULTS_FILE"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
