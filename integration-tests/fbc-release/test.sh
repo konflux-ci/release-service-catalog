@@ -76,29 +76,29 @@ configure_test_matrix() {
     
     # These conditions are additive - multiple patterns can match and enable their respective tests
     
-    if [[ "$changed_files" =~ tasks/managed/sign-index-image ]] || [[ "$changed_files" =~ pipelines/internal/simple-signing-pipeline ]] || [[ "$changed_files" =~ tasks/internal/request-and-upload-signature ]]; then
-        echo "🎯 Detected signing task changes - enabling core scenarios with multi-component validation"
+    if [[ "$changed_files" =~ tasks/managed/sign-index-image ]] || \
+       [[ "$changed_files" =~ pipelines/internal/simple-signing-pipeline ]] || \
+       [[ "$changed_files" =~ tasks/internal/request-and-upload-signature ]]; then
+        echo "🎯 Detected signing task changes - enabling core scenarios"
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
         tests_enabled=true
-        echo "  Signing changes enabled: single-happy, single-staged, multi-happy"
+        echo "  Signing changes enabled: single-happy, single-staged"
     fi
     
-    if [[ "$changed_files" =~ tasks/managed/add-fbc-contribution ]]; then
-        echo "🎯 Detected tag logic task changes - enabling single-component focused tests"
+    if [[ "$changed_files" =~ pipelines/managed/fbc-release ]] || \
+       [[ "$changed_files" =~ tasks/managed/prepare-fbc-parameters ]] || \
+       [[ "$changed_files" =~ tasks/managed/add-fbc-contribution ]] || \
+       [[ "$changed_files" =~ tasks/internal/check-fbc-opt-in ]] || \
+       [[ "$changed_files" =~ tasks/internal/update-fbc-catalog-task ]] || \
+       [[ "$changed_files" =~ pipelines/internal/check-fbc-opt-in ]] || \
+       [[ "$changed_files" =~ pipelines/internal/update-fbc-catalog ]] || \
+       [[ "$changed_files" =~ pipelines/internal/publish-index-image-pipeline ]]; then
+        echo "🎯 Detected batching/publishing pipeline changes - enabling multi-component focused tests"
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
         GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        tests_enabled=true
-        echo "  Tag logic changes enabled: single-happy, single-staged, single-prega, single-hotfix"
-    fi
-    
-    if [[ "$changed_files" =~ pipelines/managed/fbc-release ]] || [[ "$changed_files" =~ tasks/managed/update-fbc-catalog ]] || [[ "$changed_files" =~ tasks/managed/get-ocp-version ]] || [[ "$changed_files" =~ tasks/internal/update-fbc-catalog-task ]] || [[ "$changed_files" =~ pipelines/internal/update-fbc-catalog ]] || [[ "$changed_files" =~ pipelines/internal/publish-index-image-pipeline ]]; then
-        echo "🎯 Detected batching/publishing pipeline changes - enabling multi-component focused tests"
-        GLOBAL_TEST_MATRIX["single-happy"]="enabled"
-        GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
         GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
         tests_enabled=true

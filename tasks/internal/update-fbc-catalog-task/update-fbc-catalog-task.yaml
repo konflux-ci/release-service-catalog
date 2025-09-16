@@ -17,10 +17,6 @@ spec:
       type: string
       description: >-
         Index image (catalog of catalogs) the FBC fragment will be added to
-    - name: targetIndex
-      type: string
-      description: >-
-        Target index is the pullspec the FBC catalog will be pushed to
     - name: buildTags
       type: string
       description: >-
@@ -41,23 +37,17 @@ spec:
       description: Secret containing the publishing credentials used to fetch the image config
     - name: mustPublishIndexImage
       type: string
-      default: "true"
+      default: "false"
       description: Whether the index image should be published (pre-determined by prepare-fbc-parameters)
-    - name: mustSignIndexImage
-      type: string
-      default: "true"
-      description: Whether the index image should be signed (pre-determined by prepare-fbc-parameters)
     - name: mustOverwriteFromIndexImage
       type: string
-      default: "true"
+      default: "false"
       description: Whether to overwrite the from index image (pre-determined by prepare-fbc-parameters)
   results:
     - name: jsonBuildInfo
       description: JSON build information for the requested build
     - name: buildState
       description: IIB Service build state
-    - name: genericResult
-      description: Set the genericResult if FBC Fragment is Opt-In and should be published
     - name: indexImageDigests
       description: The digests for each arch for the manifest list of the index image
     - name: iibLog
@@ -95,14 +85,14 @@ spec:
             secretKeyRef:
               name: iib-services-config
               key: krb5.conf
-        - name: TARGET_INDEX_CREDENTIAL
+        - name: FBC_FRAGMENTS
+          value: $(params.fbcFragments)
+        - name: PUBLISHING_CREDENTIAL
           valueFrom:
             secretKeyRef:
               key: targetIndexCredential
               name: $(params.publishingCredentials)
               optional: true
-        - name: FBC_FRAGMENTS
-          value: $(params.fbcFragments)
       script: |
         #!/usr/bin/env bash
 
@@ -138,54 +128,47 @@ spec:
               )] | sort_by(.updated) | last // empty')
 
           if [ "$(jq -r '.state' <<< "${build}")" = "complete" ]; then
+            # Previous build is complete, check if we should reuse it
             indexImageResolved="$(jq -r '.index_image_resolved' <<<  "${build}")"
             newCatalogCreatedDate="$(date --date "$(skopeo inspect \
               --retry-times 3 --config "docker://${indexImageResolved}" | \
               jq -r .created)" "+%s")"
 
-            if [ -n "$(params.targetIndex)" ]; then
-              # authentication is only required for the targetIndex
-              create_auth_file
-              targetIndexCreated="$(skopeo inspect --retry-times 3 --config "docker://$(params.targetIndex)" | \
-                jq -r .created)"
+            # authentication is only required for the fromIndex
+            create_auth_file
+            fromIndexCreated="$(skopeo inspect --retry-times 3 --config "docker://${from_index}" | \
+              jq -r .created)"
 
-              # If we specify a target index for the operation, we must ensure that it matches
-              # the index_image in the previous build. This covers production builds as well as
-              # hotfix and preGA builds within the same pipeline run. This is only relevant for
-              # non-stage builds.
-              if [ "$(params.mustPublishIndexImage)" = "true" ] && \
-                 [ "$(jq -r '.index_image' <<< "${build}")" = "$(params.targetIndex)" ]; then
-                return 0
-              fi
-
-              if [ -z "${targetIndexCreated}" ]; then
-                # we cannot determine the target index created date, stop here. This causes the task to trigger
-                # a new build.
-                return 0
-              fi
-
-              upstreamCatalogCreatedDate="$(date --date "${targetIndexCreated}" "+%s")"
-              # checks if the index_image_resolved in the previous completed build is newer
-              # than the upstream catalog index.
-              # in case the new catalog index is older than the upstream, a new build is
-              # required to assure the catalog integrity.
-              if [ "${newCatalogCreatedDate}" -lt "${upstreamCatalogCreatedDate}" ]; then
-                return 0
-              fi
+            if [ -z "${fromIndexCreated}" ]; then
+              # we cannot determine the from index created date, stop here. This causes the task to trigger
+              # a new build.
+              return 0
             fi
+
+            upstreamCatalogCreatedDate="$(date --date "${fromIndexCreated}" "+%s")"
+            # checks if the index_image_resolved in the previous completed build is newer
+            # than the upstream catalog index.
+            # in case the new catalog index is older than the upstream, a new build is
+            # required to assure the catalog integrity.
+            if [ "${newCatalogCreatedDate}" -lt "${upstreamCatalogCreatedDate}" ]; then
+              return 0
+            fi
+
+            # Previous build is complete and recent enough, we can reuse it
+            return 0
           fi
           echo "${build}"
         }
 
         create_auth_file() {
           mkdir -p "${HOME}/.config/containers"
-          targetIndex="$(params.targetIndex)"
-          authName="${targetIndex%:*}"
+          fromIndex="$(params.fromIndex)"
+          authName="${fromIndex%:*}"
 
           # disabling debug to not leak the token
           set +x
           jq -n --arg authName "${authName}" \
-                --arg token "$(base64 -w 0 < <(printf %s "${TARGET_INDEX_CREDENTIAL}"))" \
+                --arg token "$(base64 -w 0 < <(printf %s "${PUBLISHING_CREDENTIAL}"))" \
                 '.auths[$authName].auth = $token' > "${HOME}/.config/containers/auth.json"
           set -x
         }
@@ -237,26 +220,10 @@ spec:
         echo "Processing fragments: ${FBC_FRAGMENTS}"
         mustOverwriteFromIndexImage="$(params.mustOverwriteFromIndexImage)"
         mustPublishIndexImage="$(params.mustPublishIndexImage)"
-        mustSignIndexImage="$(params.mustSignIndexImage)"
 
         echo "Using pre-determined publishing decisions from prepare-fbc-parameters:"
         echo "             \`mustOverwriteFromIndexImage==${mustOverwriteFromIndexImage}\`"
         echo "             \`mustPublishIndexImage==${mustPublishIndexImage}\`"
-        echo "             \`mustSignIndexImage==${mustSignIndexImage}\`"
-
-        # Store execution-specific results only (FBC validation logic removed)
-        # Validation decisions are now made upstream by prepare-fbc-parameters
-        jq -n \
-          --arg fbc_opt_in "true" \
-          --arg overwrite_fromindex_image "${mustOverwriteFromIndexImage}" \
-          --arg publish_index_image "${mustPublishIndexImage}" \
-          --arg sign_index_image "${mustSignIndexImage}" \
-          '{
-            "fbc_opt_in": $fbc_opt_in,
-            "overwrite_fromindex_image": $overwrite_fromindex_image,
-            "publish_index_image": $publish_index_image,
-            "sign_index_image": $sign_index_image
-          }' | tee "$(results.genericResult.path)"
 
         # Sort fragments once for consistent use throughout the script
         sorted_fbc_fragments=$(echo "${FBC_FRAGMENTS}" | jq 'sort')
@@ -352,20 +319,21 @@ spec:
                        [ "$(params.mustPublishIndexImage)" = "true" ]; then
                         # Production build: use IIB-generated index_image
                         final_index_image=$(jq -r ".index_image" <<< "${build_info}")
-                        if [ "${final_index_image}" != "$(params.targetIndex)" ]; then
+                        # If we overwrote the from index, verify the index_image matches the fromIndex from build data
+                        expected_from_index=$(jq -r ".from_index" <<< "${build_info}")
+                        if [ "${final_index_image}" != "${expected_from_index}" ]; then
                             echo "Error: Build completed but index_image '${final_index_image}' does not match" \
-                              "expected targetIndex '$(params.targetIndex)'"
-                            echo "This could be caused by multiple pipelines releasing to production" \
-                              "running in parallel"
-                            error_msg="Index image mismatch: expected $(params.targetIndex), got ${final_index_image}."
+                              "expected fromIndex '${expected_from_index}'"
+                            echo "This indicates that the from index was not properly overwritten"
+                            error_msg="Index image mismatch: expected ${expected_from_index}, got ${final_index_image}."
                             jq -n --arg reason "${error_msg}" \
                               '{ "state": "failed", "state_reason": $reason }' > "$(results.buildState.path)"
                             return 1
                         fi
                     elif [ "$(params.mustOverwriteFromIndexImage)" = "false" ] && \
                          [ "$(params.mustPublishIndexImage)" = "true" ]; then
-                        # Hotfix/preGA build: use targetIndex with custom tag
-                        final_index_image="$(params.targetIndex)"
+                        # Hotfix/preGA build: use IIB-generated index_image
+                        final_index_image=$(jq -r ".index_image" <<< "${build_info}")
                     elif [ "$(params.mustOverwriteFromIndexImage)" = "false" ] && \
                          [ "$(params.mustPublishIndexImage)" = "false" ]; then
                         # Staging build: use IIB-generated index_image

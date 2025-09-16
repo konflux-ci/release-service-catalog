@@ -17,6 +17,7 @@ kubectl create secret generic iib-services-config \
 kubectl create secret generic iib-overwrite-fromimage-credentials \
     --from-literal=username="bot+user" \
     --from-literal=token="token"
+
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )

@@ -87,7 +87,7 @@ function curl() {
             build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
           elif [[ "$(context.taskRun.name)" =~ "multiple-fragments" ]]; then
             # Basic multiple fragments test with 3 fragments, ensure from_index and index_image match task parameters
-            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/fbc/catalog:test"' <<< "${build}")
+            build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
           fi
           build=$(jq -rc --arg taskrun_name "$taskrun_name" '.items[0].mock_case = $taskrun_name' <<< "${build}")
           build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
@@ -112,7 +112,7 @@ function curl() {
         *index-mismatch*)
           # For index-mismatch test, return a completed build with wrong index_image
           echo "DEBUG: Setting index-mismatch case" >&2
-          build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000"] | .items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
+          build=$(jq -rc '.items[0].fbc_fragments = ["registry.io/image0@sha256:0000"] | .items[0].from_index = "quay.io/fbc/catalog:mismatch" | .items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
           build=$(jq -rc '.items[0].state = "complete"' <<< "${build}")
           build=$(jq -rc '.items[0].state_reason = "The FBC fragment was successfully added in the index image"' <<< "${build}")
         ;;
@@ -136,7 +136,7 @@ function curl() {
     # For index-mismatch test, keep default index_image to trigger validation failure
     if [[ "$(context.taskRun.name)" =~ "index-mismatch" ]]; then
         # Keep default index_image ("quay.io/scoheb/fbc-index-testing:latest")
-        # which won't match targetIndex ("quay.io/fbc/catalog:mismatch")
+        # which won't match fromIndex ("quay.io/fbc/catalog:mismatch")
         echo "DEBUG: index-mismatch test - keeping default index_image to trigger validation failure" >&2
     fi
 
@@ -159,7 +159,7 @@ function curl() {
             buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111"]' <<< "${buildJson}")
           else
             # For basic multiple fragments test with 3 fragments, set correct index_image for production build validation
-            buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .index_image = "quay.io/fbc/catalog:test"' <<< "${buildJson}")
+            buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000", "registry.io/image1@sha256:1111", "registry.io/image2@sha256:2222"] | .index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${buildJson}")
           fi
         ;;
         *empty-fragments*)
@@ -171,6 +171,10 @@ function curl() {
           # But if it does, return an error response
           echo '{"error": "Invalid fbc_fragments parameter"}'
           exit
+        ;;
+        *index-mismatch*)
+          # For index-mismatch test, set up mismatched from_index and index_image
+          buildJson=$(jq -c '.fbc_fragments = ["registry.io/image0@sha256:0000"] | .from_index = "quay.io/fbc/catalog:mismatch" | .index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${buildJson}")
         ;;
         *error*)
           # For error test - return successful API response, but build will fail in step 2
@@ -224,13 +228,6 @@ function skopeo() {
         echo '{"created": "'"${today}"'"}'
     fi
 
-    if [[ "$*" == "--retry-times 3 --config docker://quay.io/fbc/catalog:complete" ]]; then
-        echo '{"created": "'"${yesterday}"'"}'
-    fi
-
-    if [[ "$*" == "--retry-times 3 --config docker://quay.io/fbc/catalog:outdated" ]]; then
-        echo '{"created": "'"${tomorrow}"'"}'
-    fi
 }
 
 # the watch_build_state can't reach some mocks by default, so exporting them fixes it.

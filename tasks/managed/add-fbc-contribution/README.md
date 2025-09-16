@@ -22,7 +22,6 @@ Task to create an internalrequest to add fbc contributions to index images
 | taskGitRevision             | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
 | maxBatchSize                | Maximum number of FBC fragments to process in a single batch                                                               | Yes      | 5                    |
 | mustPublishIndexImage       | Whether the index image should be published (from prepare-fbc-parameters)                                                  | No       | -                    |
-| mustSignIndexImage          | Whether the index image should be signed (from prepare-fbc-parameters)                                                     | No       | -                    |
 | mustOverwriteFromIndexImage | Whether to overwrite the from index image (from prepare-fbc-parameters)                                                    | No       | -                    |
 | iibServiceAccountSecret     | IIB service account secret name (from prepare-fbc-parameters)                                                              | No       | -                    |
 | resolvedTargetIndex         | Resolved target index with sanitized tag (from prepare-fbc-parameters)                                                     | No       | -                    |
