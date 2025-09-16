@@ -88,6 +88,11 @@ function oras() {
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
             touch $output_file_dir/logs/hello-debuginfo-2.12.1-6.fc44.x86_64.rpm.log
             touch $output_file_dir/logs/hello-debugsource-2.12.1-6.fc44.x86_64.rpm.log
+        elif [[ "$args" == *"quay.io/test/onlynoarch"* ]]; then
+            touch $output_file_dir/hello-2.12.1-6.fc44.noarch.rpm
+            # mimic having logs from each rpm build
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.noarch.rpm.log
         else
             echo Error: Unexpected call
             exit 1

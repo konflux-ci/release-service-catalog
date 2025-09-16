@@ -1,0 +1,196 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-rpms-to-pulp-only-noarch-rpms
+spec:
+  description: |
+    Run the push-rpms-to-pulp task with required parameters - but only noarch rpms are expected.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:d39d3af868c7136f7e4bffb32d1e625398d6264a
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "rpms",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/onlynoarch@sha256:12345",
+                    "name": "test",
+                    "source": {
+                      "git": {
+                        "revision": "32c8f78c26e5831a87aa865ea80452fadbb3a95e",
+                        "url": "https://gitlab.example.com/rpms/test"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: push-rpms-to-pulp
+      params:
+        - name: SNAPSHOT_PATH
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: PULP_DOMAIN
+          value: "mydomain"
+        - name: PULP_SECRET_NAME
+          value: "pulp-task-pulp-secret"
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:d39d3af868c7136f7e4bffb32d1e625398d6264a
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              ls -lR "$(params.dataDir)"
+
+              results=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-rpms-to-pulp-results.json")
+              echo "$results"
+
+              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 1 ]; then
+                echo Error: oras was expected to be called 1 time. Actual calls:
+                cat "$(params.dataDir)/mock_oras.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(params.dataDir)/mock_pulp.txt")" != 9   ]; then
+                echo Error: pulp was expected to be called 9 times. Actual calls:
+                cat "$(params.dataDir)/mock_pulp.txt"
+                exit 1
+              fi
+
+              # count how many rpmfiles are in the results
+              if [ "$(echo "$results" | jq '.rpmfiles | length')" != 4 ]; then
+                echo Error: there should be 4 rpmfiles in the results. Actual results:
+                echo "$results"
+                exit 1
+              fi
+              # count how noarch rpmfiles are in the results
+              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "noarch")) | length')" != 4 ]; then
+                echo Error: there should be 4 noarch rpmfiles in the results. Actual results:
+                echo "$results"
+                exit 1
+              fi
+              # count how non-noarch rpmfiles are in the results
+              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch != "noarch")) | length')" != 0 ]; then
+                echo Error: there should be 0 non-noarch rpmfiles in the results. Actual results:
+                echo "$results"
+                exit 1
+              fi
+              # count how source rpmfiles are in the results
+              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "source")) | length')" != 0 ]; then
+                echo Error: there should be 0 source rpmfiles in the results. Actual results:
+                echo "$results"
+                exit 1
+              fi
+      runAfter:
+        - run-task
