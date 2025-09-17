@@ -104,60 +104,64 @@ spec:
           user="${1}"
           from_index="${2}"
           fbc_fragments_json="${3}"
+          current_build_tags="${4:-[]}"  # PLR identifier tags from add-fbc-contribution
 
-          # fbc_fragments_json is already sorted by caller, use directly for consistent comparison
-
-          # We filter between stage and (prod, preGA, hotfix) based on ${user}. We do not
-          # overwrite the target index for hotfix or preGA but we do publish the index image.
-          #
-          # We really only need to worry about hotfix/preGA vs. production releases. This is only
-          # tricky if builds are in progress. 
-          #
-          # Let's just reuse any in-progress release that matches. At the end, we will check to see
-          # if .index_image meets expectations. If it doesn't meet expectations, we return a failure
-          # for the internal request. Since we have retries on the outer loop, We can handle the
-          # occasional chance of collision which we expect to be rare as these pipelines will likely
-          # not be running in parallel for the same fragment set.
-
-          # fetch only builds in progress or completed
-          # check if any fragment in the array has an existing build
-          build=$(curl -s "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}" | \
+          # Step 1: Look for completed builds using server-side state filtering which allows us 
+          completed_build=$(curl -s "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}&state=complete" | \
             jq --argjson fbc_fragments "${fbc_fragments_json}" \
-              '[.items[] | select(.state!="failed") | select(
-                (.fbc_fragments != null and ((.fbc_fragments | sort) == $fbc_fragments))
-              )] | sort_by(.updated) | last // empty')
+              '[.items[] |
+                select(.fbc_fragments != null) |
+                select((.fbc_fragments | sort) == $fbc_fragments) |
+                select(.distribution_scope == "prod" or .distribution_scope == null)
+              ] | sort_by(.updated) | last // empty')
 
-          if [ "$(jq -r '.state' <<< "${build}")" = "complete" ]; then
-            # Previous build is complete, check if we should reuse it
-            indexImageResolved="$(jq -r '.index_image_resolved' <<<  "${build}")"
+          if [ -n "${completed_build}" ] && [ "${completed_build}" != "null" ]; then
+            # Validate completed build freshness (existing logic remains unchanged)
+            indexImageResolved="$(jq -r '.index_image_resolved' <<< "${completed_build}")"
             newCatalogCreatedDate="$(date --date "$(skopeo inspect \
               --retry-times 3 --config "docker://${indexImageResolved}" | \
               jq -r .created)" "+%s")"
 
-            # authentication is only required for the fromIndex
             create_auth_file
             fromIndexCreated="$(skopeo inspect --retry-times 3 --config "docker://${from_index}" | \
               jq -r .created)"
 
             if [ -z "${fromIndexCreated}" ]; then
-              # we cannot determine the from index created date, stop here. This causes the task to trigger
-              # a new build.
               return 0
             fi
 
             upstreamCatalogCreatedDate="$(date --date "${fromIndexCreated}" "+%s")"
-            # checks if the index_image_resolved in the previous completed build is newer
-            # than the upstream catalog index.
-            # in case the new catalog index is older than the upstream, a new build is
-            # required to assure the catalog integrity.
             if [ "${newCatalogCreatedDate}" -lt "${upstreamCatalogCreatedDate}" ]; then
               return 0
             fi
 
-            # Previous build is complete and recent enough, we can reuse it
+            # Completed build is valid for reuse
+            echo "${completed_build}"
             return 0
           fi
-          echo "${build}"
+
+          # Step 2: Look for in-progress builds with PLR collision prevention
+          if [ "${current_build_tags}" != "[]" ] && [ -n "${current_build_tags}" ]; then
+            in_progress_build=$(curl -s \
+              "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}&state=in_progress" | \
+              jq --argjson fbc_fragments "${fbc_fragments_json}" \
+                 --argjson current_tags "${current_build_tags}" \
+                '[.items[] |
+                  select(.fbc_fragments != null) |
+                  select((.fbc_fragments | sort) == $fbc_fragments) |
+                  select(.distribution_scope == "prod" or .distribution_scope == null) |
+                  select(.build_tags != null and ($current_tags | length > 0) and
+                         ($current_tags | map(. as $tag | . | IN(.build_tags[])) | any))
+                ] | sort_by(.updated) | last // empty')
+
+            if [ -n "${in_progress_build}" ] && [ "${in_progress_build}" != "null" ]; then
+              echo "${in_progress_build}"
+              return 0
+            fi
+          fi
+
+          # No suitable build found
+          return 0
         }
 
         create_auth_file() {
@@ -230,7 +234,10 @@ spec:
 
         # if it finds a build which is completed or in progress, it should exit this step and jump to
         # the next step `s-wait-for-build-state` which will watch the build until it is completed.
-        build=$(check_previous_build "${KRB5_PRINCIPAL}" "${FROM_INDEX}" "${sorted_fbc_fragments}")
+        # Pass build_tags to enable PLR filtering for in-progress builds
+        build_tags_param="$(params.buildTags)"
+        build=$(check_previous_build "${KRB5_PRINCIPAL}" "${FROM_INDEX}" \
+                  "${sorted_fbc_fragments}" "${build_tags_param}")
         if [ -n "${build}" ]; then
           echo "=== A previous build for this fragment was found ==="
           echo "${build}" | gzip -c | base64 -w0 | tee "$(results.jsonBuildInfo.path)"

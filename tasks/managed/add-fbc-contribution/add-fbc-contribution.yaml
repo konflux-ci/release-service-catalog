@@ -83,16 +83,9 @@ spec:
       description: Delay between batch retry attempts in seconds
       type: string
       default: "60"
-    - name: fbcOptIn
-      type: string
-      description: Whether FBC opt-in is enabled (from prepare-fbc-parameters)
   results:
     - name: buildTimestamp
       description: Build timestamp used in the tag
-    - name: isFbcOptIn
-      description: Indicates whether the FBC fragment is opt-in (true/false)
-    - name: requestTargetIndex
-      description: The targetIndex used in this request
     - name: requestResultsFile
       description: Internal Request results file
     - name: internalRequestResultsFile
@@ -183,7 +176,6 @@ spec:
         publishing_credentials=$(jq -r '.fbc.publishingCredentials // "catalog-publishing-secret"' "$DATA_FILE")
 
         # Use pre-determined values from prepare-fbc-parameters
-        fbc_opt_in="$(params.fbcOptIn)"
         iib_service_account_secret="$(params.iibServiceAccountSecret)"
         mustPublishIndexImage="$(params.mustPublishIndexImage)"
         mustOverwriteFromIndexImage="$(params.mustOverwriteFromIndexImage)"
@@ -202,7 +194,6 @@ spec:
 
         # to keep compatibility with current single component mode
         echo -n "$timestamp" > "$(results.buildTimestamp.path)"
-        echo -n "$target_index" > "$(results.requestTargetIndex.path)"
         jq -n --arg target_index "$target_index" \
           '{"index_image": {"target_index": $target_index}, "components": []}' \
           | tee "$RESULTS_FILE"
@@ -220,6 +211,20 @@ spec:
         # Read global buildTags and addArches from data file
         build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
         add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
+
+        # Extract tag from target index for PLR identification
+        target_tag=$(printf '%s' "$(params.resolvedTargetIndex)" | rev | cut -d: -f1 | rev)
+
+        # If target has no tag, use tag from fromIndex
+        if [ "${target_tag}" = "$(params.resolvedTargetIndex)" ]; then
+            # No tag in target index, extract from fromIndex
+            target_tag=$(printf '%s' "$(params.fromIndex)" | rev | cut -d: -f1 | rev)
+        fi
+
+        # Add PLR identifier to build tags (appends to existing tags)
+        build_tags=$(echo "${build_tags}" | jq --arg tag "${target_tag}" '. + [$tag]')
+        echo "Added PLR identifier to build_tags: ${target_tag}"
+        echo "Final build_tags: $(echo "${build_tags}" | jq -r '.[]' | tr '\n' ' ')"
 
         # Use the same target_index for batch processing (already resolved above)
         resolved_target_index="$target_index"
@@ -485,10 +490,8 @@ spec:
 
         echo "Final publishing and compatibility values:"
         echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
-        echo "  - fbc_opt_in: ${fbc_opt_in}"
 
         # Store the results in Tekton's results files
-        echo -en "${fbc_opt_in}" | tee "$(results.isFbcOptIn.path)"
 
         # Store deprecated results for compatibility
         conditions=$(kubectl get internalrequest "${internalRequest}" \
@@ -504,9 +507,6 @@ spec:
         # Summarize batch results
         if [ "$mustPublishIndexImage" = "true" ]; then
           echo "Index image will be published."
-        elif [ "$fbc_opt_in" = "false" ]; then
-          echo "Index image will not be published because fbc_opt_in is set to false in Pyxis."
-          echo "If this is the first time you are releasing, make sure you request fbc_opt_in in Pyxis."
         else
           echo "Index image will not be published (decision made by prepare-fbc-parameters)."
         fi

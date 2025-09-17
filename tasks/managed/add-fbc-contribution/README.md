@@ -27,4 +27,3 @@ Task to create an internalrequest to add fbc contributions to index images
 | resolvedTargetIndex         | Resolved target index with sanitized tag (from prepare-fbc-parameters)                                                     | No       | -                    |
 | maxRetries                  | Maximum number of retry attempts for failed internal requests                                                              | Yes      | 3                    |
 | batchRetryDelaySeconds      | Delay between batch retry attempts in seconds                                                                              | Yes      | 60                   |
-| fbcOptIn                    | Whether FBC opt-in is enabled (from prepare-fbc-parameters)                                                                | No       | -                    |
