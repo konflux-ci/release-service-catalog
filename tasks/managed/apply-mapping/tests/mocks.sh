@@ -46,27 +46,27 @@ function skopeo() {
       return
   fi
 
-  if [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/badimage"* ]]
+  if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/badimage"* ]]
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}}'
     return
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/labels"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/labels"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "Goodlabel": "labelvalue", "Goodlabel.with-dash": "labelvalue-with-dash", "Badlabel": "label with space"}}'
     return
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/onlycreated"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/onlycreated"* ]]
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}, "Created": "2024-07-29T02:17:29"}'
     return
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/web-app"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/web-app"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}, "annotations": {"org.opencontainers.image.version": "1.2.3-beta"}}'
     return
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/api-service"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/api-service"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
     return
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/helm-chart"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags docker://quay.io/myorg/helm-chart"* ]]
   then
     # Helm chart should fail normal inspect and fall back to raw manifest
     return 1
@@ -74,9 +74,9 @@ function skopeo() {
   then
     echo '{"annotations": {"org.opencontainers.image.version": "2.0.1+alpha", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
     return
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://"* ]]
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://"* ]]
   then
-    echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}, "annotations": {"org.opencontainers.image.version": "2.0.1+alpha"}}'
     return
   fi
 
