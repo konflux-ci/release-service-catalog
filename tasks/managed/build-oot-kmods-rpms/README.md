@@ -1,17 +1,13 @@
-# push-oot-kmods
+# build-oot-kmods-rpms
 
-Task to upload out-of-tree kernel modules to private vendor repo
+Task to build RPM packages containing signed out-of-tree kernel modules
 
 ## Parameters
 
 | Name                    | Description                                                                                                                | Optional | Default value                                             |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-----------------------------------------------------------|
-| signedKmodsPath         | Path where the kernel modules are stored in the workspace                                                                  | No       | -                                                         |
-| rpmPath                 | Path where the RPM packages are stored in the workspace (optional)                                                         | Yes      | ""                                                        |
-| vendor                  | vendor of the kernel modules                                                                                               | No       | -                                                         |
-| artifactRepoUrl         | Repository URL where the signed modules will be pushed                                                                     | No       | -                                                         |
-| artifactBranch          | Specific branch in the repository                                                                                          | Yes      | main                                                      |
-| artifactRepoToken       | Secret containing the Project Access Token for the artifact repos                                                          | No       | -                                                         |
+| signedKmodsPath         | Path where the signed kernel modules are stored in the workspace                                                           | No       | -                                                         |
+| rpmOutputPath           | Path where the built RPM packages will be stored                                                                           | Yes      | rpms                                                      |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                                                     |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                                                        |
 | trustedArtifactsDebug   | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                                     | Yes      | ""                                                        |

@@ -1,0 +1,234 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-oot-kmods-rpms
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Task to build RPM packages containing signed out-of-tree kernel modules
+  params:
+    - name: signedKmodsPath
+      type: string
+      description: Path where the signed kernel modules are stored in the workspace
+    - name: rpmOutputPath
+      type: string
+      description: Path where the built RPM packages will be stored
+      default: "rpms"
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for task and StepAction resolution
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for task and StepAction resolution
+      default: main
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: build-rpm-packages
+      image: quay.io/konflux-ci/release-service-utils:001c270152854f9184d29fb6ed2dfc93c8749930ed1cf87a01f0cf7b32c1c39c
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        SIGNED_KMODS_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
+        RPM_OUTPUT_PATH="$(params.dataDir)/$(params.rpmOutputPath)"
+
+        echo "Building RPM packages from signed modules in: ${SIGNED_KMODS_PATH}"
+        echo "RPM output path: ${RPM_OUTPUT_PATH}"
+
+        # Create RPM output directory
+        mkdir -p "${RPM_OUTPUT_PATH}"
+
+        # Navigate to signed kmods directory
+        cd "${SIGNED_KMODS_PATH}" || exit 1
+
+        # Check if envfile exists and source it
+        if [ ! -f "envfile" ]; then
+            echo "ERROR: envfile not found in ${SIGNED_KMODS_PATH}"
+            exit 1
+        fi
+
+        # shellcheck source=/dev/null
+        . ./envfile
+
+        # Validate required environment variables
+        if [ -z "${DRIVER_VENDOR:-}" ] || [ -z "${DRIVER_VERSION:-}" ] || [ -z "${KERNEL_VERSION:-}" ]; then
+            echo "ERROR: Missing required environment variables from envfile"
+            echo "Required: DRIVER_VENDOR, DRIVER_VERSION, KERNEL_VERSION"
+            exit 1
+        fi
+
+        # Check if there are any .ko files
+        if ! ls -- *.ko >/dev/null 2>&1; then
+            echo "ERROR: No .ko files found in ${SIGNED_KMODS_PATH}"
+            exit 1
+        fi
+
+        # Set up RPM build environment
+        export RPM_BUILD_ROOT="${RPM_OUTPUT_PATH}/rpmbuild"
+        mkdir -p "${RPM_BUILD_ROOT}"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+
+        # Package information
+        PACKAGE_NAME="${DRIVER_VENDOR}-kmods"
+        PACKAGE_VERSION="${DRIVER_VERSION}"
+        PACKAGE_RELEASE="1.$(echo "${KERNEL_VERSION}" | tr '.-' '_')"
+        SPEC_FILE="${RPM_BUILD_ROOT}/SPECS/${PACKAGE_NAME}.spec"
+
+        echo "Creating RPM spec file: ${SPEC_FILE}"
+
+        # Create RPM spec file by building it line by line
+        {
+          echo "Name:           ${PACKAGE_NAME}"
+          echo "Version:        ${PACKAGE_VERSION}"
+          echo "Release:        ${PACKAGE_RELEASE}"
+          echo "Summary:        ${DRIVER_VENDOR} out-of-tree kernel modules for kernel ${KERNEL_VERSION}"
+          echo "License:        Proprietary"
+          echo "Group:          System Environment/Kernel"
+          echo "BuildArch:      x86_64"
+          echo "Requires:       kernel = ${KERNEL_VERSION}"
+          echo ""
+          echo "%description"
+          echo "This package contains signed out-of-tree kernel modules for ${DRIVER_VENDOR}"
+          echo "driver version ${PACKAGE_VERSION}, built for kernel ${KERNEL_VERSION}."
+          echo ""
+          echo "%prep"
+          echo "# No prep needed"
+          echo ""
+          echo "%build"
+          echo "# No build needed"
+          echo ""
+          echo "%install"
+          echo "mkdir -p %{buildroot}/lib/modules/${KERNEL_VERSION}/extra/${DRIVER_VENDOR}"
+          echo "cp %{_sourcedir}/*.ko %{buildroot}/lib/modules/${KERNEL_VERSION}/extra/${DRIVER_VENDOR}/"
+          echo ""
+          echo "%files"
+          echo "/lib/modules/${KERNEL_VERSION}/extra/${DRIVER_VENDOR}/*.ko"
+          echo ""
+          echo "%post"
+          echo "/sbin/depmod -a ${KERNEL_VERSION} || :"
+          echo ""
+          echo "%postun"
+          echo "/sbin/depmod -a ${KERNEL_VERSION} || :"
+          echo ""
+          echo "%changelog"
+          echo "* $(date '+%a %b %d %Y') Konflux CI <konflux-ci@redhat.com> - ${PACKAGE_VERSION}-${PACKAGE_RELEASE}"
+          echo "- Automated build of signed ${DRIVER_VENDOR} kernel modules for ${KERNEL_VERSION}"
+        } > "${SPEC_FILE}"
+
+        # Copy .ko files to SOURCES directory
+        cp -- *.ko "${RPM_BUILD_ROOT}/SOURCES/"
+
+        # Build the RPM
+        echo "Building RPM package..."
+        rpmbuild --define "_topdir ${RPM_BUILD_ROOT}" \
+                 --define "_sourcedir ${RPM_BUILD_ROOT}/SOURCES" \
+                 -bb "${SPEC_FILE}"
+
+        # Move built RPMs to output directory
+        find "${RPM_BUILD_ROOT}/RPMS" -name "*.rpm" -exec mv {} "${RPM_OUTPUT_PATH}/" \;
+
+        # Cleanup intermediate files
+        rm -rf "${RPM_BUILD_ROOT}"
+
+        # List built RPMs
+        echo "Built RPM packages:"
+        ls -la "${RPM_OUTPUT_PATH}"/*.rpm
+
+        echo "RPM build completed successfully"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

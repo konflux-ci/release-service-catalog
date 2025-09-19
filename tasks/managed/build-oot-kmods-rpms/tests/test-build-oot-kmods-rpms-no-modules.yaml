@@ -1,0 +1,113 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-build-oot-kmods-rpms-no-modules
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Test the build-oot-kmods-rpms task with no kernel modules (should fail)
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:8353253caa411bfce2e121d75127693785348f51
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/"
+
+              # Create test environment file but NO kernel modules
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/envfile" << EOF
+              DRIVER_VENDOR=nvidia
+              DRIVER_VERSION=555.42.02
+              KERNEL_VERSION=6.5.0-1.el9.x86_64
+              EOF
+
+              # Create some other files but no .ko files
+              echo "readme" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/README.txt"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: build-oot-kmods-rpms
+      params:
+        - name: signedKmodsPath
+          value: $(context.pipelineRun.uid)/signed-kmods
+        - name: rpmOutputPath
+          value: $(context.pipelineRun.uid)/rpms
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+  finally:
+    - name: verify-expected-failure
+      taskSpec:
+        steps:
+          - name: verify-failure
+            image: quay.io/konflux-ci/release-service-utils:8353253caa411bfce2e121d75127693785348f51
+            script: |
+              #!/usr/bin/env bash
+
+              # This pipeline is expected to fail at the run-task step
+              echo "✅ Pipeline correctly failed due to missing kernel modules - this is expected behavior"

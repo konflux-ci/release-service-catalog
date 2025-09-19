@@ -9,6 +9,7 @@ metadata:
 spec:
   description: >-
     Tekton pipeline to sign out-of-tree kernel modules and upload them to an internal Gitlab repository.
+    Optionally builds RPM packages from signed modules when buildRpm parameter is set to "yes".
   params:
     - name: release
       type: string
@@ -63,6 +64,10 @@ spec:
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
       default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: buildRpm
+      type: string
+      description: Whether to build RPM packages from signed kernel modules (yes/no)
+      default: "yes"
   tasks:
     - name: verify-access-to-resources
       taskRef:
@@ -151,7 +156,8 @@ spec:
               {"resultIndex": 8, "key": ".ootsign.vendor"},
               {"resultIndex": 9, "key": ".ootsign.artifact-repo-url"},
               {"resultIndex": 10, "key": ".ootsign.artifact-branch"},
-              {"resultIndex": 11, "key": ".ootsign.artifact-repo-token"}
+              {"resultIndex": 11, "key": ".ootsign.artifact-repo-token"},
+              {"resultIndex": 12, "key": ".ootsign.rpmPath"}
             ]
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
@@ -401,6 +407,39 @@ spec:
       runAfter:
         - extract-oot-kmods
         - collect-task-params
+    - name: build-oot-kmods-rpms
+      when:
+        - input: "$(params.buildRpm)"
+          operator: in
+          values: ["yes", "true", "1"]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/build-oot-kmods-rpms/build-oot-kmods-rpms.yaml
+      params:
+        - name: signedKmodsPath
+          value: $(tasks.collect-task-params.results.extractedValues[7])
+        - name: rpmOutputPath
+          value: $(tasks.collect-task-params.results.extractedValues[12])
+        - name: sourceDataArtifact
+          value: "$(tasks.sign-oot-kmods.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - sign-oot-kmods
     - name: push-oot-kmods
       taskRef:
         resolver: "git"
@@ -414,6 +453,8 @@ spec:
       params:
         - name: signedKmodsPath
           value: $(tasks.collect-task-params.results.extractedValues[7])
+        - name: rpmPath
+          value: $(tasks.collect-task-params.results.extractedValues[12])
         - name: vendor
           value: $(tasks.collect-task-params.results.extractedValues[8])
         - name: artifactRepoUrl
