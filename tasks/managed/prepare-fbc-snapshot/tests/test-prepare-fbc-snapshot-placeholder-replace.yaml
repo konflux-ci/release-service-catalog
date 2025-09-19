@@ -2,11 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-update-ocp-tag
+  name: test-prepare-fbc-snapshot-placeholder-replace
 spec:
   description: |
-    Run the update-ocp-tag task with sample values
-    and verify that all tags get updated to the new OCP version.
+    Run the prepare-fbc-snapshot task and verify
+    that the task successfully updates the snapshot
+    with the ocpVersion, updatedFromIndex, targetIndex for all the components in snapshot
+    using placeholder replacement
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -29,7 +31,13 @@ spec:
       type: string
   tasks:
     - name: setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
       taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
         results:
           - name: sourceDataArtifact
             type: string
@@ -48,8 +56,8 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+          - name: add-snapshot
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
             script: |
               #!/usr/bin/env sh
               set -eux
@@ -58,9 +66,44 @@ spec:
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "fbc": {
-                  "fromIndex": "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:{{ OCP_VERSION }}",
+                  "fromIndex": "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:{{OCP_VERSION}}",
                   "targetIndex": "quay.io/redhat/redhat----preview-operator-index:{{ OCP_VERSION }}"
                 }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << EOF
+              {
+                  "application": "foo-app",
+                  "artifacts": {},
+                  "components": [
+                      {
+                          "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                          "name": "test-container-foo",
+                          "source": {
+                              "git": {
+                                  "context": "./",
+                                  "dockerfileUrl": "build/Dockerfile",
+                                  "revision": "foo",
+                                  "url": "https://github.com/foo/bar"
+                              }
+                          },
+                          "repository": "test/foo/bar"
+                      },
+                      {
+                       "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                          "name": "test-container-boo",
+                          "source": {
+                              "git": {
+                                  "context": "./",
+                                  "dockerfileUrl": "build/Dockerfile",
+                                  "revision": "foo",
+                                  "url": "https://github.com/foo/bar"
+                              }
+                          },
+                          "repository": "test/foo/bar"
+                      }
+                      ]
               }
               EOF
           - name: create-trusted-artifact
@@ -75,12 +118,12 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: update-ocp-tag
+        name: prepare-fbc-snapshot
       params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
         - name: dataPath
           value: $(context.pipelineRun.uid)/data.json
-        - name: ocpVersion
-          value: "v4.13"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -92,17 +135,15 @@ spec:
         - name: trustedArtifactsDebug
           value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: "http://localhost"
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
         - name: taskGitRevision
-          value: "main"
+          value: "development"
       runAfter:
         - setup
     - name: check-result
       params:
-        - name: updated-fromIndex
-          value: $(tasks.run-task.results.updated-fromIndex)
-        - name: updated-targetIndex
-          value: $(tasks.run-task.results.updated-targetIndex)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
@@ -111,9 +152,7 @@ spec:
         - run-task
       taskSpec:
         params:
-          - name: updated-fromIndex
-            type: string
-          - name: updated-targetIndex
+          - name: snapshotPath
             type: string
           - name: sourceDataArtifact
             type: string
@@ -142,18 +181,32 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
-            env:
-              - name: "UPDATED_FROMINDEX"
-                value: '$(params.updated-fromIndex)'
-              - name: "UPDATED_TARGETINDEX"
-                value: '$(params.updated-targetIndex)'
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              echo "Validate all tags got updated to v4.13"
-              test "$UPDATED_FROMINDEX" == \
-              "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.13"
-              test "$UPDATED_TARGETINDEX" == "quay.io/redhat/redhat----preview-operator-index:v4.13"
+              if [ "$(wc -l < "$(params.dataDir)/mock_skopeo.txt")" != 2 ]; then
+                echo Error: skopeo was expected to be called 2 times. Actual calls:
+                cat "$(params.dataDir)/mock_skopeo.txt"
+                exit 1
+              fi
+
+              # ocp version in skopeo mock-up is set to v4.12
+              ocpVersion="v4.12"
+
+              SNAPSHOT_PATH=$(params.dataDir)/$(params.snapshotPath)
+
+              # Read components and initial values
+              num_components=$(jq -r '.components | length' "$SNAPSHOT_PATH")
+              for ((i=0; i<num_components; i++)); do
+                fromIndex=$(jq -r ".components[$i].updatedFromIndex" "$SNAPSHOT_PATH")
+                targetIndex=$(jq -r ".components[$i].targetIndex" "$SNAPSHOT_PATH")
+
+                for index in "${fromIndex}" "${targetIndex}"; do
+                  [ "${index#*:}" = "${ocpVersion}" ]
+                done
+              done

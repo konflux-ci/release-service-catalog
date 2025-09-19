@@ -1,0 +1,431 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-fbc-snapshot
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Task to update snapshot with multi-OCP version data by extracting OCP versions from container images
+    and resolving index templates with component-specific OCP versions and release suffixes.
+    
+    This task runs in parallel with prepare-fbc-parameters and focuses solely on snapshot data transformation.
+    It extracts OCP versions from container image annotations, resolves index templates with {{OCP_VERSION}}
+    placeholders, and updates the original snapshot with component-specific resolved indexes. These resolved
+    indexes take into account the OCP version targeted as well as the release strategy (i.e. hotfix and preGA).
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact with updated snapshot
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+        - name: orasOptions
+          value: $(params.orasOptions)
+    - name: update-snapshot
+      image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 350m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "ERROR: No valid data file was provided."
+            exit 1
+        fi
+
+        if [ ! -f "${SNAPSHOT_PATH}" ] ; then
+            echo "ERROR: No valid snapshot file was provided."
+            exit 1
+        fi
+
+        echo "INFO: Starting snapshot update with multi-OCP version data..."
+
+        # Get release-level configuration for suffix generation
+        hotfix=$(jq -r '.fbc.hotfix // false' "${DATA_FILE}")
+        pre_ga=$(jq -r '.fbc.preGA // false' "${DATA_FILE}")
+        staged_index=$(jq -r '.fbc.stagedIndex // false' "${DATA_FILE}")
+
+        echo "INFO: Release configuration:"
+        echo "  - hotfix: ${hotfix}"
+        echo "  - preGA: ${pre_ga}"
+        echo "  - stagedIndex: ${staged_index}"
+
+        # Read raw index templates from data file. This is the common base
+        # for all component indexes.
+        raw_from_index=$(jq -r '.fbc.fromIndex // ""' "${DATA_FILE}")
+        raw_target_index=$(jq -r '.fbc.targetIndex // ""' "${DATA_FILE}")
+
+        # Validate required indexes based on release mode
+        if [ -z "${raw_from_index}" ]; then
+            echo "ERROR: 'fbc.fromIndex' must be set in the data file and cannot be empty."
+            exit 1
+        fi
+
+        # For staged releases, targetIndex can be empty since we don't publish to production catalogs
+        if [ "${staged_index}" = "false" ] && [ -z "${raw_target_index}" ]; then
+            echo "ERROR: 'fbc.targetIndex' must be set for non-staged releases and cannot be empty."
+            exit 1
+        fi
+
+        echo "INFO: Raw index templates:"
+        echo "  - fromIndex: ${raw_from_index}"
+        echo "  - targetIndex: ${raw_target_index}"
+
+        # OCP version validation pattern
+        ocp_version_pattern="^v[0-9]+\.[0-9]+$"
+
+        # Tag validation and sanitization function
+        validate_and_sanitize_tag_component() {
+          local component="$1"
+          local component_name="$2"
+          local max_length="$3"
+
+          # Validate not empty
+          if [ -z "$component" ]; then
+            echo "ERROR: ${component_name} cannot be empty"
+            exit 1
+          fi
+
+          # Sanitize invalid characters by replacing with hyphens
+          sanitized="${component//[^a-zA-Z0-9._-]/-}"
+
+          # Collapse consecutive special characters to single hyphen
+          while [[ "$sanitized" =~ [._-][._-] ]]; do
+            sanitized="${sanitized//[._-][._-]/-}"
+          done
+
+          # Remove leading and trailing special characters
+          sanitized=$(echo "$sanitized" | sed 's/^[-._]*//;s/[-._]*$//')
+
+          # Check if sanitization resulted in empty string
+          if [ -z "$sanitized" ]; then
+            echo "ERROR: ${component_name} '$component' sanitization resulted in empty string"
+            exit 1
+          fi
+
+          # Check for reserved names
+          case "$sanitized" in
+            "latest"|"main"|"master"|"HEAD")
+              echo "ERROR: ${component_name} cannot use reserved name: '$sanitized' (from '$component')"
+              exit 1
+              ;;
+          esac
+
+          # Report sanitization if changes were made
+          if [ "$component" != "$sanitized" ]; then
+            echo "INFO: ${component_name} sanitized from '$component' to '$sanitized'" >&2
+          fi
+
+          # Check length and truncate if necessary
+          if [ ${#sanitized} -gt "$max_length" ]; then
+            truncated=$(echo "$sanitized" | cut -c1-"$max_length")
+            # Ensure truncated version doesn't end with special char
+            truncated="${truncated%[._-]}"
+            while [[ "$truncated" =~ [._-]$ ]]; do
+              truncated="${truncated%[._-]}"
+            done
+            echo "WARNING: ${component_name} truncated from '$sanitized' to '$truncated' (max ${max_length} chars)" >&2
+            echo "$truncated"
+          else
+            echo "$sanitized"
+          fi
+        }
+
+        # Helper function to replace {{ OCP_VERSION }} placeholders
+        replace_tag() {
+            local template="$1"
+            local ocp_version="$2"
+            sed -E "s/\\{\\{(\\s+)?OCP_VERSION(\\s+)?\\}\\}/${ocp_version}/g" <<< "${template}"
+        }
+
+        # validateOCPVersion function validates if the base image ocp version matches with the one in the tested index
+        validateOCPVersion() {
+            local index="$1"
+            local expectedOCPVersion="$2"
+            local indexVersion="${index#*:}"
+            
+            # For indexes with suffixes, check if the version starts with the expected OCP version
+            # This handles cases like "v4.12-suffix" by checking if it starts with "v4.12"
+            if [[ "$indexVersion" == "$expectedOCPVersion"* ]]; then
+                # Version matches (exact match or starts with expected version)
+                return 0
+            else
+                echo "ERROR: The OCP version of the index does not match with the base image"
+                echo "  - index version: ${indexVersion}"
+                echo "  - base image version: ${expectedOCPVersion}"
+                echo "  - index: ${index}"
+                exit 1
+            fi
+        }
+
+        # Generate component-specific target index with suffix
+        generate_component_target_index() {
+            local component_ocp_version="$1"
+            local raw_target_index="$2"
+            local component_suffix="$3"
+
+            # Return empty string if there is no raw target index (i.e. stage releases)
+            if [ -z "${raw_target_index}" ]; then
+                echo ""
+                return
+            fi
+
+            # Replace OCP version placeholder
+            local resolved_index
+            resolved_index=$(replace_tag "${raw_target_index}" "${component_ocp_version}")
+
+            # Apply component-specific suffix if provided
+            if [ -n "${component_suffix}" ]; then
+                resolved_index="${resolved_index}-${component_suffix}"
+            fi
+
+            echo "${resolved_index}"
+        }
+
+        # Generate common suffix for hotfix/pre-GA modes
+        timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
+        timestamp=$(date "+${timestamp_format}")
+        common_suffix=""
+        max_tag_length=128
+        timestamp_length=${#timestamp}
+        ocp_length=5  # Average OCP version length (e.g., "v4.12")
+
+        if [ "${hotfix}" = "true" ]; then
+            issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
+            if [ -z "${issue_id}" ]; then
+                echo "ERROR: Hotfix releases require the issue id set in the 'fbc.issueId' key"
+                exit 1
+            fi
+
+            # Calculate space allocation
+            separator_chars=3  # Three hyphens: ocp-issueId-timestamp
+            available_space=$((max_tag_length - timestamp_length - ocp_length - separator_chars))
+            max_issue_id_length=$((available_space > 50 ? 50 : available_space))
+            [ $max_issue_id_length -lt 15 ] && max_issue_id_length=15
+
+            sanitized_issue_id=$(validate_and_sanitize_tag_component "$issue_id" "fbc.issueId" "$max_issue_id_length")
+            common_suffix="${sanitized_issue_id}-${timestamp}"
+            echo "INFO: Generated hotfix suffix: ${common_suffix}"
+        elif [ "${pre_ga}" = "true" ]; then
+            product_name=$(jq -r '.fbc.productName // ""' "${DATA_FILE}")
+            product_version=$(jq -r '.fbc.productVersion // ""' "${DATA_FILE}")
+            if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
+                echo "ERROR: Pre-GA releases require 'fbc.productName' and 'fbc.productVersion'"
+                exit 1
+            fi
+
+            # Calculate optimal length allocation
+            separator_chars=4  # Four hyphens: ocp-productName-productVersion-timestamp
+            available_space=$((max_tag_length - timestamp_length - ocp_length - separator_chars))
+
+            # Allocate space: 60% for product name, 40% for product version
+            max_product_name_length=$((available_space * 6 / 10))
+            max_product_version_length=$((available_space * 4 / 10))
+
+            # Ensure minimum lengths
+            [ $max_product_name_length -lt 5 ] && max_product_name_length=5
+            [ $max_product_version_length -lt 3 ] && max_product_version_length=3
+
+            sanitized_product_name=$(validate_and_sanitize_tag_component "$product_name" \
+                                           "fbc.productName" "$max_product_name_length")
+            sanitized_product_version=$(validate_and_sanitize_tag_component "$product_version" \
+                                              "fbc.productVersion" "$max_product_version_length")
+
+            common_suffix="${sanitized_product_name}-${sanitized_product_version}-${timestamp}"
+            echo "INFO: Generated pre-GA suffix: ${common_suffix}"
+        fi
+
+        # Get the number of components
+        component_count=$(jq '.components | length' "${SNAPSHOT_PATH}")
+        echo "INFO: Found ${component_count} components to process"
+
+        if [ "${component_count}" -eq 0 ]; then
+            echo "ERROR: No components found in snapshot"
+            exit 1
+        fi
+
+        # Process each component
+        for ((i=0; i<component_count; i++)); do
+            component=$(jq -c ".components[$i]" "${SNAPSHOT_PATH}")
+            container_image=$(jq -r '.containerImage' <<< "$component")
+            component_name=$(jq -r '.name' <<< "$component")
+
+            echo "INFO: Processing component $((i+1))/${component_count}: ${component_name}"
+
+            # Extract OCP version from container image using Skopeo
+            echo "  INFO: Extracting OCP version from container image..."
+            image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${container_image}")
+            media_type=$(jq -r .mediaType <<< "${image_metadata}")
+            ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
+              | cut -d: -f2 | sed 's/"//g')
+
+            # Handle multiplatform images
+            if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]]; then
+                echo "    INFO: Multiplatform image detected, extracting manifest"
+                arch_json=$(get-image-architectures "${container_image}")
+                manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
+                single_arch_fragment="${container_image%@*}@${manifest_image_sha}"
+
+                ocp_version=$(skopeo inspect --retry-times 3 --raw "docker://${single_arch_fragment}" \
+                 | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+            fi
+
+            # Validate OCP version format
+            if ! echo "${ocp_version}" | grep -Eq "${ocp_version_pattern}"; then
+                echo "    ERROR: Invalid OCP version format: '${ocp_version}'"
+                echo "    Expected format: vX.Y (e.g., v4.12)"
+                echo "    OCP version is extracted from image annotations"
+                echo "    which are only supported on OCI mediaTypes."
+                exit 1
+            else
+                echo "    SUCCESS: Found valid OCP version: ${ocp_version}"
+            fi
+
+            # Generate resolved indexes
+            updated_from_index=""
+            resolved_target_index=""
+
+            # Generate updated fromIndex if template provided
+            updated_from_index=$(replace_tag "${raw_from_index}" "${ocp_version}")
+            echo "    INFO: Resolved fromIndex: ${updated_from_index}"
+
+            # Generate targetIndex with OCP version and common suffix
+            # The suffix should always be just the common suffix (e.g., RELEASE-1234-timestamp)
+            # The OCP version comes from either replacing {{ OCP_VERSION }} or being in the fixed version
+
+            resolved_target_index=$(generate_component_target_index \
+              "${ocp_version}" "${raw_target_index}" "${common_suffix}")
+            echo "    INFO: Resolved targetIndex: ${resolved_target_index}"
+
+            # Validate OCP version consistency between indexes and base image
+            # if {{OCP_VERSION}} is not set, the original Index will be kept but its ocp version should
+            # match base image version.
+            echo "    INFO: Validating OCP version consistency..."
+            validateOCPVersion "${updated_from_index}" "${ocp_version}"
+            if [ -n "${resolved_target_index}" ]; then
+                validateOCPVersion "${resolved_target_index}" "${ocp_version}"
+            fi
+            echo "    SUCCESS: OCP version validation passed"
+
+            # Update snapshot with component-specific data
+            echo "  INFO: Updating snapshot with component data..."
+
+            TEMP="/tmp/temp.json"
+            # Apply each update directly
+            jq ".components[$i].ocpVersion |= \"$ocp_version\"" \
+              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
+            jq ".components[$i].updatedFromIndex |= \"$updated_from_index\"" \
+              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
+            jq ".components[$i].targetIndex |= \"$resolved_target_index\"" \
+              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
+
+            echo "  INFO: Successfully updated component with multi-OCP data"
+        done
+
+        echo "INFO: Snapshot update completed successfully"
+        echo "INFO: Updated ${component_count} components with OCP version and resolved indexes"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

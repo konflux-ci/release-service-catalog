@@ -1,6 +1,23 @@
 # add-fbc-contribution
 
-Task to create an internalrequest to add fbc contributions to index images
+Task to create internalrequests to add fbc contributions to index images. It can batch
+multiple fragments into a single IIB request and can also split requests according
+to their OCP versions.
+
+This task batches FBC fragments to submit them to IIB in sets of params.maxBatchSize.
+The Snapshot has been previously augmented by prepare-fbc-snapshot to include OCP and
+target index metadata for each component.
+
+In this task, we split fragments up by their OCP versions and then process each of these
+in series. For each OCP version, we chain together batches so that the final targetIndex
+produced will have all fragments added. This means that the index_image from one internal
+request will be set as the fromIndex for the next request within that OCP version.
+
+Since we have seen flakiness in IIB requests in the past, we retry and failed batches
+and internal requests can attach onto currently in progress IIB requests. We retry batches
+at the end to allow for timed out requests to finish so that we can just get the final
+result. This will slightly compress the time in which batches are entered into the IIB
+queue to reduce the effect of a full queue on a single release.
 
 ## Parameters
 
@@ -8,9 +25,7 @@ Task to create an internalrequest to add fbc contributions to index images
 |-----------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------|
 | snapshotPath                | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                  | No       | -                    |
 | dataPath                    | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                    |
-| fromIndex                   | fromIndex value updated by update-ocp-tag task                                                                             | No       | -                    |
 | pipelineRunUid              | The uid of the current pipelineRun. Used as a label value when creating internal requests                                  | No       | -                    |
-| ocpVersion                  | The OCP version for all components in this release                                                                         | No       | -                    |
 | resultsDirPath              | Path to the results directory in the data workspace                                                                        | No       | -                    |
 | ociStorage                  | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
 | ociArtifactExpiresAfter     | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                   |
@@ -24,6 +39,5 @@ Task to create an internalrequest to add fbc contributions to index images
 | mustPublishIndexImage       | Whether the index image should be published (from prepare-fbc-parameters)                                                  | No       | -                    |
 | mustOverwriteFromIndexImage | Whether to overwrite the from index image (from prepare-fbc-parameters)                                                    | No       | -                    |
 | iibServiceAccountSecret     | IIB service account secret name (from prepare-fbc-parameters)                                                              | No       | -                    |
-| resolvedTargetIndex         | Resolved target index with sanitized tag (from prepare-fbc-parameters)                                                     | No       | -                    |
 | maxRetries                  | Maximum number of retry attempts for failed internal requests                                                              | Yes      | 3                    |
 | batchRetryDelaySeconds      | Delay between batch retry attempts in seconds                                                                              | Yes      | 60                   |
