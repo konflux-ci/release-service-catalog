@@ -19,10 +19,6 @@ spec:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-    - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored
-      type: string
-      default: "empty"
     - name: ociArtifactExpiresAfter
       description: Expiration date for the trusted artifacts created in the
         OCI repository. An empty string means the artifacts do not expire
@@ -65,9 +61,6 @@ spec:
       description: Delay between retry attempts in seconds
       type: string
       default: "30"
-    - name: targetIndex
-      type: string
-      description: Target index pullspec for the catalog
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. It is only available at the pipeline level
@@ -78,9 +71,6 @@ spec:
     - name: validationPassed
       type: string
       description: Whether validation checks passed successfully
-    - name: sanitizedTag
-      type: string
-      description: Sanitized tag to use for target index (optional)
     - name: mustPublishIndexImage
       type: string
       description: Whether the index image should be published (strategy-aware decision)
@@ -93,12 +83,6 @@ spec:
     - name: iibServiceAccountSecret
       type: string
       description: IIB service account secret name (environment-aware)
-    - name: targetIndex
-      type: string
-      description: Resolved target index with sanitized tag if applicable
-    - name: sourceDataArtifact
-      type: string
-      description: Produced trusted data artifact
   volumes:
     - name: workdir
       emptyDir: {}
@@ -177,35 +161,22 @@ spec:
         echo "  - preGA: ${pre_ga}"
         echo "  - stagedIndex: ${staged_index}"
 
-        echo "DEBUG: Beginning validation checks..."
-        echo "DEBUG: Current bash options: $(set +o)"
-        echo "DEBUG: Script PID: $$"
-        echo "DEBUG: Available shell functions: $(declare -F | head -10)"
-
-        # Validate mutually exclusive release modes
-        echo "DEBUG: Starting mode validation..."
-        echo "DEBUG: Release modes - hotfix: ${hotfix}, preGA: ${pre_ga}, stagedIndex: ${staged_index}"
-
         # Count active release modes explicitly
         active_modes=()
         if [[ "${hotfix}" == "true" ]]; then
             active_modes+=("hotfix")
-            echo "DEBUG: Hotfix mode is ACTIVE"
         fi
 
         if [[ "${pre_ga}" == "true" ]]; then
             active_modes+=("preGA")
-            echo "DEBUG: PreGA mode is ACTIVE"
         fi
 
         if [[ "${staged_index}" == "true" ]]; then
             active_modes+=("stagedIndex")
-            echo "DEBUG: StagedIndex mode is ACTIVE"
         fi
 
         # Validate mutual exclusivity
         mode_count=${#active_modes[@]}
-        echo "DEBUG: Total active modes: ${mode_count} (${active_modes[*]})"
 
         if [[ ${mode_count} -eq 0 ]]; then
             echo "INFO: Standard production release mode (no special flags set)"
@@ -218,90 +189,16 @@ spec:
             exit 1
         fi
 
-        echo "DEBUG: Mode validation completed successfully"
-
-        # Tag validation and sanitization function (moved from add-fbc-contribution)
-        echo "DEBUG: Defining validate_and_sanitize_tag_component function..."
-        validate_and_sanitize_tag_component() {
-          local component="$1"
-          local component_name="$2"
-          local max_length="$3"
-
-          # Validate not empty
-          if [ -z "$component" ]; then
-            echo "ERROR: ${component_name} cannot be empty"
-            exit 1
-          fi
-
-          # Sanitize invalid characters by replacing with hyphens
-          sanitized="${component//[^a-zA-Z0-9._-]/-}"
-
-          # Collapse consecutive special characters to single hyphen
-          while [[ "$sanitized" =~ [._-][._-] ]]; do
-            sanitized="${sanitized//[._-][._-]/-}"
-          done
-
-          # Remove leading and trailing special characters
-          sanitized=$(echo "$sanitized" | sed 's/^[-._]*//;s/[-._]*$//')
-
-          # Check if sanitization resulted in empty string
-          if [ -z "$sanitized" ]; then
-            echo "ERROR: ${component_name} '$component' sanitization resulted in empty string"
-            exit 1
-          fi
-
-          # Check for reserved names
-          case "$sanitized" in
-            "latest"|"main"|"master"|"HEAD")
-              echo "ERROR: ${component_name} cannot use reserved name: '$sanitized' (from '$component')"
-              exit 1
-              ;;
-          esac
-
-          # Report sanitization if changes were made
-          if [ "$component" != "$sanitized" ]; then
-            echo "INFO: ${component_name} sanitized from '$component' to '$sanitized'"
-          fi
-
-          # Check length and truncate if necessary
-          if [ ${#sanitized} -gt "$max_length" ]; then
-            truncated=$(echo "$sanitized" | cut -c1-"$max_length")
-            # Ensure truncated version doesn't end with special char
-            truncated="${truncated%[._-]}"
-            while [[ "$truncated" =~ [._-]$ ]]; do
-              truncated="${truncated%[._-]}"
-            done
-            echo "WARNING: ${component_name} truncated from '$sanitized' to '$truncated' (max ${max_length} chars)"
-            echo "$truncated"
-          else
-            echo "$sanitized"
-          fi
-        }
-
-        echo "DEBUG: Function validate_and_sanitize_tag_component defined successfully"
-
-        # Read all components from snapshot for comprehensive validation
-        echo "DEBUG: About to read components from snapshot..."
-        echo "DEBUG: SNAPSHOT_PATH=${SNAPSHOT_PATH}"
-        echo "DEBUG: Checking if snapshot file exists and is readable..."
-        ls -la "${SNAPSHOT_PATH}" || echo "DEBUG: ls command failed"
-
-        echo "DEBUG: Attempting to read component count..."
         component_count=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
-        echo "DEBUG: jq command completed, component_count=${component_count}"
         echo "INFO: Found ${component_count} components to process"
 
         if [ "${component_count}" -eq 0 ]; then
             echo "ERROR: No components found in snapshot"
-            echo "DEBUG: Snapshot file contents:"
-            cat "${SNAPSHOT_PATH}" || echo "DEBUG: Failed to cat snapshot file"
             exit 1
         fi
 
         # Extract container images for opt-in checking
-        echo "DEBUG: Extracting container images for opt-in checking..."
         container_images=$(jq -c '[.components[].containerImage]' "${SNAPSHOT_PATH}")
-        echo "DEBUG: Container images extraction completed"
         echo "INFO: Container images to check:"
         echo "${container_images}" | jq .
 
@@ -317,14 +214,9 @@ spec:
         fi
 
         # Add retry mechanism with proper failure detection
-        echo "DEBUG: Setting up retry mechanism..."
         max_retries=$(params.maxRetries)
         retry_delay=$(params.retryDelaySeconds)
-        echo "DEBUG: max_retries=${max_retries}, retry_delay=${retry_delay}"
-
-        echo "DEBUG: Checking if internal-request command is available..."
-        which internal-request || echo "DEBUG: internal-request not found in PATH"
-        echo "DEBUG: PATH=${PATH}"
+        echo "INFO: max_retries=${max_retries}, retry_delay=${retry_delay}"
 
         # Setup consistent labeling for FBC internal requests
         TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
@@ -334,15 +226,7 @@ spec:
         for attempt in $(seq 1 "$max_retries"); do
             echo "Validation attempt ${attempt}/${max_retries}..."
 
-            echo "DEBUG: About to create internal request with parameters:"
-            echo "DEBUG:   - containerImages=${container_images}"
-            echo "DEBUG:   - iibServiceAccountSecret=${iib_service_account_secret}"
-            echo "DEBUG:   - pyxisServer=$(params.pyxisServer)"
-            echo "DEBUG:   - taskGitUrl=$(params.taskGitUrl)"
-            echo "DEBUG:   - taskGitRevision=$(params.taskGitRevision)"
-
             # Create internal request with proper error handling
-            echo "DEBUG: Executing internal-request command..."
             if ! internal-request --pipeline "check-fbc-opt-in" \
                                  -p containerImages="${container_images}" \
                                  -p iibServiceAccountSecret="${iib_service_account_secret}" \
@@ -366,16 +250,12 @@ spec:
                 continue
             fi
 
-            echo "DEBUG: internal-request command completed successfully"
-
             # Extract request name with validation
             internalRequest=$(awk -F"'" '/created/ { print $2 }' \
                 "$(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log")
 
             if [ -z "${internalRequest}" ]; then
                 echo "ERROR: Failed to extract internal request name from output on attempt ${attempt}"
-                echo "DEBUG: Output file contents:"
-                cat "$(params.dataDir)/check-fbc-opt-in-output-attempt-${attempt}.log"
 
                 if [ "${attempt}" -eq "${max_retries}" ]; then
                     echo "ERROR: Could not extract internal request name after ${max_retries} attempts"
@@ -432,7 +312,6 @@ spec:
         # Initialize result tracking arrays for comprehensive validation
         validation_failed=false
         package_validation_results='[]'
-        target_versions='[]'
         
         echo "INFO: Processing all ${component_count} components for validation..."
         
@@ -473,117 +352,10 @@ spec:
             package_validation_results=$(jq '. += [$result]' \
               --argjson result "$package_result" <<< "$package_validation_results")
             
-            # === OCP VERSION VALIDATION ===
-            # Extract OCP target version from fragment base image per ADR-0026
-            echo "  INFO: Extracting OCP target version from fragment base image annotation..."
-
-            # Get image metadata
-            image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${fbc_fragment}")
-            media_type=$(jq -r .mediaType <<< "${image_metadata}")
-            ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
-              | cut -d: -f2 | sed 's/"//g')
-
-            # Handle multiplatform images
-            if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]] || \
-               [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
-                echo "    INFO: Multiplatform image detected, extracting manifest"
-                arch_json=$(get-image-architectures "${fbc_fragment}")
-                manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
-                single_arch_fragment="${fbc_fragment%@*}@${manifest_image_sha}"
-
-                ocp_version=$(skopeo inspect --retry-times 3 --raw "docker://${single_arch_fragment}" \
-                 | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
-            fi
-
-            # Validate OCP version format
-            ocp_version_pattern="^v[0-9]\.[0-9]+$"
-            if ! echo "${ocp_version}" | grep -Eq "${ocp_version_pattern}"; then
-                echo "    ERROR: Invalid OCP version format: '${ocp_version}'"
-                echo "    Expected format: vX.Y (e.g., v4.12)"
-                validation_failed=true
-                ocp_version="invalid"
-            else
-                echo "    SUCCESS: Found valid OCP version: ${ocp_version}"
-                target_versions=$(jq --arg version "$ocp_version" '. += [$version]' <<< "$target_versions")
-            fi
         done
 
         # === VALIDATION SUMMARY ===
         echo "INFO: Summarizing validation results..."
-
-        # Check OCP version consistency across all fragments per ADR-0026
-        unique_versions=$(jq 'unique' <<< "$target_versions")
-        version_count=$(jq 'length' <<< "$unique_versions")
-
-        if [ "$version_count" -gt 1 ]; then
-          echo "ERROR: Inconsistent OCP target versions found: $(jq -c . <<< "$unique_versions")"
-          echo "All FBC fragments in a release must target the same OCP version per ADR-0026"
-          validation_failed=true
-        elif [ "$version_count" -eq 1 ]; then
-          unified_ocp_version=$(jq -r '.[0]' <<< "$unique_versions")
-          echo "SUCCESS: All fragments target consistent OCP version: ${unified_ocp_version}"
-        else
-          echo "ERROR: No valid OCP versions found in any fragments"
-          validation_failed=true
-        fi
-
-        # === SANITIZED TAG GENERATION ===
-        # Generate sanitized tag for special release modes using unified OCP version
-        echo "INFO: Generating sanitized tag for special release modes..."
-        timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
-        timestamp=$(date "+${timestamp_format}")
-        sanitized_tag=""
-
-        if [ "${hotfix}" = "true" ]; then
-          issue_id=$(jq -r '.fbc.issueId // empty' "${DATA_FILE}")
-          if [ -z "${issue_id}" ]; then
-            echo "ERROR: Hotfix releases require the issue id set in the 'fbc.issueId' key"
-            exit 1
-          fi
-
-          # Calculate space allocation including OCP version
-          max_tag_length=128
-          timestamp_length=${#timestamp}
-          ocp_length=${#unified_ocp_version}
-          separator_chars=3  # Three hyphens: ocp-issueId-timestamp
-
-          available_space=$((max_tag_length - timestamp_length - ocp_length - separator_chars))
-          max_issue_id_length=$((available_space > 50 ? 50 : available_space))
-          [ $max_issue_id_length -lt 5 ] && max_issue_id_length=5
-
-          sanitized_issue_id=$(validate_and_sanitize_tag_component "$issue_id" "fbc.issueId" "$max_issue_id_length")
-          sanitized_tag="${unified_ocp_version}-${sanitized_issue_id}-${timestamp}"
-          echo "INFO: Generated hotfix tag: ${sanitized_tag}"
-        elif [ "${pre_ga}" = "true" ]; then
-          product_name=$(jq -r '.fbc.productName // ""' "${DATA_FILE}")
-          product_version=$(jq -r '.fbc.productVersion // ""' "${DATA_FILE}")
-          if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
-            echo "ERROR: Pre-GA releases require 'fbc.productName' and 'fbc.productVersion'"
-            exit 1
-          fi
-
-          # Calculate optimal length allocation including OCP version
-          max_tag_length=128
-          timestamp_length=${#timestamp}
-          ocp_length=${#unified_ocp_version}
-          separator_chars=4  # Four hyphens: ocp-productName-productVersion-timestamp
-
-          available_space=$((max_tag_length - timestamp_length - ocp_length - separator_chars))
-
-          # Allocate space: 60% for product name, 40% for product version
-          max_product_name_length=$((available_space * 6 / 10))
-          max_product_version_length=$((available_space * 4 / 10))
-          [ $max_product_name_length -lt 8 ] && max_product_name_length=8
-          [ $max_product_version_length -lt 8 ] && max_product_version_length=8
-
-          sanitized_product_name=$(validate_and_sanitize_tag_component "$product_name" \
-                                           "fbc.productName" "$max_product_name_length")
-          sanitized_product_version=$(validate_and_sanitize_tag_component "$product_version" \
-                                              "fbc.productVersion" "$max_product_version_length")
-
-          sanitized_tag="${unified_ocp_version}-${sanitized_product_name}-${sanitized_product_version}-${timestamp}"
-          echo "INFO: Generated pre-GA tag: ${sanitized_tag}"
-        fi
 
         # Determine unified opt-in status: if ANY component is opted out, entire release is opted out
         any_opted_out=$(jq '[.[] | select(.fbcOptIn == false)] | length > 0' <<< "$opt_in_results")
@@ -619,18 +391,6 @@ spec:
             echo "INFO: Standard production release: publishing based on opt-in status (${unified_fbc_opt_in})"
         fi
 
-        # === TARGET INDEX RESOLUTION ===
-        # Apply sanitized tag to target index if provided
-        echo "INFO: Resolving target index..."
-        if [ -n "$sanitized_tag" ] && [ "$sanitized_tag" != "null" ]; then
-            base_repo=$(printf '%s' "$(params.targetIndex)" | cut -d: -f1)
-            resolved_target_index="${base_repo}:${sanitized_tag}"
-            echo "INFO: Using sanitized tag for target index: ${resolved_target_index}"
-        else
-            resolved_target_index="$(params.targetIndex)"
-            echo "INFO: Using standard target index: ${resolved_target_index}"
-        fi
-
         # === RESULTS COMPILATION ===
         echo "INFO: Final FBC parameter preparation results:"
         echo "  - FBC Opt-in: ${unified_fbc_opt_in}"
@@ -638,9 +398,6 @@ spec:
         echo "  - Must Sign Index: ${must_sign}"
         echo "  - Must Overwrite From Index: ${must_overwrite_from_index}"
         echo "  - Release Mode: hotfix=${hotfix}, preGA=${pre_ga}, staged=${staged_index}"
-        if [ -n "$sanitized_tag" ]; then
-          echo "  - Sanitized Tag: ${sanitized_tag}"
-        fi
 
         if [ "$validation_failed" = "true" ]; then
             echo "ERROR: Parameter collection completed with validation failures"
@@ -653,32 +410,7 @@ spec:
         echo -n "$unified_fbc_opt_in" > "$(results.fbcOptIn.path)"
         echo -n "$([ "$validation_failed" = "false" ] && echo "true" || echo "false")" \
           > "$(results.validationPassed.path)"
-        echo -n "${sanitized_tag}" > "$(results.sanitizedTag.path)"
         echo -n "${must_publish}" > "$(results.mustPublishIndexImage.path)"
         echo -n "${must_sign}" > "$(results.mustSignIndexImage.path)"
         echo -n "${must_overwrite_from_index}" > "$(results.mustOverwriteFromIndexImage.path)"
         echo -n "${iib_service_account_secret}" > "$(results.iibServiceAccountSecret.path)"
-        echo -n "${resolved_target_index}" > "$(results.targetIndex.path)"
-    - name: create-trusted-artifact
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 250m
-      ref:
-        resolver: "git"
-        params:
-          - name: url
-            value: $(params.taskGitUrl)
-          - name: revision
-            value: $(params.taskGitRevision)
-          - name: pathInRepo
-            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
-      params:
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: workDir
-          value: $(params.dataDir)
-        - name: sourceDataArtifact
-          value: $(results.sourceDataArtifact.path)

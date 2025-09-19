@@ -2,13 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-add-fbc-contribution-ir-failure
+  name: test-add-fbc-contribution-multi-ocp-basic
   annotations:
-    test/assert-task-failure: "run-task"
+    test/assert-task-failure: "add-contribution"
 spec:
-  description: |
-    Run the add-fbc-contribution task with an IR that has exitCode set to 1 in its status.
-    The task should fail.
+  description: Test that multi-OCP functionality correctly validates for snapshot
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -18,14 +16,14 @@ spec:
         OCI repository. An empty string means the artifacts do not expire.
       type: string
       default: "1d"
-    - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
-      type: string
-      default: "--insecure"
     - name: trustedArtifactsDebug
       description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
       type: string
       default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
     - name: dataDir
       description: The location where data will be stored
       type: string
@@ -50,52 +48,44 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Create legacy snapshot (for backward compatibility)
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot-spec.json" << EOF
               {
-                "application": "myapp",
+                "application": "multi-ocp-validation-test",
                 "components": [
                   {
-                    "name": "comp0",
-                    "containerImage": "fail.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0"
+                    "name": "test-component",
+                    "containerImage": "quay.io/test/comp@sha256:abc123",
+                    "repository": "quay.io/test/repo"
                   }
                 ]
               }
               EOF
 
+              # Create data.json
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "fbc": {
                   "fbcPublishingCredentials": "test-fbc-publishing-credentials",
                   "buildTimeoutSeconds": 420,
-                  "requestTimeoutSeconds": 120
+                  "requestTimeoutSeconds": 120,
+                  "fromIndex": "quay.io/test/from-index:latest",
+                  "targetIndex": "quay.io/test/target-index:latest"
                 }
               }
               EOF
 
-              # Create snapshot with multi-OCP data (simulating prepare-fbc-snapshot output)
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
-              {
-                "application": "myapp",
-                "components": [
-                  {
-                    "name": "comp0",
-                    "containerImage": "fail.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0",
-                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
-                    "targetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12",
-                    "ocpVersion": "4.12"
-                  }
-                ]
-              }
-              EOF
+              # Note: We intentionally do NOT create snapshot_spec.json
+              # This will trigger the snapshot validation error
+              echo "Test setup complete - snapshot intentionally omitted to test validation"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -106,51 +96,49 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
-    - name: run-task
+
+    - name: add-contribution
       taskRef:
         name: add-fbc-contribution
       params:
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot_spec.json
+          value: $(context.pipelineRun.uid)/snapshot-spec.json
         - name: dataPath
           value: $(context.pipelineRun.uid)/data.json
         - name: resultsDirPath
           value: "$(context.pipelineRun.uid)/results"
         - name: ociStorage
           value: $(params.ociStorage)
-        - name: orasOptions
-          value: $(params.orasOptions)
         - name: sourceDataArtifact
           value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-        # Required parameters from prepare-fbc-parameters that don't have defaults
         - name: mustPublishIndexImage
           value: "true"
         - name: mustOverwriteFromIndexImage
-          value: "false"
+          value: "true"
         - name: iibServiceAccountSecret
           value: "test-iib-secret"
       runAfter:
         - setup
+
   finally:
     - name: cleanup
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            image: quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
-              
-              # Only delete InternalRequests created by this specific pipeline run
+
               kubectl delete internalrequests -l \
                 "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+
+              echo "Multi-OCP validation test cleanup completed"

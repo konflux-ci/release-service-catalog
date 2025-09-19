@@ -2,11 +2,12 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-validate-fbc-fragments-failure-propagation
+  name: test-prepare-fbc-snapshot-fail-ocp-version-mismatch
   annotations:
     test/assert-task-failure: "run-task"
 spec:
-  description: Test managed validate-fbc-fragments task properly propagates validation failures.
+  description: |
+    Run the prepare-fbc-snapshot task and fail as the ocp version mismatch.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -29,14 +30,10 @@ spec:
       type: string
   tasks:
     - name: setup
-      params:
-        - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot.json
       taskSpec:
-        params:
-          - name: snapshotPath
+        results:
+          - name: sourceDataArtifact
             type: string
-            description: Path to the JSON string of the mapped Snapshot spec in the data workspace
         volumes:
           - name: workdir
             emptyDir: {}
@@ -51,42 +48,44 @@ spec:
               value: "$(params.orasOptions)"
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
-        results:
-          - name: sourceDataArtifact
-            description: Location of trusted artifacts to be used to populate data directory
         steps:
-          - name: setup-values
+          - name: add-snapshot
             image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
             script: |
-              #!/usr/bin/env bash
-              
-              # Ensure data directory exists
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              
-              # Create test data that should cause validation failure (using restrictive allowedPackages)
-              cat > "$(params.dataDir)/$(params.snapshotPath)" << 'EOF'
-              {
-                "components": [
-                  {
-                    "name": "test-component-invalid-package",
-                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297"
-                  }
-                ]
-              }
-              EOF
+              #!/usr/bin/env sh
+              set -eux
 
-              cat > "$(params.dataDir)/data.json" << 'EOF'
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "fbc": {
-                  "allowedPackages": ["non-matching-package"],
-                  "hotfix": false,
-                  "preGA": false,
-                  "stagedIndex": false
+                  "fromIndex": "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.12",
+                  "targetIndex": "quay.io/redhat/redhat----preview-operator-index:v4.10"
                 }
               }
               EOF
-              
-              echo "Test data created for failure propagation test"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                  "application": "foo-app",
+                  "artifacts": {},
+                  "components": [
+                      {
+                          "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                          "name": "test-container-foo",
+                          "source": {
+                              "git": {
+                                  "context": "./",
+                                  "dockerfileUrl": "build/Dockerfile",
+                                  "revision": "foo",
+                                  "url": "https://github.com/foo/bar"
+                              }
+                          },
+                          "repository": "test/foo/bar"
+                      }
+                  ]
+              }
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -99,31 +98,25 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: prepare-fbc-parameters
+        name: prepare-fbc-snapshot
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot.json
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
         - name: dataPath
-          value: data.json
-        - name: pyxisSecret
-          value: test-pyxis-secret
-        - name: pyxisServer
-          value: production
-        - name: ociArtifactExpiresAfter
-          value: $(params.ociArtifactExpiresAfter)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
         - name: orasOptions
           value: $(params.orasOptions)
         - name: sourceDataArtifact
           value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: https://github.com/konflux-ci/release-service-catalog.git
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
         - name: taskGitRevision
-          value: development
-        - name: pipelineRunUid
-          value: "test-pipeline-run-uid"
+          value: "development"
       runAfter:
         - setup

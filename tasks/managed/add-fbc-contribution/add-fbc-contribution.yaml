@@ -8,7 +8,24 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Task to create an internalrequest to add fbc contributions to index images
+    Task to create internalrequests to add fbc contributions to index images. It can batch
+    multiple fragments into a single IIB request and can also split requests according
+    to their OCP versions.
+
+    This task batches FBC fragments to submit them to IIB in sets of params.maxBatchSize.
+    The Snapshot has been previously augmented by prepare-fbc-snapshot to include OCP and
+    target index metadata for each component.
+
+    In this task, we split fragments up by their OCP versions and then process each of these
+    in series. For each OCP version, we chain together batches so that the final targetIndex
+    produced will have all fragments added. This means that the index_image from one internal
+    request will be set as the fromIndex for the next request within that OCP version.
+
+    Since we have seen flakiness in IIB requests in the past, we retry and failed batches
+    and internal requests can attach onto currently in progress IIB requests. We retry batches
+    at the end to allow for timed out requests to finish so that we can just get the final
+    result. This will slightly compress the time in which batches are entered into the IIB
+    queue to reduce the effect of a full queue on a single release.
   params:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
@@ -16,15 +33,9 @@ spec:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
       type: string
-    - name: fromIndex
-      type: string
-      description: fromIndex value updated by update-ocp-tag task
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
-    - name: ocpVersion
-      type: string
-      description: The OCP version for all components in this release
     - name: resultsDirPath
       type: string
       description: Path to the results directory in the data workspace
@@ -72,9 +83,6 @@ spec:
     - name: iibServiceAccountSecret
       type: string
       description: IIB service account secret name (from prepare-fbc-parameters)
-    - name: resolvedTargetIndex
-      type: string
-      description: Resolved target index with sanitized tag (from prepare-fbc-parameters)
     - name: maxRetries
       description: Maximum number of retry attempts for failed internal requests
       type: string
@@ -135,6 +143,8 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+        - name: orasOptions
+          value: $(params.orasOptions)
     - name: add-contribution
       image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
       computeResources:
@@ -152,6 +162,13 @@ spec:
         DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         if [ ! -f "${DATA_FILE}" ] ; then
             echo "No valid data file was provided."
+            exit 1
+        fi
+
+        # The snapshot should be updated by prepare-fbc-snapshot
+        SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "$SNAPSHOT_PATH" ]; then
+            echo "ERROR: Snapshot not found at $SNAPSHOT_PATH"
             exit 1
         fi
 
@@ -183,20 +200,35 @@ spec:
         timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
         timestamp=$(date "+${timestamp_format}")
 
-        # Use resolved target index from prepare-fbc-parameters
-        target_index="$(params.resolvedTargetIndex)"
+        # Extract OCP versions from snapshot
+        ocp_versions=$(jq -r '.components[].ocpVersion' "$SNAPSHOT_PATH" | sort -u)
+        echo "INFO: Found OCP versions: $(echo "$ocp_versions" | tr '\n' ' ')"
 
         echo "INFO: Using pre-determined values from prepare-fbc-parameters:"
         echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
         echo "  - mustOverwriteFromIndexImage: ${mustOverwriteFromIndexImage}"
         echo "  - iibServiceAccountSecret: ${iib_service_account_secret}"
-        echo "  - resolvedTargetIndex: ${target_index}"
 
-        # to keep compatibility with current single component mode
+        # Initialize results file for multi-OCP processing
         echo -n "$timestamp" > "$(results.buildTimestamp.path)"
-        jq -n --arg target_index "$target_index" \
-          '{"index_image": {"target_index": $target_index}, "components": []}' \
-          | tee "$RESULTS_FILE"
+        jq -n '{"components": []}' | tee "$RESULTS_FILE"
+
+        # Snapshot validation for multi-OCP processing
+        if ! jq -e '.components | type == "array" and length > 0' "$SNAPSHOT_PATH" > /dev/null; then
+            echo "ERROR: Snapshot missing required 'components' array"
+            exit 1
+        fi
+
+        # Validate snapshot for processing
+        echo "INFO: Validating snapshot for processing..."
+        total_components=$(jq '.components | length' "$SNAPSHOT_PATH")
+
+        if [ "${total_components}" -eq 0 ]; then
+            echo "ERROR: No components found in snapshot"
+            exit 1
+        fi
+
+        echo "INFO: Processing ${total_components} components"
 
         # Setup consistent labeling for FBC internal requests
         TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
@@ -212,281 +244,370 @@ spec:
         build_tags=$(jq '.fbc.buildTags // []' "${DATA_FILE}")
         add_arches=$(jq '.fbc.addArches // []' "${DATA_FILE}")
 
-        # Extract tag from target index for PLR identification
-        target_tag=$(printf '%s' "$(params.resolvedTargetIndex)" | rev | cut -d: -f1 | rev)
-
-        # If target has no tag, use tag from fromIndex
-        if [ "${target_tag}" = "$(params.resolvedTargetIndex)" ]; then
-            # No tag in target index, extract from fromIndex
-            target_tag=$(printf '%s' "$(params.fromIndex)" | rev | cut -d: -f1 | rev)
-        fi
-
-        # Add PLR identifier to build tags (appends to existing tags)
-        build_tags=$(echo "${build_tags}" | jq --arg tag "${target_tag}" '. + [$tag]')
-        echo "Added PLR identifier to build_tags: ${target_tag}"
-        echo "Final build_tags: $(echo "${build_tags}" | jq -r '.[]' | tr '\n' ' ')"
-
-        # Use the same target_index for batch processing (already resolved above)
-        resolved_target_index="$target_index"
+        # Processing will use group-specific target indexes
+        # Each OCP version group will have its own target index resolved by prepare-fbc-parameters
+        # No single "global" target index exists - each component gets its OCP-specific target index
 
         # Calculate number of batches needed
         NUM_BATCHES=$(( (LENGTH + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE ))
         echo "Creating $NUM_BATCHES batch(es) for $LENGTH components"
 
-        # Common values for all batches
-        batch_from_index="$(params.fromIndex)"
-        batch_target_index="$resolved_target_index"
-        batch_ocp_version="$(params.ocpVersion)"
-        
+        echo "INFO: Processing snapshot components"
+        # Create groups directory
+        groups_dir="$(params.dataDir)/ocp-groups"
+        mkdir -p "$groups_dir"
+
         # Calculate timeout for batches
         finally_task_timeout=300
         pipeline_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds + finally_task_timeout )))
         task_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds )))
 
-        # Initialize tracking for batch chaining
-        current_from_index="$batch_from_index"
-        latest_iib_index_image=""
+        # Group components by OCP version for isolated processing
+        group_components_by_ocp_version() {
+            local snapshot_file="$1"
+            local ocp_versions="$2"
 
-        # Helper function to determine fromIndex strategy based on release type
-        get_current_from_index() {
-            if [ "${mustOverwriteFromIndexImage}" = "true" ]; then
-                # IIB overwrites fromIndex - keep using original consistently
-                printf '%s' "$(params.fromIndex)"
+            # Group components by OCP version
+            for ocp_version in $ocp_versions; do
+                local group_file="${groups_dir}/${ocp_version}.json"
+                jq --arg ocp_version "$ocp_version" \
+                    '.components | map(select(.ocpVersion == $ocp_version))' \
+                    "$snapshot_file" > "$group_file"
+
+                local group_count
+                group_count=$(jq 'length' "$group_file")
+                echo "INFO: OCP version $ocp_version has $group_count components" >&2
+            done
+        }
+
+        # Group components by OCP versions
+        group_components_by_ocp_version "$SNAPSHOT_PATH" "$ocp_versions"
+
+        # Process all OCP groups sequentially
+        process_all_ocp_groups() {
+            echo "INFO: Starting group processing"
+
+            for ocp_version in $ocp_versions; do
+                local group_file="${groups_dir}/${ocp_version}.json"
+                echo "INFO: Processing OCP group: $ocp_version"
+
+                local group_components
+                group_components=$(cat "$group_file")
+
+                process_ocp_group "$ocp_version" "$group_components"
+            done
+
+            echo "INFO: Processing completed successfully"
+        }
+
+        # Process OCP group
+        process_ocp_group() {
+            local group_ocp_version="$1"
+            local group_components="$2"
+
+            echo "INFO: Processing OCP group $group_ocp_version"
+
+            # Get group-specific parameters from first component (all should have same values within group)
+            local first_component
+            first_component=$(jq -r '.[0]' <<< "$group_components")
+            local group_from_index
+            group_from_index=$(jq -r '.updatedFromIndex // empty' <<< "$first_component")
+            local group_target_index
+            group_target_index=$(jq -r '.targetIndex // empty' <<< "$first_component")
+
+            # Group parameters are already validated globally, but verify tag format
+            echo "INFO: Group parameters - fromIndex: $group_from_index, targetIndex: $group_target_index"
+
+            # Extract and validate tag from group target index for PLR identification
+            # For staged releases, targetIndex is empty so no tag extraction is needed
+            if [ -n "$group_target_index" ]; then
+                group_target_tag=$(printf '%s' "${group_target_index}" | rev | cut -d: -f1 | rev)
+                if [[ "$group_target_tag" = "${group_target_index}" ]]; then
+                    echo "ERROR: Target index for OCP group $group_ocp_version has no tag: $group_target_index"
+                    exit 1
+                fi
+                echo "INFO: Using tag '$group_target_tag' for PLR identification in OCP group $group_ocp_version"
+
+                # Add group-specific PLR identifier to build tags
+                group_build_tags=$(echo "${build_tags}" | jq --arg tag "$group_target_tag" '. + [$tag]')
             else
-                # IIB creates new index - we MUST track what was actually created
-                if [ ${#successful_batches[@]} -eq 0 ]; then
-                    # No successful batches yet - start from original fromIndex
-                    printf '%s' "$(params.fromIndex)"
+                echo "INFO: No target index for OCP group $group_ocp_version (staged release), skipping tag extraction"
+                group_build_tags="$build_tags"
+            fi
+            echo "INFO: Group build tags for OCP $group_ocp_version:" \
+                "$(echo "${group_build_tags}" | jq -r '.[]' | tr '\n' ' ')"
+
+            # Initialize group-specific tracking for batch chaining
+            local group_current_from_index="$group_from_index"
+            local group_latest_iib_index_image=""
+            local group_failed_batches=()
+            local group_successful_batches=()
+
+            # Calculate batches for this group
+            local num_components
+            num_components=$(echo "$group_components" | jq 'length')
+            local group_num_batches=$(( (num_components + MAX_BATCH_SIZE - 1) / MAX_BATCH_SIZE ))
+
+            echo "INFO: Creating $group_num_batches batch(es) for $num_components components" \
+                "in OCP group $group_ocp_version"
+
+            # Determine fromIndex for batch chaining
+            get_current_from_index() {
+                if [ "${mustOverwriteFromIndexImage}" = "true" ]; then
+                    # IIB overwrites fromIndex - keep using original consistently
+                    printf '%s' "${group_from_index}"
                 else
-                    # We have successful batches - MUST use latest IIB output
-                    if [ -z "${latest_iib_index_image}" ]; then
-                        echo "FATAL ERROR: We have successful batches but latest_iib_index_image is empty!"
-                        echo "This would cause data loss. Successful batches: ${successful_batches[*]}"
-                        exit 1
+                    # IIB creates new index - we MUST track what was actually created
+                    if [ ${#group_successful_batches[@]} -eq 0 ]; then
+                        # No successful batches yet - start from original fromIndex
+                        printf '%s' "${group_from_index}"
+                    else
+                        # We have successful batches - MUST use latest IIB output
+                        if [ -z "${group_latest_iib_index_image}" ]; then
+                            echo "FATAL ERROR: We have successful batches but group_latest_iib_index_image is empty!"
+                            echo "This would cause data loss. Group successful batches: ${group_successful_batches[*]}"
+                            exit 1
+                        fi
+                        echo "${group_latest_iib_index_image}"
                     fi
-                    echo "${latest_iib_index_image}"
                 fi
-            fi
-        }
+            }
 
-        # Helper function to get batch fragments
-        get_batch_fragments() {
-            local batch_num="$1"
-            local start_idx
-            start_idx=$((batch_num * MAX_BATCH_SIZE))
-            local end_idx
-            end_idx=$(((batch_num + 1) * MAX_BATCH_SIZE))
-            if [ "$end_idx" -gt "$LENGTH" ]; then
-                end_idx=$LENGTH
-            fi
-
-            local batch_fragments
-            batch_fragments='[]'
-            for((i=start_idx; i<end_idx; i++)); do
-                local fbc_fragment
-                fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
-                batch_fragments=$(jq --arg fragment "$fbc_fragment" '. += [$fragment]' <<< "$batch_fragments")
-            done
-            echo "$batch_fragments"
-        }
-
-        # Helper function to execute batch with validation
-        execute_batch_with_validation() {
-            local batch_num="$1"
-            local from_index="$2"
-            local target_index="$3"
-
-            echo "Executing batch $((batch_num + 1)): fromIndex=${from_index}"
-
-            local batch_fragments
-            batch_fragments=$(get_batch_fragments "$batch_num")
-            # Create InternalRequest for this batch
-            internal-request --pipeline "update-fbc-catalog" \
-                -p fromIndex="${from_index}" \
-                -p fbcFragments="$(printf '%s' "${batch_fragments}" | jq -c .)" \
-                -p iibServiceAccountSecret="${iib_service_account_secret}" \
-                -p publishingCredentials="${publishing_credentials}" \
-                -p buildTimeoutSeconds="${build_timeout_seconds}" \
-                -p buildTags="$(jq -c . <<< "${build_tags}")" \
-                -p addArches="$(jq -c . <<< "${add_arches}")" \
-                -p mustPublishIndexImage="${mustPublishIndexImage}" \
-                -p mustOverwriteFromIndexImage="${mustOverwriteFromIndexImage}" \
-                -p taskGitUrl="$(params.taskGitUrl)" \
-                -p taskGitRevision="$(params.taskGitRevision)" \
-                --service-account "${internal_request_service_account}" \
-                -l ${TASK_LABEL}="${TASK_ID}" \
-                -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-                --pipeline-timeout "${pipeline_timeout}" \
-                --task-timeout "${task_timeout}" \
-                -t "${request_timeout_seconds}" \
-                | tee "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log"
-
-            # Extract request name
-            local internalRequest
-            internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-                "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log")
-
-            # Validate internal request succeeded
-            local request_status
-            request_status=$(kubectl get internalrequest "${internalRequest}" \
-                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
-
-            if [ "${request_status}" != "True" ]; then
-                echo "ERROR: Batch $((batch_num + 1)) internal request failed"
-                local request_reason
-                request_reason=$(kubectl get internalrequest "${internalRequest}" \
-                    -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}')
-                local request_message
-                request_message=$(kubectl get internalrequest "${internalRequest}" \
-                    -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
-                echo "Reason: ${request_reason}"
-                echo "Message: ${request_message}"
-                return 1
-            fi
-
-            # Extract and validate results
-            local results
-            results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
-
-            if [ -z "${results}" ] || [ "${results}" = "{}" ]; then
-                echo "ERROR: Batch $((batch_num + 1)) succeeded but returned empty results"
-                return 1
-            fi
-
-            # Store results for this batch
-            echo "${results}" > "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-result.json"
-
-            # Process results for each fragment in this batch
-            local decompressed_json_build_info
-            decompressed_json_build_info="$(jq -r '.jsonBuildInfo' <<< "${results}" | base64 -d | gunzip)"
-            local completion_time_raw
-            completion_time_raw="$(jq -r '.updated' <<< "${decompressed_json_build_info}")"
-            local completion_time
-            completion_time=$(date +"${timestamp_format}" -d "${completion_time_raw}")
-            local fragment_count
-            fragment_count=$(jq -r 'length' <<< "$batch_fragments")
-
-            for((f=0; f<fragment_count; f++)); do
-                local fragment
-                fragment=$(jq -r --argjson f "$f" '.[$f]' <<< "$batch_fragments")
-
-                echo "Processing result for fragment: $fragment (batch $((batch_num + 1)))"
-
-                # Build individual component result
-                local build_results
-                build_results=$(jq \
-                  --arg fragment "$fragment" \
-                  --arg target_index "$target_index" \
-                  --arg ocp_version "$batch_ocp_version" \
-                  --arg completion_time "$completion_time" \
-                  --argjson decompressed_json "${decompressed_json_build_info}" \
-                '{
-                  "fbc_fragment": $fragment,
-                  "target_index": $target_index,
-                  "ocp_version": $ocp_version,
-                  "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
-                  "index_image": $decompressed_json.index_image,
-                  "index_image_resolved": $decompressed_json.index_image_resolved,
-                  "completion_time": $completion_time,
-                  "iibLog": .iibLog
-                }' <<< "${results}")
-
-                # Add to results file
-                export build_results
-                yq -i '.components += [ env(build_results) ]' "$RESULTS_FILE"
-            done
-
-            echo "Batch $((batch_num + 1)) completed successfully"
-            return 0
-        }
-
-        # Execute batches with failure tracking and retry logic
-        failed_batches=()
-        successful_batches=()
-
-        for((batch_num=0; batch_num<"$NUM_BATCHES"; batch_num++)); do
-            echo "Processing batch $((batch_num + 1))/${NUM_BATCHES}..."
-
-            current_from_index=$(get_current_from_index)
-
-            if execute_batch_with_validation "$batch_num" "$current_from_index" "$batch_target_index"; then
-                successful_batches+=("$batch_num")
-                echo "Batch $((batch_num + 1)) succeeded"
-
-                # Extract latest IIB index image for next batch (only when not overwriting)
-                if [ "${mustOverwriteFromIndexImage}" = "false" ]; then
-                    result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-result.json"
-                    batch_results=$(cat "${result_file}")
-                    latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
-                        base64 -d | gunzip | jq -r '.index_image')
-                    echo "Updated fromIndex for next batch: ${latest_iib_index_image}"
+            # Get batch fragments
+            get_batch_fragments() {
+                local batch_num="$1"
+                local start_idx=$((batch_num * MAX_BATCH_SIZE))
+                local end_idx=$(((batch_num + 1) * MAX_BATCH_SIZE))
+                local group_length
+                group_length=$(echo "$group_components" | jq 'length')
+                if [ "$end_idx" -gt "$group_length" ]; then
+                    end_idx=$group_length
                 fi
-            else
-                failed_batches+=("$batch_num")
-                echo "Batch $((batch_num + 1)) failed, will retry later"
-                # Continue with next batch - no dependency blocking
-            fi
-        done
 
-        # Retry failed batches (order doesn't matter)
-        max_retries=$(params.maxRetries)
-        batch_retry_delay=$(params.batchRetryDelaySeconds)
+                echo "$group_components" | jq -c ".[${start_idx}:${end_idx}] | map(.containerImage)"
+            }
 
-        for retry_attempt in $(seq 1 "$max_retries"); do
-            if [ ${#failed_batches[@]} -eq 0 ]; then
-                echo "All batches completed successfully"
-                break
-            fi
+            # Execute batch with validation
+            execute_batch() {
+                local batch_num="$1"
+                local from_index="$2"
 
-            echo "Retry attempt ${retry_attempt}: ${#failed_batches[@]} batches to retry"
-            still_failed=()
+                echo "Executing group batch $((batch_num + 1)): fromIndex=${from_index}" \
+                    "(OCP: $group_ocp_version)"
 
-            for batch_num in "${failed_batches[@]}"; do
-                current_from_index=$(get_current_from_index)
+                # Get batch fragments
+                local batch_fragments
+                batch_fragments=$(get_batch_fragments "$batch_num")
 
-                if execute_batch_with_validation "$batch_num" "$current_from_index" "$batch_target_index"; then
-                    echo "Batch $((batch_num + 1)) succeeded on retry attempt ${retry_attempt}"
+                # Create InternalRequest for this batch
+                internal-request --pipeline "update-fbc-catalog" \
+                    -p fromIndex="${from_index}" \
+                    -p fbcFragments="$(printf '%s' "${batch_fragments}" | jq -c .)" \
+                    -p iibServiceAccountSecret="${iib_service_account_secret}" \
+                    -p publishingCredentials="${publishing_credentials}" \
+                    -p buildTimeoutSeconds="${build_timeout_seconds}" \
+                    -p buildTags="$(jq -c . <<< "${group_build_tags}")" \
+                    -p addArches="$(jq -c . <<< "${add_arches}")" \
+                    -p mustPublishIndexImage="${mustPublishIndexImage}" \
+                    -p mustOverwriteFromIndexImage="${mustOverwriteFromIndexImage}" \
+                    -p taskGitUrl="$(params.taskGitUrl)" \
+                    -p taskGitRevision="$(params.taskGitRevision)" \
+                    --service-account "${internal_request_service_account}" \
+                    -l ${TASK_LABEL}="${TASK_ID}" \
+                    -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+                    --pipeline-timeout "${pipeline_timeout}" \
+                    --task-timeout "${task_timeout}" \
+                    -t "${request_timeout_seconds}" \
+                    | tee "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log"
 
-                    # Add to successful batches and extract latest IIB index image (only when not overwriting)
-                    successful_batches+=("$batch_num")
+                # Extract request name
+                local internalRequest
+                internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+                    "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log")
+
+                # Validate internal request succeeded
+                local request_status
+                request_status=$(kubectl get internalrequest "${internalRequest}" \
+                    -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
+
+                if [ "${request_status}" != "True" ]; then
+                    echo "ERROR: Batch $((batch_num + 1)) internal request failed"
+                    local request_reason
+                    request_reason=$(kubectl get internalrequest "${internalRequest}" \
+                        -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}')
+                    local request_message
+                    request_message=$(kubectl get internalrequest "${internalRequest}" \
+                        -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
+                    echo "Reason: ${request_reason}"
+                    echo "Message: ${request_message}"
+                    return 1
+                fi
+
+                # Extract and validate results
+                local results
+                results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
+
+                if [ -z "${results}" ] || [ "${results}" = "{}" ]; then
+                    echo "ERROR: Batch $((batch_num + 1)) succeeded but returned empty results"
+                    return 1
+                fi
+
+                # Store results for this batch
+                echo "${results}" > "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-result.json"
+
+                # Process results for each fragment in this batch
+                local decompressed_json_build_info
+                decompressed_json_build_info="$(jq -r '.jsonBuildInfo' <<< "${results}" | base64 -d | gunzip)"
+                local completion_time_raw
+                completion_time_raw="$(jq -r '.updated' <<< "${decompressed_json_build_info}")"
+                local completion_time
+                completion_time=$(date +"${timestamp_format}" -d "${completion_time_raw}")
+
+                # Process fragments in batch
+                local fragment_index=0
+                echo "$batch_fragments" | jq -r '.[]' | while read -r fragment; do
+                    echo "Processing result for fragment: $fragment" \
+                        "(group batch $((batch_num + 1)), OCP: $group_ocp_version)"
+
+                    # Build individual component result
+                    local build_results
+                    build_results=$(jq \
+                      --arg fragment "$fragment" \
+                      --arg target_index "$group_target_index" \
+                      --arg ocp_version "$group_ocp_version" \
+                      --arg completion_time "$completion_time" \
+                      --argjson decompressed_json "${decompressed_json_build_info}" \
+                    '{
+                      "fbc_fragment": $fragment,
+                      "target_index": $target_index,
+                      "ocp_version": $ocp_version,
+                      "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
+                      "index_image": $decompressed_json.index_image,
+                      "index_image_resolved": $decompressed_json.index_image_resolved,
+                      "completion_time": $completion_time,
+                      "iibLog": .iibLog
+                    }' <<< "${results}")
+
+                    # Add to results file
+                    export build_results
+                    yq -i '.components += [ env(build_results) ]' "$RESULTS_FILE"
+
+                    fragment_index=$((fragment_index + 1))
+                done
+
+                echo "Group batch $((batch_num + 1)) completed successfully" \
+                    "for OCP $group_ocp_version"
+                return 0
+            }
+
+            # Execute batches with failure tracking and retry logic
+            for((batch_num=0; batch_num<"$group_num_batches"; batch_num++)); do
+                echo "Processing group batch $((batch_num + 1))/${group_num_batches}" \
+                    "for OCP $group_ocp_version..."
+
+                group_current_from_index=$(get_current_from_index)
+
+                  if execute_batch "$batch_num" "$group_current_from_index"; then
+                    group_successful_batches+=("$batch_num")
+                    echo "Group batch $((batch_num + 1)) succeeded for OCP $group_ocp_version"
+
+                    # Extract latest IIB index image for next batch (only when not overwriting)
                     if [ "${mustOverwriteFromIndexImage}" = "false" ]; then
                         result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-result.json"
-                    batch_results=$(cat "${result_file}")
-                        latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
+                        batch_results=$(cat "${result_file}")
+                        group_latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
                             base64 -d | gunzip | jq -r '.index_image')
-                        echo "Updated fromIndex for next batch: ${latest_iib_index_image}"
+                        echo "Updated fromIndex for next batch: ${group_latest_iib_index_image}"
                     fi
                 else
-                    still_failed+=("$batch_num")
-                    echo "Batch $((batch_num + 1)) failed retry attempt ${retry_attempt}"
+                    group_failed_batches+=("$batch_num")
+                    echo "Group batch $((batch_num + 1)) failed, will retry later for OCP $group_ocp_version"
+                    # Continue with next batch - no dependency blocking
                 fi
             done
 
-            failed_batches=("${still_failed[@]}")
+            # Retry failed batches (order doesn't matter)
+            local max_retries
+            max_retries=$(params.maxRetries)
+            local batch_retry_delay
+            batch_retry_delay=$(params.batchRetryDelaySeconds)
 
-            if [ ${#failed_batches[@]} -gt 0 ] && [ "${retry_attempt}" -lt "${max_retries}" ]; then
-                echo "Waiting ${batch_retry_delay} seconds before next retry attempt..."
-                sleep "${batch_retry_delay}"
-            fi
-        done
+            for retry_attempt in $(seq 1 "$max_retries"); do
+                if [ ${#group_failed_batches[@]} -eq 0 ]; then
+                    echo "All group batches completed successfully for OCP $group_ocp_version"
+                    break
+                fi
 
-        # Final validation - CRITICAL for data safety
-        if [ ${#failed_batches[@]} -gt 0 ]; then
-            echo "ERROR: ${#failed_batches[@]} batches failed after all retries:"
-            for batch_num in "${failed_batches[@]}"; do
-                echo "  - Batch $((batch_num + 1))"
+                echo "Retry attempt ${retry_attempt}: ${#group_failed_batches[@]} group batches" \
+                    "to retry for OCP $group_ocp_version"
+                local still_failed=()
+
+                for batch_num in "${group_failed_batches[@]}"; do
+                    group_current_from_index=$(get_current_from_index)
+
+                    if execute_batch "$batch_num" "$group_current_from_index" \
+                        "$group_target_index"; then
+                        echo "Group batch $((batch_num + 1)) succeeded on retry attempt ${retry_attempt}" \
+                            "for OCP $group_ocp_version"
+
+                        # Add to successful batches and extract latest IIB index image (only when not overwriting)
+                        group_successful_batches+=("$batch_num")
+                        if [ "${mustOverwriteFromIndexImage}" = "false" ]; then
+                            result_file="$(params.dataDir)/ir-$(context.taskRun.uid)" \
+                                "-batch-$((batch_num + 1))-result.json"
+                            batch_results=$(cat "${result_file}")
+                            group_latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
+                                base64 -d | gunzip | jq -r '.index_image')
+                            echo "Updated fromIndex for next batch: ${group_latest_iib_index_image}"
+                        fi
+                    else
+                        still_failed+=("$batch_num")
+                        echo "Group batch $((batch_num + 1)) failed retry attempt ${retry_attempt}" \
+                            "for OCP $group_ocp_version"
+                    fi
+                done
+
+                group_failed_batches=("${still_failed[@]}")
+
+                if [ ${#group_failed_batches[@]} -gt 0 ] && [ "${retry_attempt}" -lt "${max_retries}" ]; then
+                    echo "Waiting ${batch_retry_delay} seconds before next retry attempt..."
+                    sleep "${batch_retry_delay}"
+                fi
             done
-            echo "Cannot proceed with partial index - this would result in incomplete fragment coverage"
+
+            # Final validation to ensure all components were processed
+            if [ ${#group_failed_batches[@]} -gt 0 ]; then
+                echo "ERROR: ${#group_failed_batches[@]} group batches failed after all retries" \
+                    "for OCP $group_ocp_version:"
+                for batch_num in "${group_failed_batches[@]}"; do
+                    echo "  - Group batch $((batch_num + 1))"
+                done
+                echo "Cannot proceed with partial index for OCP $group_ocp_version -" \
+                    "this would result in incomplete fragment coverage"
+                exit 1
+            fi
+
+            echo "SUCCESS: All ${group_num_batches} group batches completed" \
+                "successfully for OCP $group_ocp_version"
+        }
+
+        # Execute the multi-OCP processing
+        process_all_ocp_groups
+
+        # Get the final batch result for legacy compatibility (use last successful batch from any group)
+        # Find the most recent batch result file
+        latest_result_file=$(find "$(params.dataDir)" -name "ir-*-batch-*-result.json" \
+            -type f -exec ls -t {} + 2>/dev/null | head -1)
+        if [[ -n "$latest_result_file" ]]; then
+            results=$(cat "$latest_result_file")
+            # Extract batch number from filename for output log
+            batch_number=$(basename "$latest_result_file" | sed 's/.*-batch-\([0-9]*\)-result.json/\1/')
+            internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+                "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-${batch_number}-output.log")
+        else
+            echo "ERROR: No batch result files found"
             exit 1
         fi
-
-        echo "SUCCESS: All ${NUM_BATCHES} batches completed successfully"
-
-        # Get the final batch result for legacy compatibility (use last successful batch)
-        last_batch_num=$((NUM_BATCHES - 1))
-        results=$(cat "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((last_batch_num + 1))-result.json")
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-            "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((last_batch_num + 1))-output.log")
 
         echo "Final publishing and compatibility values:"
         echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
@@ -516,7 +637,10 @@ spec:
           exit "$RC"
         fi
         
-        echo "Batch processing completed successfully with $LENGTH components"
+        # Calculate total components processed across all OCP groups
+        total_components=$(jq '.components | length' "$SNAPSHOT_PATH")
+        echo "Multi-OCP batch processing completed successfully with $total_components components" \
+            "across $(echo "$ocp_versions" | wc -w) OCP versions"
         echo "Results file:"
         cat "$RESULTS_FILE"
     - name: create-trusted-artifact

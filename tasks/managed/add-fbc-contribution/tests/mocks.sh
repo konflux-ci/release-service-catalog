@@ -67,7 +67,9 @@ function set_ir_status() {
     fi
 
     # Match real internal-services behavior: results are extracted from PipelineRun and stored as map[string]string
-    cat > $PATCH_FILE << EOF
+    # For failures (exitCode != 0), do not provide results as they would be empty in real scenarios
+    if [ "${EXITCODE}" -eq 0 ]; then
+        cat > $PATCH_FILE << EOF
 {
   "status": {
     "results": {
@@ -88,6 +90,24 @@ function set_ir_status() {
   }
 }
 EOF
+    else
+        # For failures, only provide conditions without results (matches real behavior)
+        cat > $PATCH_FILE << EOF
+{
+  "status": {
+    "conditions": [
+      {
+        "type": "Succeeded",
+        "status": "${CONDITION_STATUS}",
+        "reason": "${CONDITION_REASON}",
+        "message": "${CONDITION_MESSAGE}",
+        "lastTransitionTime": "$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+      }
+    ]
+  }
+}
+EOF
+    fi
     # Add retry logic for the patch operation to handle timing issues
     for attempt in 1 2 3 4 5; do
         if kubectl patch internalrequest $NAME --type=merge --subresource status --patch-file $PATCH_FILE; then

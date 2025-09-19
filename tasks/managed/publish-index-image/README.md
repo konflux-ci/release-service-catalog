@@ -7,7 +7,6 @@ Publish a built FBC index image using skopeo
 | Name                       | Description                                                                                                                | Optional | Default value        |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------|
 | dataPath                   | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                    |
-| targetIndex                | Pullspec to push the image to                                                                                              | No       | -                    |
 | internalRequestResultsFile | File containing the results of the build                                                                                   | No       | -                    |
 | retries                    | Number of skopeo retries                                                                                                   | Yes      | 0                    |
 | requestTimeout             | Max seconds waiting for the status update                                                                                  | Yes      | 360                  |
