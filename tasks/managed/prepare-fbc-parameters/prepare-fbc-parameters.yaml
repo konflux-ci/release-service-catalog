@@ -197,12 +197,98 @@ spec:
             exit 1
         fi
 
-        # Extract container images for opt-in checking
-        container_images=$(jq -c '[.components[].containerImage]' "${SNAPSHOT_PATH}")
-        echo "INFO: Container images to check:"
-        echo "${container_images}" | jq .
+        # Initialize result tracking arrays for comprehensive validation
+        validation_failed=false
+        package_validation_results='[]'
+        target_versions='[]'
 
-        # === IIB SERVICE ACCOUNT SELECTION ===
+        echo "INFO: Processing all ${component_count} components for validation..."
+
+        RENDERED_CATALOG=/tmp/catalog.json
+        bundle_images='[]'
+        for ((i=0; i<component_count; i++)); do
+            fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
+            echo "INFO: Processing component $((i+1))/${component_count}: ${fbc_fragment}"
+
+            # === PACKAGE VALIDATION ===
+            # Validate that all packages in this fragment are in the allowedPackages list
+            # and extract all bundle images while we are at it.
+            echo "  INFO: Validating packages in fragment..."
+            rm -f "${RENDERED_CATALOG}"
+            opm render "${fbc_fragment}" > "${RENDERED_CATALOG}"
+            actual_packages=$(jq -r 'select(.schema=="olm.package") | .name' < "${RENDERED_CATALOG}" | uniq)
+            component_bundle_images=$(jq -r \
+              'select(.schema == "olm.bundle") | "\(.image)" | split("@")[0]' \
+              < "${RENDERED_CATALOG}" | uniq | jq -R . | jq -s .)
+            bundle_images=$(jq --argjson component_bundle_images \
+              "$component_bundle_images" '. += $component_bundle_images' <<< "$bundle_images")
+
+            component_package_valid=true
+            disallowed_packages='[]'
+
+            for package in ${actual_packages}; do
+              if jq -e --arg pkg "$package" '.fbc.allowedPackages | index($pkg)' "${DATA_FILE}" > /dev/null
+              then
+                echo "    SUCCESS: ${package} is allowed"
+              else
+                echo "    ERROR: ${package} is NOT in allowedPackages list"
+                disallowed_packages=$(jq --arg pkg "$package" '. += [$pkg]' <<< "$disallowed_packages")
+                component_package_valid=false
+                validation_failed=true
+              fi
+            done
+
+            # Record package validation result for this component
+            package_result=$(jq -n \
+              --arg fragment "$fbc_fragment" \
+              --argjson valid "$component_package_valid" \
+              --argjson disallowed "$disallowed_packages" \
+              '{
+                "fragment": $fragment,
+                "packageValidationPassed": $valid,
+                "disallowedPackages": $disallowed
+              }')
+            package_validation_results=$(jq '. += [$result]' \
+              --argjson result "$package_result" <<< "$package_validation_results")
+
+            # === OCP VERSION VALIDATION ===
+            # Extract OCP target version from fragment base image per ADR-0026
+            echo "  INFO: Extracting OCP target version from fragment base image annotation..."
+
+            # Get image metadata
+            image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${fbc_fragment}")
+            media_type=$(jq -r .mediaType <<< "${image_metadata}")
+            ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${image_metadata}" \
+              | cut -d: -f2 | sed 's/"//g')
+
+            # Handle multiplatform images
+            if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]] || \
+               [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+                echo "    INFO: Multiplatform image detected, extracting manifest"
+                arch_json=$(get-image-architectures "${fbc_fragment}")
+                manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
+                single_arch_fragment="${fbc_fragment%@*}@${manifest_image_sha}"
+
+                ocp_version=$(skopeo inspect --retry-times 3 --raw "docker://${single_arch_fragment}" \
+                 | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed 's/"//g')
+            fi
+
+            # Validate OCP version format
+            ocp_version_pattern="^v[0-9]\.[0-9]+$"
+            if ! echo "${ocp_version}" | grep -Eq "${ocp_version_pattern}"; then
+                echo "    ERROR: Invalid OCP version format: '${ocp_version}'"
+                echo "    Expected format: vX.Y (e.g., v4.12)"
+                validation_failed=true
+                ocp_version="invalid"
+            else
+                echo "    SUCCESS: Found valid OCP version: ${ocp_version}"
+                target_versions=$(jq --arg version "$ocp_version" '. += [$version]' <<< "$target_versions")
+            fi
+        done
+        # Ensure all bundle images are unique across fragments
+        bundle_images=$(jq -c 'unique' <<< "$bundle_images")
+
+        # === CHECK ALL BUNDLE IMAGES FOR OPT-IN ===
         # Select appropriate IIB service account based on environment (moved here to fix unbound variable)
         echo "INFO: Selecting IIB service account based on environment..."
         if [ "${staged_index}" = "true" ]; then
@@ -226,9 +312,16 @@ spec:
         for attempt in $(seq 1 "$max_retries"); do
             echo "Validation attempt ${attempt}/${max_retries}..."
 
+            echo "DEBUG: About to create internal request with parameters:"
+            echo "DEBUG:   - containerImages=${bundle_images}"
+            echo "DEBUG:   - iibServiceAccountSecret=${iib_service_account_secret}"
+            echo "DEBUG:   - pyxisServer=$(params.pyxisServer)"
+            echo "DEBUG:   - taskGitUrl=$(params.taskGitUrl)"
+            echo "DEBUG:   - taskGitRevision=$(params.taskGitRevision)"
+
             # Create internal request with proper error handling
             if ! internal-request --pipeline "check-fbc-opt-in" \
-                                 -p containerImages="${container_images}" \
+                                 -p containerImages="${bundle_images}" \
                                  -p iibServiceAccountSecret="${iib_service_account_secret}" \
                                  -p pyxisServer="$(params.pyxisServer)" \
                                  -p taskGitUrl="$(params.taskGitUrl)" \
@@ -308,51 +401,6 @@ spec:
         echo "INFO: FBC opt-in check completed successfully"
         echo "Opt-in results:"
         echo "${opt_in_results}" | jq .
-
-        # Initialize result tracking arrays for comprehensive validation
-        validation_failed=false
-        package_validation_results='[]'
-        
-        echo "INFO: Processing all ${component_count} components for validation..."
-        
-        for ((i=0; i<component_count; i++)); do
-            fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
-            echo "INFO: Processing component $((i+1))/${component_count}: ${fbc_fragment}"
-            
-            # === PACKAGE VALIDATION ===
-            # Validate that all packages in this fragment are in the allowedPackages list
-            echo "  INFO: Validating packages in fragment..."
-            actual_packages=$(opm render "${fbc_fragment}" | jq -r 'select(.schema=="olm.package") | .name')
-            
-            component_package_valid=true
-            disallowed_packages='[]'
-            
-            for package in ${actual_packages}; do
-              if jq -e --arg pkg "$package" '.fbc.allowedPackages | index($pkg)' "${DATA_FILE}" > /dev/null
-              then
-                echo "    SUCCESS: ${package} is allowed"
-              else
-                echo "    ERROR: ${package} is NOT in allowedPackages list"
-                disallowed_packages=$(jq --arg pkg "$package" '. += [$pkg]' <<< "$disallowed_packages")
-                component_package_valid=false
-                validation_failed=true
-              fi
-            done
-            
-            # Record package validation result for this component
-            package_result=$(jq -n \
-              --arg fragment "$fbc_fragment" \
-              --argjson valid "$component_package_valid" \
-              --argjson disallowed "$disallowed_packages" \
-              '{
-                "fragment": $fragment,
-                "packageValidationPassed": $valid,
-                "disallowedPackages": $disallowed
-              }')
-            package_validation_results=$(jq '. += [$result]' \
-              --argjson result "$package_result" <<< "$package_validation_results")
-            
-        done
 
         # === VALIDATION SUMMARY ===
         echo "INFO: Summarizing validation results..."
