@@ -19,14 +19,16 @@ function get-image-architectures() {
 
 function kubectl() {
   # The IR won't actually be acted upon, so mock it to return Success as the task wants
-  if [[ "$*" == "get internalrequest "*"-o=jsonpath={.status.results}" ]]
+  if [[ "$*" == *"get internalrequest"*"-o=jsonpath={.status.results}"* ]]
   then
     UNRELEASED=$(echo -n '["new-component", "multi-repo-component", "single-repo-component"]' | gzip -c | base64 -w 0)
     echo '{
       "result": "Success",
       "unreleased_components": "'"$UNRELEASED"'",
       "internalRequestPipelineRunName": "test-pipeline-run",
-      "internalRequestTaskRunName": "test-task-run"
+      "internalRequestTaskRunName": "test-task-run",
+      "advisory_url": "https://access.redhat.com/errata/RHBA-2024:1234",
+      "advisory_internal_url": "https://gitlab.example.com/repo/-/raw/main/data/advisories/dev/2024/1234/advisory.yaml"
     }'
   else
     /usr/bin/kubectl "$@"

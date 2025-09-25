@@ -16,8 +16,8 @@ function git() {
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2024/1442
 
     touch -d "@1712012345" "$gitRepo"/data/advisories/dev-tenant/2025/1602
-    touch -d "@1712012344" "$gitRepo"/data/advisories/dev-tenant/2024/1452
-    touch -d "@1708012343" "$gitRepo"/data/advisories/dev-tenant/2025/1602
+    touch -d "@1712012344" "$gitRepo"/data/advisories/dev-tenant/2025/1601
+    touch -d "@1708012343" "$gitRepo"/data/advisories/dev-tenant/2024/1452
     touch -d "@1704012342" "$gitRepo"/data/advisories/dev-tenant/2024/1442
   elif [[ "$1" == "sparse-checkout" ]]; then
     : # no-op
@@ -51,7 +51,6 @@ function yq() {
   elif [[ "$2" == ".metadata.name" ]]; then
     echo "${advisory_year}:${advisory_num}"
   else
-
     echo "Returning advisory content for ${advisory_year}/${advisory_num}" >&2
 
     case "$advisory_num" in

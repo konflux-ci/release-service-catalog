@@ -33,6 +33,10 @@ spec:
       description: The name of the InternalRequest TaskRun
     - name: unreleased_components
       description: List of components that still need to be released encoded as a gzipped base64 string
+    - name: advisory_url
+      description: URL of the latest matching advisory when all components are already released
+    - name: advisory_internal_url
+      description: Internal URL of the latest matching advisory when all components are already released
   volumes:
     - name: advisory-secret
       secret:
@@ -119,9 +123,15 @@ spec:
             | gzip -c \
             | base64 -w 0)
           echo -n "$UNRELEASED_COMPONENTS" > "$(results.unreleased_components.path)"
+          echo -n "" > "$(results.advisory_url.path)"
+          echo -n "" > "$(results.advisory_internal_url.path)"
           echo -n "Success" > "$(results.result.path)"
           exit 0
         fi
+
+        # Track the latest advisory that contains matching content
+        # EXISTING_ADVISORIES is sorted by modification time (newest first)
+        LATEST_ADVISORY_FILE=""
 
         EXISTING_CONTENT=/tmp/existing_content.json
         # Use a mutable working set for progressive filtering across advisories
@@ -131,6 +141,9 @@ spec:
           yq -o=json '.spec.content.images // []' "$ADVISORY_FILE" > "$EXISTING_CONTENT"
 
           echo "Comparing against: $ADVISORY_FILE"
+
+          # Check if this advisory contains any matching content before filtering
+          ARCH_IMAGES_BEFORE_FILTER="$ARCH_IMAGES"
 
           # Filter arch-specific images using original triple-match logic
           ARCH_IMAGES=$(echo "$ARCH_IMAGES" | jq --slurpfile existing "$EXISTING_CONTENT" '
@@ -143,10 +156,36 @@ spec:
               )) | length == 0)
             ))')
 
+          ARCH_IMAGES_BEFORE_COUNT=$(jq 'length' <<< "$ARCH_IMAGES_BEFORE_FILTER")
+          ARCH_IMAGES_AFTER_COUNT=$(jq 'length' <<< "$ARCH_IMAGES")
+          if [[ $ARCH_IMAGES_BEFORE_COUNT -gt $ARCH_IMAGES_AFTER_COUNT ]]; then
+            if [[ -z "$LATEST_ADVISORY_FILE" ]]; then
+              LATEST_ADVISORY_FILE="$ADVISORY_FILE"
+              FILTERED_COUNT=$((ARCH_IMAGES_BEFORE_COUNT - ARCH_IMAGES_AFTER_COUNT))
+              echo "Tracked latest advisory: $LATEST_ADVISORY_FILE (filtered $FILTERED_COUNT items)"
+            fi
+          fi
+
           # If no arch images remain, all components are released
           if jq -e 'length == 0' <<< "$ARCH_IMAGES" >/dev/null; then
             echo "All arch images in the snapshot have already been released in advisories. Stopping pipeline."
             echo -n "[]" | gzip -c | base64 -w 0 > "$(results.unreleased_components.path)"
+            
+            echo "Returning advisory: $LATEST_ADVISORY_FILE"
+            ADVISORY_TYPE=$(yq -r '.spec.type' "$LATEST_ADVISORY_FILE")
+            ADVISORY_NAME=$(yq -r '.metadata.name' "$LATEST_ADVISORY_FILE")
+            
+            if [[ "${GIT_REPO}" == *"/rhtap-release/"* ]]; then
+              ADVISORY_URL_PREFIX="https://access.stage.redhat.com/errata"
+            else
+              ADVISORY_URL_PREFIX="https://access.redhat.com/errata"
+            fi
+            
+            LATEST_ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
+            LATEST_ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${LATEST_ADVISORY_FILE}"
+            
+            echo -n "$LATEST_ADVISORY_URL" > "$(results.advisory_url.path)"
+            echo -n "$LATEST_ADVISORY_INTERNAL_URL" > "$(results.advisory_internal_url.path)"
             echo -n "Success" > "$(results.result.path)"
             exit 0
           fi
@@ -161,4 +200,6 @@ spec:
         # Map back to original components and get unique names
         UNRELEASED_COMPONENTS=$(echo "$ARCH_IMAGES" | jq -c '[.[].name] | unique' | gzip -c | base64 -w 0)
         echo -n "$UNRELEASED_COMPONENTS" > "$(results.unreleased_components.path)"
+        echo -n "" > "$(results.advisory_url.path)"
+        echo -n "" > "$(results.advisory_internal_url.path)"
         echo -n "Success" > "$(results.result.path)"

@@ -82,6 +82,12 @@ spec:
     - name: environment
       type: string
       description: The environment for the advisory to be published. Options are stage and production
+    - name: latest_advisory_url
+      type: string
+      description: URL of the latest matching advisory when all components are already released
+    - name: latest_advisory_internal_url
+      type: string
+      description: Internal URL of the latest matching advisory when all components are already released
   volumes:
     - name: workdir
       emptyDir: {}
@@ -293,9 +299,13 @@ spec:
 
         internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
         internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
+        latestAdvisoryUrl="$(jq -jr '.advisory_url // ""' <<< "${results}")"
+        latestAdvisoryInternalUrl="$(jq -jr '.advisory_internal_url // ""' <<< "${results}")"
         echo "Internal request details:"
         echo "- Pipeline run: ${internalRequestPipelineRunName}"
         echo "- Task run: ${internalRequestTaskRunName}"
+        echo "- Latest advisory URL: ${latestAdvisoryUrl}"
+        echo "- Latest advisory internal URL: ${latestAdvisoryInternalUrl}"
 
         if [[ "$(jq -r '.result' <<< "$results")" == "Success" ]]; then
           echo "Image filtering successful"
@@ -330,13 +340,26 @@ spec:
             cat "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
             echo -n "Success" > "$(results.result.path)"
             echo -n "true" > "$(results.skip_release.path)"
-            jq -n --rawfile snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
+            
+            # Write the latest advisory URLs to results
+            echo -n "$latestAdvisoryUrl" > "$(results.latest_advisory_url.path)"
+            echo -n "$latestAdvisoryInternalUrl" > "$(results.latest_advisory_internal_url.path)"
+            
+            # Create results file with advisory information (same format as create-advisory)
+            jq -n --arg url "$latestAdvisoryUrl" --arg internal_url "$latestAdvisoryInternalUrl" \
+              '{"advisory": {"url": $url, "internal_url": $internal_url}}' | tee "$RESULTS_FILE"
             exit 0
           fi
 
           cat "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
           echo -n "Success" > "$(results.result.path)"
           echo -n "false" > "$(results.skip_release.path)"
+          
+          # Set advisory URL results to empty when components need release
+          echo -n "" > "$(results.latest_advisory_url.path)"
+          echo -n "" > "$(results.latest_advisory_internal_url.path)"
+          
+          # Create results file with filtered snapshot data only
           jq -n --rawfile snapshot "$FILTERED_SNAPSHOT" '{"filtered_snapshot": $snapshot}' | tee "$RESULTS_FILE"
         else
           echo "Filtering failed. Results:"

@@ -1,0 +1,83 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-all-components-released
+spec:
+  description: |
+    Test the filter-already-released-advisory-images-task when all components
+    are already released. Should return latest advisory URL and empty unreleased components.
+  tasks:
+    - name: run-filter-task
+      taskRef:
+        name: filter-already-released-advisory-images-task
+      params:
+        - name: transformedSnapshot
+          # Transformed snapshot with arch-specific images before `gzip -c|base64 -w 0` encoding:
+          # '[{"name":"released-component","containerImage":"registry.redhat.io/test@sha256:releasedarch123","tags":["v1.0"],"repository":"registry.redhat.io/test","rh-registry-repo":"registry.redhat.io/test","originalComponent":"released-component","architecture":"amd64"}]'
+          value: 'H4sIAKei1mgAA32PsQ6CQBBEez9ja0BBpaAyofIbCMXm2Nxtwt2RvdWEGP9diMEO63nzMtO9IKAnaEBoJEw05Cb6KQYKChmYGBQ5kNw92i9lOanMhdDgUAuOR6Wkt+SwutbNJkExrqzOi0HRJmg6eJbFCfpsEUwxsUaZ921LTVy+hfla+QtHYcsBx/a3fOfOOouVjD5kPYN+qC/w7g8f+pQW4AYBAAA='
+        - name: origin
+          value: "test-origin"
+        - name: advisory_secret_name
+          value: "filter-already-released-advisory-images-secret"
+        - name: internalRequestPipelineRunName
+          value: "$(context.pipelineRun.name)"
+    - name: validate-result
+      runAfter:
+        - run-filter-task
+      params:
+        - name: result
+          value: "$(tasks.run-filter-task.results.result)"
+        - name: unreleased_components
+          value: "$(tasks.run-filter-task.results.unreleased_components)"
+        - name: latest_advisory_url
+          value: "$(tasks.run-filter-task.results.advisory_url)"
+        - name: latest_advisory_internal_url
+          value: "$(tasks.run-filter-task.results.advisory_internal_url)"
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: unreleased_components
+            type: string
+          - name: latest_advisory_url
+            type: string
+          - name: latest_advisory_internal_url
+            type: string
+        steps:
+          - name: validate
+            image: quay.io/konflux-ci/release-service-utils:26e22ecf2c23e7ec8134fede3b40a6e6aef8ac20
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "Validating filter task result for all components released scenario..."
+
+              if [[ "$(params.result)" != "Success" ]]; then
+                echo "Task result was not Success: $(params.result)"
+                exit 1
+              fi
+
+              # Verify unreleased components list is empty
+              UNRELEASED_COMPONENTS=$(base64 -d <<< "$(params.unreleased_components)" | gunzip)
+              UNRELEASED_COUNT=$(jq 'length' <<< "$UNRELEASED_COMPONENTS")
+              if [[ "$UNRELEASED_COUNT" -ne 0 ]]; then
+                echo "Expected 0 unreleased components, but found $UNRELEASED_COUNT"
+                exit 1
+              fi
+
+              # Verify latest advisory URLs are provided
+              if [[ -z "$(params.latest_advisory_url)" ]]; then
+                echo "Expected latest_advisory_url to be provided when all components are released"
+                exit 1
+              fi
+
+              if [[ -z "$(params.latest_advisory_internal_url)" ]]; then
+                echo "Expected latest_advisory_internal_url to be provided when all components are released"
+                exit 1
+              fi
+
+              echo "Latest advisory URL: $(params.latest_advisory_url)"
+              echo "Latest advisory internal URL: $(params.latest_advisory_internal_url)"
+
+              echo "Validation successful!"

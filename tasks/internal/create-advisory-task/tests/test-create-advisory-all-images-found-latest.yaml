@@ -1,0 +1,86 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-all-images-found-latest
+spec:
+  description: |
+    Verifies that when all images are found in existing advisories,
+    the task returns the latest advisory URL (not just any matching advisory).
+    
+    Test scenario:
+    - Input contains 2 images: alpha123 and beta123
+    - Mock creates 4 advisories with timestamps (1602=newest, 1442=oldest)
+    - Advisory 1601 contains alpha123
+    - Advisory 1602 contains beta123 (newest with matching content)
+    - Since all images are found in existing advisories, no new advisory is created
+    - Task should return advisory 1602 (the latest one with matching content)
+    
+    This ensures retry scenarios return consistent, predictable results
+    (always the latest advisory, not the last one checked in the loop).
+  tasks:
+    - name: run-task
+      taskRef:
+        name: create-advisory-task
+      params:
+        - name: advisory_json
+          value: >-
+            H4sIACi17mgAA91RUWvbMBB+768Iek6s2u1CEYxljEH3NjroSynlIl9tUVnSpHNICPvvO8lOGtjT9jhjZN9339199+koQvTtqOnFtELVzc3yDDgYUCjxgO3iHmjxfYLFO2GHMRnvmFNXTXVzkUkUEQZOUKgZ1iE34lNJULiHIVhUM1ehvWMKHQrn4f7HZ47SwfmQTModMNHiHDPRB6NP+BQsRYtJRxNoUlNSlxA39Ha8zJ7jpYj4ihGdRp72JHqikJSUrdepmqVW2g/SeS4Uz7yMd4SOhDoKM0BXyo4FBeMwfssYj/k5wqEyXs49ZESLkHCTemg+rBXY0APbXQQEnwz5eOCymb6aHDxV5b2hKwJ3dXXNoYW8R9YDUfeGUNMY81wY2vVtvooxWg7DW3dyXPqALhHot01RsNUtfnof/sIFH/9Q3fsU6vUq9tM16V3e9yhezR7b/PPl8euquW6aFe9ym4HA/WdXyvDOW3CdnD6Vj53cS4cks9HNpq5qfsXzL36Wf+/iFunfTGyKiWzG1uJ/ZSIfV78BdpMq4dQDAAA=
+          # advisory_json string before `gzip -c|base64 -w 0` encoding:
+          # {"product_id":123,"product_name":"Red Hat Product","product_version":"1.2.3","product_stream":"tp1",
+          # "cpe":"cpe:/a:example:product:el8","type":"RHSA","synopsis":"test synopsis","topic":"test topic",
+          # "description":"test description","solution":"test solution","references":["https://docs.example.com/notes"],
+          # "content":{"images":[{"containerImage":"quay.io/example/release@sha256:alpha123",
+          # "repository":"example-stream/release","tags":["v1.0", "latest"],"architecture":"amd64",
+          # "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8","cves":{"fixed":{
+          # "CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}},{"containerImage":"quay.io/example/release@sha256:beta123",
+          # "repository":"example-stream/release","tags":["v2.0", "stable"],"architecture":"amd64",
+          # "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8","cves":{"fixed":{
+          # "CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}}]}}
+        - name: origin
+          value: dev-tenant
+        - name: application
+          value: "test-app"
+        - name: config_map_name
+          value: "create-advisory-test-cm"
+        - name: advisory_secret_name
+          value: "create-advisory-secret"
+        - name: errata_secret_name
+          value: "create-advisory-errata-secret"
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+    - name: check-result
+      params:
+        - name: advisory-url
+          value: $(tasks.run-task.results.advisory_url)
+        - name: result-status
+          value: $(tasks.run-task.results.result)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: advisory-url
+            type: string
+          - name: result-status
+            type: string
+        steps:
+          - name: verify-latest-advisory-returned
+            image: quay.io/konflux-ci/release-service-utils:002e438fd71196a7b4613308025358476acc1f8e
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              EXPECTED_URL="https://access.redhat.com/errata/RHSA-2025:1602"
+
+              if [[ "$(params.result-status)" != "Success" ]]; then
+                  echo "Task did not succeed. Status: $(params.result-status)"
+                  exit 1
+              fi
+
+              if [[ "$(params.advisory-url)" != "$EXPECTED_URL" ]]; then
+                  echo "Expected advisory URL: $EXPECTED_URL"
+                  echo "Got advisory URL: $(params.advisory-url)"
+                  exit 1
+              fi
+
+              echo "SUCCESS: Correctly returned latest advisory URL: $(params.advisory-url)"

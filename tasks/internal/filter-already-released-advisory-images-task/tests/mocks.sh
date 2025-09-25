@@ -49,7 +49,12 @@ function yq() {
   advisory_path="$3"
   advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
 
-  if [[ "$2" == ".spec.content.images // []" ]]; then
+  if [[ "$2" == ".spec.type" ]]; then
+    echo "RHBA"
+  elif [[ "$2" == ".metadata.name" ]]; then
+    advisory_year=$(echo "$advisory_path" | awk -F'/' '{print $(NF-2)}')
+    echo "${advisory_year}:${advisory_num}"
+  elif [[ "$2" == ".spec.content.images // []" ]]; then
     case "$advisory_num" in
       1601)
         # Include entries that match our get-image-architectures mock digests

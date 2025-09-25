@@ -187,15 +187,21 @@ spec:
               echo "No existing advisories found."
           fi
 
+          # Track the latest advisory that contains matching content
+          # EXISTING_ADVISORIES is sorted by modification time (newest first)
+          LATEST_ADVISORY_FILE=""
+
           EXISTING_CONTENT=/tmp/existing_content.json
           for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
               ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
               yq -o=json ".spec${spec_content_type} // []" "${ADVISORY_FILE}" > "$EXISTING_CONTENT"
-
               echo "Processing advisory: ${ADVISORY_FILE}"
               echo "Existing content in advisory: "
               cat "$EXISTING_CONTENT"
 
+              # Check if this advisory contains any matching content before filtering
+              CONTENT_BEFORE_FILTER=$(cat "$CONTENT_FILE")
+              
               # Update CONTENT by removing entries that already exist in the advisory
               if [ "$(params.contentType)" == "generic" ]; then
                 # Use purl as unique key for generic artifacts
@@ -221,15 +227,28 @@ spec:
               echo "Remaining entries after filtering:"
               cat "$CONTENT_FILE"
 
+              CONTENT_BEFORE_COUNT=$(jq 'length' <<< "$CONTENT_BEFORE_FILTER")
+              CONTENT_AFTER_COUNT=$(jq 'length' "$CONTENT_FILE")
+              if [[ $CONTENT_BEFORE_COUNT -gt $CONTENT_AFTER_COUNT ]]; then
+                if [[ -z "$LATEST_ADVISORY_FILE" ]]; then
+                  LATEST_ADVISORY_FILE="$ADVISORY_FILE"
+                  FILTERED_COUNT=$((CONTENT_BEFORE_COUNT - CONTENT_AFTER_COUNT))
+                  echo "Tracked latest advisory: $LATEST_ADVISORY_FILE (filtered $FILTERED_COUNT items)"
+                fi
+              fi
+
               # If after filtering, no entries are left, then we can exit early
               if jq -e 'length == 0' "$CONTENT_FILE" >/dev/null; then
-                  echo "Matching advisory exists: ${ADVISORY_FILE}. Skipping creation."
-                  ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${ADVISORY_FILE}"
-                  ADVISORY_TYPE=$(yq -r '.spec.type' "${ADVISORY_FILE}")
-                  ADVISORY_NAME=$(yq -r '.metadata.name' "${ADVISORY_FILE}")
+                  echo "All content found in existing advisories. Skipping creation."
+                  echo "Returning advisory: $LATEST_ADVISORY_FILE"
+                  
+                  ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${LATEST_ADVISORY_FILE}"
+                  ADVISORY_TYPE=$(yq -r '.spec.type' "${LATEST_ADVISORY_FILE}")
+                  ADVISORY_NAME=$(yq -r '.metadata.name' "${LATEST_ADVISORY_FILE}")
                   ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
                   echo -n "Success" > "$(results.result.path)"
                   echo -n "${ADVISORY_URL}" > "$(results.advisory_url.path)"
+                  echo -n "$ADVISORY_INTERNAL_URL" > "$(results.advisory_internal_url.path)"
                   exit 0
               fi
           done
