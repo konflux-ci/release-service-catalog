@@ -18,10 +18,10 @@ function kubectl() {
     # Check if this is the failure propagation test based on the allowedPackages in data.json
     if [ -f "$(params.dataDir)/data.json" ] && grep -q "non-matching-package" "$(params.dataDir)/data.json"; then
       # Return mock opt-in results for failure propagation test (all opted in, but packages will fail validation)
-      echo '{"optInResults": [{"containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297", "fbcOptIn": true}]}'
+      echo '{"optInResults": [{"containerImage": "quay.io/joelanford/example-operator-bundle:0.1.0", "fbcOptIn": true}, {"containerImage": "quay.io/joelanford/example-operator-bundle:0.2.0", "fbcOptIn": true}]}'
     else
-      # Return mock opt-in results for successful integration test
-      echo '{"optInResults": [{"containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297", "fbcOptIn": true}, {"containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297", "fbcOptIn": true}]}'
+      # Return mock opt-in results for successful integration test - bundle images from the FBC fragment
+      echo '{"optInResults": [{"containerImage": "quay.io/joelanford/example-operator-bundle:0.1.0", "fbcOptIn": true}, {"containerImage": "quay.io/joelanford/example-operator-bundle:0.2.0", "fbcOptIn": true}]}'
     fi
   else
     # Forward other kubectl calls to the real command
