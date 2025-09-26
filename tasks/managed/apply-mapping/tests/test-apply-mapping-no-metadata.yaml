@@ -2,13 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-create-pyxis-image-with-gzipped-layers
+  name: test-apply-mapping-no-metadata
 spec:
   description: |
-    Run the create-pyxis-image task with an image that has gzipped layers, to
-    see that we reported the uncompressed digests correctly. The data file
-    also has .pyxis.includeLayers set to true, otherwise the layers would be
-    deleted and not processed.
+    Run the apply-mapping task with a snapshot containing a helm chart component
+    and verify that the resulting snapshot contains no metadata.
+  workspaces:
+    - name: tests-workspace
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -31,10 +31,15 @@ spec:
       type: string
   tasks:
     - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
         results:
           - name: sourceDataArtifact
             type: string
+        workspaces:
+          - name: data
         volumes:
           - name: workdir
             emptyDir: {}
@@ -51,37 +56,43 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:4579b8d372e034d788129fa16185c1278faecd09
+            image: quay.io/konflux-ci/release-service-utils:a58dc96cb28b54cdef2564a346d43a6d7bd4d656
             script: |
-              #!/usr/bin/env bash
+              #!/usr/bin/env sh
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)"/mapped_snapshot.json << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
               {
-                "application": "myapp",
-                "components": [
-                  {
-                    "name": "comp",
-                    "containerImage": "source@sha256:mydigest",
-                    "repositories": [
-                      {
-                        "url": "registry.io/image-with-gzipped-layers",
-                        "tags": [
-                          "testtag"
-                        ]
-                      }
-                    ]
-                  }
-                ]
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "helm-chart",
+                      "repository": "registry.redhat.io/myorg/helm-chart",
+                      "tags": [
+                        "default"
+                      ]
+                    }
+                  ]
+                }
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/mydata.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
               {
-                "pyxis": {
-                  "includeLayers": true
-                }
+                "application": "some-app",
+                "components": [
+                  {
+                    "name": "helm-chart",
+                    "containerImage": "quay.io/myorg/helm-chart@sha256:789abcdef123456",
+                    "source": {
+                      "git": {
+                        "revision": "commit789xyz",
+                        "url": "https://github.com/myorg/helm-chart.git"
+                      }
+                    }
+                  }
+                ]
               }
               EOF
           - name: create-trusted-artifact
@@ -96,16 +107,12 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: create-pyxis-image
+        name: apply-mapping
       params:
-        - name: pyxisSecret
-          value: test-create-pyxis-image-cert
-        - name: server
-          value: stage
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/mapped_snapshot.json
+          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/mydata.json
+          value: $(context.pipelineRun.uid)/test_data.json
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -123,17 +130,20 @@ spec:
       runAfter:
         - setup
     - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       params:
-        - name: pyxisDataPath
-          value: $(tasks.run-task.results.pyxisDataPath)
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
+      runAfter:
+        - run-task
       taskSpec:
+        workspaces:
+          - name: data
         params:
-          - name: pyxisDataPath
-            type: string
           - name: sourceDataArtifact
             type: string
           - name: dataDir
@@ -162,32 +172,19 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:4579b8d372e034d788129fa16185c1278faecd09
+            image: quay.io/konflux-ci/release-service-utils:a58dc96cb28b54cdef2564a346d43a6d7bd4d656
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              if [ "$(wc -l < \
-                "$(params.dataDir)/mock_create_container_image.txt")" != 1 ]; then
-                echo Error: create_container_image was expected to be called 1 time. Actual calls:
-                cat "$(params.dataDir)/mock_create_container_image.txt"
-                exit 1
-              fi
+              TEST_SNAPSHOT="$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 4 ]; then
-                echo Error: oras was expected to be called 4 times. Actual calls:
-                cat "$(params.dataDir)/mock_oras.txt"
-                exit 1
-              fi
+              echo "Test that COMPONENT 0 has no environment variables metadata"
+              test "$(
+                jq '.components[0] | .metadata.env_variables // [] | length' < "$TEST_SNAPSHOT"
+              )" -eq 0
 
-              [ "$(head -n 1 < "$(params.dataDir)/mock_skopeo.txt")" \
-                = "inspect --retry-times 3 --raw docker://registry.io/image-with-gzipped-layers@sha256:mydigest" ]
-
-              # check that the size of the decompressed layers is as expected
-              jq -e '.uncompressed_layers[0].size == 21' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/oras-manifest-fetch-0-0.json"
-              jq -e '.uncompressed_layers[1].size == 9' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/oras-manifest-fetch-0-0.json"
-
-      runAfter:
-        - run-task
+              echo "Test that component has no labels metadata"
+              test "$(
+                jq '.components[0] | .metadata.labels // [] | length' < "$TEST_SNAPSHOT"
+              )" -eq 0

@@ -62,6 +62,11 @@ function skopeo() {
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}, "annotations": {"org.opencontainers.image.version": "1.2.3-beta"}}'
     return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/metadata"* ]]
+  then
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "com.redhat.component": "app01", "description": "it is some app"}, 
+      "Env": ["container=oci", "PATH=usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]}'
+    return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/api-service"* ]]
   then
     echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'

@@ -384,6 +384,7 @@ spec:
                 raw_manifest="$(skopeo inspect --retry-times 3 --no-tags --raw docker://"${IMAGE_REF}" | jq -c)"
                 oci_version_raw="$(jq -r '.annotations."org.opencontainers.image.version" // ""' <<< "$raw_manifest")"
                 build_date="$(jq -r '.annotations."org.opencontainers.image.created" // ""' <<< "$raw_manifest")"
+                env_variables="[]"
                 labels="{}"
             else
                 # This is a regular container image - use standard skopeo inspect
@@ -395,7 +396,28 @@ spec:
                 oci_version_raw="$(jq -r \
                   '.Labels."org.opencontainers.image.version" // ""'\
                   <<< "$image_metadata")"
-                labels="$(jq -c '.Labels' <<< "${image_metadata}")"
+                env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
+                labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+            fi
+
+            # Add image env_variables metadata to component
+            if [ "$(jq 'length' <<< "$env_variables")" -ne 0 ] ; then
+              env_file=$(mktemp)
+              echo "$env_variables" > "$env_file"
+              jq --argjson i "$i" --slurpfile env "$env_file" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {env_variables: $env[0]}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # Add image labels metadata to component
+            if [ "$(jq 'length' <<< "$labels")" -ne 0 ] ; then
+              labels_file=$(mktemp)
+              # Convert labels from {key: value} to [{name: key, value: value}]
+              jq -c 'if . then to_entries | map({name: .key, value: .value}) else [] end' \
+               <<< "$labels" > "$labels_file"
+              jq --argjson i "$i" --slurpfile labels "$labels_file" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {labels: $labels[0]}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             fi
 
             # Transform version to OCI tag format: replace + with _ (convention for OCI compliance)
