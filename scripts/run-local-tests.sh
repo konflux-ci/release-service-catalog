@@ -277,8 +277,8 @@ classify_tasks() {
             continue
         fi
         
-        # Check if task supports Trusted Artifacts (has ociStorage parameter)
-        if yq eval '.spec.params[] | select(.name == "ociStorage") | .name' "$task_file" | grep -q "ociStorage"; then
+        # Check if task supports Trusted Artifacts (uses TA step actions)
+        if grep -q "name: use-trusted-artifact\|name: create-trusted-artifact" "$task_file"; then
             trusted_artifacts_tasks+=("$item")
         else
             pvc_tasks+=("$item")
