@@ -182,20 +182,6 @@ do
     dataDir=/var/workdir/release
   fi
 
-  # while we are converting tasks to use TA, it is possible that a PR will include a Task that does not have the
-  # ociStorage or dataDir params. Therefore we cannot pass them when we start the test pipelinerun. Otherwise, you will
-  # see the error: "Error: param 'ociStorage' not present in spec"
-  ociStorageParamCheck=$(yq '(.spec.params[] | select(.name == "ociStorage"))' "$TASK_COPY")
-  ociStorageParam=""
-  if [ ! -z "${ociStorageParamCheck}" ]; then
-    ociStorageParam="-p ociStorage=${TRUSTED_ARTIFACT_OCI_STORAGE}"
-  fi
-  dataDirParamCheck=$(yq '(.spec.params[] | select(.name == "dataDir"))' "$TASK_COPY")
-  dataDirParam=""
-  if [ ! -z "${dataDirParamCheck}" ]; then
-    dataDirParam="-p dataDir=${dataDir}"
-  fi
-
   rm -f "$TASK_COPY"
 
   for TEST_PATH in ${TEST_PATHS[@]}
@@ -203,6 +189,23 @@ do
     echo "  Installing test pipeline: $TEST_PATH"
     kubectl apply -f $TEST_PATH
     TEST_NAME=$(yq '.metadata.name' $TEST_PATH)
+
+    # If a test is creating a trusted artifact, provide the necessary parameters to it.
+    # This way, we can support testing TA-based tasks which do not produce any artifacts
+    # directly. If a task requires a TA strategy, the test will also need to utilize the
+    # strategy to run successfully.
+    # If a test doesn't use the parameters, it is considered a PVC-only test and should
+    # continue to work.
+    ociStorageParamCheck=$(yq '(.spec.params[] | select(.name == "ociStorage"))' "$TEST_PATH")
+    ociStorageParam=""
+    if [ ! -z "${ociStorageParamCheck}" ]; then
+      ociStorageParam="-p ociStorage=${TRUSTED_ARTIFACT_OCI_STORAGE}"
+    fi
+    dataDirParamCheck=$(yq '(.spec.params[] | select(.name == "dataDir"))' "$TEST_PATH")
+    dataDirParam=""
+    if [ ! -z "${dataDirParamCheck}" ]; then
+      dataDirParam="-p dataDir=${dataDir}"
+    fi
 
     # Sometimes the pipeline is not available immediately
     while ! kubectl get pipeline $TEST_NAME > /dev/null 2>&1
