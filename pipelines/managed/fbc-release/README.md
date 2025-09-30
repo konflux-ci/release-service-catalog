@@ -1,6 +1,6 @@
 # fbc-release pipeline
 
-Tekton release pipeline to interact with FBC Pipeline
+Tekton release pipeline to interact with FBC Pipeline (test)
 
 ## Parameters
 
