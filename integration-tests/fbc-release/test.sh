@@ -819,58 +819,54 @@ verify_multi_component_release() {
     
     local failures=0
     
-    # Check that we have multiple components
+    # After deduplication, we expect exactly 1 component per unique target_index
+    # Multiple fragments for the same target are batched and deduplicated to a single final component
     local component_count
     component_count=$(jq '.status.artifacts.components | length' <<< "${release_json}")
     echo "Checking component count..."
-    
-    if [ "${component_count}" -eq 2 ]; then
-      echo "✅️ Found expected 2 components in release"
+
+    if [ "${component_count}" -eq 1 ]; then
+      echo "✅️ Found expected 1 component in release (after batching and deduplication)"
     else
-      echo "🔴 Expected 2 components, found ${component_count}!"
+      echo "🔴 Expected 1 component, found ${component_count}!"
       failures=$((failures+1))
     fi
 
-    # Check that each component has required fields
-    for i in $(seq 0 $((component_count-1))); do
-      local fbc_fragment ocp_version iib_log
-      fbc_fragment=$(jq -r ".status.artifacts.components[${i}].fbc_fragment // \"\"" <<< "${release_json}")
-      ocp_version=$(jq -r ".status.artifacts.components[${i}].ocp_version // \"\"" <<< "${release_json}")
-      iib_log=$(jq -r ".status.artifacts.components[${i}].iibLog // \"\"" <<< "${release_json}")
+    # Verify the component has all required fields and a valid index_image
+    local fbc_fragment ocp_version iib_log index_image
+    fbc_fragment=$(jq -r ".status.artifacts.components[0].fbc_fragment // \"\"" <<< "${release_json}")
+    ocp_version=$(jq -r ".status.artifacts.components[0].ocp_version // \"\"" <<< "${release_json}")
+    iib_log=$(jq -r ".status.artifacts.components[0].iibLog // \"\"" <<< "${release_json}")
+    index_image=$(jq -r ".status.artifacts.components[0].index_image // \"\"" <<< "${release_json}")
 
-      echo "Verifying component (index ${i})..."
-      
-      if [ -n "${fbc_fragment}" ]; then
-        echo "✅️ Component fbc_fragment: ${fbc_fragment}"
-      else
-        echo "🔴 Component fbc_fragment was empty!"
-        failures=$((failures+1))
-      fi
+    echo "Verifying component..."
 
-      if [ -n "${ocp_version}" ]; then
-        echo "✅️ Component ocp_version: ${ocp_version}"
-      else
-        echo "🔴 Component ocp_version was empty!"
-        failures=$((failures+1))
-      fi
-
-      if [ -n "${iib_log}" ]; then
-        echo "✅️ Component iib_log: ${iib_log}"
-      else
-        echo "🔴 Component iib_log was empty!"
-        failures=$((failures+1))
-      fi
-    done
-
-    # Verify batching behavior by checking that components share the same index image
-    local comp1_index_image comp2_index_image
-    comp1_index_image=$(jq -r '.status.artifacts.components[0].index_image // ""' <<< "${release_json}")
-    comp2_index_image=$(jq -r '.status.artifacts.components[1].index_image // ""' <<< "${release_json}")
-
-    if [ "${comp1_index_image}" = "${comp2_index_image}" ] && [ -n "${comp1_index_image}" ]; then
-      echo "✅️ Components share same index_image (successful batching): ${comp1_index_image}"
+    if [ -n "${fbc_fragment}" ]; then
+      echo "✅️ Component fbc_fragment: ${fbc_fragment}"
     else
-      echo "🔴 Components have different index_images (batching failed): comp1=${comp1_index_image}, comp2=${comp2_index_image}"
+      echo "🔴 Component fbc_fragment was empty!"
+      failures=$((failures+1))
+    fi
+
+    if [ -n "${ocp_version}" ]; then
+      echo "✅️ Component ocp_version: ${ocp_version}"
+    else
+      echo "🔴 Component ocp_version was empty!"
+      failures=$((failures+1))
+    fi
+
+    if [ -n "${iib_log}" ]; then
+      echo "✅️ Component iib_log: ${iib_log}"
+    else
+      echo "🔴 Component iib_log was empty!"
+      failures=$((failures+1))
+    fi
+
+    # Verify batching success by checking that the component has a valid index_image
+    if [ -n "${index_image}" ]; then
+      echo "✅️ Component has valid index_image (successful batching): ${index_image}"
+    else
+      echo "🔴 Component index_image was empty (batching failed)!"
       failures=$((failures+1))
     fi
 

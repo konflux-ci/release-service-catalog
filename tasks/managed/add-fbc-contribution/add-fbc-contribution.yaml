@@ -594,6 +594,26 @@ spec:
         # Execute the multi-OCP processing
         process_all_ocp_groups
 
+        # Deduplicate results: keep only the last component per unique target_index (the last one)
+        # This ensures downstream tasks (collect-index-images, create-pyxis-image) use the correct digest
+        UNIQUE_TARGETS=$(jq -r '[.components[].target_index] | unique | length' "$RESULTS_FILE")
+        TOTAL_COMPONENTS=$(jq -r '.components | length' "$RESULTS_FILE")
+
+        if [[ "$TOTAL_COMPONENTS" -gt "$UNIQUE_TARGETS" ]]; then
+          echo "Found $TOTAL_COMPONENTS components for $UNIQUE_TARGETS unique targets"
+          echo "Keeping only the last (most recent) index for each OCP target"
+
+          RESULTS_TEMP_FILE="/tmp/results-temp.json"
+          jq '[.components | group_by(.target_index) | .[] | last] | {components: .}' \
+            "$RESULTS_FILE" > "$RESULTS_TEMP_FILE"
+          mv "$RESULTS_TEMP_FILE" "$RESULTS_FILE"
+
+          DEDUPLICATED_COUNT=$(jq -r '.components | length' "$RESULTS_FILE")
+          echo "Deduplicated from $TOTAL_COMPONENTS to $DEDUPLICATED_COUNT components"
+        else
+          echo "No deduplication needed ($TOTAL_COMPONENTS components, $UNIQUE_TARGETS unique targets)"
+        fi
+
         # Get the final batch result for legacy compatibility (use last successful batch from any group)
         # Find the most recent batch result file
         latest_result_file=$(find "$(params.dataDir)" -name "ir-*-batch-*-result.json" \
