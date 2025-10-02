@@ -1,0 +1,67 @@
+---
+# If triggered via /hotfix comment on a PR, you get PRs for both staging and production.
+# If you only want a PR for one of the branches, you have to manually trigger the workflow.
+name: Hot Fix PR
+on:
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: PR number to hot fix (must be merged into development branch)
+        type: string
+        required: true
+      target-branches:
+        description: Which branches to create hotfix PRs for
+        type: choice
+        required: true
+        default: both
+        options:
+          - both
+          - staging
+          - production
+      dry-run:
+        description: |
+          Dry run: Print out the changes that would be made but do not create the PRs
+        type: boolean
+        required: true
+        default: false
+  issue_comment:
+    types: [created]
+jobs:
+  hot-fix-pr:
+    name: Hot Fix PR
+    runs-on: ubuntu-latest
+    # Only run on manual dispatch or when comment is "/hotfix" on a PR
+    if: |
+      github.event_name == 'workflow_dispatch' || 
+      (github.event_name == 'issue_comment' && 
+       github.event.issue.pull_request != null && 
+       github.event.comment.body == '/hotfix')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4
+        with:
+          fetch-depth: 0  # Need full history to check commit relationships
+      - name: Set PR number
+        id: set-pr
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "pr_number=${{ inputs.pr-number }}" >> $GITHUB_OUTPUT
+            echo "dry_run=${{ inputs.dry-run }}" >> $GITHUB_OUTPUT
+            echo "is_comment_trigger=false" >> $GITHUB_OUTPUT
+          else
+            echo "pr_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+            echo "dry_run=false" >> $GITHUB_OUTPUT
+            echo "is_comment_trigger=true" >> $GITHUB_OUTPUT
+          fi
+      - name: Run hot fix script
+        run: |
+          .github/scripts/hot_fix_pr.sh --pr-number "$PR_NUMBER" \
+            --dry-run "$DRY_RUN" --comment-trigger "$IS_COMMENT_TRIGGER" \
+            --target-branches "$TARGET_BRANCHES"
+        env:
+          PR_NUMBER: ${{ steps.set-pr.outputs.pr_number }}
+          DRY_RUN: ${{ steps.set-pr.outputs.dry_run }}
+          # Default to 'both' for comment triggers since inputs.target-branches won't exist
+          TARGET_BRANCHES: ${{ inputs.target-branches || 'both' }}
+          IS_COMMENT_TRIGGER: ${{ steps.set-pr.outputs.is_comment_trigger }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
