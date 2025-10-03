@@ -24,6 +24,7 @@ import requests
 import yaml
 import re
 import logging
+from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
@@ -51,7 +52,7 @@ GITHUB_REPO_URL = "https://github.com/konflux-ci/release-service-catalog"
 REPO_ROOT = Path(__file__).parent.parent.parent
 
 # AI Configuration
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 MAX_COMMITS_FOR_AI = 50
 AI_TEMPERATURE = 0.7
 AI_MAX_TOKENS = 2500
