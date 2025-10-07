@@ -1,6 +1,6 @@
 # push-oot-kmods pipeline
 
-Tekton pipeline to sign out-of-tree kernel modules and upload them to an internal Gitlab repository. Optionally builds RPM packages from signed modules when buildRpm parameter is set to "yes".
+Tekton pipeline to sign out-of-tree kernel modules and upload them to an internal Gitlab repository.
 
 ## Parameters
 
@@ -20,4 +20,3 @@ Tekton pipeline to sign out-of-tree kernel modules and upload them to an interna
 | dataDir                         | The location where data will be stored                                                                                             | Yes      | /var/workdir/release                                      |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | Yes      | main                                                      |
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
-| buildRpm                        | Whether to build RPM packages from signed kernel modules (yes/no)                                                                  | Yes      | yes                                                       |
