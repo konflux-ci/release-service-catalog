@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-build-oot-kmods-rpms
+  name: test-build-oot-kmods-rpms-custom-output-path
 spec:
   description: |
-    Test the build-oot-kmods-rpms task
+    Test the build-oot-kmods-rpms task with custom RPM output path parameter
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -57,20 +57,19 @@ spec:
 
               # Create test environment file with driver information
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/envfile" << EOF
-              DRIVER_VENDOR=nvidia
-              DRIVER_VERSION=555.42.02
-              KERNEL_VERSION=6.5.0-1.el9.x86_64
+              DRIVER_VENDOR=custom-vendor
+              DRIVER_VERSION=2.4.6
+              KERNEL_VERSION=6.9.0-1.el9.x86_64
               EOF
 
               # Create mock signed kernel module files
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/nvidia.ko"
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/nvidia-drm.ko"
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/nvidia-modeset.ko"
+              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/custom-driver.ko"
+              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/custom-helper.ko"
 
               # Make them look like kernel modules (minimal binary header)
               for ko in "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/"*.ko; do
                 printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "$ko"
-                printf "nvidia kernel module test data" >> "$ko"
+                printf "custom kernel module test data" >> "$ko"
               done
           - name: create-trusted-artifact
             ref:
@@ -89,7 +88,7 @@ spec:
         - name: signedKmodsPath
           value: $(context.pipelineRun.uid)/signed-kmods
         - name: rpmOutputPath
-          value: $(context.pipelineRun.uid)/rpms
+          value: $(context.pipelineRun.uid)/custom-rpm-output  # Custom output path
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -145,80 +144,74 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
-          - name: check-result
+          - name: check-custom-path
             image: quay.io/konflux-ci/release-service-utils:001c270152854f9184d29fb6ed2dfc93c8749930ed1cf87a01f0cf7b32c1c39c
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              RPM_OUTPUT_PATH="$(params.dataDir)/$(params.pipelineRunUid)/rpms"
+              CUSTOM_RPM_OUTPUT_PATH="$(params.dataDir)/$(params.pipelineRunUid)/custom-rpm-output"
+              DEFAULT_RPM_OUTPUT_PATH="$(params.dataDir)/$(params.pipelineRunUid)/rpms"
 
-              echo "Checking RPM output directory: ${RPM_OUTPUT_PATH}"
+              echo "Checking custom RPM output path: ${CUSTOM_RPM_OUTPUT_PATH}"
 
-              # Check that RPMs were created
-              if ! ls "${RPM_OUTPUT_PATH}"/*.rpm >/dev/null 2>&1; then
-                echo "ERROR: No RPM files found in ${RPM_OUTPUT_PATH}"
-                echo "Contents of RPM output directory:"
-                ls -la "${RPM_OUTPUT_PATH}" || echo "Directory does not exist"
+              # Verify that RPMs were created in the custom path, not the default path
+              if ! ls "${CUSTOM_RPM_OUTPUT_PATH}"/*.rpm >/dev/null 2>&1; then
+                echo "ERROR: No RPM files found in custom output path ${CUSTOM_RPM_OUTPUT_PATH}"
+                echo "Contents of custom output directory:"
+                ls -la "${CUSTOM_RPM_OUTPUT_PATH}" || echo "Custom output directory does not exist"
                 exit 1
               fi
 
-              echo "Found RPM files:"
-              ls -la "${RPM_OUTPUT_PATH}"/*.rpm
+              # Verify RPMs were NOT created in the default path
+              if ls "${DEFAULT_RPM_OUTPUT_PATH}"/*.rpm >/dev/null 2>&1; then
+                echo "ERROR: RPM files found in default path when custom path was specified"
+                echo "Default path contents:"
+                ls -la "${DEFAULT_RPM_OUTPUT_PATH}"/*.rpm
+                exit 1
+              fi
 
-              # Verify expected RPM naming pattern
-              expected_rpm="${RPM_OUTPUT_PATH}/nvidia-kmods-555.42.02-1.6_5_0_1_el9_x86_64.x86_64.rpm"
+              echo "RPMs correctly created in custom output path"
+
+              # Verify expected RPM naming pattern with custom vendor
+              expected_rpm="${CUSTOM_RPM_OUTPUT_PATH}/custom-vendor-kmods-2.4.6-1.6_9_0_1_el9_x86_64.x86_64.rpm"
               if [ ! -f "$expected_rpm" ]; then
                 echo "ERROR: Expected RPM file not found: $expected_rpm"
-                echo "Available RPM files:"
-                ls -la "${RPM_OUTPUT_PATH}"/*.rpm
+                echo "Available RPM files in custom path:"
+                ls -la "${CUSTOM_RPM_OUTPUT_PATH}"/*.rpm
                 exit 1
               fi
 
-              echo "Found expected RPM: $expected_rpm"
+              echo "Found expected RPM with custom vendor: $expected_rpm"
 
-              # Basic RPM validation - check if file is a valid RPM
+              # Basic RPM validation
               if ! rpm -qp --queryformat '%{NAME}-%{VERSION}-%{RELEASE}\n' "$expected_rpm" >/dev/null 2>&1; then
                 echo "ERROR: Generated file is not a valid RPM"
                 exit 1
               fi
 
-              # Get RPM metadata
+              # Get and verify RPM metadata
               rpm_name=$(rpm -qp --queryformat '%{NAME}' "$expected_rpm")
               rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$expected_rpm")
-              rpm_release=$(rpm -qp --queryformat '%{RELEASE}' "$expected_rpm")
               rpm_summary=$(rpm -qp --queryformat '%{SUMMARY}' "$expected_rpm")
 
               echo "RPM validation successful:"
               echo "  Name: $rpm_name"
               echo "  Version: $rpm_version"
-              echo "  Release: $rpm_release"
               echo "  Summary: $rpm_summary"
 
-              # Verify RPM metadata matches expected values
-              if [ "$rpm_name" != "nvidia-kmods" ]; then
-                echo "ERROR: RPM name mismatch. Expected: nvidia-kmods, Got: $rpm_name"
+              # Verify RPM metadata matches expected values for custom vendor
+              if [ "$rpm_name" != "custom-vendor-kmods" ]; then
+                echo "ERROR: RPM name mismatch. Expected: custom-vendor-kmods, Got: $rpm_name"
                 exit 1
               fi
 
-              if [ "$rpm_version" != "555.42.02" ]; then
-                echo "ERROR: RPM version mismatch. Expected: 555.42.02, Got: $rpm_version"
+              if [ "$rpm_version" != "2.4.6" ]; then
+                echo "ERROR: RPM version mismatch. Expected: 2.4.6, Got: $rpm_version"
                 exit 1
               fi
 
-              echo "All RPM metadata validation passed"
-
-              # List RPM contents to verify kernel modules are included
-              echo "RPM contents:"
-              rpm -qlp "$expected_rpm"
-
-              # Verify kernel modules are in the correct location
-              if ! rpm -qlp "$expected_rpm" | grep -q "/lib/modules/6.5.0-1.el9.x86_64/extra/nvidia/.*\.ko$"; then
-                echo "ERROR: Kernel modules not found in expected location within RPM"
-                exit 1
-              fi
-
-              echo "Kernel modules found in correct RPM location"
-              echo "build-oot-kmods-rpms test completed successfully"
+              echo "All custom output path validation passed"
+              echo "Custom output path test completed successfully"
       runAfter:
         - run-task

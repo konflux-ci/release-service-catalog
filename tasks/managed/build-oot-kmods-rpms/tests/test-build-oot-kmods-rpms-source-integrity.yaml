@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-build-oot-kmods-rpms
+  name: test-build-oot-kmods-rpms-source-integrity
 spec:
   description: |
-    Test the build-oot-kmods-rpms task
+    Test the build-oot-kmods-rpms task to ensure it uses signed kmods and preserves source integrity
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -57,21 +57,23 @@ spec:
 
               # Create test environment file with driver information
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/envfile" << EOF
-              DRIVER_VENDOR=nvidia
-              DRIVER_VERSION=555.42.02
-              KERNEL_VERSION=6.5.0-1.el9.x86_64
+              DRIVER_VENDOR=test-vendor
+              DRIVER_VERSION=1.2.3
+              KERNEL_VERSION=6.8.0-1.el9.x86_64
               EOF
 
-              # Create mock signed kernel module files
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/nvidia.ko"
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/nvidia-drm.ko"
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/nvidia-modeset.ko"
+              # Create mock signed kernel module files with distinct content for integrity testing
+              KMODS_DIR="$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods"
+              printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "${KMODS_DIR}/test-module1.ko"
+              printf "SIGNED_MODULE_1_CONTENT_MARKER" >> "${KMODS_DIR}/test-module1.ko"
 
-              # Make them look like kernel modules (minimal binary header)
-              for ko in "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/"*.ko; do
-                printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "$ko"
-                printf "nvidia kernel module test data" >> "$ko"
-              done
+              printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "${KMODS_DIR}/test-module2.ko"
+              printf "SIGNED_MODULE_2_CONTENT_MARKER" >> "${KMODS_DIR}/test-module2.ko"
+
+              # Calculate checksums for integrity verification
+              echo "Original file checksums:"
+              sha256sum "${KMODS_DIR}/"*.ko > "${KMODS_DIR}/checksums.txt"
+              cat "${KMODS_DIR}/checksums.txt"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -145,29 +147,39 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
-          - name: check-result
+          - name: check-integrity
             image: quay.io/konflux-ci/release-service-utils:001c270152854f9184d29fb6ed2dfc93c8749930ed1cf87a01f0cf7b32c1c39c
             script: |
               #!/usr/bin/env bash
               set -eux
 
+              SIGNED_KMODS_PATH="$(params.dataDir)/$(params.pipelineRunUid)/signed-kmods"
               RPM_OUTPUT_PATH="$(params.dataDir)/$(params.pipelineRunUid)/rpms"
 
-              echo "Checking RPM output directory: ${RPM_OUTPUT_PATH}"
+              echo "Checking source integrity and build results..."
+
+              # Verify that original signed kmods still exist and are unchanged
+              if [ ! -f "${SIGNED_KMODS_PATH}/checksums.txt" ]; then
+                echo "ERROR: Original checksums file not found"
+                exit 1
+              fi
+
+              echo "Verifying original signed kmods integrity:"
+              cd "${SIGNED_KMODS_PATH}"
+              if ! sha256sum -c checksums.txt; then
+                echo "ERROR: Original signed kmods were modified during build process!"
+                exit 1
+              fi
+              echo "Original signed kmods integrity preserved"
 
               # Check that RPMs were created
               if ! ls "${RPM_OUTPUT_PATH}"/*.rpm >/dev/null 2>&1; then
                 echo "ERROR: No RPM files found in ${RPM_OUTPUT_PATH}"
-                echo "Contents of RPM output directory:"
-                ls -la "${RPM_OUTPUT_PATH}" || echo "Directory does not exist"
                 exit 1
               fi
 
-              echo "Found RPM files:"
-              ls -la "${RPM_OUTPUT_PATH}"/*.rpm
-
-              # Verify expected RPM naming pattern
-              expected_rpm="${RPM_OUTPUT_PATH}/nvidia-kmods-555.42.02-1.6_5_0_1_el9_x86_64.x86_64.rpm"
+              # Find the expected RPM
+              expected_rpm="${RPM_OUTPUT_PATH}/test-vendor-kmods-1.2.3-1.6_8_0_1_el9_x86_64.x86_64.rpm"
               if [ ! -f "$expected_rpm" ]; then
                 echo "ERROR: Expected RPM file not found: $expected_rpm"
                 echo "Available RPM files:"
@@ -177,48 +189,45 @@ spec:
 
               echo "Found expected RPM: $expected_rpm"
 
-              # Basic RPM validation - check if file is a valid RPM
-              if ! rpm -qp --queryformat '%{NAME}-%{VERSION}-%{RELEASE}\n' "$expected_rpm" >/dev/null 2>&1; then
-                echo "ERROR: Generated file is not a valid RPM"
-                exit 1
-              fi
+              # Extract and verify RPM contents contain the correct kernel modules
+              echo "Extracting RPM to verify contents..."
+              TEMP_EXTRACT_DIR="${RPM_OUTPUT_PATH}/rpm_extract"
+              mkdir -p "${TEMP_EXTRACT_DIR}"
+              cd "${TEMP_EXTRACT_DIR}"
 
-              # Get RPM metadata
-              rpm_name=$(rpm -qp --queryformat '%{NAME}' "$expected_rpm")
-              rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$expected_rpm")
-              rpm_release=$(rpm -qp --queryformat '%{RELEASE}' "$expected_rpm")
-              rpm_summary=$(rpm -qp --queryformat '%{SUMMARY}' "$expected_rpm")
-
-              echo "RPM validation successful:"
-              echo "  Name: $rpm_name"
-              echo "  Version: $rpm_version"
-              echo "  Release: $rpm_release"
-              echo "  Summary: $rpm_summary"
-
-              # Verify RPM metadata matches expected values
-              if [ "$rpm_name" != "nvidia-kmods" ]; then
-                echo "ERROR: RPM name mismatch. Expected: nvidia-kmods, Got: $rpm_name"
-                exit 1
-              fi
-
-              if [ "$rpm_version" != "555.42.02" ]; then
-                echo "ERROR: RPM version mismatch. Expected: 555.42.02, Got: $rpm_version"
-                exit 1
-              fi
-
-              echo "All RPM metadata validation passed"
-
-              # List RPM contents to verify kernel modules are included
-              echo "RPM contents:"
-              rpm -qlp "$expected_rpm"
+              # Extract RPM
+              rpm2cpio "$expected_rpm" | cpio -idmv
 
               # Verify kernel modules are in the correct location
-              if ! rpm -qlp "$expected_rpm" | grep -q "/lib/modules/6.5.0-1.el9.x86_64/extra/nvidia/.*\.ko$"; then
-                echo "ERROR: Kernel modules not found in expected location within RPM"
+              expected_ko_dir="./lib/modules/6.8.0-1.el9.x86_64/extra/test-vendor"
+              if [ ! -d "$expected_ko_dir" ]; then
+                echo "ERROR: Expected kernel module directory not found: $expected_ko_dir"
+                find . -name "*.ko" || echo "No .ko files found in RPM"
                 exit 1
               fi
 
-              echo "Kernel modules found in correct RPM location"
-              echo "build-oot-kmods-rpms test completed successfully"
+              # Verify specific kernel modules exist
+              if [ ! -f "$expected_ko_dir/test-module1.ko" ] || [ ! -f "$expected_ko_dir/test-module2.ko" ]; then
+                echo "ERROR: Expected kernel modules not found in RPM"
+                ls -la "$expected_ko_dir" || echo "Directory listing failed"
+                exit 1
+              fi
+
+              # Verify kernel module content integrity (check for our markers)
+              if ! grep -q "SIGNED_MODULE_1_CONTENT_MARKER" "$expected_ko_dir/test-module1.ko"; then
+                echo "ERROR: Module 1 content marker not found - module integrity compromised"
+                exit 1
+              fi
+
+              if ! grep -q "SIGNED_MODULE_2_CONTENT_MARKER" "$expected_ko_dir/test-module2.ko"; then
+                echo "ERROR: Module 2 content marker not found - module integrity compromised"
+                exit 1
+              fi
+
+              echo "Kernel module content integrity verified"
+              echo "Source integrity test completed successfully"
+
+              # Cleanup
+              rm -rf "${TEMP_EXTRACT_DIR}"
       runAfter:
         - run-task
