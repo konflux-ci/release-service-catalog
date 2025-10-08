@@ -113,29 +113,51 @@ class CommitCollector:
             raise subprocess.CalledProcessError(result.returncode, cmd, result.stderr)
         return result.stdout.strip()
     
-    def get_commits_with_diff(self, from_branch: str, to_branch: str) -> List[Dict]:
+    def get_commits_with_diff(self, from_branch: str, to_branch: str, commit_range: str = None) -> List[Dict]:
         """Collect commits with detailed diff information."""
-        # Fetch latest remote state
-        self.run_git_command(["fetch", "--no-tags", "origin"])
+        # Fetch latest remote state (skip if commit_range provided - already captured before promotion)
+        if not commit_range:
+            self.run_git_command(["fetch", "--no-tags", "origin"])
         
-        # Get commit range - try origin branches first, fallback to local
-        try:
-            rev_range = f"origin/{to_branch}..origin/{from_branch}"
+        # Use provided commit range or determine it
+        if commit_range:
+            rev_range = commit_range
+            logger.info(f"Using provided commit range: {rev_range}")
+        else:
+            # Get commit range - try origin branches first, fallback to local
+            try:
+                rev_range = f"origin/{to_branch}..origin/{from_branch}"
+            except subprocess.CalledProcessError:
+                logger.warning("Origin branches not found, trying local branches")
+                rev_range = f"{to_branch}..{from_branch}"
+        
+        # Handle different commit range formats
+        if ".." in rev_range:
+            # Standard range format (e.g., "origin/production..origin/staging")
             log_cmd = [
                 "log", rev_range,
                 "--pretty=format:%H||%s||%an||%ad||%ae",
                 "--date=short"
             ]
-            logs = self.run_git_command(log_cmd).split("\n")
-        except subprocess.CalledProcessError:
-            logger.warning("Origin branches not found, trying local branches")
-            rev_range = f"{to_branch}..{from_branch}"
-            log_cmd = [
-                "log", rev_range,
-                "--pretty=format:%H||%s||%an||%ad||%ae",
-                "--date=short"
-            ]
-            logs = self.run_git_command(log_cmd).split("\n")
+        else:
+            # Single commit or space-separated commits
+            commits = rev_range.split()
+            if len(commits) == 1:
+                # Single commit
+                log_cmd = [
+                    "log", commits[0],
+                    "--pretty=format:%H||%s||%an||%ad||%ae",
+                    "--date=short",
+                    "-1"
+                ]
+            else:
+                # Multiple commits
+                log_cmd = [
+                    "log", "--pretty=format:%H||%s||%an||%ad||%ae",
+                    "--date=short"
+                ] + commits
+        
+        logs = self.run_git_command(log_cmd).split("\n")
         commits = []
         
         for line in logs:
@@ -719,14 +741,21 @@ class EmailSender:
 
 def main():
     """Main function to generate and send promotion report."""
-    if len(sys.argv) != 3:
-        logger.error("Usage: python generate_promotion_report.py <from_branch> <to_branch>")
+    if len(sys.argv) < 3 or len(sys.argv) > 5:
+        logger.error("Usage: python generate_promotion_report.py <from_branch> <to_branch> [--commit-range <range>]")
         logger.error("Example: python generate_promotion_report.py development staging")
+        logger.error("Example: python generate_promotion_report.py staging production --commit-range origin/production..origin/staging")
         sys.exit(1)
     
     from_branch = sys.argv[1]
     to_branch = sys.argv[2]
     promotion_type = f"{from_branch}-to-{to_branch}"
+    
+    # Parse optional commit range parameter
+    commit_range = None
+    if len(sys.argv) >= 5 and sys.argv[3] == "--commit-range":
+        commit_range = sys.argv[4]
+        logger.info(f"Using provided commit range: {commit_range}")
     
     logger.info(f"🚀 Generating promotion report: {from_branch} → {to_branch}")
     
@@ -738,7 +767,7 @@ def main():
         
         # Collect commits
         logger.info("📊 Collecting commits...")
-        commits = collector.get_commits_with_diff(from_branch, to_branch)
+        commits = collector.get_commits_with_diff(from_branch, to_branch, commit_range)
         
         if not commits:
             logger.info("ℹ️ No commits found for this promotion")

@@ -46,6 +46,46 @@ jobs:
         with:
           fetch-depth: 0  # Fetch full history for commit analysis
       
+      - name: Capture commits for report (if email report requested)
+        if: inputs.send-email-report == true
+        id: capture-commits
+        run: |
+          # Determine source and target branches
+          if [ "${{ inputs.promotion-type }}" = "development-to-staging" ]; then
+            FROM_BRANCH="development"
+            TO_BRANCH="staging"
+          else
+            FROM_BRANCH="staging"
+            TO_BRANCH="production"
+          fi
+          
+          # Fetch latest remote state
+          git fetch --no-tags origin
+          
+          # Get commit range and store in file for later use
+          echo "FROM_BRANCH=$FROM_BRANCH" >> $GITHUB_ENV
+          echo "TO_BRANCH=$TO_BRANCH" >> $GITHUB_ENV
+          
+          # Capture the commit range before promotion
+          COMMIT_RANGE="origin/$TO_BRANCH..origin/$FROM_BRANCH"
+          echo "COMMIT_RANGE=$COMMIT_RANGE" >> $GITHUB_ENV
+          
+          # Get commit hashes and store them
+          COMMITS=$(git log --pretty=format:"%H" $COMMIT_RANGE | head -50)
+          echo "COMMITS<<EOF" >> $GITHUB_ENV
+          echo "$COMMITS" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          # Store commits in a file for manual recovery
+          echo "$COMMITS" > /tmp/promoted_commits.txt
+          
+          # Also capture the current HEAD of source branch for reference
+          SOURCE_HEAD=$(git rev-parse origin/$FROM_BRANCH)
+          echo "SOURCE_HEAD=$SOURCE_HEAD" >> $GITHUB_ENV
+          
+          echo "📊 Captured $(echo "$COMMITS" | wc -l) commits for report generation"
+          echo "📊 Source branch HEAD: $SOURCE_HEAD"
+
       - name: Run branch promotion script
         id: promote
         run: |
@@ -78,16 +118,9 @@ jobs:
         if: |
           steps.promote.outcome == 'success' && 
           inputs.send-email-report == true
+        id: generate-report
+        continue-on-error: true
         run: |
-          # Determine source and target branches
-          if [ "${{ inputs.promotion-type }}" = "development-to-staging" ]; then
-            FROM_BRANCH="development"
-            TO_BRANCH="staging"
-          else
-            FROM_BRANCH="staging"
-            TO_BRANCH="production"
-          fi
-          
           # Create secret files securely
           echo "${{ secrets.GEMINI_API_KEY }}" > /tmp/gemini_api_key
           echo "${{ secrets.SMTP_USERNAME }}" > /tmp/smtp_username  
@@ -95,8 +128,8 @@ jobs:
           echo "${{ secrets.GH_TOKEN }}" > /tmp/gh_token
           chmod 600 /tmp/gemini_api_key /tmp/smtp_username /tmp/smtp_password /tmp/gh_token
           
-          # Generate the promotion report
-          python .github/scripts/generate_promotion_report.py $FROM_BRANCH $TO_BRANCH
+          # Generate the promotion report using captured commit range
+          python .github/scripts/generate_promotion_report.py $FROM_BRANCH $TO_BRANCH --commit-range "$COMMIT_RANGE"
           
           # Clean up secret files
           rm -f /tmp/gemini_api_key /tmp/smtp_username /tmp/smtp_password /tmp/gh_token
@@ -111,3 +144,18 @@ jobs:
           SMTP_USERNAME_FILE: /tmp/smtp_username
           SMTP_PASSWORD_FILE: /tmp/smtp_password
           GH_TOKEN_FILE: /tmp/gh_token
+      
+      - name: Report generation status
+        if: always() && inputs.send-email-report == true
+        run: |
+          if [ "${{ steps.promote.outcome }}" = "success" ]; then
+            if [ "${{ steps.generate-report.outcome }}" = "success" ]; then
+              echo "✅ Promotion and email report completed successfully"
+            else
+              echo "⚠️ WARNING: Promotion succeeded but email report generation failed"
+              echo "📧 Report can be generated manually using commit range: $COMMIT_RANGE"
+              echo "📖 See documentation for manual report generation steps"
+            fi
+          else
+            echo "❌ Promotion failed - no report generated"
+          fi
