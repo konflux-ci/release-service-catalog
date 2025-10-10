@@ -54,6 +54,24 @@ spec:
       description: The link to the log from the IIB request
     - name: exitCode
       description: The exit code from the task
+  volumes:
+    - name: service-account-secret
+      secret:
+        secretName: $(params.iibServiceAccountSecret)
+        defaultMode: 0400
+    - name: iib-services-config-vol
+      secret:
+        secretName: iib-services-config
+        defaultMode: 0400
+    - name: iib-overwrite-fromimage-credentials-vol
+      secret:
+        secretName: iib-overwrite-fromimage-credentials
+        defaultMode: 0400
+    - name: publishing-credentials-vol
+      secret:
+        optional: true
+        secretName: $(params.publishingCredentials)
+        defaultMode: 0400
   steps:
     - name: update-fbc-catalog-prepare-and-call-iib-step
       image: >-
@@ -64,37 +82,33 @@ spec:
         requests:
           memory: 512Mi
           cpu: '1'
+      volumeMounts:
+        - name: service-account-secret
+          mountPath: /mnt/service-account-secret
+        - name: iib-services-config-vol
+          mountPath: /mnt/iib-services-config
+        - name: iib-overwrite-fromimage-credentials-vol
+          mountPath: /mnt/iib-overwrite-fromimage-credentials
+        - name: publishing-credentials-vol
+          mountPath: /mnt/publishing-credentials
       env:
-        - name: IIB_SERVICE_URL
-          valueFrom:
-            secretKeyRef:
-              name: iib-services-config
-              key: url
-        - name: IIB_OVERWRITE_FROM_INDEX_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: iib-overwrite-fromimage-credentials
-              key: username
-        - name: IIB_OVERWRITE_FROM_INDEX_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: iib-overwrite-fromimage-credentials
-              key: token
-        - name: KRB5_CONF_CONTENT
-          valueFrom:
-            secretKeyRef:
-              name: iib-services-config
-              key: krb5.conf
         - name: FBC_FRAGMENTS
           value: $(params.fbcFragments)
-        - name: PUBLISHING_CREDENTIAL
-          valueFrom:
-            secretKeyRef:
-              key: targetIndexCredential
-              name: $(params.publishingCredentials)
-              optional: true
       script: |
         #!/usr/bin/env bash
+        
+        IIB_SERVICE_URL="$(cat /mnt/iib-services-config/url)"
+        KRB5_CONF_CONTENT="$(cat /mnt/iib-services-config/krb5.conf)"
+
+        IIB_OVERWRITE_FROM_INDEX_USERNAME="$(cat /mnt/iib-overwrite-fromimage-credentials/username)"
+        IIB_OVERWRITE_FROM_INDEX_TOKEN="$(cat /mnt/iib-overwrite-fromimage-credentials/token)"
+
+        PUBLISHING_CREDENTIAL_PATH="/mnt/publishing-credentials/targetIndexCredential"
+        if [ -f "${PUBLISHING_CREDENTIAL_PATH}" ] && [ -s "${PUBLISHING_CREDENTIAL_PATH}" ]; then
+          PUBLISHING_CREDENTIAL="$(cat "${PUBLISHING_CREDENTIAL_PATH}")"
+        else
+          PUBLISHING_CREDENTIAL=""
+        fi
 
         # checks if there is any previous build for the same set of fbc_fragments.
         # fragments are sorted for comparison to ensure consistent matching.
@@ -219,7 +233,7 @@ spec:
           echo -n 1 > "$(results.exitCode.path)"
           exit 1
         fi
-        
+
         # Use pre-determined publishing decisions from prepare-fbc-parameters
         echo "Processing fragments: ${FBC_FRAGMENTS}"
         mustOverwriteFromIndexImage="$(params.mustOverwriteFromIndexImage)"
@@ -281,9 +295,6 @@ spec:
         
         # compress and store the response only after error check passes
         echo "${iib_response}" | gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"
-      volumeMounts:
-        - name: service-account-secret
-          mountPath: /mnt/service-account-secret
     - name: update-fbc-catalog-wait-for-iib-build-step
       image: >-
         quay.io/konflux-ci/release-service-utils:9c82b0f13e40e76150835b628c86ce05ae95a366
@@ -293,15 +304,16 @@ spec:
         requests:
           memory: 256Mi
           cpu: 250m
-      env:
-        - name: IIB_SERVICE_URL
-          valueFrom:
-            secretKeyRef:
-              name: iib-services-config
-              key: url
+      volumeMounts:
+        - name: iib-services-config-vol
+          mountPath: "/mnt/iib-services-config"
       script: |
         #!/usr/bin/env bash
-        # shellcheck disable=SC2317 # shellcheck calls all the commands in the function unreachable
+        # shellcheck disable=SC2317 # shellcheck calls all the commands in the function unreachable        
+        IIB_SERVICE_URL="$(cat /mnt/iib-services-config/url)"
+        
+        # export the variable required by the watch_build_state function 
+        export IIB_SERVICE_URL 
         set -x
 
         # shellcheck disable=SC2329 # function is used with timeout command
@@ -412,9 +424,3 @@ spec:
         curl -s "$(awk '{print $NF}' < "$(results.iibLog.path)")"
 
         exit "${BUILDEXIT}"
-  volumes:
-    - name: service-account-secret
-      secret:
-        secretName: $(params.iibServiceAccountSecret)
-        defaultMode:
-          0400
