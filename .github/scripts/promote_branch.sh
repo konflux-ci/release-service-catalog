@@ -33,6 +33,9 @@ COMMIT_MAX_AGE_DAYS=6
 # Personal access token with appropriate permissions
 token="${GITHUB_TOKEN}"
 
+# Parsed tickets JSON
+PARSED_TICKETS_JSON='[]'
+
 print_help(){
     echo "Usage: $0 --branches branch1-to-branch2 [--force-to-staging false] [--override false] [--dry-run false]"
     echo
@@ -236,6 +239,30 @@ find_prs_for_commits() {
     echo "$result"
 }
 
+# Function to add ticket data to the parsed JSON
+add_to_parsed_tickets_json() {
+    local commit_title="$1"
+    local pr_url_input="$2"
+
+    # Extract first Jira key from the title message
+    local ticket="$(grep -oE '([A-Z]+-[0-9]+)' <<<"$commit_title" | head -n1 || true)"
+    if [[ -z "$ticket" ]]; then
+        echo "No ticket found in the commit title, skipping..."
+        return
+    fi
+
+    # Validate PR URL if provided
+    local pr_url=""
+    if [[ "$pr_url_input" =~ ^https?:// ]]; then
+        pr_url="$pr_url_input"
+    fi
+
+    # Append the ticket and PR URL (if present) to the parsed JSON
+    PARSED_TICKETS_JSON="$(jq --arg ticket "$ticket" --arg pr_url "$pr_url" \
+        '. += [ {"ticket": $ticket} + (if $pr_url != "" then {"pr_url": $pr_url} else {} end) ]' \
+        <<<"$PARSED_TICKETS_JSON")"
+}
+
 if [ -z "${PROMOTION_TYPE}" ]; then
     echo -e "Error: missing '--promotion-type' argument\n"
     print_help
@@ -345,7 +372,14 @@ for COMMIT in "${COMMITS[@]}"; do
     fi
 
     # Show commit message
-    git show --oneline --no-patch --no-decorate "$COMMIT"
+    commit_title=$(git show --oneline --no-patch --no-decorate "$COMMIT") || {
+        echo "Error: Failed to get commit message for $COMMIT"
+        exit 1
+    }
+    echo "$commit_title"
+
+    # Adds each ticket to the parsed JSON
+    add_to_parsed_tickets_json "$commit_title" "$COMMIT_PR_INFO"
 done
 
 # Check if there are any breaking changes
@@ -363,6 +397,11 @@ if [ "$BREAKING_COUNT" -gt 0 ]; then
     ')
     echo "$BREAKING_CHANGES"
 fi
+
+PARSED_TICKETS_FILE=$(mktemp)
+echo "Parsed tickets JSON for Jira promotion:"
+tee "$PARSED_TICKETS_FILE" <<< "$PARSED_TICKETS_JSON"
+echo "parsed_tickets_file=$PARSED_TICKETS_FILE" >> "$GITHUB_OUTPUT"
 
 if [ "${DRY_RUN}" == "true" ] ; then
     exit
