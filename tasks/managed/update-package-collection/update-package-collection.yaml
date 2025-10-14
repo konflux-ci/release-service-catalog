@@ -1,0 +1,311 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-package-collection
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: update-package-collection
+spec:
+  description: |-
+    Tekton task to update package collection.
+  params:
+    - name: snapshotPath
+      type: string
+      description: |
+        Path to the JSON file of the mapped Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: action
+      type: string
+      description: The action type of package collection
+      default: "add-builds"
+    - name: env
+      type: string
+      description: Target environment (dev, stage, prod)
+      default: "prod"
+    - name: request
+      type: string
+      description: Type of request to be created
+      default: "update-package-collection"
+    - name: synchronously
+      type: string
+      description: Whether the task should wait for InternalRequests to complete
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: update-package-collection
+      image: quay.io/konflux-ci/release-service-utils:c637293b4d14180df3e04a95a14845350604589a
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 250m
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+
+        KOJI_TAGS=$(jq --exit-status -r '.pushOptions.koji_tags // [] | join(" ")' "${DATA_FILE}")
+
+        PRODUCT_NAME=$(jq -r '.releaseNotes.product_name // ""' "${DATA_FILE}")
+        PRODUCT_Version=$(jq -r '.releaseNotes.product_version // ""' "${DATA_FILE}")
+        if [ -z "${product_name}" ] || [ -z "${product_version}" ]; then
+            echo "ERROR: update package collection require '.releaseNotes.product_name' and '.releaseNotes.product_version' in the releasePlanAdmission"
+            exit 1
+        fi
+
+        # Fetch the component list from data.pushOptions.components by default, if there is no such list
+        # fetch from data.mapping.components.
+        RELEASE_COMPONENTS=$(jq -r '
+            if .pushOptions.components then
+                .pushOptions.components[]
+            else
+                empty
+            end' "${DATA_FILE}")
+        if [ -z "$RELEASE_COMPONENTS" ]; then
+            RELEASE_COMPONENTS=$(jq -r '.mapping.components[].name' "$DATA_FILE")
+        fi
+
+        get_override_pkg_collection_value() {
+          local comp_name=$1
+          jq -r --arg name "$comp_name" \
+            '.mapping.components[] | select(.name == $name) | .override_package_collection' \
+            data.json
+        }
+
+
+        printf 'Start task "%s" for Application "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+          containerImage=$(jq -r '.containerImage' <<< "$component")
+          componentName=$(jq -r '.name' <<< "$component")
+
+          # Use printf to join the array elements and grep to check for the presence of the variable
+          if ! printf "%s\n" "${RELEASE_COMPONENTS[@]}" | grep -q -x "$componentName"; then
+              printf "Skip the component %s as it is not in the release list.\n" "$componentName"
+              continue
+          fi
+
+          override_pkg_collection=$(get_override_pkg_collection_value "$componentName")
+
+          mkdir temp && cd temp
+
+          # The login serviceaccount should have the dockerconfig to pull the images.
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry
+          authFile=$(mktemp)
+          select-oci-auth "${containerImage}" > "$authFile"
+          oras pull --registry-config "$authFile" "$containerImage"
+
+          SRPM=$(ls ./*.src.rpm)
+          PACKAGE_NVR=$(basename "$SRPM" .src.rpm)
+
+
+          # Get Koji build target from the RPM image annotation to tag the
+          # imported build later.
+          koji_target=$(
+            oras manifest fetch "$containerImage" --registry-config "$authFile" |
+              jq --exit-status -r '.annotations."koji.build-target"'
+          )
+          if [ -z "$koji_target" ]; then
+              echo "ERROR: No Koji build target found in the container image annotations."
+              exit 1
+          fi
+          # For draft builds, remove "-candidate" tag suffix if present and
+          # append "-draft".
+          if [[ "$draft" == "true" && "$koji_target" != *-draft ]]; then
+              koji_tag=${koji_target%-candidate}-draft
+          else
+              koji_tag=${koji_target}
+          fi
+          KOJI_TAGS="$koji_tag $KOJI_TAGS"
+
+
+          build_name=$(jq -r '.build.name' cg_import.json)
+          TARGET_PKG_COLLECTION="${override_pkg_collection:-$KOJI_TAGS}"
+
+
+          # package_name=build_name
+          # nvr=PACKAGE_NVR
+          # download_url=containerImage
+          # pgk_coll = KOJI_TAGS
+          # TARGET_PKG_COLLECTION
+          # product=PRODUCT_NAME
+
+          for tag in $TARGET_PKG_COLLECTION; do
+
+            IR_FILE="$(params.dataDir)/$(context.task.name)/{build_name}/{tag}/ir-result.txt"
+            mkdir -p "$(dirname "$IR_FILE")"
+
+            echo "Creating InternalRequest to update package collection..."
+            internal-request --pipeline "$(params.request)" \
+                            -p action="$(params.action)" \
+                            -p env="$(params.env)" \
+                            -p product="$(PRODUCT_NAME)" \
+                            -p collection-name="$(tag)" \
+                            -p package_name="$(build_name)" \
+                            -p nvr="$(PACKAGE_NVR)" \
+                            -p download_url="$(containerImage)" \
+                            -p taskGitUrl="$(params.taskGitUrl)" \
+                            -p taskGitRevision="$(params.taskGitRevision)" \
+                            -s "$(params.synchronously)" \
+                            --pipeline-timeout "01h05m00s" \
+                            --task-timeout "01h00m00s" \
+                            -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
+                            | tee "$IR_FILE" || \
+                            (grep "^\[" "$IR_FILE" | jq . && exit 1)
+
+
+            internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_FILE")
+            echo "done (${internalRequest})"
+
+            results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
+            internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
+            internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
+
+            echo "** internalRequestPipelineRunName: ${internalRequestPipelineRunName}"
+            echo "** internalRequestTaskRunName: ${internalRequestTaskRunName}"
+
+            if [[ "$(echo "${results}" | jq -r '.result')" == "Success" ]]; then
+              echo "Package collection update created"
+            else
+              echo "Package collection update failed"
+              echo "$results"
+              exit 1
+            fi
+
+          done
+
+          # Clean up to handle next component
+          cd .. && rm -rf temp
+        done
+
+
+        # Submit the code
+
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

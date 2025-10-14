@@ -1,0 +1,131 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-package-collection-task
+  labels:
+    app.kubernetes.io/component: release
+    app.kubernetes.io/version: "2.0.0"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    A Tekton Task to update a single product package in a collection.
+  params:
+    - name: repo
+      type: string
+      description: Git repository URL for package-collection-utils
+      default: "https://gitlab.cee.redhat.com/package-collection/package-collection-utils.git"
+
+    - name: branch
+      type: string
+      description: Git branch to checkout
+      default: "main"
+
+    - name: action
+      type: string
+      description: Action to perform on the package collection: add-builds or delete-builds
+      default: "add-builds"
+
+    - name: env
+      type: string
+      description: Target environment (dev, stage, prod)
+
+    - name: product
+      type: string
+      description: Product name
+
+    - name: collection-name
+      type: string
+      description: The name of the package collection to update
+
+    - name: package_name
+      type: string
+      description: Package name
+    - name: nvr
+      type: string
+      description: NVR of the package
+    - name: download_url
+      type: string
+      description: Download URL for the package
+
+    - name: internalRequestPipelineRunName
+      type: string
+      description: Internal pipeline run name for traceability
+
+  results:
+    - name: result
+      description: Success if the task succeeds, the error otherwise
+    - name: internalRequestPipelineRunName
+      description: Name of the PipelineRun that called this task
+    - name: internalRequestTaskRunName
+      description: Name of this Task Run to be made available to caller
+
+  steps:
+    - name: update-package-collection
+      image: quay.io/konflux-ci/release-service-utils:e56dd7c1875e352677af23c3d63ee5fb266c8a63
+      computeResources:
+        requests:
+          cpu: "1"
+          memory: 512Mi
+        limits:
+          memory: 1Gi
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        IFS=$'\n\t'
+
+        WORKDIR=/tmp/package-collection
+        STDERR_FILE="$WORKDIR/stderr.txt"
+        REPO_BRANCH="$(params.branch)"
+        PKG_COL_UTILS_REPO="$(params.repo)"
+
+        echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
+        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
+
+        exitfunc() {
+          local err=$1 line=$2 cmd="$3"
+          if [[ $err -eq 0 ]]; then
+            echo -n "Success" > "$(results.result.path)"
+          else
+            {
+              echo -e "\e[31mERROR:\e[0m '$cmd' failed at line $line (exit $err)"
+              [[ -f "$STDERR_FILE" ]] && echo -e "\n--- Last 20 lines of stderr ---\n$(tail -n 20 "$STDERR_FILE")"
+            } > "$(results.result.path)"
+          fi
+          exit 0
+        }
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        mkdir -p "$WORKDIR"
+        cd "$WORKDIR"
+
+        # Load helper functions
+        for helper in /home/utils/gitlab-functions /home/utils/git-functions; do
+          [[ -f "$helper" ]] && . "$helper" || echo "⚠️ Warning: $helper not found"
+        done
+        gitlab_init
+        git_functions_init
+
+        # Clone repo
+        git_clone_and_checkout --repository "$PKG_COL_UTILS_REPO" --revision "$REPO_BRANCH"
+
+        # Ensure UV is available
+        if ! command -v uv >/dev/null 2>&1; then
+          echo "Installing uv..."
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+        fi
+        uv sync
+
+        echo "→ Updating package: $(params.package_name) (NVR: $(params.nvr))"
+
+        uv run pc-manager package-collection "$(params.action)" \
+          --env "$(params.env)" \
+          --product "$(params.product)" \
+          --collection-name "$(params.collection-name)" \
+          --package-name "$(params.package_name)" \
+          --item nvr="$(params.nvr)" \
+          --item download_url="$(params.download_url)" \
+          --auto-push 2>> "$STDERR_FILE"
+
+        echo "✅ Package collection update completed successfully for package $(params.package_name) (collection: $(params.collection-name), product: $(params.product))"

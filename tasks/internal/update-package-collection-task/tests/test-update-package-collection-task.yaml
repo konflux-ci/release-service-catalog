@@ -1,0 +1,72 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-package-collection-task
+spec:
+  description: |
+    Run the update-package-collection-task and check the result.
+  params:
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: run-task
+      taskRef:
+        name: update-package-collection-task
+      params:
+        - name: env
+          value: "prod"
+        - name: product
+          value: "Test Product"
+        - name: collection-name
+          value: "test-collection"
+        - name: package_name
+          value: "test-package"
+        - name: nvr
+          value: "test-package-1.0-1"
+        - name: download_url
+          value: "http://example.com/test-package-1.0-1.rpm"
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: dataDir
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e56dd7c1875e352677af23c3d63ee5fb266c8a63
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              exit_code=0
+
+              function assert_cmd_called() {
+                  calls_file="$(params.dataDir)/${1}_calls.txt"
+                  if ! grep -q "^$*$" "$calls_file"; then
+                      echo "Command call not found:"
+                      echo "  $*"
+                      echo "Actual calls:"
+                      sed 's/^/  /' "$calls_file"
+                      return 1
+                  fi
+              }
+
+              echo Test that result is Success
+              test "$(params.result)" == Success
+
+              assert_cmd_called git clone --depth 1 --branch main https://gitlab.cee.redhat.com/package-collection/package-collection-utils.git .
+              assert_cmd_called curl -LsSf https://astral.sh/uv/install.sh
+              assert_cmd_called uv sync
+              assert_cmd_called uv run pc-manager package-collection add-builds --env prod --product "Test Product" --collection-name test-collection --package-name test-package --item nvr=test-package-1.0-1 --item download_url=http://example.com/test-package-1.0-1.rpm --auto-push
