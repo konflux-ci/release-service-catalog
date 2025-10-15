@@ -15,3 +15,5 @@ Tekton task to submit a IIB build request to add/update fbc-fragments to an inde
 | publishingCredentials       | Secret containing the publishing credentials used to fetch the image config            | No       | -             |
 | mustPublishIndexImage       | Whether the index image should be published (pre-determined by prepare-fbc-parameters) | Yes      | false         |
 | mustOverwriteFromIndexImage | Whether to overwrite the from index image (pre-determined by prepare-fbc-parameters)   | Yes      | false         |
+| caTrustConfigMapName        | The name of the ConfigMap to read CA bundle data from                                  | Yes      | trusted-ca    |
+| caTrustConfigMapKey         | The name of the key in the ConfigMap that contains the CA bundle data                  | Yes      | ca-bundle.crt |

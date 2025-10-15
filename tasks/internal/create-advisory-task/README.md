@@ -18,3 +18,5 @@ request.
 | errata_secret_name             | The name of the secret that contains the errata service account metadata                               | No       | -             |
 | internalRequestPipelineRunName | Name of the PipelineRun that called this task                                                          | No       | -             |
 | contentType                    | The contentType of the release artifact. One of [image|binary|generic]                                 | Yes      | image         |
+| caTrustConfigMapName           | The name of the ConfigMap to read CA bundle data from                                                  | Yes      | trusted-ca    |
+| caTrustConfigMapKey            | The name of the key in the ConfigMap that contains the CA bundle data                                  | Yes      | ca-bundle.crt |

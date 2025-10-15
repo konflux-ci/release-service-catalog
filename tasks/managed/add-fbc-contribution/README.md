@@ -41,3 +41,5 @@ queue to reduce the effect of a full queue on a single release.
 | iibServiceAccountSecret     | IIB service account secret name (from prepare-fbc-parameters)                                                              | No       | -                    |
 | maxRetries                  | Maximum number of retry attempts for failed internal requests                                                              | Yes      | 3                    |
 | batchRetryDelaySeconds      | Delay between batch retry attempts in seconds                                                                              | Yes      | 60                   |
+| caTrustConfigMapName        | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
+| caTrustConfigMapKey         | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |

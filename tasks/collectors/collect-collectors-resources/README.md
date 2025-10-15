@@ -10,10 +10,12 @@ A task result is returned for each resource with the relative path to the stored
 
 ## Parameters
 
-| Name                   | Description                                                      | Optional | Default value |
-|------------------------|------------------------------------------------------------------|----------|---------------|
-| previousRelease        | The namespaced name of the previous Release                      | No       | -             |
-| release                | The namespaced name of the Release                               | No       | -             |
-| collectorsResourceType | The type of resource that contains the collectors                | Yes      | releaseplan   |
-| collectorsResource     | The namespaced name of the resource that contains the collectors | No       | -             |
-| subdirectory           | Subdirectory inside the workspace to be used                     | Yes      | ""            |
+| Name                   | Description                                                           | Optional | Default value |
+|------------------------|-----------------------------------------------------------------------|----------|---------------|
+| previousRelease        | The namespaced name of the previous Release                           | No       | -             |
+| release                | The namespaced name of the Release                                    | No       | -             |
+| collectorsResourceType | The type of resource that contains the collectors                     | Yes      | releaseplan   |
+| collectorsResource     | The namespaced name of the resource that contains the collectors      | No       | -             |
+| subdirectory           | Subdirectory inside the workspace to be used                          | Yes      | ""            |
+| caTrustConfigMapName   | The name of the ConfigMap to read CA bundle data from                 | Yes      | trusted-ca    |
+| caTrustConfigMapKey    | The name of the key in the ConfigMap that contains the CA bundle data | Yes      | ca-bundle.crt |

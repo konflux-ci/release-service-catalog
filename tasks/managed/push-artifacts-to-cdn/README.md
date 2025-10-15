@@ -23,3 +23,5 @@ The environment to use is pulled from the `cdn.env` key in the data file.
 | sourceDataArtifact       | Location of trusted artifacts to be used to populate data directory                                                        | Yes      | ""                        |
 | quayURL                  | Quay URL of the repo where content will be shared between tasks                                                            | Yes      | quay.io/konflux-artifacts |
 | dataDir                  | The location where data will be stored                                                                                     | Yes      | /var/workdir/release      |
+| caTrustConfigMapName     | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca                |
+| caTrustConfigMapKey      | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt             |
