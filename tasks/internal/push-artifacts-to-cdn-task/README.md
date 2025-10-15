@@ -31,3 +31,5 @@ data only, artifacts are pushed to the Developer Portal (exodus-rsync) and CGW.
 | udcacheSecret         | Env specific secret containing the udcache credentials                          | No       | -                         |
 | cgwHostname           | Env specific hostname for content gateway                                       | No       | -                         |
 | cgwSecret             | Env specific secret containing the content gateway credentials                  | No       | -                         |
+| caTrustConfigMapName  | The name of the ConfigMap to read CA bundle data from                           | Yes      | trusted-ca                |
+| caTrustConfigMapKey   | The name of the key in the ConfigMap that contains the CA bundle data           | Yes      | ca-bundle.crt             |

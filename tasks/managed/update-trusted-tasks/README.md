@@ -21,3 +21,5 @@ else a new artifact will be created.
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
 | registrySecret          | The name of the secret with the registry token for making repositories public                                              | Yes      | registry-token       |
+| caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
+| caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |

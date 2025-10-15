@@ -31,3 +31,5 @@ Downstream tasks continue to use the same snapshot path.
 | pipelineRunUid           | UID of the current pipelineRun                                                                                             | No       | -                    |
 | synchronously            | Whether to wait for the InternalRequest completion                                                                         | Yes      | true                 |
 | dataPath                 | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                    |
+| caTrustConfigMapName     | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
+| caTrustConfigMapKey      | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |

@@ -17,3 +17,5 @@ It returns as a result the blob to sign, that is the result of the base64 encode
 | dataDir                 | The location where data will be stored                                                                                     | Yes      | /var/workdir/release |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
+| caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
+| caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |

@@ -23,3 +23,5 @@ and strategy-aware publishing decisions (hotfix, staging, etc.).
 | maxRetries              | Maximum number of retry attempts for failed internal requests                                                              | Yes      | 3                    |
 | retryDelaySeconds       | Delay between retry attempts in seconds                                                                                    | Yes      | 30                   |
 | pipelineRunUid          | The uid of the current pipelineRun. It is only available at the pipeline level                                             | No       | -                    |
+| caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
+| caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |

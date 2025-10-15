@@ -11,3 +11,5 @@ impact from all of the CVEs is returned as a task result.
 |--------------------------------|--------------------------------------------------------------------------------|----------|---------------|
 | releaseNotesImages             | Base64 string of gzipped JSON array of image specific details for the advisory | No       | -             |
 | internalRequestPipelineRunName | name of the PipelineRun that called this task                                  | No       | -             |
+| caTrustConfigMapName           | The name of the ConfigMap to read CA bundle data from                          | Yes      | trusted-ca    |
+| caTrustConfigMapKey            | The name of the key in the ConfigMap that contains the CA bundle data          | Yes      | ca-bundle.crt |

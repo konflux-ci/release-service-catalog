@@ -21,3 +21,5 @@ the releaseNotes data can use it.
 | binaries_dir            | The location of github release binaries. Needed for PURL generation                                                        | Yes      | ""                   |
 | github_release_version  | The version string of the release (from collect-gh-params)                                                                 | Yes      | ""                   |
 | github_release_url      | The url of the release (from collect-gh-params)                                                                            | Yes      | ""                   |
+| caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
+| caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |
