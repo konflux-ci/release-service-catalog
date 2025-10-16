@@ -135,11 +135,6 @@ spec:
             echo "No valid snapshot file was provided at $SNAPSHOT_FILE"
             exit 1
         fi
-        snapshot=$(jq -c '.' "$SNAPSHOT_FILE" | gzip -c | base64 -w 0)
-        if [ -z "$snapshot" ]; then
-            echo "Failed to read snapshot file"
-            exit 1
-        fi
 
         # Transform snapshot components to architecture-specific images
         echo "Transforming snapshot components using get-image-architectures..."
@@ -165,26 +160,27 @@ spec:
                 while IFS= read -r arch_json; do
                     if [[ -n "$arch_json" ]]; then
                         arch_digest=$(jq -r '.digest' <<< "$arch_json")
-                        arch=$(jq -r '.platform.architecture' <<< "$arch_json")
                         containerImage="${repo_url}@${arch_digest}"
 
-                        jq \
+                        # Create minimal object with only the 4 fields needed by the consuming task
+                        jq -n \
+                            --arg name "$COMPONENT_NAME" \
                             --arg ci "$containerImage" \
+                            --argjson tags "$(jq '.tags' <<< "$component")" \
                             --arg repo "$repo_url" \
-                            --arg orig_name "$COMPONENT_NAME" \
-                            --arg arch "$arch" \
-                            '.containerImage = $ci
-                             | .repository = $repo
-                             | .originalComponent = $orig_name
-                             | .architecture = $arch' \
-                            <<< "$component"
+                            '{
+                              name: $name,
+                              containerImage: $ci,
+                              tags: $tags,
+                              repository: $repo
+                            }'
                     fi
                 done <<< "$digests"
             done
         done > "$TRANSFORMED_COMPONENTS"
 
         # Create transformed snapshot with arch-specific images
-        transformedSnapshot=$(jq -s '.' "$TRANSFORMED_COMPONENTS" | gzip -c | base64 -w 0)
+        transformedSnapshot=$(jq -sc '.' "$TRANSFORMED_COMPONENTS" | gzip -c | base64 -w 0)
         rm -f "$TRANSFORMED_COMPONENTS"
 
         if [ -z "$transformedSnapshot" ]; then
