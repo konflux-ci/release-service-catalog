@@ -29,6 +29,9 @@ function pubtools-pyxis-upload-signatures() {
 function openssl() {
   >&2 echo "Mock openssl called with: $*"
   echo "$*" >> "$(workspaces.data.path)/mock_openssl.txt"
+  if [[ "$*" =~ "x509 -noout -subject" ]]; then
+    echo "UID=test-mock"
+  fi
 }
 
 export CUSTOM_TASK_ID="1234"
