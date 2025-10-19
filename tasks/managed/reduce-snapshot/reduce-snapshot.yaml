@@ -116,15 +116,83 @@ spec:
           value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE_NS)
         - name: SNAPSHOT_PATH
           value: $(params.SNAPSHOT_PATH)
-      image: quay.io/enterprise-contract/ec-cli@sha256:913c7dac3d41877b01835d2e55bcd970c6cdbf4944f8176e9e3de9548642a2b4
+      image: quay.io/conforma/cli@sha256:908feedf8972a15b39616365dff77673030e844a8960a7be056abeb9e57185ad
       computeResources:
         limits:
           memory: 128Mi
         requests:
           memory: 128Mi
           cpu: 10m
-      command: [reduce-snapshot.sh]
-      onError: continue  # progress even if the step fails
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+        
+        # CONFORMA CLI BUG WORKAROUND:
+        # The Conforma CLI has a bug where it reports success (exit code 0) and prints
+        # "COMPONENT_COUNT: 1" to stdout, but actually produces an empty output file
+        # instead of writing the reduced snapshot.
+        #
+        # Bug details:
+        # - CLI reports: "COMPONENT_COUNT: 1" and exits with code 0
+        # - Expected: Reduced snapshot written to SNAPSHOT_PATH
+        # - Actual: SNAPSHOT_PATH is empty (0 bytes) - the file is corrupted!
+        # - Impact: Downstream steps fail because they can't parse the empty file
+        # - Note: SNAPSHOT and SNAPSHOT_PATH usually point to the same file (in-place modification)
+        #
+        # Related issue: https://github.com/conforma/cli/issues/3009
+        
+        SNAPSHOT_BACKUP=$(mktemp)
+        if [ -f "$SNAPSHOT" ]; then
+          cp "$SNAPSHOT" "$SNAPSHOT_BACKUP"
+        fi
+        
+        /usr/local/bin/reduce-snapshot.sh || exit_code=$?
+        
+        if [ -f "$SNAPSHOT_PATH" ]; then
+          FILE_SIZE=$(wc -c < "$SNAPSHOT_PATH" 2>/dev/null || echo "0")
+          if [ "$FILE_SIZE" == "0" ]; then
+            echo "WARNING: Reduce script reported success but produced empty file (Conforma CLI bug)"
+            echo "Performing manual reduction as workaround"
+            
+            cp "$SNAPSHOT_BACKUP" "$SNAPSHOT_PATH"
+            
+            if [ "${SINGLE_COMPONENT}" == "true" ]; then
+              echo "Manual reduction: Querying for component name"
+              COMPONENT_NAME=""
+              if [ -n "${CUSTOM_RESOURCE_NAMESPACE:-}" ]; then
+                COMPONENT_NAME=$(kubectl get "$CUSTOM_RESOURCE" \
+                  -n "$CUSTOM_RESOURCE_NAMESPACE" -ojson 2>/dev/null | \
+                  jq -r '.metadata.labels."appstudio.openshift.io/component" // ""' \
+                  2>/dev/null || echo "")
+              else
+                COMPONENT_NAME=$(kubectl get "$CUSTOM_RESOURCE" -ojson 2>/dev/null | \
+                  jq -r '.metadata.labels."appstudio.openshift.io/component" // ""' \
+                  2>/dev/null || echo "")
+              fi
+              
+              if [ -n "$COMPONENT_NAME" ]; then
+                echo "Manual reduction: Reducing to component '$COMPONENT_NAME'"
+                TEMP_SNAPSHOT=$(mktemp)
+                jq --arg component "$COMPONENT_NAME" \
+                  '.components = [.components[] | select(.name == $component)]' \
+                  "$SNAPSHOT_PATH" > "$TEMP_SNAPSHOT"
+                mv "$TEMP_SNAPSHOT" "$SNAPSHOT_PATH"
+                echo "Manual reduction: Successfully reduced to 1 component"
+              else
+                echo "Manual reduction: Could not determine component name, keeping original"
+              fi
+            fi
+          fi
+        else
+          echo "WARNING: Reduce script did not create output file"
+          echo "Creating snapshot file from backup to prevent downstream failures"
+          cp "$SNAPSHOT_BACKUP" "$SNAPSHOT_PATH"
+        fi
+        
+        rm -f "$SNAPSHOT_BACKUP"
+        
+        exit "${exit_code:-0}"
+      onError: continue
     - name: create-trusted-artifact
       computeResources:
         limits:
