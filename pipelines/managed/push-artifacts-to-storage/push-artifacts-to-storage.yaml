@@ -1,0 +1,433 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: push-artifacts-to-storage
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: push-artifact-storage
+spec:
+  description: |-
+    Tekton pipeline to push rpms into the artifact storage instance.
+  params:
+    - name: release
+      type: string
+      description:
+        The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
+    - name: releasePlan
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the releaseServiceConfig
+    - name: snapshot
+      type: string
+      description: The namespaced name (namespace/name) of the snapshot
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON representation of the EnterpriseContractPolicy
+      default: "brew-rhel-sst-prod"
+    - name: enterpriseContractExtraRuleData
+      type: string
+      description: |
+        Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax
+        "key1=value1,key2=value2..."
+      default: "pipeline_intention=release"
+    - name: verify_ec_task_git_revision
+      type: string
+      description: The git revision to be used when consuming the verify-conforma task
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+      default: "quay.io/konflux-ci/release-service-trusted-artifacts"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      # to avoid tar extraction errors, we need to specify a subdirectory
+      # inside the volume.
+      default: "/var/workdir/release"
+  tasks:
+    - name: verify-access-to-resources
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/verify-access-to-resources/verify-access-to-resources.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: requireInternalServices
+          value: "false"
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-data/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - verify-access-to-resources
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      params:
+        - name: dataDir
+          value: "$(params.dataDir)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".conforma.workerCount", "default": "4"},
+              {"resultIndex": 1, "key": ".conforma.timeout", "default": "8h0m0s"},
+              {"resultIndex": 2, "key": ".pushOptions.pushKeytab.secret"},
+              {"resultIndex": 3, "key": ".pushOptions.pushPipelineImage"},
+              {"resultIndex": 4, "key": ".pushOptions.pushType", "default": "import"}
+            ]
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+      runAfter:
+        - collect-data
+    - name: reduce-snapshot
+      timeout: "4h"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/reduce-snapshot/reduce-snapshot.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(params.dataDir)/$(tasks.collect-data.results.snapshotSpec)
+        - name: SINGLE_COMPONENT
+          value: $(tasks.collect-data.results.singleComponentMode)
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE
+          value: snapshot/$(tasks.collect-data.results.snapshotName)
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE_NS
+          value: $(tasks.collect-data.results.snapshotNamespace)
+        - name: SNAPSHOT_PATH
+          value: $(params.dataDir)/$(tasks.collect-data.results.snapshotSpec)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-data
+    - name: verify-conforma
+      timeout: "4h00m0s"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/conforma/cli
+          - name: revision
+            value: "$(params.verify_ec_task_git_revision)"
+          - name: pathInRepo
+            value: "tasks/verify-conforma-konflux-ta/0.1/verify-conforma-konflux-ta.yaml"
+      params:
+        - name: SNAPSHOT_FILENAME
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          value: "1"
+        - name: IGNORE_REKOR
+          value: "true"
+        - name: EXTRA_RULE_DATA
+          value: $(params.enterpriseContractExtraRuleData)
+        - name: TIMEOUT
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: WORKERS
+          value: "$(tasks.collect-task-params.results.extractedValues[0])"
+        - name: SOURCE_DATA_ARTIFACT
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: TRUSTED_ARTIFACTS_DEBUG
+          value: "$(params.trustedArtifactsDebug)"
+      runAfter:
+        - reduce-snapshot
+        - collect-task-params
+    - name: push-rpm-to-koji
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/push-rpm-to-koji/push-rpm-to-koji.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: pushSecret
+          value: $(tasks.collect-task-params.results.extractedValues[2])
+        - name: pipelineImage
+          value: $(tasks.collect-task-params.results.extractedValues[3])
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-task-params
+      when:
+        - input: $(tasks.collect-task-params.results.extractedValues[4])
+          operator: notin
+          values: ["promote"]
+    - name: update-package-collection-after-push-rpm-process
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/update-package-collection/update-package-collection.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: pushSecret
+          value: $(tasks.collect-task-params.results.extractedValues[2])
+        - name: pipelineImage
+          value: $(tasks.collect-task-params.results.extractedValues[3])
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: pushType
+          value: "$(tasks.collect-task-params.results.extractedValues[4])"
+      runAfter:
+        - push-rpm-to-koji
+      when:
+        - input: $(tasks.collect-task-params.results.extractedValues[4])
+          operator: notin
+          values: ["promote"]
+    - name: promote-koji-draft-build
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/promote-koji-draft-build/promote-koji-draft-build.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: pushSecret
+          value: $(tasks.collect-task-params.results.extractedValues[2])
+        - name: pipelineImage
+          value: $(tasks.collect-task-params.results.extractedValues[3])
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-task-params
+      when:
+        - input: $(tasks.collect-task-params.results.extractedValues[4])
+          operator: in
+          values: ["promote"]
+    - name: update-package-collection-after-promote-draft-build
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/update-package-collection/update-package-collection.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: pushSecret
+          value: $(tasks.collect-task-params.results.extractedValues[2])
+        - name: pipelineImage
+          value: $(tasks.collect-task-params.results.extractedValues[3])
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: pushType
+          value: "$(tasks.collect-task-params.results.extractedValues[4])"
+      runAfter:
+        - promote-koji-draft-build
+      when:
+        - input: $(tasks.collect-task-params.results.extractedValues[4])
+          operator: in
+          values: ["promote"]
+    - name: push-artifacts-to-storage
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/push-artifacts-to-storage/push-artifacts-to-storage.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: snapshotNamespace
+          value: "$(tasks.collect-data.results.snapshotNamespace)"
+        - name: snapshotBuildId
+          value: "$(tasks.collect-data.results.snapshotBuildId)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+      runAfter:
+        - collect-task-params
+      when:
+        - input: $(tasks.collect-task-params.results.extractedValues[4])
+          operator: notin
+          values: ["promote"]
+  finally:
+    - name: cleanup-internal-requests
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/cleanup-internal-requests/cleanup-internal-requests.yaml
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)

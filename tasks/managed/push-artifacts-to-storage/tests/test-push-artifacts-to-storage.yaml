@@ -1,0 +1,219 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-artifacts-to-storage
+spec:
+  description: |
+    Test the push-artifacts-to-storage task.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          # Use the same security context as the main task to avoid permission issues
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test-foo",
+                      "pushSourceContainer": false,
+                      "repository": "quay.io/test/test-foo"
+                    },
+                    {
+                      "name": "test-bar",
+                      "pushSourceContainer": false,
+                      "repository": "quay.io/test/test-bar"
+                    }
+                  ]
+                },
+                "pushOptions": {
+                  "koji_profile": "koji",
+                  "koji_import_draft": true,
+                  "koji_tags": [
+                    "test-rpm"
+                  ],
+                  "pushKeytab": {
+                    "name": "test.keytab",
+                    "principal": "test@test.com",
+                    "secret": "test-secrets"
+                  },
+                  "pushPipelineImage": "test-image"
+                }
+              }
+              EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "rpms",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/test-foo@sha256:111",
+                    "name": "test-foo",
+                    "source": {
+                      "git": {
+                        "revision": "32c8f78c26e5831a87aa865ea80452fadbb3a95e",
+                        "url": "https://gitlab.example.com/rpms/test"
+                      }
+                    }
+                  },
+                  {
+                    "containerImage": "quay.io/test/test-bar@sha256:222",
+                    "name": "test-bar",
+                    "source": {
+                      "git": {
+                        "context": "./",
+                        "dockerfileUrl": "Containerfile",
+                        "revision": "222",
+                        "url": "https://gitlab.example.com/rpms/test-bar"
+                      }
+                    }
+                  },
+                  {
+                    "containerImage": "quay.io/test/test-baz@sha256:333",
+                    "name": "test-baz",
+                    "source": {
+                      "git": {
+                        "context": "./",
+                        "dockerfileUrl": "Containerfile",
+                        "revision": "333",
+                        "url": "https://gitlab.example.com/rpms/test-baz"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: push-artifacts-to-storage
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: snapshotNamespace
+          value: "default-namespace"
+        - name: snapshotBuildId
+          value: "default-buildid"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          # Use the same security context as the main task to avoid permission issues
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              exit_code=0
+              exit $exit_code

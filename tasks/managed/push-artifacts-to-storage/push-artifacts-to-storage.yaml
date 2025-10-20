@@ -1,0 +1,200 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-artifacts-to-storage
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: push-rok-storage
+spec:
+  description: |-
+    Tekton task to push konflux builds to artifact storage.
+  params:
+    - name: snapshotPath
+      type: string
+      description: |
+        Path to the JSON file of the mapped Snapshot spec in the data workspace
+    - name: snapshotNamespace
+      type: string
+      description: |
+        Namespace that tha snapshot originated from
+    - name: snapshotBuildId
+      type: string
+      description: |
+        Build Id that tha snapshot originated from
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: rok-access
+      secret:
+        optional: true
+        secretName: rok-storage
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: push-build-to-artifact-storage
+      # The pipelineImage will be fetching from get-secrets task with koji installed there
+      image: quay.io/redhat-user-workloads/rpm-build-pipeline-tenant/environment:latest@sha256:90b1289849de3fb8b6435225f4409d2ae288acdcc0e38a5ff5fb563fef35c620
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 250m
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        if [ ! -f /etc/rok-access/cli.toml ] ; then
+            echo "No rok-access provided."
+            exit 0
+        fi
+
+        KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft' "${DATA_FILE}")
+
+        if [[ "$KOJI_IMPORT_DRAFT" == "false" ]]; then
+            echo "Draft build skipping Artifact Storage"
+            exit 0
+        fi
+
+        APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+
+        pulp_transfer.py \
+        --config /etc/rok-access/cli.toml \
+        --build_id "$(params.snapshotNamespace)" \
+        --namespace "$(params.snapshotBuildId)" \
+        --cert_path /etc/rok-access/tls.crt \
+        --key_path /etc/rok-access/tls.key
+
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$APPLICATION"
+      volumeMounts:
+        - mountPath: /etc/rok-access
+          name: rok-access
+          readOnly: true
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
