@@ -37,21 +37,23 @@ token="${GITHUB_TOKEN}"
 PARSED_TICKETS_JSON='[]'
 
 print_help(){
-    echo "Usage: $0 --branches branch1-to-branch2 [--force-to-staging false] [--override false] [--dry-run false]"
+    echo "Usage: $0 --branches branch1-to-branch2 [--force-to-staging false] [--override false] [--dry-run false] [--override-hotfix-check false]"
     echo
-    echo "  --promotion-type:   The type of promotion to perform. Either development-to-staging"
-    echo "                      or staging-to-production."
-    echo "  --force-to-staging: If passed with value true, allow promotion to staging even"
-    echo "                      if staging and production differ."
-    echo "  --override:         If passed with value true, allow promotion to production"
-    echo "                      even if the change has not been in staging for six days."
-    echo "  --dry-run:          If passed with value true, print out the changes that would"
-    echo "                      be promoted but do not git push or delete the temp repo."
+    echo "  --promotion-type:        The type of promotion to perform. Either development-to-staging"
+    echo "                           or staging-to-production."
+    echo "  --force-to-staging:      If passed with value true, allow promotion to staging even"
+    echo "                           if staging and production differ."
+    echo "  --override:              If passed with value true, allow promotion to production"
+    echo "                           even if the change has not been in staging for six days."
+    echo "  --dry-run:               If passed with value true, print out the changes that would"
+    echo "                           be promoted but do not git push or delete the temp repo."
+    echo "  --override-hotfix-check: If passed with value true, do not fail when hotfix commits are found"
+    echo "                           that are missing in the source branch. Default is false."
     echo
     echo "  --promotion-type has to be specified."
 }
 
-OPTIONS=$(getopt --long "promotion-type:,force-to-staging:,override:,dry-run:,help" -o "p:,h" -- "$@")
+OPTIONS=$(getopt --long "promotion-type:,force-to-staging:,override:,dry-run:,override-hotfix-check:,help" -o "p:,h" -- "$@")
 eval set -- "$OPTIONS"
 while true; do
     case "$1" in
@@ -69,6 +71,10 @@ while true; do
             ;;
         --dry-run)
             DRY_RUN="$2"
+            shift 2
+            ;;
+        --override-hotfix-check)
+            OVERRIDE_HOTFIX_CHECK="$2"
             shift 2
             ;;
         -h|--help)
@@ -307,6 +313,27 @@ if [[ "${TARGET_BRANCH}" == "staging" && "${FORCE_TO_STAGING}" != "true" ]] ; th
     check_if_branch_differs production
 fi
 
+# See if there are hot fix commits in the target branch
+HOTFIX_COMMITS=$(git log --oneline origin/${SOURCE_BRANCH}..origin/${TARGET_BRANCH})
+if [ ! -z "$HOTFIX_COMMITS" ]; then
+    echo Hotfix commits detected! Listing them:
+    echo "$HOTFIX_COMMITS"
+    # Save the hot fix diff
+    git format-patch "origin/${SOURCE_BRANCH}..origin/${TARGET_BRANCH}" --stdout > /tmp/hotfixes.patch
+    # Ensure the hot fix commit changes are in SOURCE_BRANCH
+    git checkout origin/${SOURCE_BRANCH}
+    if ! git apply --reverse --check /tmp/hotfixes.patch ; then
+        echo "Error! Hot fix commits were detected in ${TARGET_BRANCH} and the changes"
+        echo "are not in ${SOURCE_BRANCH}. We don't want to lose hot fix changes during"
+        echo "promotion."
+        if [ "${OVERRIDE_HOTFIX_CHECK}" == "true" ]; then
+            echo "Continuing with promotion as --override-hotfix-check was passed as true."
+        else
+            exit 1
+        fi
+    fi
+fi
+
 echo "Included PRs:"
 
 # Get commits to be promoted
@@ -408,7 +435,7 @@ if [ "${DRY_RUN}" == "true" ] ; then
 fi
 
 git checkout "$SOURCE_BRANCH"
-git push origin "$SOURCE_BRANCH:$TARGET_BRANCH"
+git push origin -f "$SOURCE_BRANCH:$TARGET_BRANCH"
 
 cd -
 rm -rf ${tmpDir}
