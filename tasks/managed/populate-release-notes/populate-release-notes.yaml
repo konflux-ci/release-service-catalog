@@ -583,18 +583,26 @@ spec:
             exit 1
         fi
 
-        NUM_CVES=$(jq '.releaseNotes.cves | length' "${DATA_FILE}")
-
-        # Set type to RHSA if there are fixed CVEs
-        if [[ "$NUM_CVES" -gt 0 ]] ; then
-            jq '.releaseNotes.type = "RHSA"' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
+        if jq -e '.releaseNotes.content.images' "$DATA_FILE" > /dev/null; then
+            CONTENT_TYPE=".releaseNotes.content.images"
+        elif jq -e '.releaseNotes.content.artifacts' "$DATA_FILE" > /dev/null; then
+            CONTENT_TYPE=".releaseNotes.content.artifacts"
+        else
+            echo "No content found under releaseNotes.content.images or .artifacts;"
+            exit 0
         fi
 
-        if [ "$(jq -r '.releaseNotes.type' "${DATA_FILE}")" != "RHSA" ] ; then
-            echo "Type is not RHSA. Ensuring references key exists, but not adding any"
+        CVES=$(jq -r "$CONTENT_TYPE"'[] | select(.cves.fixed) | .cves.fixed' "${DATA_FILE}")
+        NUM_CVES=$(jq 'length' <<< "$CVES" | jq -s 'add')
+
+        if [[ "$NUM_CVES" -eq 0 ]] ; then
+            echo "No CVEs found. Ensuring references key exists, but not adding anything to it"
             jq '.releaseNotes.references += []' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
             exit 0
         fi
+
+        # Set type to RHSA as there are CVEs fixed
+        jq '.releaseNotes.type = "RHSA"' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
 
         # Inject classification link into data.json references
         jq '.releaseNotes.references += ["https://access.redhat.com/security/updates/classification/"]' \
@@ -602,7 +610,7 @@ spec:
 
         for ((i = 0; i < NUM_CVES; i++))
         do
-            cve=$(jq -r --argjson i "$i" '.releaseNotes.cves[$i].key' "${DATA_FILE}")
+            cve=$(jq -rs --argjson i "$i" 'map(keys[]) | .[$i]' <<< "${CVES}")
             # Inject cve link into data.json references
             jq --arg cve "$cve" '.releaseNotes.references += ["https://access.redhat.com/security/cve/\($cve)"]' \
                 "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
