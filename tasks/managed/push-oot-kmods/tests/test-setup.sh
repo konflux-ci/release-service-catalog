@@ -24,6 +24,11 @@ DRIVER_VERSION="1.0.0"
 KERNEL_VERSION="5.14.0"
 EOF
 
+# Generate checksums file to match sign-oot-kmods task output
+cd "$(params.dataDir)/$(params.signedKmodsPath)/"
+sha256sum *.ko > signed_kmods_checksums.txt
+echo "Generated checksums file for test .ko files"
+
 echo "Test data setup complete:"
 echo "DataDir contents:"
 ls -la "$(params.dataDir)" || echo "dataDir does not exist"

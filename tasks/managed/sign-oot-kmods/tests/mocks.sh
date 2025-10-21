@@ -67,6 +67,11 @@ function scp() {
           echo "SIGNED_MODULE1" > "$dest_path/mod1.ko"
           echo "SIGNED_MODULE2" > "$dest_path/mod2.ko"
           echo "Mock scp: Created signed files in $dest_path"
+
+          # Generate checksums file to match the actual task behavior
+          cd "$dest_path"
+          sha256sum *.ko > signed_kmods_checksums.txt
+          echo "Mock scp: Generated checksums file in $dest_path"
         else
           echo "Mock scp: Warning - destination directory $dest_path does not exist"
         fi

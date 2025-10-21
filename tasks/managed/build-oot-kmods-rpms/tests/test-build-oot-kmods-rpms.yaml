@@ -72,6 +72,11 @@ spec:
                 printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "$ko"
                 printf "nvidia kernel module test data" >> "$ko"
               done
+
+              # Generate checksums file to match the sign-oot-kmods task output
+              cd "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/"
+              sha256sum ./*.ko > signed_kmods_checksums.txt
+              echo "Generated checksums file for test .ko files"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -219,6 +224,73 @@ spec:
               fi
 
               echo "Kernel modules found in correct RPM location"
+
+              # Verify that .ko files in RPM are actually the signed ones
+              echo "Extracting and verifying .ko files from RPM match signed versions..."
+              VERIFICATION_DIR="/tmp/rpm_test_verification"
+              mkdir -p "$VERIFICATION_DIR"
+              cd "$VERIFICATION_DIR"
+
+              # Extract .ko files from RPM
+              rpm2cpio "$expected_rpm" | cpio -idm "*/lib/modules/*/*.ko" 2>/dev/null || true
+
+              # Find extracted .ko files and verify they match signed checksums
+              if find . -name "*.ko" -type f | head -1 >/dev/null; then
+                echo "Found .ko files in RPM, verifying they match signed versions..."
+                SIGNED_KMODS_PATH="$(params.dataDir)/$(params.pipelineRunUid)/signed-kmods"
+
+                # Check each extracted .ko file against the signed version
+                find . -name "*.ko" -type f | while read -r ko_file; do
+                  ko_basename=$(basename "$ko_file")
+                  if [ -f "${SIGNED_KMODS_PATH}/${ko_basename}" ]; then
+                    EXTRACTED_CHECKSUM=$(sha256sum "$ko_file" | cut -d' ' -f1)
+                    SIGNED_CHECKSUM=$(sha256sum "${SIGNED_KMODS_PATH}/${ko_basename}" | cut -d' ' -f1)
+
+                    if [ "$EXTRACTED_CHECKSUM" = "$SIGNED_CHECKSUM" ]; then
+                      echo "SUCCESS: ${ko_basename} in RPM matches signed version"
+                    else
+                      echo "ERROR: ${ko_basename} checksum mismatch - RPM contains different version!"
+                      echo "  Extracted: $EXTRACTED_CHECKSUM"
+                      echo "  Signed:    $SIGNED_CHECKSUM"
+                      exit 1
+                    fi
+                  else
+                    echo "ERROR: ${ko_basename} not found in signed kmods directory"
+                    exit 1
+                  fi
+                done
+                echo "SUCCESS: All .ko files in RPM match signed versions"
+              else
+                echo "ERROR: No .ko files found in extracted RPM"
+                exit 1
+              fi
+
+              # Cleanup verification directory
+              rm -rf "$VERIFICATION_DIR"
+
+              # Verify that checksum verification functionality was tested
+              SIGNED_KMODS_PATH="$(params.dataDir)/$(params.pipelineRunUid)/signed-kmods"
+              CHECKSUMS_FILE="${SIGNED_KMODS_PATH}/signed_kmods_checksums.txt"
+
+              echo "Verifying checksums file exists and was used during build..."
+              if [ -f "$CHECKSUMS_FILE" ]; then
+                echo "SUCCESS: Checksums file found: $CHECKSUMS_FILE"
+                echo "Checksums file contents:"
+                cat "$CHECKSUMS_FILE"
+
+                # Verify checksums are still valid (files weren't corrupted during build)
+                cd "$SIGNED_KMODS_PATH"
+                if sha256sum -c signed_kmods_checksums.txt; then
+                  echo "SUCCESS: Checksum validation passed - files intact during RPM build"
+                else
+                  echo "ERROR: Checksum validation failed - files may have been corrupted"
+                  exit 1
+                fi
+              else
+                echo "ERROR: Checksums file not found - checksum verification may not be working"
+                exit 1
+              fi
+
               echo "build-oot-kmods-rpms test completed successfully"
       runAfter:
         - run-task
