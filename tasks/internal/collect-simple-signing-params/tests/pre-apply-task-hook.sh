@@ -31,5 +31,31 @@ cat > "/tmp/configMap.json" << EOF
     }
 }
 EOF
+cat > "/tmp/configMap2.json" << EOF
+{
+    "apiVersion": "v1",
+    "data": {
+        "PYXIS_URL": "https://pyxis.stage.engineering.redhat.com",
+        "SIG_KEY_IDS": "4096R/37036783 SHA-256, 4096R/FD431D51 SHA-256",
+        "SIG_KEY_NAMES": "redhate2etesting, redhate2etesting2",
+        "PYXIS_SSL_CERT_FILE_NAME": "hacbs-signing-pipeline.pem",
+        "PYXIS_SSL_CERT_SECRET_NAME": "hacbs-signing-pipeline-certs",
+        "PYXIS_SSL_KEY_FILE_NAME": "hacbs-signing-pipeline.key",
+        "UMB_CLIENT_NAME": "hacbs-signing-pipeline-nonprod",
+        "UMB_LISTEN_TOPIC": "VirtualTopic.eng.robosignatory.hacbs.sign",
+        "UMB_PUBLISH_TOPIC": "VirtualTopic.eng.hacbs-signing-pipeline.hacbs.sign",
+        "UMB_URL": "umb.stage.api.redhat.com",
+        "UMB_SSL_CERT_FILE_NAME": "hacbs-signing-pipeline.pem",
+        "UMB_SSL_CERT_SECRET_NAME": "hacbs-signing-pipeline-certs",
+        "UMB_SSL_KEY_FILE_NAME": "hacbs-signing-pipeline.key"
+    },
+    "kind": "ConfigMap",
+    "metadata": {
+        "name": "hacbs-signing-pipeline-config-example-2"
+    }
+}
+EOF
 kubectl delete cm/hacbs-signing-pipeline-config-example --ignore-not-found
 kubectl create -f /tmp/configMap.json
+kubectl delete cm/hacbs-signing-pipeline-config-example-2 --ignore-not-found
+kubectl create -f /tmp/configMap2.json
