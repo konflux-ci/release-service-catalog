@@ -9,16 +9,23 @@ function create_container_image() {
   # Extract repository name from parameters to determine the line number
   # This allows us to have a thread-safe way to determine the image id without locking
   local repository=""
+  local metadata_file=""
   local args=("$@")
 
-  # Parse arguments to extract the --name parameter (repository)
+  # Parse arguments to extract the --name (repository) and --metadata parameters
   for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[i]}" == "--name" && $((i+1)) -lt ${#args[@]} ]]; then
       repository="${args[i+1]}"
-      break
+    elif [[ "${args[i]}" == "--metadata" && $((i+1)) -lt ${#args[@]} ]]; then
+      metadata_file="${args[i+1]}"
     fi
   done
 
+  # Append metadata to mock_metadata_output.json
+  if [[ -n "$metadata_file" && -f "$metadata_file" ]]; then 
+    jq . "$metadata_file" >> "$(params.dataDir)/mock_metadata_output.json"
+  fi
+  
   # Find the line number where this repository appears in the file
   local matching_lines=$(grep -n -- "--name $repository" "$(params.dataDir)/mock_create_container_image.txt")
   local line_count=$(echo "$matching_lines" | wc -l)
