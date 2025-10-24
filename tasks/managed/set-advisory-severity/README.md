@@ -7,7 +7,7 @@ Tekton task to set the severity level in the releaseNotes key of the data.json. 
 | Name                    | Description                                                                                                                | Optional | Default value        |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------|
 | dataPath                | Path to the JSON string of the merged data to use in the data workspace                                                    | No       | -                    |
-| requestTimeout          | InternalRequest timeout                                                                                                    | Yes      | 2700                 |
+| requestTimeout          | InternalRequest timeout                                                                                                    | Yes      | 7200                 |
 | pipelineRunUid          | The uid of the current pipelineRun. Used as a label value when creating internal requests                                  | No       | -                    |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                   |
