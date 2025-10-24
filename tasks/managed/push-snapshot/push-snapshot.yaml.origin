@@ -1,0 +1,424 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-snapshot
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to push snapshot images to an image registry using `cosign copy`.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: resultsDirPath
+      description: Path to the results directory in the data workspace
+      type: string
+    - name: concurrentLimit
+      description: The maximum number of images to be proccessed concurrently
+      type: string
+      default: "20"
+    - name: retries
+      description: Retry copy N times
+      type: string
+      default: "3"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: copyAttachedArtifacts
+      type: string
+      description: Enable copying of attached artifacts
+      default: "false"
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: push-snapshot
+      image: quay.io/konflux-ci/release-service-utils:1d0f44656336b012945d5f4af5e289b0dfe176ba
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: "2"
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        push_image () { # Expected arguments are [origin_digest, name, containerImage, repository, tag, platform]
+          # note: Inspection might fail on empty repos, hence `|| true`
+
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry.
+          DEST_AUTH_FILE=$(mktemp)
+          registry=$(echo "$4" | cut -d '/' -f 1)
+          if [ "$registry" = "docker.io" ]; then
+            # For docker.io, the auth key will always be https://index.docker.io/v1/
+            select-oci-auth "$4" > "$DEST_AUTH_FILE"
+          else
+            # For other registries, the auth key will be modified to the full repository path, so that
+            # we can create a combined auth file with source and destination entries for `cosign copy` later
+            select-oci-auth "$4" | jq -c \
+              '.auths."'"$4"'" = .auths."'"$registry"'" | del(.auths."'"$registry"'")' > "$DEST_AUTH_FILE"
+          fi
+
+          oras_args=()
+          if [ -n "$6" ]; then
+            oras_args=(--platform "$6")
+          fi
+
+          destination_digest=$(oras resolve --registry-config "$DEST_AUTH_FILE" "${oras_args[@]}" "$4:$5" || true)
+
+          if [[ "$destination_digest" != "$1" || -z "$destination_digest" ]]; then
+            printf '* Pushing component: %s to %s:%s\n' "$2" "$4" "$5"
+            # Create a combined auth file to enable partial oci matches to work
+            DOCKER_CONFIG="$(mktemp -d)"
+            export DOCKER_CONFIG
+            # shellcheck disable=SC2128
+            jq -s 'reduce .[] as $item ({}; . * $item)' \
+              "$SOURCE_AUTH_FILE" "$DEST_AUTH_FILE" > "$DOCKER_CONFIG"/config.json
+
+            # Check if we should copy attached artifacts
+            if [[ "$COPY_ATTACHED_ARTIFACTS" == "true" ]]; then
+              # Check for any attached artifacts using oras discover, with retries on failure
+              printf '* Checking for attached artifacts on %s\n' "$3"
+              artifact_count="0"
+              discover_attempt=0
+              discover_succeeded=false
+              until [ "$discover_attempt" -gt "$(params.retries)" ]; do # same retry style as copy loop
+                if oras discover \
+                  --registry-config "$SOURCE_AUTH_FILE" \
+                  "$3" \
+                  --format json \
+                  >/tmp/artifacts.json
+                then
+                  artifact_count=$(jq -r '.referrers | length' /tmp/artifacts.json || echo "0")
+                  echo "Found $artifact_count artifacts"
+                  discover_succeeded=true
+                  break
+                else
+                  rc=$?
+                  echo "oras discover failed (attempt $((discover_attempt+1))) with exit code $rc"
+                  discover_attempt=$((discover_attempt+1))
+                fi
+              done
+              if [ "$discover_succeeded" != true ]; then
+                echo "Max retries exceeded. Proceeding without attached artifacts (falling back to cosign copy)."
+              fi
+            fi
+
+            attempt=0
+            until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
+              if [[ "$COPY_ATTACHED_ARTIFACTS" == "true" && "${artifact_count}" -gt 0 ]]; then
+                # Copy the image and all attached artifacts
+                oras cp -r \
+                  --from-registry-config "$SOURCE_AUTH_FILE" \
+                  --to-registry-config "$DEST_AUTH_FILE" \
+                  "${oras_args[@]}" \
+                  "$3" \
+                  "$4:$5" \
+                  && break
+              else
+                # Fallback to classic image copy
+                cosign copy -f "$3" "$4:$5" && break
+              fi
+              attempt=$((attempt+1))
+            done
+            if [ "$attempt" -gt "$(params.retries)" ] ; then
+              echo "Max retries exceeded."
+              exit 1
+            fi
+            # Only the cosign call above needs this custom Docker config. Unset it, so that skopeo call
+            # in get-image-architecture uses the default config in ~/.docker/config.json (this one would break it)
+            unset DOCKER_CONFIG
+          else
+            printf '* Component push skipped (source digest exists at destination): %s (%s)\n' \
+              "$2" "$3"
+          fi
+          jq -n --arg name "$2" --arg url "$4:$5" '{name: $name, url: $url}' > "$TMP_RESULTS_DIR/$2-$5.json"
+        }
+
+        SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        if [ "$(jq '.components | map(select(.repositories |
+          map(select((has("tags")|not) or (.tags | IN([])))) | length > 0)) | length' \
+          "${SNAPSHOT_SPEC_FILE}")" -ne 0 ] ; then
+            echo "Found components in the snapshot file that do not contain tags. Failing"
+            cat "${SNAPSHOT_SPEC_FILE}"
+            exit 1
+        fi
+
+        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/push-snapshot-results.json"
+        RESULTS_JSON_FILE=$(mktemp)
+        echo '{"images":[]}' > "$RESULTS_JSON_FILE"
+
+        RUNNING_JOBS="\j" # A Bash param for number of jobs running
+        CONCURRENT_LIMIT=$(params.concurrentLimit)
+        REQUEST_COUNT=0
+        SUCCESS=true
+
+        # Wait for a slot to open up in the concurrent limit
+        wait_for_slot () {
+          while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+            wait -n || SUCCESS=false
+          done
+        }
+
+        # Create a temporary directory to store the results of each push
+        TMP_RESULTS_DIR=$(mktemp -d)
+
+        defaultPushSourceContainer=$(jq -r '.mapping.defaults.pushSourceContainer' "$DATA_FILE")
+        COPY_ATTACHED_ARTIFACTS="$(params.copyAttachedArtifacts)"
+
+        application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        printf 'Beginning "%s" for "%s"\n\n' "$(context.task.name)" "$application"
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+          containerImage=$(jq -r '.containerImage' <<< "$component")
+
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry.
+          registry=$(echo "${containerImage}" | cut -d '/' -f 1)
+          # Apply-mapping ensures that the containerImage contains a sha256 digest
+          source_repo=${containerImage%%@sha256:*}
+          SOURCE_AUTH_FILE=$(mktemp)
+          select-oci-auth "${containerImage}" | jq -c \
+            '.auths."'"$source_repo"'" = .auths."'"$registry"'" | del(.auths."'"$registry"'")' > "$SOURCE_AUTH_FILE"
+
+          arch_json=$(get-image-architectures "${containerImage}")
+          arches=$(jq -s 'map(.platform.architecture)' <<< "$arch_json")
+          oses=$(jq -s 'map(.platform.os)' <<< "$arch_json")
+
+          # Just read the first from the list of architectures
+          os=$(jq -r '.[0]' <<< "$oses")
+          arch=$(jq -r '.[0]' <<< "$arches")
+          name=$(jq -r '.name' <<< "$component")
+          media_type=$(skopeo inspect --retry-times 3 --raw "docker://${containerImage}" | jq -r .mediaType)
+          oras_args=()
+          platform=
+          if [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]\
+            || [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]]; then
+            platform=$os/$arch
+            oras_args=(--platform "$platform")
+          fi
+
+          # we do not use oras_args here since we want to get the manifest index image digest
+          origin_digest=$(oras resolve --registry-config "$SOURCE_AUTH_FILE" "${containerImage}")
+
+          jq --arg i "$i" --argjson arches "$arches" --argjson oses "$oses" --arg name "$name" \
+            --arg sha "$origin_digest" \
+            '.images[$i|tonumber] += {"arches": $arches, "oses": $oses, "name": $name, "shasum": $sha, "urls": []}' \
+              "$RESULTS_JSON_FILE" > "$RESULTS_JSON_FILE.tmp" && mv "$RESULTS_JSON_FILE.tmp" "$RESULTS_JSON_FILE"
+
+          # Push source container if the component has pushSourceContainer: true or if the
+          # pushSourceContainer key is missing from the component and the defaults has
+          # pushSourceContainer: true
+          pushSourceContainer=$(jq -r '.pushSourceContainer' <<< "$component")
+          hasPushSourceContainer=$(jq 'has("pushSourceContainer")' <<< "$component")
+
+          if [[ "${pushSourceContainer}" == "true" ]] || [[ "${hasPushSourceContainer}" == "false" && \
+                  ${defaultPushSourceContainer} == "true" ]] ; then
+            source_tag=${origin_digest/:/-}.src
+            # Calculate the source container image based on the provided container image
+            sourceContainer="${source_repo}:${source_tag}"
+            # Check if the source container exists
+            source_container_digest=$(oras resolve --registry-config "$SOURCE_AUTH_FILE" \
+              "${sourceContainer}")
+
+            if [ -z "$source_container_digest" ] ; then
+              echo "Error: Source container ${sourceContainer} not found!"
+              exit 1
+            fi
+          fi
+
+          NUM_REPOS=$(jq -c '.repositories | length' <<< "$component")           
+          for ((j = 0; j < NUM_REPOS; j++)); do 
+            repository=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
+            imageTags=$(jq '.tags' <<< "$repository")
+            repository_url=$(jq -r '.url' <<< "$repository")
+          
+            if [ -n "${source_container_digest-}" ] ; then
+              # Push the source image with the source tag here. The source image will be
+              # pushed with the provided tags below in the loop
+              wait_for_slot
+              push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
+                "${repository_url}" "${source_tag}" "" > "$TMP_RESULTS_DIR/${name}-${source_tag}.out" 2>&1 &
+              ((++REQUEST_COUNT))
+              echo "Request Count: $REQUEST_COUNT"
+            fi
+
+            for tag in $(jq -r '.[]' <<< "$imageTags") ; do
+              wait_for_slot
+              # Push the container image
+              push_image "${origin_digest}" "${name}" "${containerImage}" "${repository_url}" "${tag}" \
+              "$platform" > "$TMP_RESULTS_DIR/${name}-${tag}.out" 2>&1 &
+              ((++REQUEST_COUNT))
+              echo "Request Count: $REQUEST_COUNT"
+
+              # This variable will only exist if the above logic determined the source container should
+              # be pushed for this component
+              if [ -n "${source_container_digest-}" ] ; then
+                wait_for_slot
+                push_image "${source_container_digest}" "${name}" "${sourceContainer}" \
+                  "${repository_url}" "${tag}-source" "" > "$TMP_RESULTS_DIR/${name}-${tag}-source.out" 2>&1 &
+                ((++REQUEST_COUNT))
+                echo "Request Count: $REQUEST_COUNT"
+              fi
+            done
+          done
+        done
+
+        echo "Waiting for all jobs to complete...."
+        while (( ${RUNNING_JOBS@P} > 0 )); do
+          wait -n || SUCCESS=false
+        done
+
+        echo "Printing outputs for each push image"
+        for file in "$TMP_RESULTS_DIR"/*.out; do
+          echo "=== $(basename "${file}" .out) ==="
+          cat "$file"
+          echo
+        done
+
+        if [ "$SUCCESS" != true ]; then
+            echo "One or more jobs failed. Please check the logs above for details."
+            exit 1
+        fi
+
+        # Create a temporary file for the pushes data to avoid command line argument length limits
+        PUSHES_FILE=$(mktemp)
+        jq -s . "$TMP_RESULTS_DIR"/*.json > "$PUSHES_FILE"
+
+        # Use file input instead of command line arguments to avoid argument length limits
+        jq --slurpfile PUSHES "$PUSHES_FILE" '
+          reduce $PUSHES[0][] as $p (.; (.images[] | select(.name == $p.name).urls) += [$p.url])
+        ' "$RESULTS_JSON_FILE" | tee "$RESULTS_FILE"
+
+        # Clean up temporary files
+        rm -f "$RESULTS_JSON_FILE" "$RESULTS_JSON_FILE.tmp" "$PUSHES_FILE"
+
+        printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$application"
+      volumeMounts:
+        - name: trusted-ca
+          mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+          subPath: ca-bundle.crt
+          readOnly: true
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
