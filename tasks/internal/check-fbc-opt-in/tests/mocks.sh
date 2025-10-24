@@ -4,13 +4,13 @@ set -eux
 # mocks to be injected into task step scripts
 function kinit() {
   echo "Mock kinit called with: $*"
-  echo $* >> /var/workdir/mock_kinit.txt
+  echo $* >> /workspace/workdir/mock_kinit.txt
   # Mock successful kinit
   return 0
 }
 function curl() {
   echo "Mock curl called with: $*"
-  echo $* >> /var/workdir/mock_curl.txt
+  echo $* >> /workspace/workdir/mock_curl.txt
 
   # Extract output file from curl arguments
   local output_file=""

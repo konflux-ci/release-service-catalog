@@ -179,7 +179,7 @@ do
     workSpaceParams="emptyDir="
     # to avoid tar extraction errors, we need to specify a subdirectory
     # inside the volume.
-    dataDir=/var/workdir/release
+    dataDir=/workspace/workdir/release
   fi
 
   rm -f "$TASK_COPY"

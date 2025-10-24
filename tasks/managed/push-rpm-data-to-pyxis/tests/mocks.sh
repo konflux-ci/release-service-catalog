@@ -25,7 +25,7 @@ function cosign() {
 
   SBOM_JSON='{"spdxVersion": "SPDX-2.3"}'
 
-  echo "$SBOM_JSON" > "/var/workdir/downloaded-sboms/${4}"
+  echo "$SBOM_JSON" > "/workspace/workdir/downloaded-sboms/${4}"
   # Also save a copy in the dataDir for test verification
   mkdir -p "$(params.dataDir)/downloaded-sboms"
   echo "$SBOM_JSON" > "$(params.dataDir)/downloaded-sboms/${4}"
