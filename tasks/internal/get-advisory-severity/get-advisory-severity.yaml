@@ -142,23 +142,37 @@ spec:
                   # To check if it is the same component, we use the repository value and match it with the
                   # repository_url field in the purl from OSIDB. Thus, we have to check each entry as
                   # repository_url is not its own field
-                  NUM_AFFECTED_COMPONENTS=$(jq '.affects | length' <<< "$OUTPUT")
-                  for ((k = 0; k < NUM_AFFECTED_COMPONENTS; k++)); do
-                      AFFECTED_COMPONENT=$(jq --argjson k "$k" '.affects[$k]' <<< "$OUTPUT")
-                      PURL=$(jq -r '.purl // ""' <<< "$AFFECTED_COMPONENT")
-                      # .purl can be empty, so we direct stderr and just have it return empty string if purl was empty
-                      AFFECTED_REPOSITORY=$(python3 -c "from packageurl import PackageURL; \
-                        print(PackageURL.from_string('$PURL').to_dict()['qualifiers']['repository_url'])" \
-                        2> /dev/null || true)
-                      if [ "$AFFECTED_REPOSITORY" == "$repository" ] ; then
-                          COMPONENT_IMPACT=$(jq -r '.impact // ""' <<< "$AFFECTED_COMPONENT")
-                          # If we found a component specific impact, use that
-                          if [ -n "$COMPONENT_IMPACT" ] ; then
-                              IMPACT="$COMPONENT_IMPACT"
-                          fi
-                          break
-                      fi
-                  done
+                  COMPONENT_IMPACT=$(echo "$OUTPUT" | python3 - "$repository" 2> /dev/null <<'PYEOF' || true
+          import json
+          import sys
+          from packageurl import PackageURL
+
+          output = json.load(sys.stdin)
+          repository = sys.argv[1]
+
+          for affected in output.get('affects', []):
+              purl = affected.get('purl')
+              if not purl:
+                  continue
+
+              try:
+                  pkg = PackageURL.from_string(purl)
+                  qualifiers = pkg.to_dict().get('qualifiers', {})
+                  repository_url = qualifiers.get('repository_url', '')
+
+                  if repository_url == repository:
+                      # If we found a component specific impact, use that
+                      component_impact = affected.get('impact', '')
+                      if component_impact:
+                          print(component_impact)
+                          sys.exit(0)
+              except Exception:
+                  continue
+          PYEOF
+          )
+                  if [ -n "$COMPONENT_IMPACT" ] ; then
+                      IMPACT="$COMPONENT_IMPACT"
+                  fi
                   ADVISORY_SEVERITY=$(get_higher_severity "$ADVISORY_SEVERITY" "$IMPACT")
               done
           done
