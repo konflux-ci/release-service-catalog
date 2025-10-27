@@ -250,11 +250,27 @@ spec:
             # Check if image is manifest list
             BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
             DIGEST="${BUILD_CONTAINER_IMAGE/*@}"
-            IMAGE=$(skopeo inspect --raw "docker://${BUILD_CONTAINER_IMAGE}")
-            MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
             LIST=0
-            if [ "$MEDIA_TYPE" = "application/vnd.docker.distribution.manifest.list.v2+json" ]; then LIST=1; fi
-            if [ "$MEDIA_TYPE" = "application/vnd.oci.image.index.v1+json" ]; then LIST=1; fi
+            MANIFEST_DIGESTS=""
+
+            # First, try to get imageDigests from the snapshot
+            # (avoids calling skopeo on inaccessible registries, like IIB)
+            IMAGE_DIGESTS=$(jq -c ".components[${COMPONENTS_INDEX}].imageDigests // []" "${SNAPSHOT_PATH}")
+            IMAGE_DIGESTS_LENGTH=$(jq 'length' <<< "$IMAGE_DIGESTS")
+
+            if [ "$IMAGE_DIGESTS_LENGTH" -gt 0 ]; then
+              # imageDigests available - use them (IIB always produces multi-arch manifest lists)
+              LIST=1
+              MANIFEST_DIGESTS=$(jq -r '.[]' <<< "$IMAGE_DIGESTS")
+            else
+              IMAGE=$(skopeo inspect --raw "docker://${BUILD_CONTAINER_IMAGE}")
+              MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
+              if [ "$MEDIA_TYPE" = "application/vnd.docker.distribution.manifest.list.v2+json" ]; then LIST=1; fi
+              if [ "$MEDIA_TYPE" = "application/vnd.oci.image.index.v1+json" ]; then LIST=1; fi
+              if [ $LIST -eq 1 ]; then
+                MANIFEST_DIGESTS=$(echo "$IMAGE" | jq -r '.manifests[]|.digest')
+              fi
+            fi
 
             # Process repositories array (apply-mapping guarantees this exists)
             NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$COMPONENT")
@@ -293,7 +309,7 @@ spec:
                 # Sign each manifest in the manifest list
                 if [ $LIST -eq 1 ]; then
                     for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                        for MDIGEST in $(jq -r '.manifests[]|.digest' <<< "$IMAGE"); do
+                        for MDIGEST in $MANIFEST_DIGESTS; do
                             for TAG in $REPO_TAGS; do
                                 to_sign+=("${REGISTRY_REF}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
                             done

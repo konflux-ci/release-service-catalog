@@ -111,6 +111,7 @@ spec:
         for((i=0; i<LENGTH; i++)); do
           TARGETINDEX=$(jq -r --argjson i "$i" '.components[$i].target_index' "$RESULTS_FILE")
           SOURCEINDEX=$(jq -r  --argjson i "$i" '.components[$i].index_image_resolved' "$RESULTS_FILE")
+          IMAGE_DIGESTS=$(jq -c --argjson i "$i" '.components[$i].image_digests // []' "$RESULTS_FILE")
           REPOSITORY=${TARGETINDEX%:*}
 
           TAG=${TARGETINDEX#*:}
@@ -120,20 +121,38 @@ spec:
           fi
           JSON_TAGS=$(jq -n -c '$ARGS.positional' --args -- "${TAGS[@]}")
 
+          # Translate target_index to get rh-registry-repo and registry-access-repo
+          TRANSLATED=$(translate-delivery-repo "$TARGETINDEX")
+          RH_REGISTRY_REPO=$(jq -r '.[] | select(.repo=="redhat.io") | .url' <<< "$TRANSLATED" \
+            | cut -d':' -f1)
+          REGISTRY_ACCESS_REPO=$(jq -r '.[] | select(.repo=="access.redhat.com") | .url' \
+            <<< "$TRANSLATED" | cut -d':' -f1)
+
+          # Build repository object with translated fields
+          REPO_OBJECT=$(jq -n \
+            --arg url "${REPOSITORY}" \
+            --argjson tags "${JSON_TAGS}" \
+            --arg rh_registry_repo "${RH_REGISTRY_REPO}" \
+            --arg registry_access_repo "${REGISTRY_ACCESS_REPO}" \
+            '{
+              "url": $url,
+              "tags": $tags
+            } + (if $rh_registry_repo != "" then {"rh-registry-repo": $rh_registry_repo} else {} end)
+              + (if $registry_access_repo != "" then {"registry-access-repo": $registry_access_repo} else {} end)'
+          )
+
           COMPONENT=$(jq -n \
             --arg image "${SOURCEINDEX}" \
             --arg repository "${REPOSITORY}" \
             --argjson tags "${JSON_TAGS}" \
+            --argjson image_digests "${IMAGE_DIGESTS}" \
+            --argjson repo_object "${REPO_OBJECT}" \
             '{
               "containerImage": $image,
               "repository": $repository,
-              "repositories": [
-                {
-                  "url": $repository,
-                  "tags": $tags
-                }
-              ],
-              "tags": $tags
+              "repositories": [$repo_object],
+              "tags": $tags,
+              "imageDigests": $image_digests
             }'
           )
           export COMPONENT
