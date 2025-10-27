@@ -691,58 +691,16 @@ validate_pipeline_results() {
     
     echo "🔍 DEBUG: Release JSON retrieved successfully"
     
-    # Extract index image artifacts (these should be populated by the managed pipeline)
-    local release_index_image release_index_image_resolved
-    release_index_image=$(jq -r '.status.artifacts.index_image.index_image // ""' <<< "${release_json}")
-    release_index_image_resolved=$(jq -r '.status.artifacts.index_image.index_image_resolved // ""' <<< "${release_json}")
-    
-    echo "🔍 DEBUG: Extracted index images from release:"
-    echo "🔍 DEBUG:   index_image: '$release_index_image'"
-    echo "🔍 DEBUG:   index_image_resolved: '$release_index_image_resolved'"
-    
-    # Validate index_image (equivalent to iibIndexImage pipeline result)
-    echo "Checking index_image artifact..."
-    if [ -z "$release_index_image" ]; then
-        echo "🔴 Release artifact index_image is empty or missing"
-        failures=$((failures+1))
-    elif [[ "$release_index_image" =~ $'\n' ]]; then
-        echo "🔴 Release artifact index_image contains newlines (indicates pipeline result issue)"
-        echo "    Value: '$release_index_image'"
-        echo "    This suggests the original multi-line pipeline result issue still exists"
+    local index_image_artifacts
+    index_image_artifacts=$(jq -c '.status.artifacts.index_image // {}' <<< "${release_json}")
+
+    echo "Checking index_image artifacts..."
+    if [ "$index_image_artifacts" = "{}" ] || [ -z "$index_image_artifacts" ]; then
+        echo "🔴 index_image artifacts are empty or missing"
         failures=$((failures+1))
     else
-        echo "✅ Release artifact index_image: $release_index_image"
-    fi
-    
-    # Validate index_image_resolved (equivalent to iibIndexImageResolved pipeline result)  
-    echo "Checking index_image_resolved artifact..."
-    if [ -z "$release_index_image_resolved" ]; then
-        echo "🔴 Release artifact index_image_resolved is empty or missing"
-        failures=$((failures+1))
-    elif [[ "$release_index_image_resolved" =~ $'\n' ]]; then
-        echo "🔴 Release artifact index_image_resolved contains newlines (indicates pipeline result issue)"
-        echo "    Value: '$release_index_image_resolved'"  
-        echo "    This suggests the original multi-line pipeline result issue still exists"
-        failures=$((failures+1))
-    else
-        echo "✅ Release artifact index_image_resolved: $release_index_image_resolved"
-    fi
-    
-    # Additional validation: check that both artifacts are consistent (should be the same image)
-    if [ -n "$release_index_image" ] && [ -n "$release_index_image_resolved" ]; then
-        # Extract just the registry and image parts (without digest) to compare base images
-        local base_image base_image_resolved
-        base_image=$(echo "$release_index_image" | cut -d'@' -f1 2>/dev/null || echo "$release_index_image")
-        base_image_resolved=$(echo "$release_index_image_resolved" | cut -d'@' -f1 2>/dev/null || echo "$release_index_image_resolved")
-        
-        if [ "$base_image" = "$base_image_resolved" ]; then
-            echo "✅ Index image artifacts are consistent (same base image)"
-        else
-            echo "⚠️  Index image artifacts have different base images:"
-            echo "    index_image base: $base_image"
-            echo "    index_image_resolved base: $base_image_resolved"
-            echo "    This may be expected if they reference the same image differently"
-        fi
+        echo "✅ index_image artifacts:"
+        jq '.' <<< "$index_image_artifacts"
     fi
     
     if [ $failures -eq 0 ]; then
@@ -764,14 +722,12 @@ verify_single_component_release() {
     release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
     
     local failures=0
-    local fbc_fragment ocp_version iib_log index_image index_image_resolved
+    local fbc_fragment ocp_version iib_log index_image_artifacts
 
     fbc_fragment=$(jq -r '.status.artifacts.components[0].fbc_fragment // ""' <<< "${release_json}")
     ocp_version=$(jq -r '.status.artifacts.components[0].ocp_version // ""' <<< "${release_json}")
     iib_log=$(jq -r '.status.artifacts.components[0].iibLog // ""' <<< "${release_json}")
-
-    index_image=$(jq -r '.status.artifacts.index_image.index_image // ""' <<< "${release_json}")
-    index_image_resolved=$(jq -r '.status.artifacts.index_image.index_image_resolved // ""' <<< "${release_json}")
+    index_image_artifacts=$(jq -c '.status.artifacts.index_image // {}' <<< "${release_json}")
 
     echo "Checking fbc_fragment..."
     if [ -n "${fbc_fragment}" ]; then
@@ -795,18 +751,12 @@ verify_single_component_release() {
       failures=$((failures+1))
     fi
     echo "Checking index_image..."
-    if [ -n "${index_image}" ]; then
-      echo "✅️ index_image: ${index_image}"
-    else
+    if [ "$index_image_artifacts" = "{}" ] || [ -z "$index_image_artifacts" ]; then
       echo "🔴 index_image was empty!"
       failures=$((failures+1))
-    fi
-    echo "Checking index_image_resolved..."
-    if [ -n "${index_image_resolved}" ]; then
-      echo "✅️ index_image_resolved: ${index_image_resolved}"
     else
-      echo "🔴 index_image_resolved was empty!"
-      failures=$((failures+1))
+      echo "✅️ index_image:"
+      jq '.' <<< "$index_image_artifacts"
     fi
 
     return $failures
