@@ -83,6 +83,8 @@ configure_test_matrix() {
         echo "🎯 Detected signing task changes - enabling core scenarios"
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
+        GLOBAL_TEST_MATRIX["single-prega"]="enabled"
+        GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
         tests_enabled=true
         echo "  Signing changes enabled: single-happy, single-staged"
     fi

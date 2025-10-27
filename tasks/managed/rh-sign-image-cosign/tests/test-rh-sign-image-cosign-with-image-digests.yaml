@@ -2,10 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-collect-index-images-single-version
+  name: test-rh-sign-image-cosign-with-image-digests
 spec:
-  description: |
-    Run the collect-index-images task for single index image version and verify the results
+  description: Test signing an image with imageDigests field (IIB scenario)
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -48,21 +47,50 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            image: quay.io/konflux-ci/release-service-utils:70be98cc78c9ef52526c4f2be437321aa943b516
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)"
-              cat > "$(params.dataDir)/internal-requests-results.json" << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
+                "application": "myapp",
                 "components": [
                   {
-                    "target_index": "quay.io/redhat/redhat----fbc-target-index:v4.12",
-                    "index_image_resolved": "redhat.com/rh-stage/iib@sha256:abcdefghijk"
+                    "name": "index-image",
+                    "containerImage": "quay.io/redhat-pending/iib@sha256:abcdef123456",
+                    "imageDigests": [
+                      "sha256:amd64digest1234567890",
+                      "sha256:arm64digest1234567890",
+                      "sha256:ppc64ledigest123456"
+                    ],
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-pending/rhtap----preview-operator-index",
+                        "rh-registry-repo": "registry.redhat.io/rhtap/preview-operator-index",
+                        "registry-access-repo": "registry.access.redhat.com/rhtap/preview-operator-index",
+                        "tags": ["v4.13", "v4.13-1234567890"]
+                      }
+                    ]
                   }
                 ]
               }
+              EOF
+              # create empty cosign verify mock files for manifest list and arch-specific digests
+              for D in sha256:abcdef123456 sha256:amd64digest1234567890 \
+                sha256:arm64digest1234567890 sha256:ppc64ledigest123456 ; do
+                REF="quay.io/redhat-pending/rhtap----preview-operator-index@${D}"
+                touch "$(params.dataDir)/$(echo $REF | tr '/' '-')"
+              done
+
+              # Setup cosign success calls (verify + sign for each operation)
+              for _ in $(seq 1 32); do
+                  echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
+              done
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/signRegistryAccess.txt" << EOF
+              rhtap/preview-operator-index
               EOF
           - name: create-trusted-artifact
             ref:
@@ -76,12 +104,16 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: collect-index-images
+        name: rh-sign-image-cosign
       params:
-        - name: internalRequestResultsFile
-          value: "internal-requests-results.json"
-        - name: buildTimestamp
-          value: "2468"
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: secretName
+          value: 'test-cosign-secret'
+        - name: signRegistryAccessPath
+          value: $(context.pipelineRun.uid)/signRegistryAccess.txt
+        - name: concurrentLimit
+          value: 4
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -100,13 +132,14 @@ spec:
         - setup
     - name: check-result
       params:
-        - name: indexImageSnapshot
-          value: $(tasks.run-task.results.indexImageSnapshot)
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
       taskSpec:
         params:
-          - name: indexImageSnapshot
+          - name: sourceDataArtifact
+            type: string
         volumes:
           - name: workdir
             emptyDir: {}
@@ -131,68 +164,19 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            image: quay.io/konflux-ci/release-service-utils:70be98cc78c9ef52526c4f2be437321aa943b516
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              SNAPSHOT_FILE="$(params.dataDir)/$(params.indexImageSnapshot)"
+              # Verify that all cosign calls were consumed (file should be empty)
+              REMAINING_CALLS=$(wc -l < "$(params.dataDir)/mock_cosign_success_calls" || echo 0)
 
-              if [ "$(jq -r '.components[0].containerImage' < "${SNAPSHOT_FILE}")" != \
-                "redhat.com/rh-stage/iib@sha256:abcdefghijk" ]; then
-                echo "containerImage does not match"
-                exit 1
-              fi
-
-              if [ "$(jq -r '.components[0].repositories[0].url' < "${SNAPSHOT_FILE}")" != \
-                "quay.io/redhat/redhat----fbc-target-index" ]; then
-                echo "repository does not match"
+              if [ "$REMAINING_CALLS" -ne 0 ]; then
+                echo "Expected all cosign calls to be consumed, but $REMAINING_CALLS calls remain"
                 exit 1
               fi
 
-              if [ "$(jq -c '.components[0].repositories[0].tags' < "${SNAPSHOT_FILE}")" != \
-                "[\"v4.12\",\"v4.12-2468\"]" ]; then
-                echo "tags do not match"
-                exit 1
-              fi
-
-              # Verify rh-registry-repo field exists and is not empty
-              RH_REGISTRY_REPO=$(jq -r '.components[0].repositories[0]."rh-registry-repo" // ""' \
-                < "${SNAPSHOT_FILE}")
-              if [ -z "$RH_REGISTRY_REPO" ]; then
-                echo "rh-registry-repo is missing or empty"
-                exit 1
-              fi
-
-              # Verify registry-access-repo field exists and is not empty
-              REGISTRY_ACCESS_REPO=$(jq -r \
-                '.components[0].repositories[0]."registry-access-repo" // ""' < "${SNAPSHOT_FILE}")
-              if [ -z "$REGISTRY_ACCESS_REPO" ]; then
-                echo "registry-access-repo is missing or empty"
-                exit 1
-              fi
-
-              # Verify the translated repos contain expected patterns
-              if [[ ! "$RH_REGISTRY_REPO" =~ registry.redhat.io ]]; then
-                echo "rh-registry-repo does not contain registry.redhat.io: $RH_REGISTRY_REPO"
-                exit 1
-              fi
-
-              if [[ ! "$REGISTRY_ACCESS_REPO" =~ registry.access.redhat.com ]]; then
-                echo "registry-access-repo does not contain registry.access.redhat.com: $REGISTRY_ACCESS_REPO"
-                exit 1
-              fi
-
-              # Remove from here to next comment when repository key support is removed
-              if [ "$(jq -r '.components[0].repository' < "${SNAPSHOT_FILE}")" != \
-                "quay.io/redhat/redhat----fbc-target-index" ]; then
-                echo "repository does not match"
-                exit 1
-              fi
-              if [ "$(jq -c '.components[0].tags' < "${SNAPSHOT_FILE}")" != "[\"v4.12\",\"v4.12-2468\"]" ]; then
-                echo "tags do not match"
-                exit 1
-              fi
-              # End of block to be removed
+              echo "Test passed: all cosign calls were consumed, imageDigests were used for signing"
       runAfter:
         - run-task
