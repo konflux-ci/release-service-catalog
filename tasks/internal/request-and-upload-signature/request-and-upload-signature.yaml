@@ -53,9 +53,17 @@ spec:
       description: umb topic to listen to for responses with signed content
       name: umb_listen_topic
       type: string
+    - default: VirtualTopic.eng.robosignatory.konflux.sign
+      description: batch signer umb topic to listen to for responses with signed content
+      name: umb_batch_listen_topic
+      type: string
     - default: VirtualTopic.eng.operatorpipelines.isv.sign
       description: umb topic to publish to for requesting signing
       name: umb_publish_topic
+      type: string
+    - default: VirtualTopic.eng.hacbs-signing-pipeline.konflux.sign
+      description: batch signer umb topic to publish to for requesting signing
+      name: umb_batch_publish_topic
       type: string
     - default: umb.api.redhat.com
       description: umb host to connect to for messaging
@@ -77,6 +85,10 @@ spec:
     - name: signature_data_file
       description: The file where the signing response should be placed
       default: "signing_response.json"
+      type: string
+    - name: signer_type
+      description: Determines if a single or batch signing should be used
+      default: "single"
       type: string
   volumes:
     - name: umb-ssl-cert-secret
@@ -135,8 +147,12 @@ spec:
           value: $(params.umb_client_name)
         - name: umb_listen_topic
           value: $(params.umb_listen_topic)
+        - name: umb_batch_listen_topic
+          value: $(params.umb_batch_listen_topic)
         - name: umb_publish_topic
           value: $(params.umb_publish_topic)
+        - name: umb_batch_publish_topic
+          value: $(params.umb_batch_publish_topic)
         - name: umb_url
           value: $(params.umb_url)
         - name: signature_data_file
@@ -166,6 +182,21 @@ spec:
           send_retries: 2
           message_id_key: request_id
           log_level: debug
+        msg_batch_signer:
+          messaging_brokers:
+            - "amqps://${umb_url}:5671"
+          messaging_cert_key: /tmp/umb.pem
+          messaging_ca_cert: ${CA_BUNDLE}
+          topic_send_to: topic://${umb_batch_publish_topic}
+          topic_listen_to: queue://Consumer.${creator}.${requester}-{task_id}.${umb_batch_listen_topic}
+          environment: prod
+          service: ${umb_client_name}
+          timeout: 60
+          retries: 2
+          send_retries: 2
+          message_id_key: request_id
+          log_level: debug
+          chunk_size: 200
         EOF
         echo "Using signing config:"
         cat "$(workspaces.data.path)/pubtools-sign-config.yaml"
@@ -225,9 +256,10 @@ spec:
           value: "$(params.signature_data_file)"
         - name: requester
           value: "$(params.requester)"
+        - name: signer_type
+          value: "$(params.signer_type)"
       script: |
         #!/usr/bin/env /bin/bash
-        
         umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
         umb_key="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)")"
 
@@ -243,6 +275,8 @@ spec:
         set -x
         declare -a reference_args=()
         declare -a digest_args=()
+        declare -a signing_key_args=()
+        declare -a signing_key_name_args=()
         for reference in $references; do
           reference_args+=("--reference")
           reference_args+=("${reference}")
@@ -251,16 +285,25 @@ spec:
           digest_args+=("--digest")
           digest_args+=("${digest}")
         done
+        for sig_key in $sig_key_names; do
+          signing_key_args+=("--signing-key")
+          signing_key_args+=("${sig_key}")
+          signing_key_name_args+=("--signing-key-name")
+          signing_key_name_args+=("${sig_key}")
+        done
+
         task_id=$(get-task-id)
         echo "Running pubtools-sign-msg-container-sign "
-        echo "--signing-key ${sig_key_names} --config-file $(workspaces.data.path)/pubtools-sign-config.yaml"
-        echo " ${reference_args[@]} ${digest_args[@]} --task-id $task_id"
+        echo "${signing_key_args[@]} ${signing_key_name_args[@]} "
+        echo "--config-file $(workspaces.data.path)/pubtools-sign-config.yaml "
+        echo "${reference_args[@]} ${digest_args[@]} --task-id $task_id"
 
         pubtools-sign-msg-container-sign \
           --requester "${requester}" \
-          --signing-key-name "${sig_key_names}" \
-          --signing-key "${sig_key_names}" \
+          "${signing_key_args[@]}" \
+          "${signing_key_name_args[@]}" \
           --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" "${reference_args[@]}" "${digest_args[@]}" \
+          --signer-type "${signer_type}" \
           --task-id $task_id > "$(workspaces.data.path)/${signature_data_file}"
         echo "Signing response was:"
         fold "$(workspaces.data.path)/${signature_data_file}"
@@ -276,6 +319,8 @@ spec:
       env:
         - name: signature_data_file
           value: "$(params.signature_data_file)"
+        - name: signer_type
+          value: "$(params.signer_type)"
       script: |
         #!/usr/bin/env /bin/bash
         set -xe
@@ -293,18 +338,40 @@ spec:
           exit 1
         fi
 
-        SIGNATURE_DATA=$(
-          cat "$(workspaces.data.path)/${signature_data_file}" | \
-          jq -cM "[
-            [.operation_results, .operation.references]|
-            transpose|
-            .[]|
-            {reference:.[1],
-             manifest_digest:.[0][0].msg.manifest_digest,
-             repository:.[0][0].msg.repo,
-             signature_data:.[0][0].msg.signed_claim,
-             sig_key_id: .[0][0].msg.sig_key_id}
-          ]")
+        if [ "$signer_type" == "single" ]; then
+          SIGNATURE_DATA=$(
+            cat "$(workspaces.data.path)/${signature_data_file}" | \
+            jq -cM "[
+              [.operation_results, .operation.references]|
+              transpose|
+              .[]|
+              {reference:.[1],
+               manifest_digest:.[0][0].msg.manifest_digest,
+               repository:.[0][0].msg.repo,
+               signature_data:.[0][0].msg.signed_claim,
+               sig_key_id: .[0][0].msg.sig_key_id}
+            ]")
+        elif [ "$signer_type" == "batch" ]; then
+          SIGNATURE_DATA=$(
+            cat "$(workspaces.data.path)/${signature_data_file}" | \
+            jq -cM '[
+              [(.operation_results|.[]|.[0].msg.claims),
+               [range(0; (.operation_results|.[]|.[0].msg.claims)|length) as $x |
+                (.operation_results|.[]|.[0].msg.repo)]
+              ]
+              |transpose
+              |.[]
+              |(.[0].signed_claims|to_entries|.[]) as $x
+              |{reference:(.[0].claim_file | @base64d | fromjson | .critical.identity."docker-reference"),
+                manifest_digest:.[0].manifest_digest,
+                repo:.[1],
+                signature_data: $x.value,
+                sig_key_id: $x.key}
+            ]')
+        else
+          echo "Unknown signer_type: $signer_type"
+          exit 1
+        fi
         echo "${SIGNATURE_DATA}" > "${signature_data_file}"
 
     - name: upload-signature
