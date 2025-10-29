@@ -20,3 +20,4 @@ else a new artifact will be created.
 | sourceDataArtifact      | The source data artifact to use for trusted artifacts                                                                      | Yes      | ""                   |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
+| registrySecret          | The name of the secret with the registry token for making repositories public                                              | Yes      | registry-token       |

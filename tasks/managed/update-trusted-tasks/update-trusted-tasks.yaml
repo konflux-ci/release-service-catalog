@@ -49,11 +49,18 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: registrySecret
+      type: string
+      description: The name of the secret with the registry token for making repositories public
+      default: "registry-token"
   results:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
   volumes:
+    - name: registry-secret-vol
+      secret:
+        secretName: $(params.registrySecret)
     - name: workdir
       emptyDir: {}
   stepTemplate:
@@ -176,6 +183,92 @@ spec:
                 done
             done
         done
+    - name: make-data-acceptable-bundles-public
+      image: quay.io/konflux-ci/release-service-utils:a5072c6da901bc9cf4d767da82e700784c7df981
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 150m
+      volumeMounts:
+        - name: registry-secret-vol
+          mountPath: "/etc/secrets"
+      script: |
+        #!/usr/bin/env bash
+        set -eu
+        REGISTRY_TOKEN="$(cat /etc/secrets/token)"
+        set -x
+        # Function to call quay.io to make a repository public
+        # Parameters:
+        # repository: full path to repo on quay.io, e.g. "myorg/myrepo"
+        function make_repo_public() {
+          set +x
+          if curl -X POST \
+            --fail-with-body --retry 3 \
+            --header "Authorization: Bearer ${REGISTRY_TOKEN}" \
+            --header 'Content-Type: application/json' \
+            --data '{"visibility": "public"}' \
+            "https://quay.io/api/v1/repository/${1}/changevisibility"
+          then
+            echo "Successfully made quay.io/${1} public"
+          else
+            echo "Error: Failed to make repo quay.io/${1} public."\
+              "Make sure the secret $(params.registrySecret) contains"\
+              " the \"token\" key with token that has permission to"\
+              " Administer Repositories."
+            exit 1
+          fi
+          set -x
+        }
+        SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+        # Extract the application from the snapshot
+        application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        # Get the number of components
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        printf 'Making data-acceptable-bundles repositories public for "%s"\n\n' "$application"
+        
+        # Track all data-acceptable-bundles repositories that were created/updated
+        declare -A processed_repos
+        
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+            # Extract the component from the snapshot
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            # Get the number of repositories from the component
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$component")
+            # Iterate through each repository in the component
+            for ((j = 0; j < NUM_REPOSITORIES; j++))
+            do
+                # Extract the repository URL from the snapshot
+                repository=$(jq -r --argjson j "$j" '.repositories[$j].url' <<< "$component")
+                # The data-acceptable-bundles repo should reside in the same org in the registry.
+                # Fetch the repository and replace the repo with data-acceptable-bundles
+                # for example: quay.io/myorg/myrepo -> quay.io/myorg/data-acceptable-bundles
+                ACCEPTABLE_BUNDLES=$(echo "${repository}" \
+                  | awk -F'/' '{$NF="data-acceptable-bundles"; print $0}' OFS='/')
+                # Only process quay.io repositories and avoid duplicates
+                if [[ "$ACCEPTABLE_BUNDLES" == quay.io/* ]] && \
+                   [[ -z "${processed_repos[$ACCEPTABLE_BUNDLES]:-}" ]]; then
+                    echo "Making data-acceptable-bundles repository $ACCEPTABLE_BUNDLES public..."
+                    
+                    # Remove quay.io/ prefix for the API call
+                    REPO_PATH=${ACCEPTABLE_BUNDLES#quay.io/}
+                    REPO_PATH=${REPO_PATH%/} # Remove trailing slash just in case
+                    
+                    make_repo_public "$REPO_PATH"
+                    
+                    # Mark this repo as processed to avoid duplicates
+                    processed_repos[$ACCEPTABLE_BUNDLES]=1
+                fi
+            done
+        done
+        
+        echo "Completed making all data-acceptable-bundles repositories public"
     - name: create-trusted-artifact
       computeResources:
         limits:
