@@ -1,9 +1,6 @@
-#!/usr/bin/env bash
 set -eux
 
-# mocks to be injected into task step scripts
-
-function git() {
+git() {
     case "$1" in
         lfs)
             echo "Mocking LFS install: $*"
@@ -11,10 +8,9 @@ function git() {
         clone)
             echo "Mocking clone command: $*"
             mkdir local-artifacts
-
-            if [ -d "$(params.dataDir)" ]; then
-                echo "$*" >> "$(params.dataDir)"/mock_git_clone.txt
-            fi
+            ;;
+        sparse-checkout)
+            echo "Mocking sparse-checkout: $*"
             ;;
         config)
             echo "Skipping git config: $*"
@@ -22,10 +18,21 @@ function git() {
         checkout)
             echo "Skipping git checkout: $*"
             ;;
+        
         add)
             echo "Mock git add: $*"
-            echo "Files to add: $(ls -l ${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}/ 2>/dev/null || echo 'No files found')"
+            TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
+            echo "Checking for files in target directory: ${TARGET_DIR}"
+            
+            if [ -f "${TARGET_DIR}/mod1.ko" ] && [ -f "${TARGET_DIR}/mod2.ko" ]; then
+                echo "SUCCESS: Found .ko files in ${TARGET_DIR}"
+            else
+                echo "ERROR: Did not find .ko files in ${TARGET_DIR}"
+                ls -la "${TARGET_DIR}"
+                exit 1
+            fi
             ;;
+
         commit)
             echo "Mocking commit: $*"
             ;;

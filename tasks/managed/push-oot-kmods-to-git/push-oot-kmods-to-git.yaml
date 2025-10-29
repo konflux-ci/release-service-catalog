@@ -1,0 +1,141 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-oot-kmods-to-git
+spec:
+  description: >-
+    Task to upload out-of-tree kernel modules and optionally RPMs to a private vendor git repo
+  params:
+    - name: signedKmodsPath
+      type: string
+      description: Path where the kernel modules are stored relative to the dataDir
+    - name: rpmPath
+      type: string
+      description: Path where the RPM packages are stored relative to the dataDir (optional)
+      default: ""
+    - name: dataDir
+      type: string
+      description: The absolute path to the working directory
+      default: /var/workdir/release
+    - name: gitRepoUrl
+      type: string
+      description: Repository URL where the artifacts will be pushed
+    - name: gitBranch
+      type: string
+      description: Specific branch in the repository
+    - name: gitTokenSecret
+      type: string
+      description: The name of the Kubernetes secret containing the Git token
+    - name: sourceDataArtifact
+      type: string
+      description: OCI reference to the trusted artifact containing the dataDir contents
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for StepAction resolution
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for StepAction resolution
+      default: main
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: git-token-secret-vol
+      secret:
+        secretName: $(params.gitTokenSecret)
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: push-to-git
+      image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      volumeMounts:
+        - name: git-token-secret-vol
+          mountPath: /var/secrets/git-token
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        PUSH_TOKEN=$(cat /var/secrets/git-token/gitlab-gr-maintenance-token)
+
+        SIGNED_KMODS_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
+        RPM_FULL_PATH="$(params.dataDir)/$(params.rpmPath)"
+        REPO_URL="$(params.gitRepoUrl)"
+        mkdir -p "${SIGNED_KMODS_PATH}"
+        cd "${SIGNED_KMODS_PATH}"
+        if [ ! -f "signed_kmods_checksums.txt" ]; then
+            exit 1
+        fi
+        sha256sum -c signed_kmods_checksums.txt
+        export GIT_LFS_SKIP_SMUDGE=1
+        PUSH_TOKEN_CLEAN=$(printf "%s" "$PUSH_TOKEN" | tr -d '\n')
+        GIT_URL_WITH_AUTH="https://gitlab-ci-token:${PUSH_TOKEN_CLEAN}@${REPO_URL}"
+        git clone --depth=1 --filter=blob:none --no-checkout \
+          --single-branch --branch "$(params.gitBranch)" \
+          "$GIT_URL_WITH_AUTH" local-artifacts
+        cd local-artifacts
+        git sparse-checkout init --cone
+        
+        # shellcheck source=/dev/null
+        . ../envfile
+        
+        TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
+        git sparse-checkout set "${TARGET_DIR}"
+        git checkout
+        mkdir -p "${TARGET_DIR}"
+        cp ../*.ko "${TARGET_DIR}/"
+        cp ../signed_kmods_checksums.txt "${TARGET_DIR}/"
+        if [ -n "$(params.rpmPath)" ] && [ -d "${RPM_FULL_PATH}" ] && \
+           [ -n "$(find "${RPM_FULL_PATH}" -maxdepth 1 -name '*.rpm' -print -quit)" ]; then
+            cp "${RPM_FULL_PATH}"/*.rpm "${TARGET_DIR}/"
+        fi
+        git config user.email "partner-accelerators@konflux-ci.redhat.com"
+        git config user.name "Partner Accelerators CI Bot"
+        git add "${TARGET_DIR}"
+        if git status --porcelain | grep -q '^[ AM]'; then
+            git commit -m "Automated push from Build and Sign pipeline"
+            git push -u origin "$(params.gitBranch)"
+        fi

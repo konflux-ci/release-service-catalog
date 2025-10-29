@@ -1,0 +1,144 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-oot-kmods-to-azure
+spec:
+  description: >-
+    Task to upload out-of-tree kernel modules to Azure Blob Storage
+  params:
+    - name: signedKmodsPath
+      type: string
+      description: Path where the kernel modules are stored relative to the dataDir
+    - name: dataDir
+      type: string
+      description: The absolute path to the working directory
+      default: /var/workdir/release
+    - name: azureStorageAccount
+      type: string
+      description: Azure Storage account name
+    - name: azureContainer
+      type: string
+      description: Azure Blob container name
+    - name: azureSpSecret
+      type: string
+      description: Kubernetes Secret with AZURE_TENANT_ID, AZURE_CLIENT_ID, and AZURE_CLIENT_SECRET
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for task and StepAction resolution
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for task and StepAction resolution
+      default: main
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: azure-sp-secret-vol
+      secret:
+        secretName: $(params.azureSpSecret)
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: upload-to-azure
+      image: mcr.microsoft.com/azure-cli@sha256:a4cc8fbb908dd2652db6caa4b9053af671d914ddf52aa81a766342603e21b507
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      volumeMounts:
+        - name: azure-sp-secret-vol
+          mountPath: /var/secrets/azure-sp
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        AZURE_TENANT_ID=$(cat /var/secrets/azure-sp/AZURE_TENANT_ID)
+        export AZURE_TENANT_ID
+        AZURE_CLIENT_ID=$(cat /var/secrets/azure-sp/AZURE_CLIENT_ID)
+        export AZURE_CLIENT_ID
+        AZURE_CLIENT_SECRET=$(cat /var/secrets/azure-sp/AZURE_CLIENT_SECRET)
+        export AZURE_CLIENT_SECRET
+
+        SIGNED_KMODS_FULL_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
+        ACCOUNT="$(params.azureStorageAccount)"
+        CONTAINER="$(params.azureContainer)"
+
+        # shellcheck source=/dev/null
+        . "${SIGNED_KMODS_FULL_PATH}/envfile"
+
+        AZURE_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/"
+
+        echo "Logging into Azure..."
+        az login --service-principal \
+          -u "$AZURE_CLIENT_ID" \
+          -p "$AZURE_CLIENT_SECRET" \
+          --tenant "$AZURE_TENANT_ID" \
+          --allow-no-subscriptions
+
+        echo "Ensuring container '${CONTAINER}' exists..."
+        az storage container create \
+          --name "$CONTAINER" \
+          --account-name "$ACCOUNT" \
+          --auth-mode login >/dev/null
+
+        echo "Uploading signed kernel modules to Azure Blob Storage: ${ACCOUNT}/${CONTAINER}/${AZURE_TARGET_PATH}"
+
+        for f in "${SIGNED_KMODS_FULL_PATH}"/*.ko; do
+          if [ -f "$f" ]; then
+            BLOB_NAME="${AZURE_TARGET_PATH}$(basename "$f")"
+            echo "Uploading ${f} to ${BLOB_NAME}..."
+            az storage blob upload \
+              --account-name "$ACCOUNT" \
+              --container-name "$CONTAINER" \
+              --name "$BLOB_NAME" \
+              --file "$f" \
+              --auth-mode login \
+              --overwrite
+          fi
+        done
+
+        echo "Upload complete."

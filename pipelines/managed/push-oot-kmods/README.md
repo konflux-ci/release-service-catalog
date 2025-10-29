@@ -1,6 +1,6 @@
 # push-oot-kmods pipeline
 
-Tekton pipeline to sign out-of-tree kernel modules and upload them to an internal Gitlab repository.
+Tekton pipeline to sign out-of-tree kernel modules, optionally build RPMs, and upload them to their destination repositories
 
 ## Parameters
 

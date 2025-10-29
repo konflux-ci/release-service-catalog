@@ -1,0 +1,121 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-oot-kmods-to-s3
+spec:
+  description: >-
+    Task to upload out-of-tree kernel modules to an S3 bucket
+  params:
+    - name: signedKmodsPath
+      type: string
+      description: Path where the kernel modules are stored relative to the dataDir
+    - name: dataDir
+      type: string
+      description: The absolute path to the working directory
+      default: /var/workdir/release
+    - name: s3Endpoint
+      type: string
+      description: The S3 endpoint URL
+    - name: s3Bucket
+      type: string
+      description: The name of the destination S3 bucket
+    - name: s3CredentialsSecret
+      type: string
+      description: The name of the Kubernetes secret containing S3 credentials
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for task and StepAction resolution
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for task and StepAction resolution
+      default: main
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: s3-credentials-vol
+      secret:
+        secretName: $(params.s3CredentialsSecret)
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: upload-to-s3
+      image: amazon/aws-cli@sha256:3be2a248274c72a6f76fa0ac042aec84f4ade6ff7f38894df31732da4005294d
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      volumeMounts:
+        - name: s3-credentials-vol
+          mountPath: /var/secrets/s3
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+        
+        AWS_ACCESS_KEY_ID=$(cat /var/secrets/s3/aws_access_key_id)
+        export AWS_ACCESS_KEY_ID
+        AWS_SECRET_ACCESS_KEY=$(cat /var/secrets/s3/aws_secret_access_key)
+        export AWS_SECRET_ACCESS_KEY
+
+        SIGNED_KMODS_FULL_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
+
+        # shellcheck source=/dev/null
+        . "${SIGNED_KMODS_FULL_PATH}/envfile"
+
+        S3_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/"
+
+        echo "Uploading signed kernel modules to s3://$(params.s3Bucket)/${S3_TARGET_PATH}"
+
+        aws s3 cp \
+          "${SIGNED_KMODS_FULL_PATH}" \
+          "s3://$(params.s3Bucket)/${S3_TARGET_PATH}" \
+          --endpoint-url "$(params.s3Endpoint)" \
+          --recursive \
+          --exclude "*" \
+          --include "*.ko"
+
+        echo "Upload complete."
