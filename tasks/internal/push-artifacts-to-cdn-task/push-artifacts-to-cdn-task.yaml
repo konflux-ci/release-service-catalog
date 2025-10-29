@@ -237,35 +237,77 @@ spec:
             fi
 
             mkdir -p "${DESTINATION}"
-            DOWNLOAD_DIR=$(mktemp -d)
-            cd "$DOWNLOAD_DIR"
-            # oras has very limited support for selecting the right auth entry,
-            # so create a custom auth file with just one entry
+
+            # Extract binaries from container image using skopeo (like extract-binaries-from-image task)
+            TMP_DIR=$(mktemp -d)
+
+            # Create auth file for skopeo
             AUTH_FILE=$(mktemp)
             select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
-            oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
-            NUM_MAPPED_FILES=$(jq '.files | length' <<< "${COMPONENT}")
-            for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
-                FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT")
-                SOURCE=$(jq -er '.source' <<< "$FILE") \
-                  || (echo "Missing files.source for component." >&2 && exit 1 )
-                FILENAME=$(jq -er '.filename' <<< "$FILE") \
-                  || (echo "Missing files.filename for component." >&2 && exit 1 )
-                # The .qcow2 images are not zipped
-                if [ -f "${SOURCE}.gz" ] ; then
-                    gzip -d "${SOURCE}.gz"
+
+            # Use skopeo to copy container manifest and layers
+            skopeo copy --retry-times 3 --authfile "$AUTH_FILE" docker://"$PULLSPEC" dir:"$TMP_DIR"
+
+            cd "$TMP_DIR"
+
+            # Determine which directories to extract from source paths in files or staged.files
+            EXTRACT_DIRS=()
+
+            # Check .files[].source paths
+            NUM_FILES=$(jq '.files | length // 0' <<< "${COMPONENT}")
+            for ((i = 0; i < NUM_FILES; i++)); do
+                SOURCE_PATH=$(jq -r --arg i "$i" '.files[$i|tonumber].source // empty' <<< "${COMPONENT}")
+                if [ -n "$SOURCE_PATH" ]; then
+                    # Extract directory part (e.g., "/releases/file.gz" -> "releases")
+                    DIR_PATH=$(dirname "$SOURCE_PATH" | sed 's|^/||')
+                    if [ "$DIR_PATH" != "." ] && [ -n "$DIR_PATH" ]; then
+                        EXTRACT_DIRS+=("$DIR_PATH")
+                    fi
                 fi
-                DESTINATION_FILE="${DESTINATION}/${FILENAME}"
-                # Albeit a low probability, a race condition can occur since this is run in parallel.
-                # The race condition is if two files have the same $DESTINATION_FILE and both
-                # if checks are run before either mv is run a few lines below.
-                if [ -f "${DESTINATION_FILE}" ] ; then
-                    echo "Multiple files use the same destination value: $DESTINATION" \
-                         "and filename value: $FILENAME. Failing..." >&2
-                    exit 1
-                fi
-                mv "$SOURCE" "${DESTINATION_FILE}" || echo "didn't find mapped file: ${SOURCE}"
             done
+
+            # Check .staged.files[].source paths
+            NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "${COMPONENT}")
+            for ((i = 0; i < NUM_STAGED_FILES; i++)); do
+                SOURCE_PATH=$(jq -r --arg i "$i" '.staged.files[$i|tonumber].source // empty' <<< "${COMPONENT}")
+                if [ -n "$SOURCE_PATH" ]; then
+                    # Extract directory part (e.g., "/releases/file.gz" -> "releases")
+                    DIR_PATH=$(dirname "$SOURCE_PATH" | sed 's|^/||')
+                    if [ "$DIR_PATH" != "." ] && [ -n "$DIR_PATH" ]; then
+                        EXTRACT_DIRS+=("$DIR_PATH")
+                    fi
+                fi
+            done
+
+            # Default to "releases" if no source directories found
+            if [ ${#EXTRACT_DIRS[@]} -eq 0 ]; then
+                EXTRACT_DIRS=("releases")
+            fi
+
+            # Remove duplicates and extract each unique directory
+            mapfile -t UNIQUE_DIRS < <(printf "%s\n" "${EXTRACT_DIRS[@]}" | sort -u)
+
+            for IMAGE_PATH in "${UNIQUE_DIRS[@]}"; do
+                echo "Looking for directory: $IMAGE_PATH"
+                for DIGEST in $(jq -r ".layers[].digest" manifest.json); do
+                    FILE=${DIGEST#sha256:}
+                    # Check if the archive contains the target dir
+                    if tar -tf "$FILE" | grep -q "^$IMAGE_PATH/"; then
+                        echo "Extracting $IMAGE_PATH/ from $FILE..."
+                        tar -xzvf "$FILE" "$IMAGE_PATH"
+                    else
+                        echo "skipping $FILE. It doesn't contain the $IMAGE_PATH dir"
+                    fi
+                done
+
+                # Copy extracted files directly to destination (flattened like extract-binaries-from-image)
+                if [ -d "$IMAGE_PATH" ]; then
+                    cp "$IMAGE_PATH"/* "$DESTINATION"/ 2>/dev/null || echo "No files found in $IMAGE_PATH directory"
+                fi
+            done
+
+            # Clean up temporary directory
+            rm -rf "$TMP_DIR"
 
         }
 
@@ -603,10 +645,10 @@ spec:
         cp "/mnt/secrets/windows_fingerprint" /tmp/.ssh/known_hosts
         chmod 600 /tmp/.ssh/known_hosts /tmp/.ssh/id_rsa
 
-        SSH_OPTS="-i /tmp/.ssh/id_rsa -o UserKnownHostsFile=/tmp/.ssh/known_hosts -p ${WINDOWS_PORT} \
-        ${WINDOWS_USER}@${WINDOWS_HOST} -o IdentitiesOnly=yes"
-        SCP_OPTS="-i /tmp/.ssh/id_rsa -o UserKnownHostsFile=/tmp/.ssh/known_hosts -P ${WINDOWS_PORT} \
-        -o IdentitiesOnly=yes"
+        SSH_OPTS=(-i /tmp/.ssh/id_rsa -o UserKnownHostsFile=/tmp/.ssh/known_hosts \
+          -o IdentitiesOnly=yes -p "${WINDOWS_PORT}")
+        SCP_OPTS=(-i /tmp/.ssh/id_rsa -o UserKnownHostsFile=/tmp/.ssh/known_hosts \
+          -o IdentitiesOnly=yes -P "${WINDOWS_PORT}")
 
         unsigned_digest=$(cat "$(results.unsignedWindowsDigest.path)")
         # Create the batch script
@@ -644,16 +686,17 @@ spec:
         EOF
         set -x
         # shellcheck disable=SC2086
-        scp $SCP_OPTS "$windows_signing_script_file" \
+        scp "${SCP_OPTS[@]}" "$windows_signing_script_file" \
         "${WINDOWS_USER}@${WINDOWS_HOST}:C:/Users/${WINDOWS_USER}/AppData/Local/Temp/windows_signing_script_file.bat"
 
         # Execute the script on the Windows host
         # shellcheck disable=SC2029,SC2086
-        ssh $SSH_OPTS "C:/Users/${WINDOWS_USER}/AppData/Local/Temp/windows_signing_script_file.bat"
+        ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" \
+          "C:/Users/${WINDOWS_USER}/AppData/Local/Temp/windows_signing_script_file.bat"
 
         # disable shellcheck for escaping the taskRun.uid as we want that evaluated on client side
         # shellcheck disable=SC2029,SC2086
-        scp $SCP_OPTS "${WINDOWS_USER}@${WINDOWS_HOST}:\
+        scp "${SCP_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}:\
         C:/Users/${WINDOWS_USER}/AppData/Local/Temp/$(context.taskRun.uid)/digest.txt" \
         "$(results.signedWindowsDigest.path)"
 
@@ -663,7 +706,7 @@ spec:
         # Clean up the windows host now that we are done
         # disable shellcheck for escaping the taskRun.uid as we want that evaluated on client side
         # shellcheck disable=SC2029,SC2086
-        ssh $SSH_OPTS "Remove-Item -LiteralPath \
+        ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" "Remove-Item -LiteralPath \
         C:\\Users\\${WINDOWS_USER}\\AppData\\Local\\Temp\\$(context.taskRun.uid) -Force -Recurse"
     - name: generate-checksums
       image: quay.io/konflux-ci/release-service-utils:91c030b48f7f1f88b32fba336fa5c2725a0f0bfd
@@ -867,7 +910,7 @@ spec:
             exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
         }
         # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
-        # trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
 
         CONTENT_DIR=/shared/artifacts
         COMPRESSED_DIR="$CONTENT_DIR/compressed"
@@ -878,20 +921,27 @@ spec:
           NUM_MAPPED_FILES=$(jq '.files | length' <<< "${COMPONENT_JSON}")
           for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
             FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT")
-            SOURCE=$(jq -er '.source' <<< "$FILE") \
-              || (echo "Missing files.source for component." && exit 1 )
+            if ! SOURCE=$(jq -er '.source' <<< "$FILE" 2>/dev/null); then
+              echo "Missing files.source for component." >&2
+              exit 1
+            fi
+            # Extract just the filename from the source path (remove /releases/ prefix)
+            SOURCE_FILENAME=$(basename "$SOURCE")
             DELIVERY_FORMAT=$(jq -r '.delivery_format // ["compressed"] | sort | .[]' <<< "$FILE")
             for FORMAT in $DELIVERY_FORMAT; do
               if [ "$FORMAT" = "compressed" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
-                    tar -czf "${COMPRESSED_DIR}/${SOURCE}" -r "${CONTENT_DIR}/macos/*"
+                    # Archive the extracted macos binaries
+                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${CONTENT_DIR}" unsigned/macos
                     ;;
                   (*linux*)
-                    tar -czf "${COMPRESSED_DIR}/${SOURCE}" -r "${CONTENT_DIR}/linux/*"
+                    # Archive the extracted linux binaries
+                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${CONTENT_DIR}" linux
                     ;;
                   (*windows*)
-                    zip -r "${COMPRESSED_DIR}/${SOURCE}" "${CONTENT_DIR}/windows/*"
+                    # Archive the extracted windows binaries (zip doesn't have -C, so use full path)
+                    (cd "${CONTENT_DIR}" && zip -r "${COMPRESSED_DIR}/${SOURCE_FILENAME%.tar.gz}.zip" unsigned/windows)
                     ;;
                 esac
               fi
