@@ -8,6 +8,8 @@ request.
 
 ## Parameters
 
-| Name | Description                                                                                | Optional | Default value |
-|------|--------------------------------------------------------------------------------------------|----------|---------------|
-| cves | String containing a space separated list of CVEs to check (e.g. 'CVE-123 CVE-234 CVE-345') | No       | -             |
+| Name                 | Description                                                                                | Optional | Default value |
+|----------------------|--------------------------------------------------------------------------------------------|----------|---------------|
+| cves                 | String containing a space separated list of CVEs to check (e.g. 'CVE-123 CVE-234 CVE-345') | No       | -             |
+| caTrustConfigMapName | The name of the ConfigMap to read CA bundle data from                                      | Yes      | trusted-ca    |
+| caTrustConfigMapKey  | The name of the key in the ConfigMap that contains the CA bundle data                      | Yes      | ca-bundle.crt |
