@@ -112,6 +112,11 @@ do
   kubectl apply -f $stepAction
 done
 
+# Clean up leftover resources from previous test runs to prevent cluster exhaustion
+echo "Cleaning up old test resources..."
+kubectl delete pipelineruns -l tekton.dev/pipeline --field-selector=status.conditions[0].status!=Unknown || true
+kubectl get taskruns -o json | jq -r '.items[] | select(.status.completionTime != null) | select((now - (.status.completionTime | fromdateiso8601)) > 3600) | .metadata.name' | xargs -r kubectl delete taskrun --ignore-not-found=true || true
+
 for ITEM in $TEST_ITEMS
 do
   echo Task item: $ITEM
@@ -268,7 +273,21 @@ do
       fi
     fi
 
+    # Cleanup test resources to prevent cluster exhaustion when running many tests
+    echo "  Cleaning up test resources..."
+    kubectl delete pipelinerun $PIPELINERUN --ignore-not-found=true
+    kubectl delete pipeline $TEST_NAME --ignore-not-found=true
+
+    # Clean up old completed PipelineRuns (keep only last 5 to avoid filling the cluster)
+    OLD_PRS=$(kubectl get pipelineruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -5)
+    if [ ! -z "$OLD_PRS" ]; then
+      echo "$OLD_PRS" | xargs -r kubectl delete pipelinerun --ignore-not-found=true
+    fi
     echo
   done
+
+  # Cleanup task after all its tests complete
+  echo "Cleaning up task $TASK_NAME"
+  kubectl delete task $TASK_NAME --ignore-not-found=true
 
 done
