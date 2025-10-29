@@ -7,6 +7,100 @@ function select-oci-auth() {
     echo Mock select-oci-auth called with: $*
 }
 
+function skopeo() {
+    echo Mock skopeo called with: $*
+    if [[ "$*" =~ copy.*--retry-times.* ]]; then
+        # Extract destination directory from skopeo copy command
+        # Format: skopeo copy --retry-times 3 --authfile FILE docker://IMAGE dir:DEST
+        local args=($*)
+        local dest_dir=""
+        
+        # Find the dir: argument
+        for arg in "${args[@]}"; do
+            if [[ "$arg" =~ ^dir: ]]; then
+                dest_dir="${arg#dir:}"
+                break
+            fi
+        done
+        
+        if [ -z "$dest_dir" ]; then
+            echo "Error: Could not find destination directory in skopeo command" >&2
+            exit 1
+        fi
+
+        # Check if this is for nonexistent-disk-image and fail
+        if [[ "$*" == *"nonexistent-disk-image"* ]]; then
+            echo "Simulating failing skopeo copy" >&2
+            exit 1
+        fi
+
+        echo "Simulating skopeo copy to $dest_dir"
+        mkdir -p "$dest_dir"
+        cd "$dest_dir"
+        
+        # Create manifest.json with mock layer digests
+        cat > manifest.json << EOF
+{
+  "layers": [
+    {"digest": "sha256:abc123456789"},
+    {"digest": "sha256:def456789012"}
+  ]
+}
+EOF
+        
+        # Create temporary directory structure for releases
+        mkdir -p temp_releases/releases
+        
+        # Create mock binary files based on the container image being pulled
+        # All files are .tar.gz since that's the expected source format
+        # Create actual tar.gz files with mock binary content inside
+        
+        create_mock_tgz() {
+            local filename="$1"
+            local binary_name="${filename%.tar.gz}"
+            
+            # Create a temporary directory for this binary
+            local temp_bin_dir=$(mktemp -d)
+            # Create mock binary file
+            echo "Mock binary content for $binary_name" > "$temp_bin_dir/$binary_name"
+            chmod +x "$temp_bin_dir/$binary_name"
+            
+            # Create tar.gz file with the mock binary
+            tar -czf "temp_releases/releases/$filename" -C "$temp_bin_dir" "$binary_name"
+            rm -rf "$temp_bin_dir"
+        }
+        
+        if [[ "$*" =~ ghijkl67890 ]]; then
+            # Second test component
+            create_mock_tgz "testproduct2-binary-windows-amd64.tar.gz"
+            create_mock_tgz "testproduct2-binary-darwin-amd64.tar.gz"
+            create_mock_tgz "testproduct2-binary-linux-amd64.tar.gz"
+        elif [[ "$*" =~ abelml6910 ]]; then
+            # Third test component
+            create_mock_tgz "testproduct3-binary-windows-amd64.tar.gz"
+            create_mock_tgz "testproduct3-binary-darwin-amd64.tar.gz"
+            create_mock_tgz "testproduct3-binary-linux-amd64.tar.gz"
+        else
+            # Default test component (abcdef12345 or any other SHA)
+            create_mock_tgz "testproduct-binary-windows-amd64.tar.gz"
+            create_mock_tgz "testproduct-binary-darwin-amd64.tar.gz"
+            create_mock_tgz "testproduct-binary-linux-amd64.tar.gz"
+        fi
+        
+        
+        # Create real tar files with the releases directory
+        tar -czf abc123456789 -C temp_releases releases
+        tar -czf def456789012 -C temp_releases releases
+        
+        # Clean up temp directory
+        rm -rf temp_releases
+    else
+        # Handle other skopeo commands (ensure we don't fall through to real skopeo)
+        echo "Mock skopeo: Unhandled command pattern: $*"
+        return 0
+    fi
+}
+
 function oras() {
     echo Mock oras called with: $*
     if [[ "$*" =~ login.* ]]; then
@@ -53,45 +147,10 @@ function oras() {
             touch macos/testproduct3-binary-darwin-amd64
         fi
     fi
-    touch testproduct-fail_gzip.raw.gz
 }
 
-# We aren't going to pull real files that can be unzipped, so just remove the .gz suffix on them
-function ziputil() {
-    echo Mock a compressing tool with: $*
-    if [[ "$2" =~ "fail_gzip.raw.gz" ]] ; then
-        echo gzip failed >&2
-        exit 1
-    fi
-
-    if [[ "$1" =~ (r|czf)$ ]]; then
-        mkdir -p $(dirname $2)
-        touch $2
-    else
-        ext="${2#*.}"
-        len=$((${#ext}+1))
-        mv "$2" "${2::-${len}}"
-    fi
-}
-
-function zip() {
-    if [[ "$1" =~ (r|czf)$ ]]; then
-        ziputil "$@"
-    else
-        #dnf install zip -y >/dev/null
-        ext="${2#*.}"
-        len=$((${#ext}+1))
-        mv "$2" "${2::-${len}}.exe"
-    fi
-}
-
-function tar() {
-    ziputil "$@"
-}
-
-function gzip() {
-    ziputil "$@"
-}
+# Note: We now use real tar, gzip, zip commands instead of mocks for most cases
+# The skopeo mock above creates real tar files that these utilities can work with
 
 function pulp_push_wrapper() {
     echo Mock pulp_push_wrapper called with: $*
