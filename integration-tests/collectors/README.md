@@ -16,12 +16,6 @@ This test uses specialized vault files with different naming:
 - **`vault/collector-managed-secrets.yaml`** - Secrets for the managed namespace
 - **`vault/collector-tenant-secrets.yaml`** - Secrets for the tenant namespace
 
-### Hardcoded Secrets
-
-Some tests have hardcoded secret names that must exist prior to running:
-
-- **`konflux-advisory-jira-secret`** - Required for JIRA integration
-
 ## Test-Specific Command Line Options
 
 The collectors test supports an additional command line option:
