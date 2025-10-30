@@ -117,6 +117,13 @@ echo "Cleaning up old test resources..."
 kubectl delete pipelineruns -l tekton.dev/pipeline --field-selector=status.conditions[0].status!=Unknown || true
 kubectl get taskruns -o json | jq -r '.items[] | select(.status.completionTime != null) | select((now - (.status.completionTime | fromdateiso8601)) > 3600) | .metadata.name' | xargs -r kubectl delete taskrun --ignore-not-found=true || true
 
+# Create global trusted-ca ConfigMap for all tests
+# This prevents race conditions where tests delete/recreate the same ConfigMap
+echo "Creating global trusted-ca ConfigMap..."
+kubectl delete configmap trusted-ca --ignore-not-found || true
+kubectl create configmap trusted-ca --from-literal=ca-bundle.crt=testcert || true
+echo "Global ConfigMap created"
+
 for ITEM in $TEST_ITEMS
 do
   echo Task item: $ITEM
