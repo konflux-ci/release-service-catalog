@@ -1,0 +1,92 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-get-advisory-severity-osidb-calls-parallel
+spec:
+  description: |
+    Test that batched CVE processing completes within reasonable time limits. The max
+    duration is 20 seconds, so with the sleeps in the mock curl command, this would not
+    pass if the CVEs were checked serially. Thus, it ensures parallel processing is working.
+  tasks:
+    - name: record-start-time
+      taskSpec:
+        results:
+          - name: startTime
+            type: string
+        steps:
+          - name: record-time
+            image: quay.io/konflux-ci/release-service-utils:002e438fd71196a7b4613308025358476acc1f8e
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Record start timestamp
+              date +%s > "$(results.startTime.path)"
+              echo "Test started at: $(date)"
+    - name: run-task
+      taskRef:
+        name: get-advisory-severity
+      params:
+        - name: releaseNotesImages
+          value: >-
+            H4sIAMpXA2kC/+3XwWoCQQzG8XeZ8xaaZDKT8Vr6Cr2IJ7sFD3VFRVrEd1eL9NT/QG8tuKeBby/7SyZk58e0HTfTbrWftp9plpbT+2Zaj+u9pCEtD+MuzY7pbfUxvl4PTy/PD3I9fL92yeeL0/CVKCaGScbEMSmYVEwCk4aJPHLECsIMwg7CEMISwhTCFsIYwhrKGtrpCdZQ1lDWUNZQ1lDWUNZQ1jDWMNawzhVhDWMNYw1jDWMNYw1jjcwamTUya+TOxGCNzBqZNTJrZNbIrOE/aVyegWat0qy9N/u92f9js98i1nDWcNbwzrbAGs4azhrOGs4ahTUKaxTWKKxRWKN0lifWKKxRWKOwRmWNyhqVNSprVNao/st5bDSP//IH3aLOcszlrVzeyuUN1gjWCNYI1gjWCNYI1ojOvwJrBGs01mis0VijsUZjjQbNvjgDulqbTeoNAAA=
+          # value before `gzip -c|base64 -w 0` encoding:
+          # 95 unique CVEs (CVE-1 through CVE-95) across 3 repositories with overlapping CVEs 
+          # to test both parallel batch processing and CVE deduplication
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+      runAfter:
+        - record-start-time
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: startTime
+          value: $(tasks.record-start-time.results.startTime)
+        - name: severity
+          value: $(tasks.run-task.results.severity)
+        - name: result
+          value: $(tasks.run-task.results.result)
+      taskSpec:
+        params:
+          - name: startTime
+            type: string
+          - name: severity
+            type: string  
+          - name: result
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:002e438fd71196a7b4613308025358476acc1f8e
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              START_TIME="$(params.startTime)"
+              END_TIME=$(date +%s)
+              DURATION=$((END_TIME - START_TIME))
+
+              echo "Performance test results:"
+              echo "Start time: $(date -d @"$START_TIME")"
+              echo "End time: $(date -d @"$END_TIME")"
+              echo "Total duration: ${DURATION} seconds"
+
+              # With 95 CVEs and parallel processing, should complete in under 20 seconds
+              # Serial processing would take ~28s, parallel should take ~6s
+              MAX_DURATION=20
+              if [ "$DURATION" -gt "$MAX_DURATION" ]; then
+                echo "Error: Task took ${DURATION}s, expected under ${MAX_DURATION}s"
+                echo "This suggests parallel processing may not be working correctly"
+                exit 1
+              fi
+
+              if [ "$(params.result)" != Success ]; then
+                echo "Error: result task result is not correct"
+                exit 1
+              fi
+
+              if [ "$(params.severity)" != "Critical" ]; then
+                echo "Error: severity task result is not correct"
+                exit 1
+              fi

@@ -102,6 +102,7 @@ spec:
 
           INCLUDE_FIELDS="cve_id,impact,affects.purl,affects.impact"
           ADVISORY_SEVERITY=""
+          CVE_CACHE_DIR=$(mktemp -d)
 
           get_higher_severity() { # Return higher sev of the two provided [current highest, new]
               if [ "$1" == "CRITICAL" ] || [ "$2" == "CRITICAL" ] ; then
@@ -119,6 +120,113 @@ spec:
               fi
           }
 
+          # Function to process a batch of CVEs with its own token
+          process_cve_batch() { # Expected arguments are [batch_id, batch_cves]
+              echo "Batch $1: Getting token..."
+              set +x
+              batch_token=$(curl --retry 3 --negotiate -u : "${OSIDB_URL}"/auth/token | jq -r '.access')
+              if [[ -z "$batch_token" || "$batch_token" == "null" ]]; then
+                  echo "Batch $1: ERROR - Failed to obtain authentication token" | tee -a "$STDERR_FILE"
+                  exit 1
+              fi
+              set -x
+
+              echo "Batch $1: Processing CVEs..."
+
+              while read -r cve; do
+                  if [[ -n "$cve" ]]; then
+                      cache_file="$CVE_CACHE_DIR/${cve}.json"
+
+                      # Note: If we bypass this check in a race condition, the output from OSIDB will be
+                      # the same anyways so it is safe - multiple batches writing identical data is harmless
+                      if [[ -f "$cache_file" ]]; then
+                          continue  # Already processed
+                      fi
+
+                      echo "Batch $1: Processing CVE ${cve}"
+                      curl_url="${OSIDB_URL}/osidb/api/v1/flaws?cve_id=${cve}&include_fields=${INCLUDE_FIELDS}"
+                      set +x
+
+                      # Try API call with current token, refresh and retry if it fails
+                      if ! curl --retry 3 \
+                          -H 'Content-Type: application/json' \
+                          -H "Authorization: Bearer ${batch_token}" \
+                          "$curl_url" | jq '.results[0]' > "$cache_file"; then
+                          echo "Batch $1: API call failed, refreshing token and retrying..."
+                          batch_token=$(curl --retry 3 --negotiate -u : "${OSIDB_URL}"/auth/token | jq -r '.access')
+                          if [[ -z "$batch_token" || "$batch_token" == "null" ]]; then
+                              echo "Batch $1: ERROR - Failed to obtain authentication token" | tee -a "$STDERR_FILE"
+                              exit 1
+                          fi
+                          curl --retry 3 -H 'Content-Type: application/json' -H "Authorization: Bearer ${batch_token}" \
+                              "$curl_url" | jq '.results[0]' > "$cache_file"
+                          # Validate cache file was written with valid data
+                          if [[ ! -s "$cache_file" ]] || [[ "$(cat "$cache_file")" == "null" ]] ; then
+                              echo "Batch $1: ERROR - Querying OSIDB for CVE $cve failed" | tee -a "$STDERR_FILE"
+                              exit 1
+                          fi
+                      fi
+                      set -x
+                  fi
+              done <<< "$2"
+
+              echo "Batch $1: Completed"
+          }
+
+          ALL_CVES=$(jq -r '[.[] | select(.cves.fixed) | .cves.fixed | keys[]] | unique | .[]' <<< "${IMAGES}" \
+            | tr "\n" " ")
+
+          # Convert to array for batching
+          read -ra ALL_CVES_ARRAY <<< "$ALL_CVES"
+          TOTAL_CVES=${#ALL_CVES_ARRAY[@]}
+
+          BATCH_SIZE=30
+          NUM_BATCHES=$(( (TOTAL_CVES + BATCH_SIZE - 1) / BATCH_SIZE ))
+          MAX_PARALLEL_BATCHES=8
+          CURRENT_JOBS=0
+
+          echo "Processing $TOTAL_CVES unique CVEs in $NUM_BATCHES parallel batches of $BATCH_SIZE CVEs each"
+
+          for ((i = 0; i < NUM_BATCHES; i++)); do
+              START_IDX=$((i * BATCH_SIZE))
+              BATCH_LENGTH=$BATCH_SIZE
+
+              # Adjust batch length for last batch
+              if [[ $((START_IDX + BATCH_SIZE)) -gt $TOTAL_CVES ]]; then
+                  BATCH_LENGTH=$((TOTAL_CVES - START_IDX))
+              fi
+
+              if [[ $BATCH_LENGTH -gt 0 ]]; then
+                  # Create batch CVE string (simple bash array slice)
+                  BATCH_CVES=$(printf '%s\n' "${ALL_CVES_ARRAY[@]:$START_IDX:$BATCH_LENGTH}")
+
+                  # Start batch in background
+                  process_cve_batch "$i" "$BATCH_CVES" &
+                  CURRENT_JOBS=$((CURRENT_JOBS + 1))
+
+                  # If we've reached the limit, wait for any job to complete
+                  if [[ $CURRENT_JOBS -ge $MAX_PARALLEL_BATCHES ]]; then
+                      if ! wait -n; then
+                          echo "ERROR: Batch processing failed - stopping remaining jobs" | tee -a "$STDERR_FILE"
+                          exit 1
+                      fi
+                      CURRENT_JOBS=$((CURRENT_JOBS - 1))
+                  fi
+              fi
+          done
+
+          # Wait for all remaining batches to complete
+          while (( CURRENT_JOBS > 0 )); do
+              if ! wait -n; then
+                  echo "ERROR: Batch processing failed - stopping remaining jobs" | tee -a "$STDERR_FILE"
+                  exit 1
+              fi
+              CURRENT_JOBS=$((CURRENT_JOBS - 1))
+          done
+
+          echo "All CVE data retrieved"
+
+          # Now process images using cached CVE data
           NUM_IMAGES=$(jq 'length' <<< "${IMAGES}")
           for ((i = 0; i < NUM_IMAGES; i++)); do
               image=$(jq -c --argjson i "$i" '.[$i]' <<< "${IMAGES}")
@@ -127,16 +235,13 @@ spec:
               for ((j = 0; j < NUM_CVES; j++)); do
                   cve=$(jq -r --argjson j "$j" '.cves.fixed | to_entries[$j].key' <<< "${image}")
                   echo "Checking CVE ${cve} for component with repository ${repository}"
-                  # Get token. They are short lived, so get one for before each request
-                  set +x
-                  TOKEN=$(curl --retry 3 --negotiate -u : "${OSIDB_URL}"/auth/token | jq -r '.access')
-                  CURL_URL="${OSIDB_URL}/osidb/api/v1/flaws?cve_id=${cve}&include_fields=${INCLUDE_FIELDS}"
-                  echo "Calling OSIDB API: ${CURL_URL}"
-                  OUTPUT=$(curl --retry 3 -H 'Content-Type: application/json' -H "Authorization: Bearer ${TOKEN}" \
-                      "$CURL_URL" \
-                      | jq '.results[0]')
-                  set -x
-                  echo "OSIDB API response: ${OUTPUT}"
+
+                  # Read saved CVE data
+                  if ! OUTPUT=$(cat "$CVE_CACHE_DIR/${cve}.json") ; then
+                      echo "ERROR: CVE ${cve} not found in cache - batch processing failed" | tee -a "$STDERR_FILE"
+                      exit 1
+                  fi
+
                   IMPACT=$(jq -r '.impact' <<< "$OUTPUT")
                   # If there is a component specific impact, use that instead
                   # To check if it is the same component, we use the repository value and match it with the
@@ -164,7 +269,7 @@ spec:
           done
 
           if [ -z "$ADVISORY_SEVERITY" ] ; then
-              echo "Unable to find severity on any cve listed in the releaseNotes" | tee "$STDERR_FILE"
+              echo "Unable to find severity on any cve listed in the releaseNotes" | tee -a "$STDERR_FILE"
               exit 1
           fi
 
