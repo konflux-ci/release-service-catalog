@@ -917,8 +917,10 @@ spec:
           mkdir -p "$COMPRESSED_DIR"
           COMPONENT_JSON="$1"
           NUM_MAPPED_FILES=$(jq '.files | length' <<< "${COMPONENT_JSON}")
+          UPDATED_FILES="[]"
+
           for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
-            FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT")
+            FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT_JSON")
             if ! SOURCE=$(jq -er '.source' <<< "$FILE" 2>/dev/null); then
               echo "Missing files.source for component." >&2
               exit 1
@@ -926,20 +928,34 @@ spec:
             # Extract just the filename from the source path (remove /releases/ prefix)
             SOURCE_FILENAME=$(basename "$SOURCE")
             DELIVERY_FORMAT=$(jq -r '.delivery_format // ["compressed"] | sort | .[]' <<< "$FILE")
+
+            # Track actual filenames created for this file entry
+            ACTUAL_FILES="[]"
+
             for FORMAT in $DELIVERY_FORMAT; do
               if [ "$FORMAT" = "compressed" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
                     # Archive the extracted macos binaries
                     tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${CONTENT_DIR}" unsigned/macos
+                    # Add compressed filename to actual files
+                    ACTUAL_FILES=$(jq --arg filename "$SOURCE_FILENAME" --argjson file "$FILE" \
+                      '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
                     ;;
                   (*linux*)
                     # Archive the extracted linux binaries
                     tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${CONTENT_DIR}" linux
+                    # Add compressed filename to actual files
+                    ACTUAL_FILES=$(jq --arg filename "$SOURCE_FILENAME" --argjson file "$FILE" \
+                      '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
                     ;;
                   (*windows*)
                     # Archive the extracted windows binaries (zip doesn't have -C, so use full path)
-                    (cd "${CONTENT_DIR}" && zip -r "${COMPRESSED_DIR}/${SOURCE_FILENAME%.tar.gz}.zip" unsigned/windows)
+                    WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
+                    (cd "${CONTENT_DIR}" && zip -r "${COMPRESSED_DIR}/${WINDOWS_FILENAME}" unsigned/windows)
+                    # Add compressed filename (with .zip extension) to actual files
+                    ACTUAL_FILES=$(jq --arg filename "$WINDOWS_FILENAME" --argjson file "$FILE" \
+                      '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
                     ;;
                 esac
               fi
@@ -947,9 +963,27 @@ spec:
               # if "raw" is listed in the delivery_mode, make sure the binaries will be also pushed
               if [ "$FORMAT" = "raw" ]; then
                 find "${CONTENT_DIR}/unsigned" "${CONTENT_DIR}/linux" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                # Add raw filename (without extension) to actual files
+                RAW_FILENAME="${SOURCE_FILENAME%.tar.gz}"
+                ACTUAL_FILES=$(jq --arg filename "$RAW_FILENAME" --argjson file "$FILE" \
+                  '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
               fi
             done
+
+            # Add all actual files for this original file entry to the updated files list
+            UPDATED_FILES=$(jq --argjson actual_files "$ACTUAL_FILES" '. + $actual_files' <<< "$UPDATED_FILES")
           done
+
+          # Update the component in SNAPSHOT_JSON with the corrected filenames
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT_JSON")
+          SNAPSHOT_JSON=$(jq --arg name "$COMPONENT_NAME" --argjson updated_files "$UPDATED_FILES" '
+            .components |= map(
+              if .name == $name then
+                .files = $updated_files
+              else
+                .
+              end
+            )' <<< "$SNAPSHOT_JSON")
         }
 
         NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
@@ -957,6 +991,9 @@ spec:
             COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
             compress_components "$COMPONENT" 2> "$STDERR_FILE"
         done
+
+        # Save the modified snapshot to shared volume so subsequent steps can use it
+        echo "$SNAPSHOT_JSON" > /shared/snapshot.json
 
     - name: push-artifacts
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
@@ -983,6 +1020,11 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -e
+
+        # Use the modified snapshot from shared volume if available
+        if [ -f /shared/snapshot.json ]; then
+          SNAPSHOT_JSON="$(cat /shared/snapshot.json)"
+        fi
 
         EXODUS_CERT="$(cat /mnt/exodusGwSecret/cert)"
         EXODUS_KEY="$(cat /mnt/exodusGwSecret/key)"
