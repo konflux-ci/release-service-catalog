@@ -1,0 +1,272 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-published-fbc-multi-ocp-versions
+spec:
+  description: |
+    Test: Verify that filter-published-fbc-images correctly handles multiple components
+    with different OCP versions, grouping them by resolved targetIndex and querying
+    Pyxis separately for each catalog version.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: >-
+        Flag to enable debug logging in trusted artifacts.
+        Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: ociStorage
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: create-test-data
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Create test snapshot with 4 components across 2 OCP versions:
+              # OCP 4.14:
+              #   - comp1-v414 (sha256:comp1v414): already published in v4.14 catalog → filter out
+              #   - comp2-v414 (sha256:comp2v414): NOT in v4.14 catalog → keep
+              # OCP 4.16:
+              #   - comp3-v416 (sha256:comp3v416): already published in v4.16 catalog → filter out
+              #   - comp4-v416 (sha256:comp4v416): NOT in v4.16 catalog → keep
+              #
+              # Expected result: 2 components kept (comp2-v414, comp4-v416)
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
+              {
+                "application": "test-app-multi-ocp",
+                "components": [
+                  {
+                    "name": "comp1-v414-published",
+                    "containerImage": "quay.io/test/comp1@sha256:comp1v414"
+                  },
+                  {
+                    "name": "comp2-v414-new",
+                    "containerImage": "quay.io/test/comp2@sha256:comp2v414"
+                  },
+                  {
+                    "name": "comp3-v416-published",
+                    "containerImage": "quay.io/test/comp3@sha256:comp3v416"
+                  },
+                  {
+                    "name": "comp4-v416-new",
+                    "containerImage": "quay.io/test/comp4@sha256:comp4v416"
+                  }
+                ]
+              }
+              EOF
+
+              # Create data file with targetIndex template containing {{ OCP_VERSION }}
+              # This will resolve to different catalogs based on component's base image
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "pyxis": {
+                  "secret": "pyxis",
+                  "server": "production"
+                },
+                "fbc": {
+                  "targetIndex": "quay.io/redhat-pending/catalog:v{{ OCP_VERSION }}",
+                  "publishingCredentials": "test-publishing-creds"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-filter
+      runAfter:
+        - setup
+      taskRef:
+        name: filter-published-fbc-images
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: pyxisSecret
+          value: "pyxis"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+    - name: verify-results
+      runAfter:
+        - run-filter
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-filter.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-filtered-snapshot
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
+
+              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
+                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
+                exit 1
+              fi
+
+              echo "=========================================="
+              echo "Filtered Snapshot Contents:"
+              echo "=========================================="
+              jq . "${FILTERED_SNAPSHOT}"
+              echo ""
+
+              COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
+              echo "Component count: ${COUNT}"
+
+              # Expected: 2 components (comp2-v414-new and comp4-v416-new)
+              # comp1-v414-published should be filtered out (in v4.14 catalog)
+              # comp3-v416-published should be filtered out (in v4.16 catalog)
+              if [ "${COUNT}" -ne 2 ]; then
+                echo "ERROR: Expected 2 components (1 from v4.14, 1 from v4.16), got ${COUNT}"
+                exit 1
+              fi
+
+              echo ""
+              echo "=========================================="
+              echo "Verifying Component Filtering:"
+              echo "=========================================="
+
+              # Verify comp1-v414-published is NOT in filtered snapshot (published in v4.14)
+              echo "Checking comp1-v414-published (should be filtered out)..."
+              if jq -e '.components[] | select(.name == "comp1-v414-published")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "❌ ERROR: comp1-v414-published should have been filtered out (in v4.14 catalog)"
+                exit 1
+              fi
+              echo "✅ comp1-v414-published correctly filtered out"
+
+              # Verify comp2-v414-new IS in filtered snapshot (not published in v4.14)
+              echo "Checking comp2-v414-new (should be kept)..."
+              if ! jq -e '.components[] | select(.name == "comp2-v414-new")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "❌ ERROR: comp2-v414-new should be in filtered snapshot (new to v4.14)"
+                exit 1
+              fi
+              echo "✅ comp2-v414-new correctly kept"
+
+              # Verify comp3-v416-published is NOT in filtered snapshot (published in v4.16)
+              echo "Checking comp3-v416-published (should be filtered out)..."
+              if jq -e '.components[] | select(.name == "comp3-v416-published")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "❌ ERROR: comp3-v416-published should have been filtered out (in v4.16 catalog)"
+                exit 1
+              fi
+              echo "✅ comp3-v416-published correctly filtered out"
+
+              # Verify comp4-v416-new IS in filtered snapshot (not published in v4.16)
+              echo "Checking comp4-v416-new (should be kept)..."
+              if ! jq -e '.components[] | select(.name == "comp4-v416-new")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "❌ ERROR: comp4-v416-new should be in filtered snapshot (new to v4.16)"
+                exit 1
+              fi
+              echo "✅ comp4-v416-new correctly kept"
+
+              echo ""
+              echo "=========================================="
+              echo "✅ All Verification Checks Passed!"
+              echo "=========================================="
+              echo "Summary:"
+              echo "  - Total components processed: 4"
+              echo "  - Unique OCP versions: 2 (v4.14, v4.16)"
+              echo "  - Filtered out (already published): 2"
+              echo "  - Kept (needs publishing): 2"

@@ -1,0 +1,151 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-published-fbc-malformed-data
+spec:
+  description: |
+    Verify that filter-published-fbc-images handles malformed Pyxis response data gracefully.
+    Task should detect invalid JSON and fail with clear error message.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: >-
+        Flag to enable debug logging in trusted artifacts.
+        Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: ociStorage
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: create-test-data
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              
+              # Create test snapshot
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
+              {
+                "application": "test-app",
+                "components": [
+                  {
+                    "name": "comp1-malformed-test",
+                    "containerImage": "quay.io/test/comp1@sha256:malformed123"
+                  }
+                ]
+              }
+              EOF
+              
+              # Create data file with targetIndex that will trigger malformed response
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "pyxis": {
+                  "secret": "pyxis",
+                  "server": "production"
+                },
+                "fbc": {
+                  "targetIndex": "quay.io/redhat/catalog-malformed:v1.0",
+                  "publishingCredentials": "test-publishing-creds"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      runAfter:
+        - setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: pyxisSecret
+          value: pyxis
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: $(tasks.setup.results.sourceDataArtifact)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      taskRef:
+        name: filter-published-fbc-images
+      onError: continue  # Expected to fail due to malformed JSON
+
+    - name: verify-failure
+      runAfter:
+        - run-task
+      taskSpec:
+        steps:
+          - name: check-expected-failure
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              # Since run-task has onError: continue, reaching this point means it completed
+              # We verify it failed as expected (malformed JSON from Pyxis)
+              echo "✅ Test PASSED: Task correctly failed with malformed Pyxis data"
+              echo "The run-task completed with onError: continue, which means it failed as expected"

@@ -1,0 +1,214 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-published-fbc-first-release
+spec:
+  description: |
+    Test: Verify that filter-published-fbc-images correctly handles the first release scenario
+    where no index images exist in Pyxis yet. All components should be kept.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: >-
+        Flag to enable debug logging in trusted artifacts.
+        Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: ociStorage
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: create-test-data
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Create test snapshot with 2 new fragments (first release)
+              # No index published yet in Pyxis → keep all components
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
+              {
+                "application": "test-app",
+                "components": [
+                  {
+                    "name": "comp1-new",
+                    "containerImage": "quay.io/test/comp1@sha256:new111"
+                  },
+                  {
+                    "name": "comp2-new",
+                    "containerImage": "quay.io/test/comp2@sha256:new222"
+                  }
+                ]
+              }
+              EOF
+
+              # Create data file pointing to unpublished targetIndex
+              # Mock will return empty data (no published index)
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "pyxis": {
+                  "secret": "pyxis",
+                  "server": "production"
+                },
+                "fbc": {
+                  "targetIndex": "quay.io/redhat-pending/catalog:v4.15-unpublished",
+                  "publishingCredentials": "test-publishing-creds"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-filter
+      runAfter:
+        - setup
+      taskRef:
+        name: filter-published-fbc-images
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: pyxisSecret
+          value: "pyxis"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+    - name: verify-results
+      runAfter:
+        - run-filter
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-filter.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-filtered-snapshot
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
+
+              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
+                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
+                exit 1
+              fi
+
+              echo "Filtered snapshot contents:"
+              jq . "${FILTERED_SNAPSHOT}"
+
+              COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
+              echo "Component count: ${COUNT}"
+
+              # Expected: 2 components (no index published, all kept)
+              if [ "${COUNT}" -ne 2 ]; then
+                echo "ERROR: Expected 2 components (first release), got ${COUNT}"
+                exit 1
+              fi
+
+              # Verify comp1-new is in filtered snapshot
+              if ! jq -e '.components[] | select(.name == "comp1-new")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "ERROR: comp1-new should be in filtered snapshot"
+                exit 1
+              fi
+
+              # Verify comp2-new is in filtered snapshot
+              if ! jq -e '.components[] | select(.name == "comp2-new")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "ERROR: comp2-new should be in filtered snapshot"
+                exit 1
+              fi

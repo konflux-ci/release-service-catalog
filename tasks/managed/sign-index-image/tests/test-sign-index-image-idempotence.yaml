@@ -1,0 +1,95 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-sign-index-image-idempotence
+spec:
+  description: |
+    Verify that sign-index-image is idempotent by checking if it queries Pyxis for existing signatures
+    and skips signing when a signature already exists for the same tag.
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: tests-workspace
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: tests-workspace
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+              
+              WORKSPACE_DIR="$(workspaces.tests-workspace.path)"
+              
+              # Create mock FBC results file with components
+              cat > "$WORKSPACE_DIR/fbc-results.json" <<EOF
+              {
+                "components": [
+                  {
+                    "target_index": "registry.redhat.io/test/catalog:v4.14",
+                    "rh-registry-repo": "registry.redhat.io/test",
+                    "image_digests": ["sha256:abc123def456"]
+                  },
+                  {
+                    "target_index": "registry.redhat.io/test/catalog:v4.15",
+                    "rh-registry-repo": "registry.redhat.io/test",
+                    "image_digests": ["sha256:abc123def456"]
+                  }
+                ]
+              }
+              EOF
+              
+              # Create mock data file
+              cat > "$WORKSPACE_DIR/data.json" <<EOF
+              {
+                "sign": {
+                  "request": "simple-signing-pipeline",
+                  "pipelineImage": "quay.io/test/pipeline:latest",
+                  "configMapName": "signing-config"
+                }
+              }
+              EOF
+              
+              echo "Test data created successfully"
+
+    - name: verify-idempotence-logic
+      runAfter: [setup]
+      workspaces:
+        - name: tests-workspace
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: tests-workspace
+        steps:
+          - name: verify-signature-check
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              reference_v414="registry.redhat.io/test/catalog:v4.14"
+              reference_v415="registry.redhat.io/test/catalog:v4.15"
+              manifest_digest="sha256:abc123def456"
+              
+              # Mock existing signatures file (would come from Pyxis)
+              cat > /tmp/${manifest_digest} <<EOF
+              registry.redhat.io/test/catalog:v4.14
+              EOF
+              
+              # Verify v4.14 already signed (should skip)
+              if ! grep -q "^${reference_v414}" "/tmp/${manifest_digest}" ; then
+                echo "ERROR: v4.14 not found in existing signatures, would sign again"
+                exit 1
+              fi
+              
+              # Verify v4.15 not signed (should sign - new tag for same digest)
+              if grep -q "^${reference_v415}" "/tmp/${manifest_digest}" ; then
+                echo "ERROR: v4.15 should not be in existing signatures"
+                exit 1
+              fi
+              

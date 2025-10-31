@@ -1,0 +1,560 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-published-fbc-images
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Filters snapshot to remove already-released FBC fragments by querying Pyxis index images.
+    Queries for index images and checks if fragments are present in their bundles/related_images fields.
+    Components already published are filtered out to prevent EC validation failures.
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data to use in the data workspace
+    - name: pyxisSecret
+      type: string
+      description: The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys - cert and key
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the OCI repository
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: >-
+        The url to the git repo where the release-service-catalog tasks to be used
+        are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: filteredSnapshotPath
+      type: string
+      description: Path to the filtered snapshot for EC validation and downstream tasks
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: pyxis-secret-vol
+      secret:
+        secretName: $(params.pyxisSecret)
+        defaultMode: 0400
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: setup-pyxis-cert
+      image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      volumeMounts:
+        - name: pyxis-secret-vol
+          mountPath: /etc/secrets
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+        
+        echo "Extracting Pyxis credentials from mounted secret"
+        PYXIS_CERT="$(cat /etc/secrets/cert)"
+        PYXIS_KEY="$(cat /etc/secrets/key)"
+        echo "${PYXIS_CERT}" > /var/workdir/crt
+        echo "${PYXIS_KEY}" > /var/workdir/key
+    - name: filter-already-released-images
+      image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 350m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        FILTERED_SNAPSHOT_FILE="$(params.dataDir)/filtered-snapshot.json"
+
+        if [ ! -f "${SNAPSHOT_FILE}" ]; then
+            echo "ERROR: No valid snapshot file at ${SNAPSHOT_FILE}"
+            exit 1
+        fi
+
+        if [ ! -f "${DATA_FILE}" ]; then
+            echo "ERROR: No valid data file at ${DATA_FILE}"
+            exit 1
+        fi
+
+        echo "==============================================================="
+        echo "Filtering Already-Released FBC Fragments via Pyxis Index Query"
+        echo "==============================================================="
+        echo ""
+
+        pyxis_server=$(jq -r '.pyxis.server // "production"' "${DATA_FILE}")
+        staged_index=$(jq -r '.fbc.stagedIndex // false' "${DATA_FILE}")
+        
+        # Exit early for stage builds - they never filter
+        if [ "$staged_index" = "true" ]; then
+          echo "ℹ️  Stage build detected (stagedIndex=true)"
+          echo "  → Skipping idempotence filtering (keeping all components)"
+          echo ""
+          cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+        
+        component_count=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        echo "Found $component_count component(s) in snapshot"
+        
+        if [ "$component_count" -eq 0 ]; then
+          echo "ℹ️  Empty snapshot - no components to filter"
+          cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+        
+        # Read targetIndex template from RPA data (single source of truth)
+        target_index_template=$(jq -r '.fbc.targetIndex // ""' "${DATA_FILE}")
+        
+        if [ -z "$target_index_template" ]; then
+          echo "ℹ️  No fbc.targetIndex found in data file"
+          echo "  → Skipping idempotence filtering (keeping all components)"
+          echo ""
+          cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+        
+        echo "targetIndex template: ${target_index_template}"
+        echo ""
+        
+        # Resolve {{ OCP_VERSION }} for each component and group by resolved targetIndex
+        declare -A target_index_to_components  # resolved targetIndex -> space-separated component indices
+        declare -a unique_target_indices       # Array of unique resolved targetIndex values
+        
+        echo "Resolving targetIndex for each component..."
+        for ((i=0; i<component_count; i++)); do
+          component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
+          component_name=$(jq -r '.name' <<< "$component")
+          container_image=$(jq -r '.containerImage' <<< "$component")
+          
+          echo "  Component $((i+1))/${component_count}: ${component_name}"
+          
+          # Resolve {{ OCP_VERSION }} if present in template
+          if [[ "$target_index_template" == *"{{ OCP_VERSION }}"* ]]; then
+            echo "    → Extracting OCP version from base image..."
+            
+            # Extract OCP version from image metadata
+            # Real FBC images built by ART/Doozer have OCP version in Env variables
+            image_metadata=$(skopeo inspect --no-tags "docker://${container_image}")
+            
+            # Try method 1: Extract from Env variables (OS_GIT_MAJOR and OS_GIT_MINOR)
+            # This is the standard for ART-built FBC images
+            ocp_major=$(echo "$image_metadata" | jq -r '.Env[]? | select(startswith("OS_GIT_MAJOR=")) | split("=")[1]')
+            ocp_minor=$(echo "$image_metadata" | jq -r '.Env[]? | select(startswith("OS_GIT_MINOR=")) | split("=")[1]')
+            
+            if [ -n "$ocp_major" ] && [ -n "$ocp_minor" ] && \
+               [ "$ocp_major" != "null" ] && [ "$ocp_minor" != "null" ]; then
+              ocp_version="${ocp_major}.${ocp_minor}"
+              echo "    → OCP version extracted from Env (OS_GIT_MAJOR/MINOR): ${ocp_version}"
+            else
+              # Try method 2: Extract from annotations (for test mocks compatibility)
+              ocp_version=$(echo "$image_metadata" \
+                | jq -r '.annotations."org.opencontainers.image.base.name"' \
+                | cut -d: -f2 | sed 's/"//g')
+              
+              if [ -z "$ocp_version" ] || [ "$ocp_version" = "null" ]; then
+                echo "    ❌ ERROR: Could not extract OCP version from ${container_image}"
+                echo "       Neither Env variables (OS_GIT_MAJOR/MINOR) nor annotation found"
+                exit 1
+              fi
+              echo "    → OCP version extracted from annotation: ${ocp_version}"
+            fi
+            
+            # Resolve {{ OCP_VERSION }} placeholder using bash parameter expansion
+            target_index="${target_index_template//\{\{ OCP_VERSION \}\}/$ocp_version}"
+          else
+            # No placeholder, use template as-is
+            target_index="$target_index_template"
+          fi
+          
+          echo "    → Resolved targetIndex: ${target_index}"
+          
+          # Group component by its resolved targetIndex
+          if [ -z "${target_index_to_components[$target_index]:-}" ]; then
+            target_index_to_components[$target_index]="$i"
+            unique_target_indices+=("$target_index")
+          else
+            target_index_to_components[$target_index]+=" $i"
+          fi
+        done
+        
+        unique_count=${#unique_target_indices[@]}
+        echo ""
+        echo "Found $unique_count unique resolved targetIndex value(s)"
+        echo ""
+        
+        case "$pyxis_server" in
+          production)
+            PYXIS_URL="https://pyxis.api.redhat.com/"
+            ;;
+          stage)
+            PYXIS_URL="https://pyxis.preprod.api.redhat.com/"
+            ;;
+          production-internal)
+            PYXIS_URL="https://pyxis.engineering.redhat.com/"
+            ;;
+          stage-internal)
+            PYXIS_URL="https://pyxis.stage.engineering.redhat.com/"
+            ;;
+          *)
+            echo "ERROR: Invalid pyxis server: $pyxis_server"
+            exit 1
+            ;;
+        esac
+
+        echo "Pyxis server: $PYXIS_URL"
+        echo ""
+        
+        # Calculate date filter (30 days ago) for Pyxis query optimization
+        # Format: YYYY-MM-DD (Pyxis expects ISO 8601 date format)
+        # 30 days covers realistic re-release scenarios while keeping queries fast
+        date_filter=$(date -u -d '30 days ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-30d '+%Y-%m-%d')
+        echo "Date filter: last_update_date>=$date_filter (last 30 days)"
+        echo ""
+        
+        # Function to query Pyxis and extract published fragments for a targetIndex
+        query_pyxis_for_target_index() {
+          local target_index="$1"
+          local max_retries=3
+          local retry_count=0
+          local index_response=""
+          local http_code=""
+          
+          echo "  Querying Pyxis for targetIndex: ${target_index}"
+          
+          while [ $retry_count -le $max_retries ]; do
+            if [ $retry_count -gt 0 ]; then
+              echo "  Retry attempt $retry_count/$max_retries..."
+              sleep $((retry_count * 2))  # Exponential backoff: 2s, 4s, 6s
+            fi
+            
+            local response_file
+            local http_code_output
+            response_file=$(mktemp)
+            http_code_output=$(mktemp)
+            
+            # Build Pyxis query URL with optimization parameters:
+            # - docker_image_id filter: find indices for this catalog
+            # - last_update_date filter: only check indices updated in last 30 days
+            # - page_size=500: retrieve up to 500 results (Pyxis API maximum)
+            # URL-encode the entire filter value to handle special characters (/, :, ;, =)
+            local filter_value="docker_image_id==${target_index};last_update_date>=${date_filter}"
+            local encoded_filter
+            encoded_filter=$(printf '%s' "${filter_value}" | jq -sRr @uri)
+            local pyxis_query_url="${PYXIS_URL}v1/images?filter=${encoded_filter}&page_size=500"
+            
+            set +e  # Temporarily disable exit on error
+            curl -s \
+              --cert /var/workdir/crt \
+              --key /var/workdir/key \
+              --max-time 60 \
+              --connect-timeout 10 \
+              -X GET \
+              "$pyxis_query_url" \
+              -H "Content-Type: application/json" \
+              -w "%{http_code}" \
+              -o "$response_file" \
+              > "$http_code_output"
+            local curl_exit=$?
+            set -e  # Re-enable exit on error
+            
+            http_code=$(cat "$http_code_output")
+            index_response=$(cat "$response_file")
+            
+            rm -f "$response_file" "$http_code_output"
+            
+            if [ $curl_exit -eq 0 ] && [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
+              echo "  ✓ Pyxis query successful (HTTP $http_code)"
+              break
+            else
+              echo "  ✗ Pyxis query failed (HTTP $http_code, curl exit: $curl_exit)"
+              retry_count=$((retry_count + 1))
+              
+              if [ $retry_count -gt $max_retries ]; then
+                echo ""
+                echo "WARNING: Failed to query Pyxis API after $max_retries retries"
+                echo ""
+                echo "Details:"
+                echo "  - HTTP code: $http_code"
+                echo "  - curl exit code: $curl_exit"
+                echo "  - Pyxis URL: ${PYXIS_URL}"
+                echo "  - Target index: ${target_index}"
+                echo ""
+                echo "Possible causes:"
+                echo "  - Invalid or expired Pyxis certificates"
+                echo "  - Network connectivity issues"
+                echo "  - Pyxis API service unavailable"
+                echo "  - Incorrect Pyxis server configuration"
+                echo ""
+                echo "Cannot verify already-published fragments. Will keep all components for release."
+                echo "If there's a real registry issue, the actual release task will fail."
+                return 1
+              fi
+            fi
+          done
+          
+          if ! jq -e '.data' <<< "$index_response" > /dev/null 2>&1; then
+            echo "WARNING: Invalid JSON response from Pyxis API"
+            echo "  Expected JSON with '.data' field"
+            echo "  Response:"
+            echo "$index_response"
+            echo "Cannot verify already-published fragments. Will keep all components for release."
+            return 1
+          fi
+          
+          local index_count
+          index_count=$(jq '.data | length' <<< "$index_response")
+          
+          if [ "$index_count" -eq 0 ]; then
+            echo "  ℹ️  No index images found (first release to this catalog)"
+            echo ""
+            return 0
+          fi
+          
+          echo "  Found $index_count existing index image(s)"
+          
+          # Extract published fragments from this targetIndex
+          local published_fragments
+          published_fragments=$(jq -r '
+            [
+              .data[] |
+              (
+                (.related_images[]?.digest // empty),
+                (.related_images[]?.image | split("@")[1] // empty),
+                (.bundles[]?.related_images[]?.digest // empty),
+                (.bundles[]?.related_images[]?.image | split("@")[1] // empty)
+              )
+            ] | unique | .[]
+          ' <<< "$index_response" 2>/dev/null || echo "")
+          
+          if [ -n "$published_fragments" ]; then
+            local fragment_count
+            fragment_count=$(echo "$published_fragments" | wc -l)
+            echo "  Extracted $fragment_count unique fragment digest(s)"
+          else
+            echo "  ⚠️  No fragments found in published index"
+          fi
+          echo ""
+          
+          # Store fragments for this targetIndex (return via stdout)
+          echo "$published_fragments"
+        }
+        
+        # Query Pyxis for each unique targetIndex and build fragment map
+        declare -A target_index_fragments  # targetIndex -> newline-separated fragment digests
+        
+        echo "Querying Pyxis for each targetIndex..."
+        echo ""
+        
+        for target_index in "${unique_target_indices[@]}"; do
+          echo "--- targetIndex: ${target_index} ---"
+          if ! fragments=$(query_pyxis_for_target_index "$target_index"); then
+            echo ""
+            echo "================================================================"
+            echo "Pyxis query failed - skipping idempotence filtering"
+            echo "================================================================"
+            echo ""
+            echo "Keeping all components for release (fail-safe behavior)."
+            echo "If there are real registry issues, they will be caught during actual release."
+            echo ""
+            cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+            echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+            exit 0
+          fi
+          target_index_fragments[$target_index]="$fragments"
+        done
+
+        echo "================================================================"
+        echo "Filtering Components Based on Published Fragments"
+        echo "================================================================"
+        echo ""
+        
+        declare -A components_to_keep
+        components_kept=0
+        filtered_out_count=0
+
+        for ((i=0; i<component_count; i++)); do
+          component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
+          component_name=$(jq -r '.name' <<< "$component")
+          container_image=$(jq -r '.containerImage' <<< "$component")
+          
+          fragment_digest="${container_image##*@}"
+          
+          # Determine which resolved targetIndex this component belongs to
+          resolved_target_index=""
+          for target_idx in "${unique_target_indices[@]}"; do
+            component_indices="${target_index_to_components[$target_idx]}"
+            if echo "$component_indices" | grep -qw "$i"; then
+              resolved_target_index="$target_idx"
+              break
+            fi
+          done
+          
+          echo "=== Component $((i+1))/${component_count}: ${component_name} ==="
+          echo "  containerImage: ${container_image}"
+          echo "  fragment digest: ${fragment_digest}"
+          echo "  Resolved targetIndex: ${resolved_target_index}"
+          
+          published_fragments="${target_index_fragments[$resolved_target_index]}"
+
+          if [ -n "$published_fragments" ] && echo "$published_fragments" | grep -Fqx "$fragment_digest"; then
+            echo "  Status: ✓ FOUND in published index"
+            echo "  Action: FILTER OUT (already published)"
+            filtered_out_count=$((filtered_out_count + 1))
+          else
+            echo "  Status: ✗ NOT in published index"
+            echo "  Action: KEEP (needs publishing)"
+            components_to_keep[$i]="keep"
+            components_kept=$((components_kept + 1))
+          fi
+          
+          echo ""
+        done
+
+        echo "================================================================"
+        echo "Filtering Summary:"
+        echo "  Total components: ${component_count}"
+        echo "  Unique targetIndex values: ${unique_count}"
+        echo "  New (to publish): ${components_kept}"
+        echo "  Already published: ${filtered_out_count}"
+        echo "================================================================"
+        echo ""
+
+        if [ ${components_kept} -eq 0 ]; then
+          echo "✓ All fragments already published!"
+          echo "  Creating empty snapshot - EC will process no components"
+          jq '.components = []' "${SNAPSHOT_FILE}" > "${FILTERED_SNAPSHOT_FILE}"
+        else
+          echo "Building filtered snapshot with ${components_kept} component(s)..."
+          
+          # Build jq filter to keep only non-published components
+          # shellcheck disable=SC2016  # jq variables, not bash - single quotes are correct
+          jq_filter='def processComponents:
+            [
+              .components as $comps |
+              [range(0; $comps | length)] as $indices |
+              $indices[] |
+              . as $idx |
+              if $keep_indices[$idx | tostring] == "keep" then
+                $comps[$idx]
+              else
+                empty
+              end
+            ];
+          . + {components: processComponents}'
+          
+          keep_indices_json="{"
+          first=true
+          for idx in "${!components_to_keep[@]}"; do
+            if [ "$first" = true ]; then
+              first=false
+            else
+              keep_indices_json+=","
+            fi
+            keep_indices_json+="\"$idx\":\"${components_to_keep[$idx]}\""
+          done
+          keep_indices_json+="}"
+          
+          jq --argjson keep_indices "$keep_indices_json" "$jq_filter" \
+            "${SNAPSHOT_FILE}" > "${FILTERED_SNAPSHOT_FILE}"
+          
+          kept_count=$(jq '.components | length' "${FILTERED_SNAPSHOT_FILE}")
+          echo "✓ Filtered snapshot created with ${kept_count} component(s)"
+        fi
+
+        echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
