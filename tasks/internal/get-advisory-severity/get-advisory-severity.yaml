@@ -35,12 +35,12 @@ spec:
         defaultMode: 0400
   steps:
     - name: get-advisory-severity
-      image: quay.io/konflux-ci/release-service-utils:002e438fd71196a7b4613308025358476acc1f8e
+      image: quay.io/konflux-ci/release-service-utils:8151de6a3ec9143e0601166a85d12633a60d3c26
       computeResources:
         limits:
-          memory: 32Mi
+          memory: 128Mi
         requests:
-          memory: 32Mi
+          memory: 128Mi
           cpu: '1'  # 1 is the max allowed by at least the staging cluster
       volumeMounts:
         - name: osidb-service-account-vol
@@ -242,28 +242,26 @@ spec:
                       exit 1
                   fi
 
-                  IMPACT=$(jq -r '.impact' <<< "$OUTPUT")
                   # If there is a component specific impact, use that instead
                   # To check if it is the same component, we use the repository value and match it with the
                   # repository_url field in the purl from OSIDB. Thus, we have to check each entry as
-                  # repository_url is not its own field
-                  NUM_AFFECTED_COMPONENTS=$(jq '.affects | length' <<< "$OUTPUT")
-                  for ((k = 0; k < NUM_AFFECTED_COMPONENTS; k++)); do
-                      AFFECTED_COMPONENT=$(jq --argjson k "$k" '.affects[$k]' <<< "$OUTPUT")
-                      PURL=$(jq -r '.purl // ""' <<< "$AFFECTED_COMPONENT")
-                      # .purl can be empty, so we direct stderr and just have it return empty string if purl was empty
-                      AFFECTED_REPOSITORY=$(python3 -c "from packageurl import PackageURL; \
-                        print(PackageURL.from_string('$PURL').to_dict()['qualifiers']['repository_url'])" \
-                        2> /dev/null || true)
-                      if [ "$AFFECTED_REPOSITORY" == "$repository" ] ; then
-                          COMPONENT_IMPACT=$(jq -r '.impact // ""' <<< "$AFFECTED_COMPONENT")
-                          # If we found a component specific impact, use that
-                          if [ -n "$COMPONENT_IMPACT" ] ; then
-                              IMPACT="$COMPONENT_IMPACT"
-                          fi
-                          break
+                  # repository_url is not its own field. Default to general impact first.
+                  IMPACT=$(jq -r '.impact' <<< "$OUTPUT")
+                  PURLS_JSON=$(jq -c '
+                      [.affects[] |
+                       select(.purl and (.purl | length > 0)) |
+                       {purl: .purl, impact: (.impact // "")}]
+                  ' <<< "$OUTPUT")
+
+                  if [[ "$PURLS_JSON" != "[]" ]]; then
+                      # Process all purls at once in Python and find matching repository
+                      COMPONENT_IMPACT=$(echo "$PURLS_JSON" | python3 /home/utils/find_matching_purl.py "$repository")
+
+                      # Use component-specific impact if found
+                      if [[ -n "$COMPONENT_IMPACT" ]]; then
+                          IMPACT="$COMPONENT_IMPACT"
                       fi
-                  done
+                  fi
                   ADVISORY_SEVERITY=$(get_higher_severity "$ADVISORY_SEVERITY" "$IMPACT")
               done
           done

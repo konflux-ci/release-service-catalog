@@ -1,0 +1,92 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-get-advisory-severity-purl-processing-performance
+spec:
+  description: |
+    Test that optimized purl processing (single Python call) completes within reasonable time limits.
+    Uses CVE with 250 affected components. The max duration is 12 seconds - with the old approach
+    (one Python subprocess per component), this would take ~30s due to subprocess overhead.
+    Thus, it ensures the purl processing optimization is working.
+  tasks:
+    - name: record-start-time
+      taskSpec:
+        results:
+          - name: startTime
+            type: string
+        steps:
+          - name: record-time
+            image: quay.io/konflux-ci/release-service-utils:002e438fd71196a7b4613308025358476acc1f8e
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Record start timestamp
+              date +%s > "$(results.startTime.path)"
+              echo "Purl processing performance test started at: $(date)"
+    - name: run-task
+      taskRef:
+        name: get-advisory-severity
+      params:
+        - name: releaseNotesImages
+          value: >-
+            H4sIAAAAAAAAA4uuVipKLcgvzizJL6pUslIqSSxKTy3RBYkp6Sgll6UWK1lVK6VlVqSmgBjOYa66uYl5lbrJ+bkF+XmpeSVgeWRedGwtEMRyAQCrS1UEWgAAAA==
+          # value before `gzip -c|base64 -w 0` encoding:
+          # [{"repository":"target-repo","cves":{"fixed":{"CVE-many-components":{"components":[]}}}}]
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+      runAfter:
+        - record-start-time
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: startTime
+          value: $(tasks.record-start-time.results.startTime)
+        - name: severity
+          value: $(tasks.run-task.results.severity)
+        - name: result
+          value: $(tasks.run-task.results.result)
+      taskSpec:
+        params:
+          - name: startTime
+            type: string
+          - name: severity
+            type: string  
+          - name: result
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:002e438fd71196a7b4613308025358476acc1f8e
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              START_TIME="$(params.startTime)"
+              END_TIME=$(date +%s)
+              DURATION=$((END_TIME - START_TIME))
+
+              echo "Purl processing performance test results:"
+              echo "Start time: $(date -d @"$START_TIME")"
+              echo "End time: $(date -d @"$END_TIME")"
+              echo "Total duration: ${DURATION} seconds"
+
+              # With 500 affected components and one python process, it should complete in under 12 seconds
+              MAX_DURATION=12
+              if [ "$DURATION" -gt "$MAX_DURATION" ]; then
+                echo "Error: Task took ${DURATION}s, expected under ${MAX_DURATION}s"
+                echo "This suggests purl processing optimization may not be working correctly"
+                exit 1
+              fi
+
+              if [ "$(params.result)" != Success ]; then
+                echo "Error: result task result is not correct"
+                exit 1
+              fi
+
+              # Should find the component-specific CRITICAL impact for target-repo (component #249)
+              if [ "$(params.severity)" != "Critical" ]; then
+                echo "Error: Expected Critical severity from component-specific impact, got $(params.severity)"
+                exit 1
+              fi

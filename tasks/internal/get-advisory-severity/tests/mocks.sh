@@ -37,8 +37,35 @@ function curl() {
     return
   fi
 
-  # Non numerical CVEs aren't part of performance tests, so do not include a sleep
-  if [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-critical"* ]]
+  # PURL performance test with many affected components
+  if [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-many-components"* ]]
+  then
+    # General impact is MODERATE, but target-repo component should have CRITICAL impact
+    # Generate 500 affected components to test performance optimization
+    echo -n '{"results": [{"impact": "MODERATE", "affects": ['
+    
+    for i in $(seq 1 500); do
+      if [[ $i -eq 499 ]]; then
+        # Put target-repo near the end with CRITICAL impact - forces processing of 498 components first
+        echo -n '{"purl": "pkg:oci/comp'$i'?repository_url=target-repo&v=1", "impact": "CRITICAL"}'
+      else
+        # Alternate between LOW and MODERATE for other components
+        if [[ $((i % 2)) -eq 0 ]]; then
+          impact="MODERATE"
+        else
+          impact="LOW"
+        fi
+        echo -n '{"purl": "pkg:oci/comp'$i'?repository_url=repo'$i'&v=1", "impact": "'$impact'"}'
+      fi
+      
+      # Add comma except for last element
+      if [[ $i -lt 500 ]]; then
+        echo -n ','
+      fi
+    done
+    
+    echo ']}]}'
+  elif [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-critical"* ]]
   then
     echo '{"results": [{"impact":"CRITICAL","affects":[{"purl":"pkg:oci/kubernetes?repository_url=component&a=b","impact":""}]}]}'
   elif [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-moderate"* ]]
