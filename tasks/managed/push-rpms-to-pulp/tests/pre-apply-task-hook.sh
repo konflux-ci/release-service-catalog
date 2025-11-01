@@ -15,3 +15,5 @@ kubectl create secret generic pulp-task-pulp-secret --from-literal=cli.toml=abcd
 # Create a dummy pulp secret (and delete it first if it exists)
 kubectl delete secret pulp-task-pulp-secret-missing --ignore-not-found
 kubectl create secret generic pulp-task-pulp-secret-missing --from-literal=dummy=abcdef123
+
+# Note: trusted-ca ConfigMap is created globally by test_tekton_tasks.sh

@@ -116,11 +116,40 @@ done
 echo "Cleaning up old test resources..."
 kubectl delete pipelineruns -l tekton.dev/pipeline --field-selector=status.conditions[0].status!=Unknown || true
 kubectl get taskruns -o json | jq -r '.items[] | select(.status.completionTime != null) | select((now - (.status.completionTime | fromdateiso8601)) > 3600) | .metadata.name' | xargs -r kubectl delete taskrun --ignore-not-found=true || true
+# Clean up all completed and failed pods to free disk space (this also cleans up their emptyDir volumes)
+kubectl delete pods --field-selector=status.phase==Succeeded || true
+kubectl delete pods --field-selector=status.phase==Failed || true
+# Also clean up pods in other terminal states that might be stuck
+kubectl delete pods --field-selector=status.phase==Unknown || true
+# Delete very old pods regardless of status (older than 1 hour)
+kubectl get pods -o json | jq -r '.items[] | select(.metadata.creationTimestamp != null) | select((now - (.metadata.creationTimestamp | fromdateiso8601)) > 3600) | .metadata.name' | xargs -r kubectl delete pod --ignore-not-found=true || true
+
+# Clean up unused container images to free disk space
+echo "Cleaning up unused container images..."
+# Get the kind cluster node name
+KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+if [ ! -z "$KIND_NODE" ]; then
+  # For kind clusters, exec into the node to prune images
+  docker exec "$KIND_NODE" crictl rmi --prune || true
+fi
+
+echo "Initial cleanup complete"
+
+# Create global trusted-ca ConfigMap for all tests
+# This prevents race conditions where tests delete/recreate the same ConfigMap
+echo "Creating global trusted-ca ConfigMap..."
+kubectl delete configmap trusted-ca --ignore-not-found || true
+kubectl create configmap trusted-ca --from-literal=ca-bundle.crt=testcert || true
+echo "Global ConfigMap created"
+
+# Initialize test counter for periodic cleanup
+TEST_COUNTER=0
 
 for ITEM in $TEST_ITEMS
 do
   echo Task item: $ITEM
   TASK_NAME=$(echo $ITEM | cut -d '/' -f 3)
+  TEST_COUNTER=$((TEST_COUNTER + 1))
   TASK_DIR=$(echo $ITEM | cut -d '/' -f -3)
   echo "  Task name: $TASK_NAME"
 
@@ -283,11 +312,49 @@ do
     if [ ! -z "$OLD_PRS" ]; then
       echo "$OLD_PRS" | xargs -r kubectl delete pipelinerun --ignore-not-found=true
     fi
+
+    # Clean up completed TaskRuns to free disk space
+    OLD_TRS=$(kubectl get taskruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -10)
+    if [ ! -z "$OLD_TRS" ]; then
+      echo "  Cleaning up completed TaskRuns..."
+      echo "$OLD_TRS" | xargs -r kubectl delete taskrun --ignore-not-found=true
+    fi
+
+    # Clean up completed Pods to free disk space (and their emptyDir volumes)
+    OLD_PODS=$(kubectl get pods --field-selector=status.phase==Succeeded -o json | jq -r '.items[].metadata.name' | head -n -10)
+    if [ ! -z "$OLD_PODS" ]; then
+      echo "  Cleaning up completed Pods (and emptyDir volumes)..."
+      echo "$OLD_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
+    fi
+
+    # Clean up failed Pods to free disk space (and their emptyDir volumes)
+    FAILED_PODS=$(kubectl get pods --field-selector=status.phase==Failed -o json | jq -r '.items[].metadata.name' | head -n -10)
+    if [ ! -z "$FAILED_PODS" ]; then
+      echo "  Cleaning up failed Pods (and emptyDir volumes)..."
+      echo "$FAILED_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
+    fi
+
+    # Clean up pods in Unknown state (and their emptyDir volumes)
+    UNKNOWN_PODS=$(kubectl get pods --field-selector=status.phase==Unknown -o json | jq -r '.items[].metadata.name' | head -n -10)
+    if [ ! -z "$UNKNOWN_PODS" ]; then
+      echo "  Cleaning up Unknown Pods (and emptyDir volumes)..."
+      echo "$UNKNOWN_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
+    fi
     echo
   done
 
   # Cleanup task after all its tests complete
   echo "Cleaning up task $TASK_NAME"
   kubectl delete task $TASK_NAME --ignore-not-found=true
+
+  # Periodic image cleanup every 50 tests to free disk space
+  if [ $((TEST_COUNTER % 50)) -eq 0 ]; then
+    echo "Periodic cleanup (test #$TEST_COUNTER): Pruning unused container images..."
+    KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+    if [ ! -z "$KIND_NODE" ]; then
+      docker exec "$KIND_NODE" crictl rmi --prune || true
+      echo "  Image cleanup completed"
+    fi
+  fi
 
 done

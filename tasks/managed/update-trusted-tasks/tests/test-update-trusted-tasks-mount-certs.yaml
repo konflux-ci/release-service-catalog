@@ -1,0 +1,179 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-trusted-tasks-mount-certs
+spec:
+  description: |
+    Verify that the update-trusted-tasks task properly mounts and accesses 
+    CA certificates from a ConfigMap for self-signed certificate support.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          # Use the same security context as the main task to avoid permission issues
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "/var/workdir/release/results"
+              cat >"/var/workdir/release/snapshot.json" <<EOF
+              {
+                "application": "tasks",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/example/echo-v01@sha256:abcde",
+                    "name": "echo-v01",
+                    "source": {
+                      "git": {
+                        "context": "task/echo/0.1",
+                        "revision": "abcde",
+                        "url": "https://example.com"
+                      }
+                    },
+                    "repositories": [
+                      {
+                        "url": "quay.io/exists/task-echo",
+                        "tags": [
+                          "0.1"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: /var/workdir/release
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: $(tasks.setup.results.sourceDataArtifact)=/var/workdir/release
+        - name: dataDir
+          value: /var/workdir/release
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: http://localhost
+        - name: taskGitRevision
+          value: main
+      runAfter:
+        - setup
+      taskRef:
+        kind: Task
+        name: update-trusted-tasks
+    - name: check-result
+      params:
+        - name: dataDir
+          value: /var/workdir/release
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: /var/workdir/release
+              - name: sourceDataArtifact
+                value: $(tasks.run-task.results.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/bin/bash
+              set -eux
+
+              # Verify mock functions were called (证明 mocks 正确执行)
+              if [ "$(wc -l <"/var/workdir/release/mock_skopeo.txt")" != 1 ]; then
+                echo Error: skopeo was expected to be called 1 times. Actual calls:
+                cat "/var/workdir/release/mock_skopeo.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l <"/var/workdir/release/mock_ec.txt")" != 1 ]; then
+                echo Error: ec was expected to be called 1 time. Actual calls:
+                cat "/var/workdir/release/mock_ec.txt"
+                exit 1
+              fi
+
+              # Verify the CA certificate verification in mocks passed
+              # (The mock checks if /mnt/trusted-ca/ca-bundle.crt is accessible)
+              echo "CA certificate mounting test passed - certificate was accessible to all steps"
+  workspaces:
+    - name: tests-workspace

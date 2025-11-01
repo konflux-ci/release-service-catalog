@@ -25,6 +25,4 @@ kubectl create secret generic test-ca \
 yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
 yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
 
-# Create a dummy configmap (and delete it first if it exists)
-kubectl delete configmap trusted-ca --ignore-not-found
-kubectl create configmap trusted-ca --from-literal=cert=mycert
+# Note: trusted-ca ConfigMap is created globally by test_tekton_tasks.sh

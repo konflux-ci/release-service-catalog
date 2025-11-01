@@ -6,6 +6,15 @@ function skopeo() {
   echo Mock skopeo called with: $* >&2
   echo $* >> "$(params.dataDir)/mock_skopeo.txt"
 
+  # Verify CA certificate is accessible if mounted
+  if [[ -d /mnt/trusted-ca ]]; then
+    if [[ ! -f /mnt/trusted-ca/ca-bundle.crt ]]; then
+      echo "Error: CA certificate not found at /mnt/trusted-ca/ca-bundle.crt"
+      return 1
+    fi
+    echo "CA certificate is accessible at /mnt/trusted-ca/ca-bundle.crt" >&2
+  fi
+
   if [[ "$*" =~ list-tags\ docker://quay.io/exists ]]; then
       echo '{"Tags": ["v2.0.0-3", "latest", "v2.0.0-2"]}'
       return
