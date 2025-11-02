@@ -324,25 +324,19 @@ do
       echo "$OLD_TRS" | xargs -r kubectl delete taskrun --ignore-not-found=true
     fi
 
-    # Clean up completed Pods to free disk space (and their emptyDir volumes)
-    OLD_PODS=$(kubectl get pods --field-selector=status.phase==Succeeded -o json | jq -r '.items[].metadata.name' | head -n -10)
+    # Clean up old Pods in terminal states to free disk space (and their emptyDir volumes)
+    # Keep last 10 of each status (Succeeded, Failed, Unknown)
+    OLD_PODS=$(kubectl get pods -o json | jq -r '
+      .items 
+      | group_by(.status.phase)
+      | map(select(.[0].status.phase == "Succeeded" or .[0].status.phase == "Failed" or .[0].status.phase == "Unknown"))
+      | map(.[:-10])
+      | flatten
+      | .[].metadata.name
+    ')
     if [ ! -z "$OLD_PODS" ]; then
-      echo "  Cleaning up completed Pods (and emptyDir volumes)..."
+      echo "  Cleaning up old Pods in terminal states (and emptyDir volumes)..."
       echo "$OLD_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
-    fi
-
-    # Clean up failed Pods to free disk space (and their emptyDir volumes)
-    FAILED_PODS=$(kubectl get pods --field-selector=status.phase==Failed -o json | jq -r '.items[].metadata.name' | head -n -10)
-    if [ ! -z "$FAILED_PODS" ]; then
-      echo "  Cleaning up failed Pods (and emptyDir volumes)..."
-      echo "$FAILED_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
-    fi
-
-    # Clean up pods in Unknown state (and their emptyDir volumes)
-    UNKNOWN_PODS=$(kubectl get pods --field-selector=status.phase==Unknown -o json | jq -r '.items[].metadata.name' | head -n -10)
-    if [ ! -z "$UNKNOWN_PODS" ]; then
-      echo "  Cleaning up Unknown Pods (and emptyDir volumes)..."
-      echo "$UNKNOWN_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
     fi
     echo
   done
