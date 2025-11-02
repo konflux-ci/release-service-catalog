@@ -345,10 +345,10 @@ do
   echo "Cleaning up task $TASK_NAME"
   kubectl delete task $TASK_NAME --ignore-not-found=true
 
-  # Periodic image cleanup every 20 tests with disk space monitoring
-  if [ $((TEST_COUNTER % 20)) -eq 0 ]; then
-    KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
-    if [ ! -z "$KIND_NODE" ]; then
+  KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+  if [ ! -z "$KIND_NODE" ]; then
+    # Periodic image cleanup every 20 tests with before/after comparison
+    if [ $((TEST_COUNTER % 20)) -eq 0 ]; then
       echo "Periodic cleanup at test #$TEST_COUNTER:"
       echo "  Disk space before cleanup:"
       docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "    Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
@@ -356,6 +356,10 @@ do
       docker exec "$KIND_NODE" crictl rmi --prune || true
       echo "  Disk space after cleanup:"
       docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "    Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
+    else
+      # Print current disk space for all other tests
+      echo "Disk space at test #$TEST_COUNTER:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "  Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
     fi
   fi
 
