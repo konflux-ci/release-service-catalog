@@ -360,8 +360,8 @@ do
     fi
   fi
 
-  # Periodic image cleanup every 15 tests to free disk space (more aggressive to prevent disk exhaustion)
-  if [ $((TEST_COUNTER % 15)) -eq 0 ]; then
+  # Periodic image cleanup every 20 tests to free disk space (more aggressive to prevent disk exhaustion)
+  if [ $((TEST_COUNTER % 20)) -eq 0 ]; then
     echo "Periodic cleanup (test #$TEST_COUNTER): Pruning unused container images..."
     KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
     if [ ! -z "$KIND_NODE" ]; then
