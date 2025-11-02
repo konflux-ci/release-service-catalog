@@ -351,13 +351,11 @@ do
   echo "Cleaning up task $TASK_NAME"
   kubectl delete task $TASK_NAME --ignore-not-found=true
 
-  # Print disk space every 5 tests to track usage trends
-  if [ $((TEST_COUNTER % 5)) -eq 0 ]; then
-    KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
-    if [ ! -z "$KIND_NODE" ]; then
-      echo "Disk space at test #$TEST_COUNTER:"
-      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "  Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
-    fi
+  # Print disk space after every test to track usage trends
+  KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+  if [ ! -z "$KIND_NODE" ]; then
+    echo "Disk space at test #$TEST_COUNTER:"
+    docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "  Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
   fi
 
   # Periodic image cleanup every 20 tests to free disk space (more aggressive to prevent disk exhaustion)
