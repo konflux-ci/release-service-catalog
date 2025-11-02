@@ -131,6 +131,10 @@ KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
 if [ ! -z "$KIND_NODE" ]; then
   # For kind clusters, exec into the node to prune images
   docker exec "$KIND_NODE" crictl rmi --prune || true
+  
+  # Check disk space after initial cleanup
+  echo "Disk space after initial cleanup:"
+  docker exec "$KIND_NODE" df -h / | grep -E '(Filesystem|/$)'
 fi
 
 echo "Initial cleanup complete"
@@ -347,12 +351,25 @@ do
   echo "Cleaning up task $TASK_NAME"
   kubectl delete task $TASK_NAME --ignore-not-found=true
 
+  # Print disk space every 5 tests to track usage trends
+  if [ $((TEST_COUNTER % 5)) -eq 0 ]; then
+    KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+    if [ ! -z "$KIND_NODE" ]; then
+      echo "Disk space at test #$TEST_COUNTER:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "  Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
+    fi
+  fi
+
   # Periodic image cleanup every 15 tests to free disk space (more aggressive to prevent disk exhaustion)
   if [ $((TEST_COUNTER % 15)) -eq 0 ]; then
     echo "Periodic cleanup (test #$TEST_COUNTER): Pruning unused container images..."
     KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
     if [ ! -z "$KIND_NODE" ]; then
+      echo "  Disk space before cleanup:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "    Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
       docker exec "$KIND_NODE" crictl rmi --prune || true
+      echo "  Disk space after cleanup:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "    Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
       echo "  Image cleanup completed"
     fi
   fi
