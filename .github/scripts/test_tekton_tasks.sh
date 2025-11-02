@@ -116,6 +116,38 @@ done
 echo "Cleaning up old test resources..."
 kubectl delete pipelineruns -l tekton.dev/pipeline --field-selector=status.conditions[0].status!=Unknown || true
 kubectl get taskruns -o json | jq -r '.items[] | select(.status.completionTime != null) | select((now - (.status.completionTime | fromdateiso8601)) > 3600) | .metadata.name' | xargs -r kubectl delete taskrun --ignore-not-found=true || true
+# Clean up all completed and failed pods to free disk space (this also cleans up their emptyDir volumes)
+kubectl delete pods --field-selector=status.phase==Succeeded || true
+kubectl delete pods --field-selector=status.phase==Failed || true
+# Also clean up pods in other terminal states that might be stuck
+kubectl delete pods --field-selector=status.phase==Unknown || true
+# Delete very old pods regardless of status (older than 1 hour)
+kubectl get pods -o json | jq -r '.items[] | select(.metadata.creationTimestamp != null) | select((now - (.metadata.creationTimestamp | fromdateiso8601)) > 3600) | .metadata.name' | xargs -r kubectl delete pod --ignore-not-found=true || true
+
+# Clean up unused container images to free disk space
+echo "Cleaning up unused container images..."
+# Get the kind cluster node name
+KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+if [ ! -z "$KIND_NODE" ]; then
+  # For kind clusters, exec into the node to prune images
+  docker exec "$KIND_NODE" crictl rmi --prune || true
+
+  # Check disk space after initial cleanup
+  echo "Disk space after initial cleanup:"
+  docker exec "$KIND_NODE" df -h / | grep -E '(Filesystem|/$)'
+fi
+
+echo "Initial cleanup complete"
+
+# Create global trusted-ca ConfigMap for all tests
+# This prevents race conditions where tests delete/recreate the same ConfigMap
+echo "Creating global trusted-ca ConfigMap..."
+kubectl delete configmap trusted-ca --ignore-not-found || true
+kubectl create configmap trusted-ca --from-literal=ca-bundle.crt=testcert || true
+echo "Global ConfigMap created"
+
+# Initialize test counter for periodic cleanup
+TEST_COUNTER=0
 
 # Create global trusted-ca ConfigMap for all tests
 # This prevents race conditions where tests delete/recreate the same ConfigMap
@@ -128,6 +160,7 @@ for ITEM in $TEST_ITEMS
 do
   echo Task item: $ITEM
   TASK_NAME=$(echo $ITEM | cut -d '/' -f 3)
+  TEST_COUNTER=$((TEST_COUNTER + 1))
   TASK_DIR=$(echo $ITEM | cut -d '/' -f -3)
   echo "  Task name: $TASK_NAME"
 
@@ -290,11 +323,49 @@ do
     if [ ! -z "$OLD_PRS" ]; then
       echo "$OLD_PRS" | xargs -r kubectl delete pipelinerun --ignore-not-found=true
     fi
+
+    # Clean up completed TaskRuns to free disk space
+    OLD_TRS=$(kubectl get taskruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -10)
+    if [ ! -z "$OLD_TRS" ]; then
+      echo "  Cleaning up completed TaskRuns..."
+      echo "$OLD_TRS" | xargs -r kubectl delete taskrun --ignore-not-found=true
+    fi
+
+    # Clean up old Pods in terminal states to free disk space (and their emptyDir volumes)
+    # Keep last 10 of each status (Succeeded, Failed, Unknown)
+    OLD_PODS=$(kubectl get pods -o json | jq -r '
+      .items
+      | group_by(.status.phase)
+      | map(select(.[0].status.phase == "Succeeded" or .[0].status.phase == "Failed" or .[0].status.phase == "Unknown"))
+      | map(.[:-10])
+      | flatten
+      | .[].metadata.name
+    ')
+    if [ ! -z "$OLD_PODS" ]; then
+      echo "  Cleaning up old Pods in terminal states (and emptyDir volumes)..."
+      echo "$OLD_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
+    fi
     echo
   done
 
   # Cleanup task after all its tests complete
   echo "Cleaning up task $TASK_NAME"
   kubectl delete task $TASK_NAME --ignore-not-found=true
+
+  KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+  if [ ! -z "$KIND_NODE" ]; then
+    if [ $((TEST_COUNTER % 20)) -eq 0 ]; then
+      echo "Periodic cleanup at test #$TEST_COUNTER:"
+      echo "  Disk space before cleanup:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "    Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
+      echo "  Pruning unused container images..."
+      docker exec "$KIND_NODE" crictl rmi --prune || true
+      echo "  Disk space after cleanup:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "    Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
+    else
+      echo "Disk space at test #$TEST_COUNTER:"
+      docker exec "$KIND_NODE" df -h / | grep -E '/$' | awk '{print "  Used: " $3 " / " $2 " (" $5 " full), Available: " $4}'
+    fi
+  fi
 
 done
