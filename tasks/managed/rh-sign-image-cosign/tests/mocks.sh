@@ -139,6 +139,8 @@ function skopeo() {
 function mktemp() {
   if [[ "${1:-}" == "-d" ]]; then
     /usr/bin/mktemp -d
+  elif [[ "${1:-}" == "--suffix" ]]; then
+    /usr/bin/mktemp "$@"
   else
     echo "temp_key_file"
   fi
@@ -148,7 +150,7 @@ function select-oci-auth() {
     echo "mock select-oci-auth called with: $*"
 }
 
-function cosign () {
+function cosign3 () {
   # check if call should end successfully
   # mock_cosign_success_calls file is expected to contain lines with "1" or "0" where
   # "1" means that the call should end successfully and "0" means that the call should end with an error

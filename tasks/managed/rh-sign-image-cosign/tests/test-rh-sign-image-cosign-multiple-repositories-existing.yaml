@@ -2,9 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-rh-sign-image-cosign-multiple-repositories
+  name: test-rh-sign-image-cosign-multiple-repositories-existing
 spec:
-  description: Test signing images with new multiple repositories schema
+  description: |
+    Test simulates signing multiple repositories in cosign when there are 
+    already existing signatures.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -86,13 +88,37 @@ spec:
                 touch "$(params.dataDir)/$(echo $REF1 | tr '/' '-')"
                 touch "$(params.dataDir)/$(echo $REF2 | tr '/' '-')"
               done
-
+              
+              cat > "$(params.dataDir)/$(echo "$REF1" | tr '/' '-')" << EOF
+              [
+              {
+                "critical": {
+                  "identity": {
+                    "docker-reference": "registry.stage.redhat.io/test-product/test-image0:t1"
+                  },
+                  "image": {
+                    "docker-manifest-digest": "sha256:0000-3"
+                  },
+                  "type": "cosign container image signature"
+                }
+              },
+              {
+                "critical": {
+                  "identity": {
+                    "docker-reference": "registry.access.stage.redhat.com/test-product/test-image0:t1"
+                  },
+                  "image": {
+                    "docker-manifest-digest": "sha256:0000"
+                  },
+                  "type": "cosign container image signature"
+                }
+              }
+              ]
+              EOF
               # Expected cosign calls:
-              # - 2 repos * (2+1) tags = 6 sign identities for main digest
-              # - 2 repos * 3 manifest digests * (2+1) tags = 18 sign identities for individual manifests
-              # - sign 2 identities at the same time
-              # - total sign calls = 12
-              # - 12 verify calls (1 per repo for all identities)
+              # - 2 repos * (2+1) tags = 6 sign calls for main digest
+              # - 2 repos * 3 manifest digests * (2+1) tags = 18 sign calls for individual manifests
+              # - 12 verify calls (1 per repo)
               # Total: 24 calls
               for _ in $(seq 1 24); do
                   echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
@@ -193,7 +219,8 @@ spec:
               # call records need to be sorted as concurrentLimit is set to 2
               CALLS=$(sort "$(params.dataDir)/mock_cosign_sign_calls")
               COSIGN_COMMON="-t 3m0s sign --new-bundle-format=false \
-              --tlog-upload=false --key aws://arn:mykey --sign-container-identity"
+              --tlog-upload=false --key aws://arn:mykey \
+              --sign-container-identity"
               IDENTITY4="${_TEST_PUB_REPO4}:latest"
               IDENTITY3="${_TEST_PUB_REPO3}:latest"
               IDENTITY2="${_TEST_PUB_REPO2}:t1"
@@ -202,6 +229,7 @@ spec:
               IDENTITY12="${_TEST_PUB_REPO1}:t2"
 
               EXPECTED=$(cat <<EOF
+              $COSIGN_COMMON ${IDENTITY2} ${_TEST_REPO1}@sha256:0000-3
               $COSIGN_COMMON ${IDENTITY3},${IDENTITY4} ${_TEST_REPO2}@sha256:0000
               $COSIGN_COMMON ${IDENTITY3},${IDENTITY4} ${_TEST_REPO2}@sha256:0000-1
               $COSIGN_COMMON ${IDENTITY3},${IDENTITY4} ${_TEST_REPO2}@sha256:0000-2
@@ -209,7 +237,6 @@ spec:
               $COSIGN_COMMON ${IDENTITY1},${IDENTITY2} ${_TEST_REPO1}@sha256:0000
               $COSIGN_COMMON ${IDENTITY1},${IDENTITY2} ${_TEST_REPO1}@sha256:0000-1
               $COSIGN_COMMON ${IDENTITY1},${IDENTITY2} ${_TEST_REPO1}@sha256:0000-2
-              $COSIGN_COMMON ${IDENTITY1},${IDENTITY2} ${_TEST_REPO1}@sha256:0000-3
               $COSIGN_COMMON ${IDENTITY12},${IDENTITY22} ${_TEST_REPO1}@sha256:0000
               $COSIGN_COMMON ${IDENTITY12},${IDENTITY22} ${_TEST_REPO1}@sha256:0000-1
               $COSIGN_COMMON ${IDENTITY12},${IDENTITY22} ${_TEST_REPO1}@sha256:0000-2
@@ -228,8 +255,8 @@ spec:
               fi
 
               CALLS=$(cat "$(params.dataDir)/mock_cosign_verify_calls")
-              COSIGN_COMMON="verify --new-bundle-format=false \
-              --insecure-ignore-tlog=true --key temp_key_file"
+              COSIGN_COMMON="verify --new-bundle-format=false --insecure-ignore-tlog=true \
+              --key temp_key_file"
               EXPECTED=$(cat <<EOF
               $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-1
               $COSIGN_COMMON ${_TEST_REPO1}@sha256:0000-2
