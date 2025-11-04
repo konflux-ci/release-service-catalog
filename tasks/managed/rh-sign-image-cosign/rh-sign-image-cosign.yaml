@@ -137,7 +137,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: sign-image
-      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
+      image: quay.io/konflux-ci/release-service-utils@sha256:67d9a69feba01d13c8c29bd71d6b70bb67c3b7fd97d9080d100476199b9f1f96
       computeResources:
         limits:
           memory: 2.5Gi
@@ -212,7 +212,7 @@ spec:
             backoff1=2
             backoff2=3
             until [ "$attempt" -gt "$(params.retries)" ] ; do # 3 retries by default
-                cosign "$@" && break
+                cosign3 "$@" && break
                 sleep $backoff2
 
                 # Fibbonaci backoff
@@ -226,10 +226,10 @@ spec:
               exit 1
             fi
         }
-        function check_existing_signatures() {
-          local identity=$1
-          local reference=$2
-          local digest=$3
+        function check_missing_signatures() {
+          local identities="$1"
+          local reference="$2"
+          local digest="$3"
           declare -a COSIGN_REKOR_ARGS=()
           if [ -v REKOR_URL ]; then
               COSIGN_REKOR_ARGS+=("--rekor-url=$REKOR_URL")
@@ -239,30 +239,45 @@ spec:
           else
               COSIGN_REKOR_ARGS+=("--insecure-ignore-tlog=true")
           fi
-          verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
-          found_signatures=$(echo "$verify_output" | jq -j '['\
+          found_sigs_file=$(mktemp --suffix sigs)
+          expected_sigs_file=$(mktemp --suffix sigs)
+          verify_output=$(run_cosign verify --new-bundle-format=false \
+                          "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
+          if [ -z "$verify_output" ]; then
+            verify_output="[]"
+          fi
+          found_sigs=$(echo "$verify_output" | jq --argjson identities "$identities" -j '['\
         '.[]|select(.critical.image."docker-manifest-digest"| contains("'"$digest"'"))'\
-        '|select(.critical.identity."docker-reference" == "'"$identity"'")'\
-        ']|length')
-          echo "$found_signatures"
+        '|select(.critical.identity."docker-reference" as $reference | $identities | index($reference))'\
+        ']|[.[]|{identity:.critical.identity."docker-reference",'\
+        'manifest_digest:.critical.image."docker-manifest-digest"}]')
+
+          echo "$found_sigs" > "$found_sigs_file"
+          expected_sigs=$(echo "$identities" |
+          jq --arg digest "$digest" -j '[.[]|'\
+        '{identity: ., manifest_digest: $digest}]')
+
+          echo "$expected_sigs" > "$expected_sigs_file"
+
+          missing_signatures=$(jq -s '.[0] - .[1]' "$expected_sigs_file" "$found_sigs_file")
+          echo "$missing_signatures"
         }
         function check_and_sign() {
-          local identity=$1
+          local identities=$1
           local reference=$2
           local digest=$3
+          local tag=$4
 
           # cosign has very limited support for selecting the right auth entry,
           # so create a custom auth file with just one entry.
           DOCKER_CONFIG="$(mktemp -d)"
           export DOCKER_CONFIG
           select-oci-auth "${reference}" > "${DOCKER_CONFIG}/config.json"
+          identities_with_tag=$(jq --arg tag "$tag" -R -s \
+                                '[gsub("\r?\n"; "")|split(",")|.[]|.+":"+$tag]' <<< "$identities")
 
           declare -a COSIGN_REKOR_ARGS=()
-          found_signatures=$(check_existing_signatures "$identity" "$reference@$digest" "$digest")
-          if [ -z "$found_signatures" ]; then
-            found_signatures=0
-          fi
-          echopid "FOUND SIGNATURES for ${identity} ${digest}: $found_signatures"
+          missing_signatures=$(check_missing_signatures "$identities_with_tag" "$reference@$digest" "$digest")
 
           if [ -v REKOR_URL ]; then
               COSIGN_REKOR_ARGS+=("-y" "--rekor-url=$REKOR_URL")
@@ -272,13 +287,17 @@ spec:
           else
               COSIGN_REKOR_ARGS+=("--tlog-upload=false")
           fi
-
-          if [ "$found_signatures" -eq 0 ]; then
-            run_cosign -t 3m0s sign "${COSIGN_REKOR_ARGS[@]}" \
+          identities_args=""
+          for missing in $(echo "$missing_signatures" | jq -rc '.[]|.identity'); do
+            identities_args="${missing},${identities_args}"
+          done
+          if [ "${identities_args}" != "" ]; then
+            run_cosign -t 3m0s sign --new-bundle-format=false "${COSIGN_REKOR_ARGS[@]}" \
               --key "$SIGN_KEY" \
-              --sign-container-identity "$identity" "$reference@$digest"
+              --sign-container-identity "${identities_args::-1}" \
+              "$reference@$digest"
           else
-            echopid "Skip signing ${identity} (${digest})"
+            echopid "Skip signing (${digest})"
           fi
         }
 
@@ -356,19 +375,25 @@ spec:
                 # Collect data for signing
                 # Sign each manifest in the manifest list
                 if [ $LIST -eq 1 ]; then
-                    for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                        for MDIGEST in $MANIFEST_DIGESTS; do
-                            for TAG in $REPO_TAGS; do
-                                to_sign+=("${REGISTRY_REF}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
+                    for MDIGEST in $MANIFEST_DIGESTS; do
+                        for TAG in $REPO_TAGS; do
+                            registry_refs=""
+                            for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
+                              registry_refs="${REGISTRY_REF},${registry_refs}"
                             done
+                            registry_refs="${registry_refs::-1}"
+                            to_sign+=("${registry_refs}#${MDIGEST}#${INTERNAL_CONTAINER_REF}#${TAG}")
                         done
                     done
                 fi
                 # Sign manifest list itself or manifest if it's not list
-                for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                    for TAG in $REPO_TAGS; do
-                        to_sign+=("${REGISTRY_REF}:${TAG}@${DIGEST}#${INTERNAL_CONTAINER_REF}")
+                for TAG in $REPO_TAGS; do
+                    registry_refs=""
+                    for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
+                      registry_refs="${REGISTRY_REF},${registry_refs}"
                     done
+                    registry_refs="${registry_refs::-1}"
+                    to_sign+=("${registry_refs}#${DIGEST}#${INTERNAL_CONTAINER_REF}#${TAG}")
                 done
             done
         done
@@ -381,11 +406,9 @@ spec:
         # Make groups based on reference + digest to avoid signing same digest in parallel
         # #
         for x in sys.stdin.read().strip().split(' '):
-          rest, internal_ref = x.split('#')
-          rest, digest = rest.split('@')
-          public_ref, tag = rest.split(':')
+          public_refs, digest, internal_ref, tag = x.split('#')
           digest_groups.setdefault(internal_ref+'@'+digest, []).append(
-            (internal_ref, public_ref, digest, tag)
+            (internal_ref, public_refs, digest, tag)
           )
         for to_yield in zip_longest(*digest_groups.values()):
           for entry in filter(None, to_yield):
@@ -404,7 +427,7 @@ spec:
               continue
             fi
             INTERNAL_REF=$(echo "$ENTRY" | cut -d' ' -f1)
-            PUBLIC_REF=$(echo "$ENTRY" | cut -d' ' -f2)
+            PUBLIC_REFS=$(echo "$ENTRY" | cut -d' ' -f2)
             DIGEST=$(echo "$ENTRY" | cut -d' ' -f3)
             TAG=$(echo "$ENTRY" | cut -d' ' -f4)
             # This function is stored in the utils/memory-throttle.sh file
@@ -413,7 +436,7 @@ spec:
             while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
               wait -n || SUCCESS=false
             done
-            check_and_sign "${PUBLIC_REF}:${TAG}" "${INTERNAL_REF}" "${DIGEST}" &
+            check_and_sign "${PUBLIC_REFS}" "${INTERNAL_REF}" "${DIGEST}" "${TAG}" &
             spawn_count=$((spawn_count + 1))
 
             # Allow memory usage to stabilize every BURST_SIZE spawns.
