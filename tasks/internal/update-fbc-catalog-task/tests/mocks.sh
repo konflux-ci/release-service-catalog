@@ -10,6 +10,7 @@ items:
   distribution_scope: "stage"
   from_index: "quay.io/scoheb/fbc-index-testing:latest"
   fbc_fragments: ["registry.io/image0@sha256:0000"]
+  build_tags: ["v4.12", "hotfix"]
   internal_index_image_copy: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:1"
   index_image_resolved: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000"
   index_image: "quay.io/scoheb/fbc-index-testing:latest"
