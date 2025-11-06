@@ -1,0 +1,328 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-already-released-images
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |- 
+    Tekton task to filter out images from a snapshot that have already been released.
+    This task checks target registries to determine if push-snapshot has completed successfully
+    for each component by validating that ALL required tags exist with the correct digest.
+    Components that are fully released (all tags present) are filtered out before conforma validation.
+    
+    Tag-level validation ensures complete releases and prevents filtering components with 
+    partial tag pushes. A component is only filtered if ALL repositories have ALL
+    required tags pointing to the correct digest.
+    
+    The task overwrites the original snapshot file in place with a filtered version 
+    containing only unpublished or partially published images.
+    
+    This task must run AFTER apply-mapping since it needs the mapped target repositories
+    and their required tags from the enriched snapshot stored in trusted artifacts
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: |-
+        Expiration date for the trusted artifacts created in the OCI repository. 
+        An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: skip_release
+      description: Whether to skip release tasks (true if all components are already released)
+    - name: sourceDataArtifact
+      description: The location of the source data artifact in the OCI repository
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: filter-already-released-images
+      image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+
+        # Helper to detect "not found" style errors from oras that should be treated as
+        # an absent tag instead of a fatal registry error.
+        is_not_found_error() {
+            local err_msg="${1:-}"
+            if grep -qiE "manifest unknown|name unknown|was not found|not found" <<< "${err_msg}"; then
+                return 0
+            fi
+            return 1
+        }
+
+        if [ ! -f "${SNAPSHOT_FILE}" ]; then
+            echo "Error: Snapshot file not found: ${SNAPSHOT_FILE}"
+            exit 1
+        fi
+
+        SNAPSHOT_JSON=$(cat "${SNAPSHOT_FILE}")
+        COMPONENT_COUNT=$(jq '.components | length' <<< "${SNAPSHOT_JSON}")
+
+        FILTERED_COMPONENTS='[]'
+        FILTERED_COUNT=0
+
+        for ((i=0; i<COMPONENT_COUNT; i++)); do
+            COMPONENT=$(jq -c ".components[$i]" <<< "${SNAPSHOT_JSON}")
+            COMPONENT_NAME=$(jq -r '.name' <<< "${COMPONENT}")
+            CONTAINER_IMAGE=$(jq -r '.containerImage' <<< "${COMPONENT}")
+
+            # Get the component image digest using oras resolve (same as push-snapshot)
+            # This ensures we compare manifest index digests, not platform-specific ones
+            COMPONENT_AUTH_FILE=$(mktemp)
+            if ! select-oci-auth "${CONTAINER_IMAGE}" > "${COMPONENT_AUTH_FILE}" 2>/dev/null || \
+               [ ! -s "${COMPONENT_AUTH_FILE}" ]; then
+                echo '{}' > "${COMPONENT_AUTH_FILE}"
+            fi
+
+            COMPONENT_ERROR_FILE=$(mktemp)
+            if ! DIGEST=$(oras resolve --registry-config "${COMPONENT_AUTH_FILE}" \
+                "${CONTAINER_IMAGE}" 2>"${COMPONENT_ERROR_FILE}"); then
+                COMPONENT_ERROR_MSG=$(cat "${COMPONENT_ERROR_FILE}")
+                
+                # Check if it's a benign error (image not found in registry)
+                if is_not_found_error "${COMPONENT_ERROR_MSG}"; then
+                    # Treat as "not yet released", keep component for release
+                    echo "WARNING: Component image ${CONTAINER_IMAGE} not found in registry, " \
+                      "treating as not yet released"
+                    FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                    rm -f "${COMPONENT_ERROR_FILE}" "${COMPONENT_AUTH_FILE}"
+                    continue
+                fi
+                
+                # Critical error (auth, network, etc) - fail the task
+                echo "ERROR: Failed to resolve component image ${CONTAINER_IMAGE}: ${COMPONENT_ERROR_MSG}"
+                exit 1
+            fi
+            rm -f "${COMPONENT_ERROR_FILE}" "${COMPONENT_AUTH_FILE}"
+
+            if [ -z "${DIGEST}" ]; then
+                echo "ERROR: oras returned an empty digest for ${CONTAINER_IMAGE}"
+                exit 1
+            fi
+            
+            echo "  Component digest: ${DIGEST}"
+
+            # Check if component has repositories (added by apply-mapping)
+            REPOSITORIES=$(jq -c '.repositories // []' <<< "${COMPONENT}")
+            NUM_REPOS=$(jq 'length' <<< "${REPOSITORIES}")
+            
+            if [ "${NUM_REPOS}" -eq 0 ]; then
+                echo "WARNING: No repositories found for component ${COMPONENT_NAME}"
+                echo "  Component will be kept (not filtered) since there are no target repos to check"
+                FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" \
+                  '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                continue
+            fi
+            
+            echo "Checking component: ${COMPONENT_NAME} (${NUM_REPOS} target repositories)"
+
+            # Check if ALL required tags exist with correct digest in ANY target repository
+            # We consider the component "released" if it is fully released to ANY of the
+            # mapped registries (i.e., if any repository has all required tags pointing
+            # to the same manifest digest).
+            ALL_TAGS_COMPLETE="false"
+            
+            for ((j=0; j<NUM_REPOS; j++)); do
+                REPO_OBJ=$(jq -c ".[$j]" <<< "${REPOSITORIES}")
+                REPO_URL=$(jq -r '.url // ""' <<< "${REPO_OBJ}")
+                REPO_TAGS=$(jq -c '.tags // []' <<< "${REPO_OBJ}")
+                
+                if [ -z "${REPO_URL}" ]; then
+                    echo "  WARNING: Repository #$((j+1)) has empty URL, skipping"
+                    continue
+                fi
+
+                NUM_TAGS=$(jq 'length' <<< "${REPO_TAGS}")
+                
+                if [ "${NUM_TAGS}" -eq 0 ]; then
+                    echo "  WARNING: Repository ${REPO_URL} has no tags specified, skipping"
+                    continue
+                fi
+                
+                echo "  Checking repository: ${REPO_URL} (${NUM_TAGS} tags)"
+                
+                REPO_COMPLETE="true"
+                for ((k=0; k<NUM_TAGS; k++)); do
+                    TAG=$(jq -r ".[$k]" <<< "${REPO_TAGS}")
+                    TARGET_IMAGE="${REPO_URL}:${TAG}"
+                    
+                    # Try to create auth file for target registry (optional for public/test registries)
+                    TARGET_AUTH_FILE=$(mktemp)
+                    if ! select-oci-auth "${REPO_URL}" > "${TARGET_AUTH_FILE}" 2>/dev/null || \
+                       [ ! -s "${TARGET_AUTH_FILE}" ]; then
+                        # No auth available, use empty config
+                        echo '{}' > "${TARGET_AUTH_FILE}"
+                    fi
+                    
+                    # Use oras resolve (same as push-snapshot) to get the manifest digest
+                    # This correctly handles multi-arch images
+                    TARGET_ERROR_FILE=$(mktemp)
+                    if ! ACTUAL_DIGEST=$(oras resolve --registry-config "${TARGET_AUTH_FILE}" \
+                        "${TARGET_IMAGE}" 2>"${TARGET_ERROR_FILE}"); then
+                        TARGET_ERROR_MSG=$(cat "${TARGET_ERROR_FILE}")
+
+                        if is_not_found_error "${TARGET_ERROR_MSG}"; then
+                            # Treat missing tag as "not released" and continue evaluating
+                            REPO_COMPLETE="false"
+                            rm -f "${TARGET_ERROR_FILE}" "${TARGET_AUTH_FILE}"
+                            break
+                        fi
+
+                        echo "ERROR: Failed to resolve target image ${TARGET_IMAGE}: ${TARGET_ERROR_MSG}"
+                        exit 1
+                    fi
+                    rm -f "${TARGET_ERROR_FILE}" "${TARGET_AUTH_FILE}"
+
+                    if [ -z "${ACTUAL_DIGEST}" ]; then
+                        # Tag doesn't exist
+                        echo "    Tag ${TAG}: NOT FOUND"
+                        REPO_COMPLETE="false"
+                        break
+                    elif [ "${ACTUAL_DIGEST}" != "${DIGEST}" ]; then
+                        # Tag exists but points to wrong digest
+                        echo "    Tag ${TAG}: DIGEST MISMATCH"
+                        echo "      Expected: ${DIGEST}"
+                        echo "      Found:    ${ACTUAL_DIGEST}"
+                        REPO_COMPLETE="false"
+                        break
+                    else
+                        echo "    Tag ${TAG}: ✅ MATCH (${ACTUAL_DIGEST})"
+                    fi
+                done
+                
+                # If this repository is complete (all tags present and digests matched)
+                # then this component can be treated as already released (any-repo logic)
+                if [ "${REPO_COMPLETE}" == "true" ]; then
+                  ALL_TAGS_COMPLETE="true"
+                  # We can stop checking other repos, one match is sufficient
+                  break
+                fi
+            done
+
+            if [ "${ALL_TAGS_COMPLETE}" == "true" ]; then
+                echo "✅ Component ${COMPONENT_NAME}: FILTERED (already released)"
+                FILTERED_COUNT=$((FILTERED_COUNT + 1))
+            else
+                echo "⏭️  Component ${COMPONENT_NAME}: KEPT (needs to be released)"
+                FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+            fi
+            echo ""
+        done
+
+        # Update snapshot with filtered components
+        FILTERED_SNAPSHOT=$(jq --argjson comps "${FILTERED_COMPONENTS}" '.components = $comps' <<< "${SNAPSHOT_JSON}")
+        echo "${FILTERED_SNAPSHOT}" > "${SNAPSHOT_FILE}"
+
+        # Summary
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "SUMMARY:"
+        echo "  Total components: ${COMPONENT_COUNT}"
+        echo "  Filtered (already released): ${FILTERED_COUNT}"
+        echo "  To be released: $((COMPONENT_COUNT - FILTERED_COUNT))"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Set skip_release=true if all components were filtered
+        if [ "${FILTERED_COUNT}" -eq "${COMPONENT_COUNT}" ] && [ "${COMPONENT_COUNT}" -gt 0 ]; then
+            echo -n "true" > "$(results.skip_release.path)"
+        else
+            echo -n "false" > "$(results.skip_release.path)"
+        fi
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

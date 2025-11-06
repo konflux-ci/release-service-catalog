@@ -1,0 +1,247 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-large-snapshot
+spec:
+  description: |
+    Test that filter-already-released-images handles large snapshots efficiently
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the OCI repository
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+            - name: DEBUG
+              value: $(params.trustedArtifactsDebug)
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Generate a large snapshot with 150 components
+              # Mix of released and unreleased components
+              TOTAL_COMPONENTS=150
+
+              echo "Generating large snapshot with ${TOTAL_COMPONENTS} components..."
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << 'EOF_START'
+              {
+                "application": "large-app",
+                "components": [
+              EOF_START
+
+              for i in $(seq 0 $((TOTAL_COMPONENTS - 1))); do
+                # Determine if already released based on index
+                # Pattern: every 3rd component is released (i.e., 50 released, 100 unreleased)
+                if [ $((i % 3)) -eq 0 ]; then
+                  DIGEST="abcdefg"
+                else
+                  DIGEST="notfound"
+                fi
+
+                if [ "$i" -gt 0 ]; then
+                  echo "," >> "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json"
+                fi
+
+                # Add component
+                cat >> "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF_COMP
+                  {
+                    "name": "component-${i}",
+                    "containerImage": "registry.io/image-${i}@sha256:${DIGEST}",
+                    "repositories": [
+                      {
+                        "url": "reg.io/target-${i}",
+                        "tags": ["v1.0", "latest"]
+                      }
+                    ]
+                  }
+              EOF_COMP
+              done
+
+              cat >> "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << 'EOF_END'
+                ]
+              }
+              EOF_END
+
+              echo "Generated snapshot with ${TOTAL_COMPONENTS} components"
+              echo "Pattern: Every 3rd component is 'already released'"
+              echo "Expected to filter: 50 components (exactly)"
+              echo "Expected to keep: 100 components (exactly)"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: filter-already-released-images
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+            - name: DEBUG
+              value: $(params.trustedArtifactsDebug)
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Calculate filtered count: original_count - final_count
+              ORIGINAL_COUNT=150  # Set up in setup task
+              
+              SNAPSHOT=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json")
+              FINAL_COUNT=$(jq '.components | length' <<< "${SNAPSHOT}")
+              FILTERED_COUNT=$((ORIGINAL_COUNT - FINAL_COUNT))
+
+              echo "Results:"
+              echo "  Filtered count: ${FILTERED_COUNT}"
+              echo "  Remaining components: ${FINAL_COUNT}"
+
+              # Every 3rd component should be filtered (150 / 3 = 50)
+              EXPECTED_FILTERED=50
+              EXPECTED_REMAINING=100
+
+              if [ "${FILTERED_COUNT}" != "${EXPECTED_FILTERED}" ]; then
+                echo "ERROR: Expected filteredCount to be ${EXPECTED_FILTERED}, got ${FILTERED_COUNT}"
+                exit 1
+              fi
+
+              if [ "${FINAL_COUNT}" != "${EXPECTED_REMAINING}" ]; then
+                echo "ERROR: Expected ${EXPECTED_REMAINING} remaining components, got ${FINAL_COUNT}"
+                exit 1
+              fi
+
+              echo "Verifying specific components..."
+
+              COMP_0=$(jq -r '.components[] | select(.name == "component-0")' <<< "${SNAPSHOT}")
+              if [ -n "${COMP_0}" ]; then
+                echo "ERROR: component-0 should have been filtered but is still present"
+                exit 1
+              fi
+              echo "✓ component-0 correctly filtered"
+
+              COMP_1=$(jq -r '.components[] | select(.name == "component-1") | .name' <<< "${SNAPSHOT}")
+              if [ "${COMP_1}" != "component-1" ]; then
+                echo "ERROR: component-1 should be kept but was filtered"
+                exit 1
+              fi
+              echo "✓ component-1 correctly kept"
+
+              COMP_3=$(jq -r '.components[] | select(.name == "component-3")' <<< "${SNAPSHOT}")
+              if [ -n "${COMP_3}" ]; then
+                echo "ERROR: component-3 should have been filtered but is still present"
+                exit 1
+              fi
+              echo "✓ component-3 correctly filtered"
+
+              COMP_149=$(jq -r '.components[] | select(.name == "component-149") | .name' <<< "${SNAPSHOT}")
+              if [ "${COMP_149}" != "component-149" ]; then
+                echo "ERROR: component-149 should be kept but was filtered"
+                exit 1
+              fi
+              echo "✓ component-149 correctly kept"
+
+              echo ""
+              echo "SUCCESS: Large snapshot test passed!"
+              echo "  - Processed 150 components"
+              echo "  - Filtered 50 already-released components"
+              echo "  - Kept 100 unreleased components"
+              echo "  - Spot checks verified correct filtering"
+      runAfter:
+        - run-task

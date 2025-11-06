@@ -37,9 +37,16 @@
 - Most secrets required are contained in the files above.
 ### Running the test
 
+This test validates idempotent release behavior by creating two releases with the same snapshot
+and verifying that the second release correctly filters already-released components.
+
 ```shell
-integration-tests/run-test.sh push-to-external-registry
+integration-tests/push-to-external-registry/run-idempotent-test.sh
 ```
+
+**Note:** This test uses a custom runner (`run-idempotent-test.sh`) instead of the standard
+`run-test.sh` because it requires creating multiple releases with the same snapshot to test
+idempotency, which is not supported by the standard test framework.
 
 ### Debugging
 
