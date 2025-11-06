@@ -276,7 +276,9 @@ create_kubernetes_resources() {
 
     echo "Building and applying tenant resources..."
     kustomize build "${SUITE_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
-    kubectl create -f "$tmpDir/tenant-resources.yaml"
+    # use "kubectl apply" to avoid failure when a resource already exists
+    # this can happen when tests run back-to-back and K8s hasn't fully propagated deletions
+    kubectl apply -f "$tmpDir/tenant-resources.yaml"
 
     echo "Building and applying managed resources..."
     kustomize build "${SUITE_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
