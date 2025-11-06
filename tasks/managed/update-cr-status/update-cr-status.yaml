@@ -136,10 +136,34 @@ spec:
             mv "$TEMP_FILE" "$RESULTS_JSON"
         done
 
-        IFS='/' read -r namespace name <<< "$(params.resource)"
-
         # Read the final JSON from the file
         FINAL_JSON=$(cat "$RESULTS_JSON")
+
+        # Filter out large metadata fields to prevent exceeding etcd size limits
+        # Remove env_variables and labels from component metadata as they are stored in Pyxis
+        # and do not need to be duplicated in the CR status, which is subject to etcd's 1.5MB limit
+        echo "Reducing data size by filtering large metadata fields (env_variables, labels)..."
+        REDUCED_JSON=$(echo "$FINAL_JSON" | jq '
+          # Remove env_variables and labels from metadata objects throughout the JSON structure
+          walk(
+            if type == "object" and has("metadata") then
+              .metadata |= del(.env_variables, .labels)
+            else
+              .
+            end
+          )
+        ')
+
+        # Check the size of the reduced JSON (in bytes)
+        REDUCED_SIZE=$(echo -n "$REDUCED_JSON" | wc -c)
+        ORIGINAL_SIZE=$(echo -n "$FINAL_JSON" | wc -c)
+        echo "Original JSON size: $ORIGINAL_SIZE bytes"
+        echo "Reduced JSON size: $REDUCED_SIZE bytes (reduced by $((ORIGINAL_SIZE - REDUCED_SIZE)) bytes)"
+
+        # Use the reduced JSON going forward
+        FINAL_JSON="$REDUCED_JSON"
+        
+        IFS='/' read -r namespace name <<< "$(params.resource)"
 
         # Create patch file to avoid "Argument list too long" error
         PATCH_FILE="/tmp/patch-$(date +%s).json"
