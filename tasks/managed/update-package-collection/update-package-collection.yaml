@@ -1,0 +1,589 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+  name: update-package-collection
+spec:
+  description: "Updates package collection with new builds and tags after push rpm process"
+  params:
+    - name: repo_branch
+      type: string
+      description: "Git repository branch"
+      default: "main"
+    - name: command_timeout
+      type: string
+      description: "Timeout for uv commands"
+      default: "5m"
+    - name: max_retries
+      type: string
+      description: "Maximum retry attempts for failed commands"
+      default: "3"
+    - name: pushType
+      type: string
+      description: |
+        Defines the push operation type:
+        - 'import': For importing new package collections
+        - 'promote': For promoting existing collections (removes -draft suffix)
+      default: "import"
+    - name: snapshotPath
+      type: string
+      description: "Path to the JSON file of the mapped Snapshot spec in the data workspace"
+    - name: dataPath
+      type: string
+      description: "Path to the JSON file of the merged data to use in the data workspace"
+    - name: pushSecret
+      type: string
+      description: "The secret that is used for login koji instance"
+    - name: pipelineImage
+      type: string
+      description: |
+        The image url with koji (1.34 or higher), jq and kinit installed for
+        running the push-rpm-to-koji task, please make sure you have such image
+        or you build this image first
+    - name: ociStorage
+      description: "The OCI repository where the Trusted Artifacts are stored"
+      type: string
+      default: "empty"
+    - name: sourceDataArtifact
+      type: string
+      description: "Location of trusted artifacts to be used to populate data directory"
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: |
+        Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: "Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable"
+      type: string
+      default: ""
+    - name: orasOptions
+      description: "oras options to pass to Trusted Artifacts calls"
+      type: string
+      default: ""
+    - name: dataDir
+      description: "The location where data will be stored"
+      type: string
+      default: /var/workdir/release
+    - name: pkgCollectionSecret
+      type: string
+      description: >
+        The kubernetes secret to use to authenticate to package collection group.
+        It needs to contain keys: gitlab-access-token, gitlab_host, git_author_name
+        git_author_email and git_repo url of the package-collection-utils
+      default: package-collection-secret
+    - name: taskGitUrl
+      type: string
+      description: "The url to the git repo where the release-service-catalog tasks to be used are stored"
+    - name: taskGitRevision
+      type: string
+      description: "The revision in the taskGitUrl repo to be used"
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: "Produced trusted data artifact"
+  volumes:
+    - name: package-collection-secret
+      secret:
+        secretName: $(params.pkgCollectionSecret)
+    - name: secret-volume
+      secret:
+        secretName: $(params.pushSecret)
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: ORAS_OPTIONS
+        value: $(params.orasOptions)
+      - name: DEBUG
+        value: $(params.trustedArtifactsDebug)
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: update-package-collection
+      image: $(params.pipelineImage)
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: "1"
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+      volumeMounts:
+        - mountPath: /etc/secret
+          name: secret-volume
+          readOnly: true
+        - name: package-collection-secret
+          mountPath: /mnt/package_collection_secret
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        # Set parameters as local variables
+        MAX_RETRIES="$(params.max_retries)"
+        COMMAND_TIMEOUT="$(params.command_timeout)"
+        GIT_AUTHOR_EMAIL="$(cat /mnt/package_collection_secret/git_author_email)"
+        GIT_REPO="$(cat /mnt/package_collection_secret/git_repo)"
+        GIT_AUTHOR_NAME="$(cat /mnt/package_collection_secret/git_author_name)"
+        GITLAB_HOST="$(cat /mnt/package_collection_secret/gitlab_host)"
+        ACCESS_TOKEN="$(cat /mnt/package_collection_secret/gitlab-access-token)"
+
+        export GIT_AUTHOR_EMAIL GIT_REPO GIT_AUTHOR_NAME GITLAB_HOST ACCESS_TOKEN
+
+        set -uxo pipefail
+
+        # Validate JSON files first
+        validate_json_file() {
+            local file="$1"
+            if [[ ! -f "$file" ]]; then
+                echo "Error: File not found: $file" >&2
+                return 1
+            fi
+            # Check if file is empty
+            if [[ ! -s "$file" ]]; then
+                echo "Error: File is empty: $file" >&2
+                return 1
+            fi
+            if ! jq -e . "$file" >/dev/null 2>&1; then
+                echo "Error: Invalid JSON in file: $file" >&2
+                return 1
+            fi
+            return 0
+        }
+
+        # Validate before parsing
+        if ! validate_json_file "${SNAPSHOT_SPEC_FILE}"; then
+            echo "Error: Invalid snapshot spec file" >&2
+            exit 1
+        fi
+
+        if ! validate_json_file "$DATA_FILE"; then
+            echo "Error: Invalid data file" >&2
+            exit 1
+        fi
+
+        # Check for pushOptions in snapshot spec
+        jq_filter='.pushOptions // empty | select(type == "object" and length > 0)'
+        if ! jq -e "$jq_filter" "${DATA_FILE}" >/dev/null 2>&1; then
+            echo "Error: Missing or empty '.pushOptions' object in data file" >&2
+            exit 1
+        fi
+
+        # Initialize environment
+        initialize_environment() {
+          setup_environment_variables
+          setup_kerberos_auth
+          setup_git_repository
+        }
+
+        # Setup environment variables from JSON files
+        setup_environment_variables() {
+          # Now safe to parse
+          APPLICATION=$(jq -r '.application // empty' "${SNAPSHOT_SPEC_FILE}")
+          NUM_COMPONENTS=$(jq '.components | length // 0' "${SNAPSHOT_SPEC_FILE}")
+          PRODUCT_SHORT_NAME=$(jq -r '.releaseNotes.product_short_name // empty' "$DATA_FILE")  # No -e flag
+          INTENTION=$(jq -r '.intention // empty' "$DATA_FILE")
+          PRINCIPAL=$(jq -r '.pushOptions.pushKeytab.principal // empty' "${DATA_FILE}")
+          KEYTAB_FILE=$(jq -r '.pushOptions.pushKeytab.name // empty' "${DATA_FILE}")
+          KOJI_PROFILE=$(jq -r '.pushOptions.koji_profile // empty' "${DATA_FILE}")
+          KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft // "false"' "${DATA_FILE}")
+          # Validate required variables
+          validate_required_vars
+        }
+
+        # Validate required environment variables
+        validate_required_vars() {
+          if [ -z "$INTENTION" ] || [ "$INTENTION" = "null" ]; then
+            echo "ERROR: intention is required in RPA"
+            exit 1
+          fi
+
+          if [ -z "$PRODUCT_SHORT_NAME" ] || [ "$PRODUCT_SHORT_NAME" = "null" ]; then
+            echo "ERROR: .releaseNotes.product_short_name is required in RPA"
+            exit 1
+          fi
+
+          ENV=$(convert_intention_to_env "$INTENTION")
+          PRODUCT=$(echo "$PRODUCT_SHORT_NAME" | tr '[:lower:]' '[:upper:]' )
+        }
+
+        # Convert intention to environment
+        convert_intention_to_env() {
+          case "$1" in
+            "production") echo "prod" ;;
+            "staging") echo "stage" ;;
+            *) echo "$1" ;;
+          esac
+        }
+
+        # Setup Kerberos authentication
+        setup_kerberos_auth() {
+
+          # Skip the init as it's not draft push
+          if [[ "$KOJI_IMPORT_DRAFT" != "true" ]]; then
+            return 0
+          fi
+          local keytab_path
+          keytab_path="./${KEYTAB_FILE}"
+
+          KRB5CCNAME=$(mktemp)
+          export KRB5CCNAME
+
+          cd "$(params.dataDir)/$(dirname "$(params.snapshotPath)")"
+
+          # Extract keytab from secret
+          if [ -f /etc/secret/base64_keytab ]; then
+            set +x
+            base64 -d /etc/secret/base64_keytab > "$keytab_path"
+            set -x
+          else
+            cp "/etc/secret/${KEYTAB_FILE}" "$keytab_path"
+          fi
+
+          # Initialize Kerberos ticket
+          local tries
+          tries=10
+          while [ $tries -gt 0 ]; do
+            if kinit -kt "$keytab_path" "$PRINCIPAL"; then
+              break
+            fi
+            tries=$((tries - 1))
+            sleep 1
+          done
+
+          if [ $tries -eq 0 ]; then
+            echo "ERROR: Failed to initialize Kerberos ticket"
+            exit 1
+          fi
+
+          koji-cmd() {
+              koji --profile="$KOJI_PROFILE" "$@"
+          }
+
+          # Test the koji connection
+          koji-cmd hello
+
+        }
+
+        # Setup Git repository
+        setup_git_repository() {
+          cd /tmp
+
+          # Source utility functions
+          source_utility_functions
+
+          # Clone and setup repository
+          git_clone_and_checkout --repository "$GIT_REPO" --revision "$(params.repo_branch)"
+
+          # Install dependencies and setup environment
+          uv sync
+          setup_ssl_certificates
+          setup_environment
+        }
+
+        # Source utility functions
+        source_utility_functions() {
+          for util_file in gitlab-functions git-functions; do
+            if [ -f "/home/utils/${util_file}" ]; then
+              # shellcheck source=/dev/null
+              source "/home/utils/${util_file}"
+            fi
+          done
+
+          # Initialize utility functions if available
+          command -v gitlab_init >/dev/null 2>&1 && gitlab_init
+          command -v git_functions_init >/dev/null 2>&1 && git_functions_init
+        }
+
+        # Setup SSL certificates
+        setup_ssl_certificates() {
+          echo | openssl s_client -connect "$GITLAB_HOST:443" -showcerts 2>/dev/null | \
+            sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' > redhat-ca-bundle.crt || true
+        }
+
+        is_sidetag() {
+            echo "Getting tag info and sidetag value for '$1':" > /dev/stderr
+            koji-cmd --noauth call --json-output getTag "$1" |
+              tee /dev/stderr |
+                jq -r '.extra.sidetag'
+        }
+
+        # Setup environment variables
+        setup_environment() {
+          set +x
+          CI_SERVER_HOST="$GITLAB_HOST"
+          GITLAB_TOKEN="$ACCESS_TOKEN"
+          REQUESTS_CA_BUNDLE=./redhat-ca-bundle.crt
+
+          export CI_SERVER_HOST GITLAB_TOKEN REQUESTS_CA_BUNDLE
+          set -x
+        }
+
+        # Get release components from data file
+        get_release_components() {
+          jq -r '
+            if .pushOptions.components then
+              .pushOptions.components[]
+            else
+              .mapping.components[].name
+            end' "${DATA_FILE}"
+        }
+
+        # Get package collections for component
+        get_package_collections() {
+
+          local comp_name container_image auth_file
+
+          comp_name=$1
+          container_image=$2
+          auth_file=$(mktemp)
+
+          select-oci-auth "$container_image" > "$auth_file"
+
+          koji_target=$(
+            oras manifest fetch "$container_image" --registry-config "$auth_file" |
+              jq --exit-status -r '.annotations."koji.build-target"'
+          )
+
+          rm -f "$auth_file"
+
+          if [ -z "$koji_target" ]; then
+              echo "ERROR: No Koji build target found in the container image annotations."
+              exit 1
+          fi
+
+          echo "INFO: Found Koji build target: $koji_target" >&2
+
+          koji_tag=${koji_target}
+          # Make sure "-draft" suffix is added to the tag for draft imports,
+          # but avoid modifying sidetags.
+          if [[ "$KOJI_IMPORT_DRAFT" == "true" && "$koji_tag" != *-draft ]]; then
+            is_sidetag=$(is_sidetag "$koji_tag")
+            if [[ "$is_sidetag" == "false" ]]; then
+                koji_tag=${koji_tag%-candidate}-draft
+            fi
+          fi
+
+          # Read and process package collections
+          local collections_json
+          collections_json=$(jq -r --arg comp "$comp_name" \
+              '.mapping.components[] |
+              select(.name == $comp) |
+              ."package-collections" // [] |
+              .[]' \
+              "$DATA_FILE" 2>/dev/null)
+
+          # Combine koji_tag and collections_json
+          # Output koji_tag as part of the collections (to stdout)
+          echo "$koji_tag"
+
+          # Output existing collections if any (to stdout)
+          if [ -n "$collections_json" ]; then
+              echo "$collections_json"
+          fi
+
+        }
+
+        # Process a single component
+        process_component() {
+          local component_index component_json component_name container_image
+
+          component_index=$1
+          component_json=$(jq -c --argjson idx "$component_index" '.components[$idx]' "${SNAPSHOT_SPEC_FILE}")
+          component_name=$(jq -r '.name' <<< "$component_json")
+          container_image=$(jq -r '.containerImage' <<< "$component_json")
+
+          # Skip if component not in release list
+          if ! echo "$RELEASE_COMPONENTS" | grep -q -x "$component_name"; then
+            echo "INFO: Skipping component $component_name - not in release list"
+            return 0
+          fi
+
+          echo "INFO: Processing component: $component_name"
+
+          # Pull container image and extract SRPM
+          pull_container_image "$container_image"
+          local srpm_file package_nvr pkg_collections
+
+          # Find the .src.rpm file
+          srpm_file=$(ls ./*.src.rpm 2>/dev/null)
+
+          # Check if the SRPM file is missing
+          if [ -z "$srpm_file" ]; then
+            echo "Error: No .src.rpm file found in the current directory."
+            exit 1
+          fi
+
+          # Extract the NVR (Name-Version-Release) from the SRPM file
+          package_nvr=$(basename "$srpm_file" .src.rpm)
+
+          # Display the package NVR
+          echo "Package NVR: $package_nvr"
+
+          # Get package collections(includes koji_target as one of the items) and remove duplicates in one step
+          pkg_collections=()
+
+          mapfile -t pkg_collections < <(get_package_collections "$component_name" "$container_image" | sort -u)
+
+          echo "INFO: All package collections (including Koji target): ${pkg_collections[*]}"
+
+          # Remove the '-draft' suffix when push type is 'promote'.
+          push_type="$(params.pushType)"
+          if [[ "$push_type" == "promote" ]]; then
+              echo "INFO: Promoting collections - removing draft suffixes"
+              for i in "${!pkg_collections[@]}"; do
+                  pkg_collections[i]="${pkg_collections[i]%-draft}"
+              done
+          fi
+
+          # Process each package collection
+          for collection in "${pkg_collections[@]}"; do
+            process_package_collection "$collection" "$package_nvr" "$container_image"
+          done
+        }
+
+        # Pull container image and extract SRPM
+        pull_container_image() {
+          local image auth_file
+
+          image=$1
+          auth_file=$(mktemp)
+
+          select-oci-auth "$image" > "$auth_file"
+          oras pull --registry-config "$auth_file" "$image"
+          rm -f "$auth_file"
+        }
+
+        # Process a single package collection
+        process_package_collection() {
+          local collection package_nvr container_image build_name retry_count success
+
+          collection=$1
+          package_nvr=$2
+          container_image=$3
+          build_name=$(jq -r '.build.name' cg_import.json 2>/dev/null || echo "$package_nvr")
+
+          echo "Processing: collection=$collection, package=$build_name, nvr=$package_nvr"
+
+          retry_count=0
+          success=false
+
+          while [ $retry_count -lt "$MAX_RETRIES" ]; do
+            if timeout "$COMMAND_TIMEOUT" uv run pc-manager package-collection "add-builds" \
+              --env "$ENV" \
+              --product "$PRODUCT" \
+              --collection-name "$collection" \
+              --package-name "$build_name" \
+              --item "nvr=$package_nvr" \
+              --item "download_url=$container_image" \
+              --auto-push; then
+              success=true
+              break
+            else
+              local exit_code
+              exit_code=$?
+              retry_count=$((retry_count + 1))
+              if [ $exit_code -eq 124 ]; then
+                echo "WARNING: Command timed out (attempt $retry_count/$MAX_RETRIES)"
+              else
+                echo "ERROR: Command failed with exit code $exit_code (attempt $retry_count/$MAX_RETRIES)"
+              fi
+              [ $retry_count -lt "$MAX_RETRIES" ] && sleep 30
+            fi
+          done
+
+          if ! $success; then
+            echo "ERROR: Failed to process package-collection: $collection," \
+              "package: $build_name after $MAX_RETRIES attempts"
+            exit 1
+
+          fi
+        }
+
+        # Main execution
+        main() {
+          # Initialize environment
+          initialize_environment
+
+          echo "=== Starting package collection update ==="
+          echo "Task: $(context.task.name)"
+          echo "Application: $APPLICATION"
+
+          # Display input files for debugging
+          echo "=== Data JSON Content ==="
+          cat "${DATA_FILE}"
+          echo -e "\n=== Snapshot Spec Content ==="
+          cat "${SNAPSHOT_SPEC_FILE}"
+
+          # Get release components
+          RELEASE_COMPONENTS=$(get_release_components)
+
+          export RELEASE_COMPONENTS
+
+          # Process each component
+          for ((i = 0; i < NUM_COMPONENTS; i++)); do
+            process_component "$i"
+          done
+
+          echo "✅ Package collection update completed successfully"
+        }
+
+        main
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: git
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

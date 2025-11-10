@@ -1,0 +1,142 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-package-collection-missing-json
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Test update-package-collection task with missing pushOptions object
+    keys in data.json. It should fail the pipeline due to the missing keys.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          # Use the same security context as the main task to avoid permission issues
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            script: |
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Missing pushOptions object parameter in data.json
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test-foo",
+                      "pushSourceContainer": false,
+                      "repository": "quay.io/test/test-foo",
+                      "package-collections": ["test-collection-1", "test-collection-2"]
+                    }
+                  ]
+                },
+                "releaseNotes": {
+                  "product_short_name": "test-product"
+                },
+                "intention": "production"
+              }
+              EOF
+
+              # Create valid snapshot file
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "rpms",
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/test-foo@sha256:111",
+                    "name": "test-foo"
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: update-package-collection
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: pushSecret
+          value: "push-koji-test"
+        - name: pkgCollectionSecret
+          value: "package-collection-secret"
+        - name: pushType
+          value: "import"
+        - name: pipelineImage
+          value: "quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: repo_branch
+          value: "main"
+        - name: command_timeout
+          value: "5m"
+        - name: max_retries
+          value: "3"
+      runAfter:
+        - setup
