@@ -220,24 +220,6 @@ spec:
         defaultPushSourceContainer=$(jq -r \
           '.mapping.defaults.pushSourceContainer | if . == null then true else . end' "${DATA_FILE}")
 
-        if [[ "$(params.pyxisServer)" == "production" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql-pyxis.api.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "production-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
-        else
-          echo "Invalid pyxisServer parameter. Only 'production','production-internal,'stage-internal' \
-              and 'stage' allowed."
-          exit 1
-        fi
-
         set +x
         echo "${pyxisCert:?}" > /tmp/crt
         echo "${pyxisKey:?}" > /tmp/key
@@ -249,6 +231,7 @@ spec:
         COMPONENTS_LENGTH=$(jq '.components |length' "${SNAPSHOT_PATH}")
         declare -a to_sign_references=()
         declare -a to_sign_digests=()
+        declare -a to_sign_repositories=()
 
         # Arrays to store information for parallel processing
         declare -a find_signatures_jobs=()
@@ -309,26 +292,6 @@ spec:
               # Store component data for later processing
               component_data+=("${i}|${repository}|${TAGS}|${manifest_digests}|${sourceContainerDigest}|${rh_registry_repo}|${registry_access_repo}")
 
-              # Start find_signatures jobs in parallel for manifest digests
-              for manifest_digest in $manifest_digests; do
-                echo "Starting find_signatures job for manifest digest: ${manifest_digest}"
-                find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                --manifest_digest "${manifest_digest}" \
-                --repository "${repository}" \
-                --output_file "/tmp/${manifest_digest}" &
-                find_signatures_jobs+=($!)
-              done
-
-              # Start find_signatures job for source container digest if it exists
-              if [ "${sourceContainerDigest}" != "" ] ; then
-                echo "Starting find_signatures job for source container digest: ${sourceContainerDigest}"
-                find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                --manifest_digest "${sourceContainerDigest}" \
-                --repository "${repository}" \
-                --output_file "/tmp/${sourceContainerDigest}" &
-                find_signatures_jobs+=($!)
-              fi
-
             done
         done
 
@@ -363,18 +326,10 @@ spec:
             for manifest_digest in $manifest_digests; do
               # Iterate over both rh-registry-repo and registry-access-repo
               for registry_reference in "${REGISTRY_REFERENCES[@]}"; do
-
                 for tag in ${TAGS}; do
-
-                  if ! grep -q "^${registry_reference}:${tag}$" "/tmp/${manifest_digest}" ; then
-                    to_sign_references+=("${registry_reference}:${tag}")
-                    to_sign_digests+=("${manifest_digest}")
-                  else
-                    echo "Signature already exists for:"
-                    echo "- reference=${registry_reference}:${tag}"
-                    echo "- manifest_digest=${manifest_digest}"
-                  fi
-
+                  to_sign_references+=("${registry_reference}:${tag}")
+                  to_sign_digests+=("${manifest_digest}")
+                  to_sign_repositories+=("${repository}")
                 done
               done
             done
@@ -384,15 +339,9 @@ spec:
 
                   for tag in ${TAGS}; do
                     sourceTag=${tag}-source
-
-                    if ! grep -q "^${registry_reference}:${sourceTag}$" "/tmp/${sourceContainerDigest}" ; then
-                      to_sign_references+=("${registry_reference}:${sourceTag}")
-                      to_sign_digests+=("${sourceContainerDigest}")
-                    else
-                      echo "Signature already exists for:"
-                      echo "- reference=${registry_reference}:${sourceTag}"
-                      echo "- manifest_digest=${sourceContainerDigest}"
-                    fi
+                    to_sign_references+=("${registry_reference}:${sourceTag}")
+                    to_sign_digests+=("${sourceContainerDigest}")
+                  to_sign_repositories+=("${repository}")
                   done
                 done
             fi
@@ -400,11 +349,13 @@ spec:
 
         references_batch=""
         digests_batch=""
+        repositories_batch=""
 
         # Process to sign arrays in batches
         for i in "${!to_sign_references[@]}"; do
           new_references_batch="${references_batch}${to_sign_references[$i]} "
           new_digests_batch="${digests_batch}${to_sign_digests[$i]} "
+          new_repositories_batch="${repositories_batch}${to_sign_repositories[$i]} "
 
           # if batches are too big, send the request
           if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
@@ -421,10 +372,12 @@ spec:
               -p pipeline_image="${pipeline_image}" \
               -p references="${references_batch}" \
               -p manifest_digests="${digests_batch}" \
+              -p repositories="${repositories_batch}" \
               -p config_map_name="${config_map_name}" \
               -p requester="$(params.requester)" \
               -p taskGitUrl="$(params.taskGitUrl)" \
               -p taskGitRevision="$(params.taskGitRevision)" \
+              -p pyxisServer="$(params.pyxisServer)" \
               -l ${TASK_LABEL}="${TASK_ID}" \
               -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
               -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
@@ -435,10 +388,12 @@ spec:
             # next batches consist of values which didn't fit in the previous batches
             references_batch="${to_sign_references[$i]} "
             digests_batch="${to_sign_digests[$i]} "
+            repositories_batch="${to_sign_repositories[$i]} "
           else
             # if batches are still small enough, add the values to the batches
             references_batch="${new_references_batch}"
             digests_batch="${new_digests_batch}"
+            repositories_batch="${new_repositories_batch}"
           fi
         done
 
@@ -453,6 +408,7 @@ spec:
             -p pipeline_image="${pipeline_image}" \
             -p references="${references_batch[*]}" \
             -p manifest_digests="${digests_batch[*]}" \
+            -p repositories="${repositories_batch[*]}" \
             -p config_map_name="${config_map_name}" \
             -p requester="$(params.requester)" \
             -p taskGitUrl="$(params.taskGitUrl)" \

@@ -2,7 +2,7 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-request-and-upload-signature
+  name: test-request-and-upload-signature-2-references
 spec:
   description: |
     Run the request-and-upload-signature task and make sure that task succeeds
@@ -26,6 +26,8 @@ spec:
               set -eux
               mkdir "$(workspaces.data.path)/mocked_signatures/"
               touch "$(workspaces.data.path)/mocked_signatures/myproduct"
+              echo "registry.redhat.io/my/repo:c containerisvsign2" > \
+                "$(workspaces.data.path)/mocked_signatures/myproduct"
 
               cat << EOF | jq -Mc > "$(workspaces.data.path)/mocked_signing_response"
               {
@@ -58,7 +60,36 @@ spec:
                      "content-type": "text/plain",
                      "amq6100_destination": "queue://Consumer.test-user.123456.VirtualTopic.eng.test.dist.sign.123456"
                     }
-                  ]],
+                  ],
+                  [
+                    {"i": 1,
+                     "msg": {
+                       "errors": [],
+                       "manifest_digest": "sha256:123456",
+                       "pub_task_id": "123456",
+                       "repo": "test-repo",
+                       "request_id": "2",
+                       "request_received_time": "3000-01-01T01:01:01.000000",
+                       "requested_by": "test-user",
+                       "sig_key_id": "test-signing-key",
+                       "sig_keyname": "test-signing-key",
+                       "signature_type": "container_signature",
+                       "signed_claim": "signed-data",
+                       "signing_server_requested": "3000-01-01T01:01:01.000000",
+                       "signing_server_responded": "3000-01-01T01:01:02.000000",
+                       "signing_status": "success"
+                     },
+                     "msg_id": "msg-id-1",
+                     "timestamp": 1738685708,
+                     "topic": "/topic/VirtualTopic.eng.test.dist.sign.123456",
+                     "username": "1001030000"
+                    },
+                    {"amq6100_originalDestination": "topic://VirtualTopic.eng.test.dist.sign.123456",
+                     "content-type": "text/plain",
+                     "amq6100_destination": "queue://Consumer.test-user.123456.VirtualTopic.eng.test.dist.sign.123456"
+                    }
+                  ]
+                ],
                 "operation": {
                   "digests": ["sha256:123456"],
                   "references": ["registry.redhat.io/myproduct/myrepo:abc"],
@@ -76,14 +107,18 @@ spec:
         - name: pipeline_image
           value: "quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6"
         - name: manifest_digests
-          value: "sha256:0000"
+          value: sha256:0000 sha256:1111 sha256:2222 sha256:3333
         - name: references
-          value: "registry.redhat.io/myproduct/myrepo:abc"
+          value: >
+            registry.redhat.io/my/repo:a registry.redhat.io/my/repo:b
+            registry.redhat.io/my/repo:c registry.redhat.io/my/repo:d
         - name: repositories
-          value: "myproduct-myrepo"
+          value: myproduct-myrepo myproduct-myrepo myproduct-myrepo myproduct-myrepo
         - name: requester
-          value: test-user
-        - value: containerisvsign
+          value: tom
+        - value: |
+            containerisvsign1
+            containerisvsign2
           name: sig_key_names
         - name: pyxis_ssl_cert_secret_name
           value: pyxis-ssl-cert
@@ -132,9 +167,9 @@ spec:
               umb_publish_topic=VirtualTopic.eng.operatorpipelines.isv.sign
               umb_batch_publish_topic=VirtualTopic.eng.hacbs-signing-pipeline.konflux.sign
               umb_listen_topic=VirtualTopic.eng.robosignatory.isv.sign
-              umb_batch_listen_topic=VirtualTopic.eng.robosignatory.konflux.sign
-              requester=test-user
+              requester=tom
               umb_client_name=operatorpipelines
+              umb_batch_listen_topic=VirtualTopic.eng.robosignatory.konflux.sign
 
               cat <<EOF > "/tmp/expected_config.yaml"
               msg_signer:
@@ -169,13 +204,26 @@ spec:
               EOF
               diff -Naur "/tmp/expected_config.yaml" "$(workspaces.data.path)/pubtools-sign-config.yaml"
 
-              expected="--requester ${requester} \
-              --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" \
-              --reference registry.redhat.io/myproduct/myrepo:abc \
+              # Expects 2 calls. The first with only with one key as find_signatures was mocked to produce
+              # entry for the second key. The second call with both keys and rest of references/digests.
+
+              expected="--requester tom --config-file $(workspaces.data.path)/pubtools-sign-config.yaml \
+              --reference registry.redhat.io/my/repo:c --digest sha256:2222 \
+              --signer-type single --signing-key-name containerisvsign1 \
+              --signing-key containerisvsign1 --task-id 1234
+              --requester tom \
+              --config-file $(workspaces.data.path)/pubtools-sign-config.yaml \
+              --reference registry.redhat.io/my/repo:d \
+              --reference registry.redhat.io/my/repo:b \
+              --reference registry.redhat.io/my/repo:a \
+              --digest sha256:3333 \
+              --digest sha256:1111 \
               --digest sha256:0000 \
               --signer-type single \
-              --signing-key-name containerisvsign \
-              --signing-key containerisvsign \
+              --signing-key-name containerisvsign1 \
+              --signing-key-name containerisvsign2 \
+              --signing-key containerisvsign1 \
+              --signing-key containerisvsign2 \
               --task-id 1234"
               echo "$expected" > "/tmp/expected"
               cat "$(workspaces.data.path)/mock_pubtools-sign.txt"

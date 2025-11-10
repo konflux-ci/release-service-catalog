@@ -203,24 +203,6 @@ spec:
             exit 1
         fi
 
-        if [[ "$(params.pyxisServer)" == "production" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql-pyxis.api.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "production-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
-        else
-          echo "Invalid pyxisServer parameter. Only 'production','production-internal,'stage-internal' \
-              and 'stage' allowed."
-          exit 1
-        fi
-
         set +x
         echo "${pyxisCert:?}" > /tmp/crt
         echo "${pyxisKey:?}" > /tmp/key
@@ -253,6 +235,7 @@ spec:
 
         declare -a to_sign_references=()
         declare -a to_sign_digests=()
+        declare -a to_sign_repos=()
 
         component_count=$(jq '.components | length' "$RESULTS_FILE")
         for ((i = 0; i < component_count; i++)); do
@@ -270,30 +253,22 @@ spec:
             rh_registry_repo=$(jq -r ".components[$i][\"rh-registry-repo\"]" "$RESULTS_FILE")
             repository="${rh_registry_repo#*/}"
 
-            find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                --manifest_digest "${manifest_digest}" \
-                --repository "${repository}" \
-                --output_file "/tmp/${manifest_digest}"
-
-            if ! grep -q "^${reference_image}" "/tmp/${manifest_digest}" ; then
-              to_sign_references+=("${reference_image}")
-              to_sign_digests+=("${manifest_digest}")
-            else
-              echo "Signature already exists for:"
-              echo "- reference=${reference_image}"
-              echo "- manifest_digest=${manifest_digest}"
-            fi
+            to_sign_references+=("${reference_image}")
+            to_sign_digests+=("${manifest_digest}")
+            to_sign_repos+=("${repository}")
 
           done
         done
 
         references_batch=""
         digests_batch=""
+        repos_batch=""
 
         # Process to sign arrays in batches
         for i in "${!to_sign_references[@]}"; do
           new_references_batch="${references_batch}${to_sign_references[$i]} "
           new_digests_batch="${digests_batch}${to_sign_digests[$i]} "
+          new_repos_batch="${repos_batch}${to_sign_repos[$i]} "
 
           # if batches are too big, send the request
           if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
@@ -306,6 +281,7 @@ spec:
               -p pipeline_image="${pipeline_image}" \
               -p references="${references_batch}" \
               -p manifest_digests="${digests_batch}" \
+              -p repositories="${repos_batch}" \
               -p requester="$(params.requester)" \
               -p config_map_name="${config_map_name}" \
               -p taskGitUrl="$(params.taskGitUrl)" \
@@ -320,10 +296,12 @@ spec:
             # next batches consist of values which didn't fit in the previous batches
             references_batch="${to_sign_references[$i]} "
             digests_batch="${to_sign_digests[$i]} "
+            repos_batch="${to_sign_repos[$i]} "
           else
             # if batches are still small enough, add the values to the batches
             references_batch="${new_references_batch}"
             digests_batch="${new_digests_batch}"
+            repos_batch="${new_repos_batch}"
           fi
         done
 
@@ -338,6 +316,7 @@ spec:
             -p pipeline_image="${pipeline_image}" \
             -p references="${references_batch[*]}" \
             -p manifest_digests="${digests_batch[*]}" \
+            -p repositories="${repos_batch[*]}" \
             -p config_map_name="${config_map_name}" \
             -p requester="$(params.requester)" \
             -p taskGitUrl="$(params.taskGitUrl)" \
