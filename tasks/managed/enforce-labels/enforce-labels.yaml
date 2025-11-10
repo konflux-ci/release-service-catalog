@@ -1,0 +1,160 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: enforce-labels
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to ensure that components destination repositories names match the supplied image name label.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: enforce-name-label
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      computeResources:
+        limits:
+          memory: 100Mi
+        requests:
+          memory: 100Mi
+          cpu: 10m
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+        
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+        
+        # derive namespace/repo from a container image URL
+        derive_name_from_url() {
+            local url="$1"
+            # remove scheme (like docker://), remove registry (first path segment),
+            # remove tag or digest (anything after : or @), strip leading slashes
+            sed -E 's~^[^/]+://~~; s~^[^/]+/~~; s~[:@].*$~~' <<< "$url" | sed 's#^/*##'
+        }
+        
+        num_components=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        for ((i = 0; i < num_components; i++))
+        do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
+            name=$(jq -r '.name' <<< "$component")
+        
+            # Fetch the value of the 'name' label from the container's metadata
+            name_label=$(jq -r '.metadata.labels? | .[] | select(.name == "name") | .value' <<< "$component" || true)
+        
+            # Check if the label was found. It is always required.
+            if [[ -z "$name_label" || "$name_label" == "null" ]]; then
+              echo "Error: Component '$name' is missing the required container label 'name' in its metadata."
+              exit 1
+            fi
+        
+            # Fetch canonicalName from the component root
+            canonical_name=$(jq -r ".canonicalName // empty" <<< "$component")
+        
+            num_repos=$(jq '.repositories | length' <<< "$component")
+        
+            if [[ "$num_repos" -eq 1 ]]; then
+                # --- SINGLE REPOSITORY LOGIC ---
+                # Must match the derived URL name. Component-level canonicalName is ignored.
+                url=$(jq -r '.repositories[0].url // empty' <<< "$component")
+                if [[ -z "$url" ]]; then
+                    echo "Error: Component '$name' repositories[0].url is missing" >&2
+                    exit 1
+                fi
+        
+                derived_name=$(derive_name_from_url "$url")
+        
+                if [[ "$name_label" != "$derived_name" ]]; then
+                    echo "Error: Component '$name' name label ('$name_label') does not match" \
+                      "derived name from URL ('$derived_name')" >&2
+                    exit 1
+                fi
+            elif [[ "$num_repos" -gt 1 ]]; then
+                # --- MULTIPLE REPOSITORY LOGIC ---
+                # A component-level canonicalName is REQUIRED and must match the name label.
+                if [[ -z "$canonical_name" ]]; then
+                    echo "Error: Component '$name' has multiple repositories, but is missing the" \
+                      "component-level 'canonicalName'." >&2
+                    exit 1
+                fi
+        
+                if [[ "$name_label" != "$canonical_name" ]]; then
+                    echo "Error: Component '$name' name label ('$name_label') does not match" \
+                      "component-level canonicalName ('$canonical_name')" >&2
+                    exit 1
+                fi
+            fi
+        done
