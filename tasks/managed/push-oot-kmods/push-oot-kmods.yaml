@@ -149,23 +149,37 @@ spec:
         echo "Checksum verification passed - .ko files are intact and ready for push"
 
         git lfs install
+        export GIT_LFS_SKIP_SMUDGE=1
 
         ## Add token to URL
+        set +x # disable logging of the token
         PUSH_TOKEN_CLEAN=$(printf "%s" "$PUSH_TOKEN" | tr -d '\n')
         GIT_URL_WITH_AUTH="https://gitlab-ci-token:${PUSH_TOKEN_CLEAN}@${REPO_URL}"
 
-        git clone "$GIT_URL_WITH_AUTH" local-artifacts
+        # Optimized clone using sparse checkout
+        # Using hardcoded "main" as per original task logic
+        git clone --depth=1 --filter=blob:none --no-checkout \
+          --single-branch --branch "main" \
+          "$GIT_URL_WITH_AUTH" local-artifacts
+        set -x # enable logging after the token is added to the URL
+        
+        cd local-artifacts
+        git sparse-checkout init --cone
+
         # Create directory with vendor/versions and move signed modules there
         # shellcheck source=/dev/null
-        . ./envfile
-        TARGET_DIR="local-artifacts/${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
+        . ../envfile
+        TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
+
+        git sparse-checkout set "${TARGET_DIR}"
+        git checkout
         mkdir -p "${TARGET_DIR}"
 
         # Copy .ko files (preserving originals for integrity)
-        cp -- *.ko "${TARGET_DIR}/"
+        cp -- ../*.ko "${TARGET_DIR}/"
 
         # Also copy checksums file for verification purposes
-        cp signed_kmods_checksums.txt "${TARGET_DIR}/"
+        cp ../signed_kmods_checksums.txt "${TARGET_DIR}/"
 
         # Verify files were copied correctly to target directory
         echo "Verifying .ko files in target directory..."
@@ -182,7 +196,7 @@ spec:
         cd .. # Back to signed-kmods directory
         if [ -n "$(params.rpmPath)" ] && [ -d "${RPM_PATH}" ] && [ "$(ls -A "${RPM_PATH}"/*.rpm 2>/dev/null)" ]; then
             echo "Moving RPM files to artifact repository..."
-            mv "${RPM_PATH}"/*.rpm "${TARGET_DIR}/"
+            mv "${RPM_PATH}"/*.rpm "local-artifacts/${TARGET_DIR}/"
         fi
 
         # Clean up working files (envfile is no longer needed and may contain sensitive info)
