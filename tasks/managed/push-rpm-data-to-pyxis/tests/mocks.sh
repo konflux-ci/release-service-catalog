@@ -58,6 +58,8 @@ function upload_rpm_data() {
     sleep 2
     rm $LOCK_FILE
   fi
+
+  return 0
 }
 
 function select-oci-auth() {
