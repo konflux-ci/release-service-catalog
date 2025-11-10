@@ -280,7 +280,9 @@ create_kubernetes_resources() {
 
     echo "Building and applying managed resources..."
     kustomize build "${SUITE_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
-    kubectl create -f "$tmpDir/managed-resources.yaml"
+    # use "kubectl apply" to avoid failure when a secret already exists 
+    # since some secret name is hardcoded in the task, it may conflict when several tests run in parellel. 
+    kubectl apply -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."
 }

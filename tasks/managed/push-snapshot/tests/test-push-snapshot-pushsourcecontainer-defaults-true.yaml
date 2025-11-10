@@ -2,12 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping-staged-files-expansion
+  name: test-push-snapshot-pushsourcecontainer-defaults-true
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
-    the data file with staged files per component and verify that the resulting json
-    contains the expected values with filenames expanded.
+    Run the push-snapshot task with pushSourceContainer enabled via the defaults
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -50,74 +48,45 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils:c7879b6f785da823ce1b66aba6cfd70599e35b4d
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
-              {
-                "mapping": {
-                  "components": [
-                    {
-                      "name": "comp1",
-                      "staged": {
-                        "destination": "ai-1-for-isos",
-                        "files": [
-                          {
-                            "source": "one.qcow2",
-                            "filename": "ai-{{git_sha}}"
-                          },
-                          {
-                            "source": "one.raw",
-                            "filename": "ai-{{git_short_sha}}"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "name": "comp2",
-                      "staged": {
-                        "destination": "ai-2-for-isos",
-                        "files": [
-                          {
-                            "source": "two.qcow2",
-                            "filename": "ai-{{digest_sha}}"
-                          }
-                        ]
-                      }
-                    }
-                  ]
-                }
-              }
-              EOF
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
               {
                 "application": "myapp",
                 "components": [
                   {
-                    "name": "comp1",
-                    "containerImage": "registry.io/image1@sha256:123456",
-                    "source": {
-                      "git": {
-                        "revision": "testrevision",
-                        "url": "myurl"
+                    "name": "comp",
+                    "containerImage": "registry.io/image@sha256:abcdefg",
+                    "repositories": [
+                      {
+                        "url": "prod-registry.io/prod-location",
+                        "tags": [
+                          "testtag"
+                        ]
                       }
-                    }
-                  },
-                  {
-                    "name": "comp2",
-                    "containerImage": "registry.io/image2@sha256:123456",
+                    ],
                     "source": {
                       "git": {
-                        "revision": "testrevision2",
-                        "url": "myurl2"
+                        "revision": "a51005b614c359b17a24317fdb264d76b2706a5a",
+                        "url": "https://github.com/abc/python-basic"
                       }
                     }
                   }
                 ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": true
+                  }
+                }
               }
               EOF
           - name: create-trusted-artifact
@@ -132,12 +101,16 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: apply-mapping
+        name: push-snapshot
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
+          value: $(context.pipelineRun.uid)/snapshot.json
         - name: dataPath
-          value: $(context.pipelineRun.uid)/test_data.json
+          value: $(context.pipelineRun.uid)/data.json
+        - name: retries
+          value: 0
+        - name: resultsDirPath
+          value: $(context.pipelineRun.uid)/results
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -160,8 +133,6 @@ spec:
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
-      runAfter:
-        - run-task
       taskSpec:
         params:
           - name: sourceDataArtifact
@@ -192,19 +163,47 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils:c7879b6f785da823ce1b66aba6cfd70599e35b4d
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              echo Test that comp1 has the proper files
-              test "$(
-                jq -c '.components[] | select(.name=="comp1") | .staged.files' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == '[{"source":"one.qcow2","filename":"ai-testrevision"},{"source":"one.raw","filename":"ai-testrev"}]'
+              # The sha 570fd5a1e41b5545a24828be5a3df2e85e4a5a67703385f39594837e77e2478e is calculated
+              # from the origin image pull spec - see mocks.sh
+              cat > "$(params.dataDir)/cosign_expected_calls.txt" << EOF
+              copy -f registry.io/image:sha256-4c0020cf1fd28563704fb5f05396899faf8ae642b94950c72c6282a507df1a03.src\
+               prod-registry.io/prod-location:sha256-4c0020cf1fd28563704fb5f05396899faf8ae642b94950c72c6282a507df1a03.src
+              copy -f registry.io/image@sha256:abcdefg prod-registry.io/prod-location:testtag
+              copy -f registry.io/image:sha256-4c0020cf1fd28563704fb5f05396899faf8ae642b94950c72c6282a507df1a03.src\
+               prod-registry.io/prod-location:testtag-source
+              EOF
 
-              echo Test that comp2 has the proper files
-              test "$(
-                jq -c '.components[] | select(.name=="comp2") | .staged.files' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == '[{"source":"two.qcow2","filename":"ai-123456"}]'
+              # Sort to ignore the cosign call orders as it differs from parallel execution.
+              sort "$(params.dataDir)/cosign_expected_calls.txt" > \
+              "$(params.dataDir)/cosign_expected_calls_sorted.txt"
+              sort "$(params.dataDir)/mock_cosign.txt" > \
+              "$(params.dataDir)/mock_cosign_sorted.txt"
+
+              if [ "$(md5sum < "$(params.dataDir)/cosign_expected_calls_sorted.txt")" \
+                != "$(md5sum < "$(params.dataDir)/mock_cosign_sorted.txt")" ]; then
+                echo "Error: Expected cosign calls do not match actual calls"
+                echo Actual calls:
+                cat "$(params.dataDir)/mock_cosign_sort.txt"
+                echo Expected calls:
+                cat "$(params.dataDir)/cosign_expected_calls_sort.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(params.dataDir)/mock_skopeo.txt")" != 1 ]; then
+                echo Error: skopeo was expected to be called 1 time. Actual calls:
+                cat "$(params.dataDir)/mock_skopeo.txt"
+                exit 1
+              fi
+
+              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 5 ]; then
+                echo Error: oras was expected to be called 5 times. Actual calls:
+                cat "$(params.dataDir)/mock_oras.txt"
+                exit 1
+              fi
+      runAfter:
+        - run-task
