@@ -18,7 +18,7 @@ function curl() {
   fi
 
   # Performance test CVE requests - simulate realistic API delay
-  if [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-"*[0-9]* ]]
+  if [[ "$*" == *"myurl/osidb/api/v2/flaws?cve_id=CVE-"*[0-9]* ]]
   then
     sleep 0.2  # Simulate 200ms API response time
     
@@ -38,7 +38,7 @@ function curl() {
   fi
 
   # PURL performance test with many affected components
-  if [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-many-components"* ]]
+  if [[ "$*" == *"myurl/osidb/api/v2/flaws?cve_id=CVE-many-components"* ]]
   then
     # General impact is MODERATE, but target-repo component should have CRITICAL impact
     # Generate 500 affected components to test performance optimization
@@ -65,10 +65,10 @@ function curl() {
     done
     
     echo ']}]}'
-  elif [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-critical"* ]]
+  elif [[ "$*" == *"myurl/osidb/api/v2/flaws?cve_id=CVE-critical"* ]]
   then
     echo '{"results": [{"impact":"CRITICAL","affects":[{"purl":"pkg:oci/kubernetes?repository_url=component&a=b","impact":""}]}]}'
-  elif [[ "$*" == *"myurl/osidb/api/v1/flaws?cve_id=CVE-moderate"* ]]
+  elif [[ "$*" == *"myurl/osidb/api/v2/flaws?cve_id=CVE-moderate"* ]]
   then
     echo '{"results": [{"impact":"MODERATE","affects":[{"purl":"pkg:oci/kubernetes?repository_url=foo&a=b","impact":"LOW"},{"purl":"pkg:oci/kubernetes?repository_url=component&a=b","impact":"IMPORTANT"},{"purl":"","impact":"LOW"}]}]}'
   else
