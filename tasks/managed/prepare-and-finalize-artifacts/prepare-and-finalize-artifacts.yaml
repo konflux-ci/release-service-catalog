@@ -52,22 +52,25 @@ spec:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
+    - name: selectedArtifact
+      type: string
+      description: Selected input artifact to use
   volumes:
     - name: workdir
       emptyDir: {}
   stepTemplate:
+    securityContext:
+      runAsUser: 1001
     volumeMounts:
       - mountPath: /var/workdir
         name: workdir
     env:
       - name: IMAGE_EXPIRES_AFTER
         value: $(params.ociArtifactExpiresAfter)
-      - name: ORAS_OPTIONS
-        value: $(params.orasOptions)
       - name: DEBUG
         value: $(params.trustedArtifactsDebug)
   steps:
-    - name: select-and-download-artifact
+    - name: select-artifact
       image: quay.io/konflux-ci/release-service-utils:0f82be4be43294b6a96846d87ef7f7c0b9e34267
       computeResources:
         limits:
@@ -80,15 +83,51 @@ spec:
         set -euxo pipefail
 
         if [ -n "$(params.rpmDataArtifact)" ]; then
-          ARTIFACT_TO_PULL_WITH_PREFIX="$(params.rpmDataArtifact)"
+          ARTIFACT_TO_USE="$(params.rpmDataArtifact)"
+        elif [ -n "$(params.baseDataArtifact)" ]; then
+          ARTIFACT_TO_USE="$(params.baseDataArtifact)"
         else
-          ARTIFACT_TO_PULL_WITH_PREFIX="$(params.baseDataArtifact)"
+          echo "ERROR: Both rpmDataArtifact and baseDataArtifact are empty. At least one must be provided."
+          exit 1
         fi
-        ARTIFACT_TO_PULL="${ARTIFACT_TO_PULL_WITH_PREFIX#oci:}"
-        
-        mkdir -p "$(params.dataDir)"
-        oras pull -o "$(params.dataDir)" "${ARTIFACT_TO_PULL}"
 
+        echo "Selected artifact: ${ARTIFACT_TO_USE}"
+        echo -n "${ARTIFACT_TO_USE}" > "$(results.selectedArtifact.path)"
+    - name: use-selected-trusted-artifact
+      image: quay.io/redhat-appstudio/build-trusted-artifacts:e02102ede09aa07187cba066ad547a54724e5cf4
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      env:
+        - name: HOME
+          value: /tekton/home
+        - name: ORAS_OPTIONS
+          value: $(params.orasOptions)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        # Read the selected artifact from the result file
+        SELECTED_ARTIFACT=$(cat "$(results.selectedArtifact.path)")
+        echo "Using selected artifact: ${SELECTED_ARTIFACT}"
+        # Use the container entrypoint directly since the image is designed with entrypoint
+        if [ -x /usr/local/bin/entrypoint ]; then
+            exec /usr/local/bin/entrypoint use "${SELECTED_ARTIFACT}=$(params.dataDir)"
+        else
+            # Fallback to looking for build-trusted-artifacts command
+            if command -v build-trusted-artifacts >/dev/null 2>&1; then
+                exec build-trusted-artifacts use "${SELECTED_ARTIFACT}=$(params.dataDir)"
+            elif [ -x /usr/local/bin/build-trusted-artifacts ]; then
+                exec /usr/local/bin/build-trusted-artifacts use "${SELECTED_ARTIFACT}=$(params.dataDir)"
+            elif [ -x /usr/bin/build-trusted-artifacts ]; then
+                exec /usr/bin/build-trusted-artifacts use "${SELECTED_ARTIFACT}=$(params.dataDir)"
+            else
+                echo "ERROR: build-trusted-artifacts command not found"
+                exit 1
+            fi
+        fi
     - name: create-trusted-artifact
       computeResources:
         limits:
@@ -112,3 +151,5 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)
+        - name: orasOptions
+          value: $(params.orasOptions)
