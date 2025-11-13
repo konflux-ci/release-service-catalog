@@ -1,0 +1,366 @@
+---
+kind: Pipeline
+apiVersion: tekton.dev/v1
+metadata:
+  name: e2e-tests-periodic-pipeline
+spec:
+  params:
+    - name: SNAPSHOT
+      default: '{"application":"e2eapp-2eb54d79","artifacts":{},"components":[{"containerImage":"registry.redhat.io/openshift4/ose-cli:latest","name":"collector-2eb54d79","source":{"git":{"revision":"4b7d4677ca75a0db09a414df6e4a1fd9cb64208c","url":"https://github.com/scoheb/e2e-base"}}}]}'
+      type: string
+    - name: VAULT_PASSWORD_SECRET_NAME
+      default: 'vault-password-secret'
+      type: string
+    - name: GITHUB_TOKEN_SECRET_NAME
+      default: 'github-token-secret'
+      type: string
+    - name: KUBECONFIG_SECRET_NAME
+      default: 'kubeconfig-secret'
+      type: string
+  tasks:
+    - name: get-snapshot-data
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: SNAPSHOT
+        results:
+          - name: CONTAINER_IMAGE
+        steps:
+          - name: get-container-image
+            image: quay.io/konflux-ci/release-service-utils@sha256:bd541d08823b7b77a5637af44cb5042bb31d765a18c8739643c8e176f55c83cf
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            script: |
+              #!/usr/bin/env bash
+
+              containerImage=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+              echo "${SNAPSHOT}"
+              echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
+    - name: run-test
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: PR_GIT_URL
+            type: string
+            default: 'https://github.com/konflux-ci/release-service-catalog'
+          - name: PR_GIT_REVISION
+            type: string
+            default: 'staging'
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+        results:
+          - name: TEST_OUTPUT
+            description: Test output
+        steps:
+          - name: run-test
+            image: $(params.STEP_IMAGE)
+            computeResources:
+              limits:
+                memory: 2Gi
+              requests:
+                memory: 2Gi
+            env:
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              failed_test_count=0
+              success_test_count=0
+              failed_test_cases=()
+              success_test_cases=()
+
+              ALL_TESTCASES=("e2e" "collectors" "fbc-release" "release-to-github" "push-to-external-registry" \
+                "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" \
+                "push-to-addons-registry")
+                # push-rpms-to-pulp fails, will be fixed in RELEASE-2049
+                # "push-to-addons-registry" "push-rpms-to-pulp")
+              overall_test_count=${#ALL_TESTCASES[@]}
+
+              exitfunc() {
+                local err=$1
+                local line=$2
+                local command="$3"
+
+                skipped_test_count=$((overall_test_count - success_test_count - failed_test_count))
+                # After the tests finish, record the overall result in the RESULT variable
+                if [ "$err" -eq 0 ] ; then   
+                  RESULT="SUCCESS"
+                else
+                  echo "$0: ERROR $command failed at line $line - exited with status $err"
+                  RESULT="FAILURE"
+                fi
+
+                # Prepare the failure and success arrays as proper JSON arrays
+                FAILED_CASES_JSON=$(jq -c -n '$ARGS.positional' --args "${failed_test_cases[@]}")
+                SUCCESS_CASES_JSON=$(jq -c -n '$ARGS.positional' --args "${success_test_cases[@]}")
+
+                # Output the standardized TEST_OUTPUT result in JSON form
+                TEST_OUTPUT=$(jq -rc \
+                    --arg date "$(date -u --iso-8601=seconds)" \
+                    --arg RESULT "${RESULT}" \
+                    --argjson successcount "${success_test_count}" \
+                    --argjson failurecount "${failed_test_count}" \
+                    --argjson skippedcount "${skipped_test_count}" \
+                    --argjson failed_cases "${FAILED_CASES_JSON}" \
+                    --argjson success_cases "${SUCCESS_CASES_JSON}" \
+                    --null-input \
+                    '{
+                        result: $RESULT, 
+                        timestamp: $date, 
+                        failures: $failurecount, 
+                        successes: $successcount, 
+                        skipped: $skippedcount, 
+                        failed_test_cases: $failed_cases, 
+                        success_test_cases: $success_cases
+                    }'
+                )
+
+                # Write to the Tekton results output path.
+                echo -n "$TEST_OUTPUT" | tee "$(results.TEST_OUTPUT.path)"
+
+                exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+              }
+
+              # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+              trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+              KUBECONFIG_FILE=$(mktemp)
+              set +x
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              set -x
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              RELEASE_CATALOG_GIT_URL="${PR_GIT_URL:-$(params.PR_GIT_URL)}"
+              RELEASE_CATALOG_GIT_REVISION="${PR_GIT_REVISION:-$(params.PR_GIT_REVISION)}"
+
+              export RELEASE_CATALOG_GIT_URL
+              export RELEASE_CATALOG_GIT_REVISION
+
+              # Run all testcases in parallel and collect their statuses
+              declare -A pids
+              # declare -A testcase_names
+              for testcase in "${ALL_TESTCASES[@]}"; do
+                echo "Running test case: $testcase"
+                "/home/e2e/tests/run-test.sh" "$testcase" &
+                pid=$!
+                pids["$pid"]=$testcase
+                # testcase_names["$testcase"]=$pid
+              done
+
+              # Wait for all tests to complete, track success and failure
+              for pid in "${!pids[@]}"; do
+                testcase="${pids[$pid]}"
+                if wait "$pid"; then
+                  success_test_cases+=("$testcase")
+                  success_test_count=$((success_test_count + 1))
+                  echo "Test case $testcase succeeded"
+                else
+                  failed_test_cases+=("$testcase")
+                  failed_test_count=$((failed_test_count + 1))
+                  echo "Test case $testcase failed"
+                fi
+              done
+              if [[ "$failed_test_count" -gt  0 ]]; then
+                 exit 1
+              fi
+      runAfter:
+        - get-snapshot-data
+    - name: notify-slack
+      params:
+        - name: secretName
+          value: "release-team-slack-notification-secret"
+        - name: secretKeyName
+          value: "release"
+        - name: TEST_RESULT
+          value: $(tasks.run-test.results.TEST_OUTPUT)
+      taskSpec:
+        params:
+          - name: secretName
+          - name: secretKeyName
+          - name: TEST_RESULT
+        volumes:
+          - name: slack-token
+            secret:
+              secretName: $(params.secretName)
+              optional: true
+        steps:
+          - name: send-result-to-slack
+            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            volumeMounts:
+              - name: slack-token
+                mountPath: "/tmp/secrets"
+                readOnly: true
+            env:
+              - name: KEYNAME
+                value: $(params.secretKeyName)
+              - name: TEST_RESULT
+                value: $(params.TEST_RESULT)
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ -z "${KEYNAME}" ] ; then
+                echo "No secret key name provided via the 'secretKeyName' pipeline parameter"
+                echo "No message will be sent to Slack"
+                exit 0
+              fi
+
+              if [ -f "/tmp/secrets/${KEYNAME}" ]; then
+                echo "Setting WEBHOOK_URL from secret"
+                set +x
+                WEBHOOK_URL=$(cat "/tmp/secrets/${KEYNAME}")
+                set -x
+              else
+                echo "Error: Secret not defined properly. The key to use (${KEYNAME}) is defined in the 'secretKeyName'"
+                exit 1
+              fi
+
+              MESSAGE=$(jq -r '.' <<< "${TEST_RESULT}" | awk NF)
+
+              # need 3 back-ticks around message for code-block
+              MESSAGE=$(echo -n "Test result: \`\`\`$MESSAGE\`\`\`" | jq -Rsa)
+
+              cat > /tmp/payload.json << EOF
+              {"text": $MESSAGE}
+              EOF
+
+              echo "Calling Slack API with curl...."
+              set +x
+              curl -H "Content-type: application/json" --data-binary "@/tmp/payload.json"  \
+                "${WEBHOOK_URL}"
+              set -x
+      runAfter:
+        - run-test
+  finally:
+    - name: cleanup-resources
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: TEST_RESULT
+          value: $(tasks.run-test.results.TEST_OUTPUT)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: TEST_RESULT
+        steps:
+          - name: cleanup-resources
+            image: $(params.STEP_IMAGE)
+            env:
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: TEST_RESULT
+                value: $(params.TEST_RESULT)
+            script: |
+              #!/usr/bin/env bash
+              set -eu
+              # shellcheck source=/dev/null
+
+              . "/home/e2e/tests/lib/test-functions.sh"
+
+              # prepare what's needed to delete k8s resources
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+              KUBECONFIG_FILE=$(mktemp)
+              set +x
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              set -x
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              # The following fix corrects the jq filter to handle empty arrays and ensure the order.
+              # This prevents "bad array subscript" errors on empty success_test_cases/failed_test_cases arrays.
+              RUN_TESTCASES=()
+              mapfile -t RUN_TESTCASES < <(jq -r '
+                (.success_test_cases // [])[]?, 
+                (.failed_test_cases // [])[]?' <<<"${TEST_RESULT}" || true)
+
+              for testcase in "${RUN_TESTCASES[@]}"; do
+                # shellcheck disable=SC1090
+                . "/home/e2e/tests/${testcase}/test.env"
+
+                # decrypt the secrets since they are part of the resources to be deleted
+                decrypt_secrets "/home/e2e/tests/${testcase}"
+
+                # delete GH repo
+                "/home/e2e/tests/scripts/delete-repository.sh" "${component_repo_name:?}"
+
+                tmpDir=$(mktemp -d)
+                # we need to rebuild the resources (without applying them)
+                # so that we can use their names to delete them
+                echo "Building tenant resources to prepare for deletion..."
+                kustomize build "/home/e2e/tests/${testcase}/resources/tenant" \
+                  | envsubst > "$tmpDir/tenant-resources.yaml"
+
+                echo "Building managed resources to prepare for deletion..."
+                kustomize build "/home/e2e/tests/${testcase}/resources/managed" \
+                  | envsubst > "$tmpDir/managed-resources.yaml"
+
+                # actually delete the k8s resources and ignore failures since
+                # they might be already deleted from the cleanup trap
+                echo "Deleting resources..."
+                kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found || true
+                kubectl delete -f "$tmpDir/managed-resources.yaml" --ignore-not-found || true
+              done
