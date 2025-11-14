@@ -8,7 +8,7 @@ meaning all the data keys must be allowed and formatted correctly.
 For example, if `releaseNotes` is passed as a system and the data file does not have all the required
 releaseNotes keys, the schema will give validation errors, and the task will fail.
 
-Currently, `releaseNotes`, and `cdn` are the only supported systems.
+The validation schema is defined in `schema/dataKeys.json` in this repository.
 
 ## Parameters
 

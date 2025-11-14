@@ -1,10 +1,15 @@
-#mocks.sh
 #!/usr/bin/env bash
 set -eux
+
 function curl() {
-    if [[ "$*" == *"https://raw.githubusercontent.com/konflux-ci/release-service-catalog/refs/heads/production/schema/non-existent-schema.json"* ]]; then
-        command curl -Ls --fail-with-body "$@" -o /tmp/schema
+    file_path="/tmp/schema"
+    if [[ "$*" == *"https://get-local-schema.com"* ]]; then
+        # Extract the JSON content from configMap
+        kubectl get configmap check-data-keys-schema -o jsonpath='{.data.dataKeys}' > "$file_path"
+        # Verify the file is not empty and contains valid JSON
+        test -s "$file_path" || { echo "Schema file is empty from configMap"; exit 1; }
+        jq empty "$file_path" || { echo "Schema file is not valid JSON from configMap"; exit 1; }
     else
-        command curl -Ls --fail-with-body "$3" -o /tmp/schema
+        command curl -Ls --fail-with-body "$@" -o "$file_path"
     fi
 }
