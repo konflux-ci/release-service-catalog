@@ -10,6 +10,15 @@ spec:
   description: |-
     Creates an InternalRequest to sign a base64 encoded blob
     
+    ## Idempotent Behavior
+    
+    This task is **idempotent**. If a valid signature file (`.sig`) already exists in the binaries directory:
+    - The task will validate the existing signature
+    - If valid, it will skip the signing operation and exit successfully
+    - If invalid or corrupted, it will remove the file and re-sign
+    
+    This allows the task to be safely retried without creating duplicate signing requests or wasting resources.
+    
     ## Signing data parameters
     
      The signing configuration should be set as `data.sign` in the _releasePlanAdmission_. The data should be set in the
@@ -138,7 +147,30 @@ spec:
         config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' "${DATA_FILE}")
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        echo "Creating InternalRequest to sign blob:"
+        # Determine the signature file path
+        checksum_file_name=$(find "$(params.dataDir)/$(params.binariesPath)" \
+          -maxdepth 1 -name '*SHA256SUMS*' ! -name '*.sig' -printf '%f\n' | head -n1)
+        sig_file_path="$(params.dataDir)/$(params.binariesPath)/${checksum_file_name}.sig"
+
+        # Check if signature already exists (idempotent behavior)
+        # NOTE: Current implementation supports single-signature scenarios.
+        # For multi-signature support (e.g., PQC + traditional), enhancement needed
+        # to check signatures per signing key from the config map. See MULTI_SIGNATURE_CONSIDERATIONS.md
+        if [ -f "$sig_file_path" ] && [ -s "$sig_file_path" ]; then
+            echo "Signature file already exists: $sig_file_path"
+            echo "Validating existing signature..."
+            
+            # Validate the signature is a valid GPG file
+            if gpg --list-packets "$sig_file_path" &>/dev/null; then
+                echo "Existing signature is valid. Skipping signing operation (idempotent behavior)."
+                exit 0
+            else
+                echo "Existing signature file is invalid or corrupted. Will re-sign."
+                rm -f "$sig_file_path"
+            fi
+        fi
+
+        echo "No valid signature found. Creating InternalRequest to sign blob:"
         echo "- blob=$(params.blob)"
         echo "- requester=$(params.requester)"
 
@@ -162,11 +194,9 @@ spec:
         decoded_payload=$(echo -n "$payload" | base64 -d)
 
         # Build .sig file
-        checksum_file_name=$(find "$(params.dataDir)/$(params.binariesPath)" -maxdepth 1 -name '*SHA256SUMS*' \
-          -printf '%f\n')
         echo -n "$decoded_payload" \
         | gpg --dearmor \
-        | tee "$(params.dataDir)/$(params.binariesPath)/${checksum_file_name}.sig"
+        | tee "$sig_file_path"
     - name: create-trusted-artifact
       computeResources:
         limits:

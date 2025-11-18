@@ -2,6 +2,15 @@
 
 Creates an InternalRequest to sign a base64 encoded blob
 
+## Idempotent Behavior
+
+This task is **idempotent**. If a valid signature file (`.sig`) already exists in the binaries directory:
+- The task will validate the existing signature
+- If valid, it will skip the signing operation and exit successfully
+- If invalid or corrupted, it will remove the file and re-sign
+
+This allows the task to be safely retried without creating duplicate signing requests or wasting resources.
+
 ## Signing data parameters
 
  The signing configuration should be set as `data.sign` in the _releasePlanAdmission_. The data should be set in the

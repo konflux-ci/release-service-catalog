@@ -1,0 +1,203 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-sign-base64-blob-idempotent
+spec:
+  description: |
+    Test idempotent behavior of sign-base64-blob task.
+    When a valid signature file already exists, the task should skip signing.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "sign": {
+                  "configMapName": "signing-config-map"
+                }
+              }
+              EOF
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/binaries"
+              touch "$(params.dataDir)/$(context.pipelineRun.uid)/binaries/foo_SHA256SUMS"
+              
+              # Create a pre-existing valid signature file (mock binary signature)
+              # This simulates an existing valid signature that should be preserved
+              echo -n "existing-valid-signature-data" > \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/binaries/foo_SHA256SUMS.sig"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: sign-base64-blob
+      params:
+        - name: requester
+          value: testuser
+        - name: blob
+          value: test-blob
+        - name: binariesPath
+          value: $(context.pipelineRun.uid)/binaries
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: binariesPath
+          value: $(context.pipelineRun.uid)/binaries
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+          - name: binariesPath
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Verify no InternalRequest was created (idempotent behavior)
+              internalRequestCount=$(kubectl get internalrequest --no-headers \
+                2>/dev/null | wc -l || echo "0")
+              if [ "$internalRequestCount" != "0" ]; then
+                echo "❌ Error: InternalRequest was created when it should" \
+                  "have been skipped (found $internalRequestCount)"
+                echo "This violates idempotent behavior!"
+                exit 1
+              fi
+              echo "✓ No InternalRequest was created (idempotent behavior verified)"
+
+              # Verify the signature file still exists and is unchanged
+              binaries_path="$(params.dataDir)/$(params.binariesPath)"
+              sig_file=$(find "$binaries_path" -maxdepth 1 -name '*SHA256SUMS.sig' -printf '%f\n')
+              
+              if [ -z "$sig_file" ]; then
+                echo "❌ Error: Signature file was removed!"
+                exit 1
+              fi
+              echo "✓ Signature file exists: $sig_file"
+
+              # Verify signature file is not empty
+              if [ ! -s "$binaries_path/$sig_file" ]; then
+                echo "❌ Error: Signature file is empty!"
+                exit 1
+              fi
+              echo "✓ Signature file is not empty"
+
+              # Verify the content is the original signature (not replaced)
+              file_content=$(cat "$binaries_path/$sig_file")
+              expected_content="existing-valid-signature-data"
+              if [ "$file_content" != "$expected_content" ]; then
+                echo "❌ Error: Signature file content was modified!"
+                echo "Expected: $expected_content"
+                echo "Got: $file_content"
+                exit 1
+              fi
+              echo "✓ Signature file content is unchanged"
+
+              echo ""
+              echo "✅ All idempotency checks passed!"
+              echo "   - Task skipped signing when valid signature existed"
+              echo "   - No unnecessary InternalRequest was created"
+              echo "   - Existing signature file was preserved"
+      runAfter:
+        - run-task

@@ -25,5 +25,23 @@ function kubectl() {
 }
 
 function gpg() {
-  echo -n "dummy-payload"
+  # Handle --list-packets for signature validation (idempotent behavior)
+  if [[ "$*" == *"--list-packets"* ]]; then
+    # Extract the file path from the arguments (last argument)
+    local file_path="${@: -1}"
+    
+    # Check if the file contains "corrupted" text (invalid signature)
+    if [ -f "$file_path" ] && grep -q "corrupted" "$file_path" 2>/dev/null; then
+      # Invalid/corrupted signature
+      return 1
+    else
+      # Valid binary signature
+      return 0
+    fi
+  elif [[ "$*" == *"--dearmor"* ]]; then
+    # For signature creation, just pass through the input
+    echo -n "dummy-payload"
+  else
+    echo -n "dummy-payload"
+  fi
 }
