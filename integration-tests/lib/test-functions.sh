@@ -236,6 +236,19 @@ decrypt_secrets() {
     else
       echo "Managed secrets already exist."
     fi
+
+    # Decrypt infrastructure secrets if they exist (these persist across test runs)
+    local managed_infra_secrets_vault="${suite_dir}/vault/managed-infra-secrets.yaml"
+    local managed_infra_secrets_file="${suite_dir}/resources/managed/secrets/managed-infra-secrets.yaml"
+    if [ -f "${managed_infra_secrets_vault}" ]; then
+      if [ ! -f "${managed_infra_secrets_file}" ]; then
+        echo "Managed infra secrets missing...decrypting ${managed_infra_secrets_vault}"
+        ansible-vault decrypt "${managed_infra_secrets_vault}" --output "${managed_infra_secrets_file}" --vault-password-file "$VAULT_PASSWORD_FILE"
+      else
+        echo "Managed infra secrets already exist."
+      fi
+    fi
+
     echo "Secret decryption check complete."
 }
 
@@ -274,14 +287,20 @@ create_kubernetes_resources() {
     tmpDir=$(mktemp -d)
     echo "Temporary directory for resources: ${tmpDir}"
 
+    # Apply infrastructure secrets first (if they exist) - these persist across test runs
+    local managed_infra_secrets_file="${SUITE_DIR}/resources/managed/secrets/managed-infra-secrets.yaml"
+    if [ -f "${managed_infra_secrets_file}" ]; then
+        echo "Applying infrastructure secrets (these persist across test runs)..."
+        envsubst < "${managed_infra_secrets_file}" > "$tmpDir/managed-infra-resources.yaml"
+        kubectl apply -f "$tmpDir/managed-infra-resources.yaml" -n "${managed_namespace}"
+    fi
+
     echo "Building and applying tenant resources..."
     kustomize build "${SUITE_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
     kubectl create -f "$tmpDir/tenant-resources.yaml"
 
     echo "Building and applying managed resources..."
     kustomize build "${SUITE_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
-    # use "kubectl apply" to avoid failure when a secret already exists 
-    # since some secret name is hardcoded in the task, it may conflict when several tests run in parellel. 
     kubectl apply -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."
