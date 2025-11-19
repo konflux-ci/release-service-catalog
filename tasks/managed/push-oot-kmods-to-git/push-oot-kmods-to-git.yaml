@@ -102,16 +102,22 @@ spec:
         set -euxo pipefail
 
         PUSH_TOKEN=$(cat /var/secrets/git-token/gitlab-gr-maintenance-token)
-
         SIGNED_KMODS_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
         RPM_FULL_PATH="$(params.dataDir)/$(params.rpmPath)"
         REPO_URL="$(params.gitRepoUrl)"
+
         mkdir -p "${SIGNED_KMODS_PATH}"
         cd "${SIGNED_KMODS_PATH}"
-        if [ ! -f "signed_kmods_checksums.txt" ]; then
-            exit 1
+
+        # Check if this is a multi-architecture build
+        if [ -f "$(params.dataDir)/arch_count.txt" ]; then
+            arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+            echo "Processing $arch_count architecture(s) for Git upload"
+        else
+            echo "No architecture information found, assuming single architecture"
+            arch_count=1
         fi
-        sha256sum -c signed_kmods_checksums.txt
+
         export GIT_LFS_SKIP_SMUDGE=1
         set +x # disable logging of the token
         PUSH_TOKEN_CLEAN=$(printf "%s" "$PUSH_TOKEN" | tr -d '\n')
@@ -120,26 +126,153 @@ spec:
           --single-branch --branch "$(params.gitBranch)" \
           "$GIT_URL_WITH_AUTH" local-artifacts
         set -x # enable logging after the token is added to the URL
+
         cd local-artifacts
         git sparse-checkout init --cone
-        
-        # shellcheck source=/dev/null
-        . ../envfile
-        
-        TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
-        git sparse-checkout set "${TARGET_DIR}"
-        git checkout
-        mkdir -p "${TARGET_DIR}"
-        cp ../*.ko "${TARGET_DIR}/"
-        cp ../signed_kmods_checksums.txt "${TARGET_DIR}/"
-        if [ -n "$(params.rpmPath)" ] && [ -d "${RPM_FULL_PATH}" ] && \
-           [ -n "$(find "${RPM_FULL_PATH}" -maxdepth 1 -name '*.rpm' -print -quit)" ]; then
-            cp "${RPM_FULL_PATH}"/*.rpm "${TARGET_DIR}/"
-        fi
         git config user.email "partner-accelerators@konflux-ci.redhat.com"
         git config user.name "Partner Accelerators CI Bot"
-        git add "${TARGET_DIR}"
+
+        # Function to push artifacts for a specific architecture
+        push_arch_artifacts() {
+            local arch_name="$1"
+            local source_dir="$2"
+            local arch_suffix=""
+
+            # Add architecture suffix for multi-arch builds
+            if [ "$arch_count" -gt 1 ]; then
+                arch_suffix="_${arch_name}"
+            fi
+
+            echo "Processing artifacts for architecture: $arch_name"
+
+            # Read envfile to get version information
+            if [ -f "$source_dir/envfile" ]; then
+                # shellcheck source=/dev/null
+                . "$source_dir/envfile"
+            else
+                echo "ERROR: envfile not found in $source_dir"
+                return 1
+            fi
+
+            TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}${arch_suffix}"
+            echo "Target directory for $arch_name: $TARGET_DIR"
+
+            git sparse-checkout set "$TARGET_DIR"
+            git checkout
+            mkdir -p "$TARGET_DIR"
+
+            # Copy .ko files
+            if ls "$source_dir"/*.ko 1> /dev/null 2>&1; then
+                cp "$source_dir"/*.ko "$TARGET_DIR/"
+                echo "Copied .ko files for $arch_name"
+            else
+                echo "WARNING: No .ko files found for $arch_name"
+                return 1
+            fi
+
+            # Copy architecture-specific checksum file
+            if [ "$arch_count" -gt 1 ]; then
+                if [ -f "$source_dir/signed_kmods_checksums_${arch_name}.txt" ]; then
+                    cp "$source_dir/signed_kmods_checksums_${arch_name}.txt" "$TARGET_DIR/"
+                    echo "Copied architecture-specific checksums for $arch_name"
+                fi
+            else
+                if [ -f "$source_dir/signed_kmods_checksums.txt" ]; then
+                    cp "$source_dir/signed_kmods_checksums.txt" "$TARGET_DIR/"
+                    echo "Copied checksums for single architecture"
+                fi
+            fi
+
+            # Copy envfile for reference
+            if [ -f "$source_dir/envfile" ]; then
+                cp "$source_dir/envfile" "$TARGET_DIR/"
+                echo "Copied envfile for $arch_name"
+            fi
+
+            # Copy RPM files if available (architecture-specific RPMs would be in arch-specific directories)
+            if [ -n "$(params.rpmPath)" ] && [ -d "${RPM_FULL_PATH}" ]; then
+                # Look for architecture-specific RPMs or general RPMs
+                rpm_source_dir="${RPM_FULL_PATH}"
+                if [ "$arch_count" -gt 1 ] && [ -d "${RPM_FULL_PATH}/${arch_name}" ]; then
+                    rpm_source_dir="${RPM_FULL_PATH}/${arch_name}"
+                fi
+
+                if [ -n "$(find "${rpm_source_dir}" -maxdepth 1 -name '*.rpm' -print -quit 2>/dev/null)" ]; then
+                    cp "${rpm_source_dir}"/*.rpm "$TARGET_DIR/"
+                    echo "Copied RPM files for $arch_name"
+                fi
+            fi
+
+            # Add files to git
+            git add "$TARGET_DIR"
+
+            return 0
+        }
+
+        # Process architectures
+        if [ "$arch_count" -gt 1 ]; then
+            echo "Multi-architecture build detected, processing each architecture"
+
+            # Verify we have the signing summary
+            if [ -f "${SIGNED_KMODS_PATH}/signing_summary.txt" ]; then
+                echo "Signing summary found:"
+                cat "${SIGNED_KMODS_PATH}/signing_summary.txt"
+            fi
+
+            # Process each architecture directory
+            for arch_dir in "${SIGNED_KMODS_PATH}"/*/; do
+                if [ -d "$arch_dir" ]; then
+                    arch_name=$(basename "$arch_dir")
+                    echo "Processing Git upload for architecture: $arch_name"
+
+                    if push_arch_artifacts "$arch_name" "$arch_dir"; then
+                        echo "Successfully processed $arch_name"
+                    else
+                        echo "ERROR: Failed to process $arch_name"
+                        exit 1
+                    fi
+                fi
+            done
+
+            # Create multi-arch summary file in the repository
+            if [ -f "${SIGNED_KMODS_PATH}/signing_summary.txt" ]; then
+                summary_target_dir="multi-arch-summary_$(date +%Y%m%d_%H%M%S)"
+                mkdir -p "$summary_target_dir"
+                cp "${SIGNED_KMODS_PATH}/signing_summary.txt" "$summary_target_dir/"
+                cp "${SIGNED_KMODS_PATH}/extraction_summary.txt" "$summary_target_dir/" 2>/dev/null || true
+                git add "$summary_target_dir"
+            fi
+
+        else
+            echo "Single architecture build, using standard upload"
+
+            # Validate checksum file exists for single-arch
+            if [ ! -f "signed_kmods_checksums.txt" ]; then
+                echo "ERROR: signed_kmods_checksums.txt not found for single architecture build"
+                exit 1
+            fi
+
+            # Verify checksums
+            sha256sum -c signed_kmods_checksums.txt
+
+            if push_arch_artifacts "single" "${SIGNED_KMODS_PATH}"; then
+                echo "Successfully processed single architecture"
+            else
+                echo "ERROR: Failed to process single architecture"
+                exit 1
+            fi
+        fi
+
+        # Commit and push all changes
         if git status --porcelain | grep -q '^[ AM]'; then
-            git commit -m "Automated push from Build and Sign pipeline"
+            commit_message="Automated push from Build and Sign pipeline"
+            if [ "$arch_count" -gt 1 ]; then
+                commit_message="$commit_message (multi-arch: $arch_count architectures)"
+            fi
+
+            git commit -m "$commit_message"
             git push -u origin "$(params.gitBranch)"
+            echo "Successfully pushed artifacts for $arch_count architecture(s) to Git"
+        else
+            echo "No changes to commit"
         fi

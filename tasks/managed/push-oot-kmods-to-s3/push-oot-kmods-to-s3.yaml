@@ -97,7 +97,7 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euxo pipefail
-        
+
         AWS_ACCESS_KEY_ID=$(cat /var/secrets/s3/aws_access_key_id)
         export AWS_ACCESS_KEY_ID
         AWS_SECRET_ACCESS_KEY=$(cat /var/secrets/s3/aws_secret_access_key)
@@ -105,19 +105,138 @@ spec:
 
         SIGNED_KMODS_FULL_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
 
-        # shellcheck source=/dev/null
-        . "${SIGNED_KMODS_FULL_PATH}/envfile"
+        # Check if this is a multi-architecture build
+        if [ -f "$(params.dataDir)/arch_count.txt" ]; then
+            arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+            echo "Processing $arch_count architecture(s) for S3 upload"
+        else
+            echo "No architecture information found, assuming single architecture"
+            arch_count=1
+        fi
 
-        S3_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/"
+        # Function to upload artifacts for a specific architecture
+        upload_arch_artifacts() {
+            local arch_name="$1"
+            local source_dir="$2"
+            local arch_suffix=""
 
-        echo "Uploading signed kernel modules to s3://$(params.s3Bucket)/${S3_TARGET_PATH}"
+            # Add architecture suffix for multi-arch builds
+            if [ "$arch_count" -gt 1 ]; then
+                arch_suffix="/${arch_name}"
+            fi
 
-        aws s3 cp \
-          "${SIGNED_KMODS_FULL_PATH}" \
-          "s3://$(params.s3Bucket)/${S3_TARGET_PATH}" \
-          --endpoint-url "$(params.s3Endpoint)" \
-          --recursive \
-          --exclude "*" \
-          --include "*.ko"
+            echo "Processing S3 upload for architecture: $arch_name"
 
-        echo "Upload complete."
+            # Read envfile to get version information
+            if [ -f "$source_dir/envfile" ]; then
+                # shellcheck source=/dev/null
+                . "$source_dir/envfile"
+            else
+                echo "ERROR: envfile not found in $source_dir"
+                return 1
+            fi
+
+            S3_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}${arch_suffix}/"
+            echo "S3 target path for $arch_name: s3://$(params.s3Bucket)/${S3_TARGET_PATH}"
+
+            # Upload .ko files
+            if ls "$source_dir"/*.ko 1> /dev/null 2>&1; then
+                echo "Uploading .ko files for $arch_name"
+                aws s3 cp \
+                  "$source_dir" \
+                  "s3://$(params.s3Bucket)/${S3_TARGET_PATH}" \
+                  --endpoint-url "$(params.s3Endpoint)" \
+                  --recursive \
+                  --exclude "*" \
+                  --include "*.ko"
+            else
+                echo "WARNING: No .ko files found for architecture $arch_name"
+                return 1
+            fi
+
+            # Upload checksum file
+            if [ "$arch_count" -gt 1 ]; then
+                if [ -f "$source_dir/signed_kmods_checksums_${arch_name}.txt" ]; then
+                    echo "Uploading architecture-specific checksums for $arch_name"
+                    aws s3 cp \
+                      "$source_dir/signed_kmods_checksums_${arch_name}.txt" \
+                      "s3://$(params.s3Bucket)/${S3_TARGET_PATH}signed_kmods_checksums_${arch_name}.txt" \
+                      --endpoint-url "$(params.s3Endpoint)"
+                fi
+            else
+                if [ -f "$source_dir/signed_kmods_checksums.txt" ]; then
+                    echo "Uploading checksums for single architecture"
+                    aws s3 cp \
+                      "$source_dir/signed_kmods_checksums.txt" \
+                      "s3://$(params.s3Bucket)/${S3_TARGET_PATH}signed_kmods_checksums.txt" \
+                      --endpoint-url "$(params.s3Endpoint)"
+                fi
+            fi
+
+            # Upload envfile for reference
+            if [ -f "$source_dir/envfile" ]; then
+                echo "Uploading envfile for $arch_name"
+                aws s3 cp \
+                  "$source_dir/envfile" \
+                  "s3://$(params.s3Bucket)/${S3_TARGET_PATH}envfile" \
+                  --endpoint-url "$(params.s3Endpoint)"
+            fi
+
+            return 0
+        }
+
+        # Process architectures
+        if [ "$arch_count" -gt 1 ]; then
+            echo "Multi-architecture build detected, processing each architecture"
+
+            # Upload summary files first
+            if [ -f "${SIGNED_KMODS_FULL_PATH}/signing_summary.txt" ]; then
+                # Use first architecture's envfile for base path information
+                first_arch_dir=$(find "${SIGNED_KMODS_FULL_PATH}" -mindepth 1 -maxdepth 1 -type d | head -1)
+                if [ -n "$first_arch_dir" ] && [ -f "$first_arch_dir/envfile" ]; then
+                    # shellcheck source=/dev/null
+                    . "$first_arch_dir/envfile"
+                    summary_s3_path="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/multi-arch-summary/"
+
+                    echo "Uploading multi-architecture summary to s3://$(params.s3Bucket)/${summary_s3_path}"
+                    aws s3 cp \
+                      "${SIGNED_KMODS_FULL_PATH}/signing_summary.txt" \
+                      "s3://$(params.s3Bucket)/${summary_s3_path}signing_summary.txt" \
+                      --endpoint-url "$(params.s3Endpoint)"
+
+                    if [ -f "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" ]; then
+                        aws s3 cp \
+                          "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" \
+                          "s3://$(params.s3Bucket)/${summary_s3_path}extraction_summary.txt" \
+                          --endpoint-url "$(params.s3Endpoint)"
+                    fi
+                fi
+            fi
+
+            # Process each architecture directory
+            for arch_dir in "${SIGNED_KMODS_FULL_PATH}"/*/; do
+                if [ -d "$arch_dir" ]; then
+                    arch_name=$(basename "$arch_dir")
+                    echo "Processing S3 upload for architecture: $arch_name"
+
+                    if upload_arch_artifacts "$arch_name" "$arch_dir"; then
+                        echo "Successfully uploaded $arch_name to S3"
+                    else
+                        echo "ERROR: Failed to upload $arch_name to S3"
+                        exit 1
+                    fi
+                fi
+            done
+
+        else
+            echo "Single architecture build, using standard upload"
+
+            if upload_arch_artifacts "single" "${SIGNED_KMODS_FULL_PATH}"; then
+                echo "Successfully uploaded single architecture to S3"
+            else
+                echo "ERROR: Failed to upload single architecture to S3"
+                exit 1
+            fi
+        fi
+
+        echo "S3 upload complete for $arch_count architecture(s)."

@@ -141,7 +141,7 @@ spec:
           memory: 512Mi
         requests:
           memory: 512Mi
-          cpu: 250m 
+          cpu: 250m
       volumeMounts:
         - name: checksum-fingerprint
           mountPath: "/etc/sec-checksum"
@@ -161,10 +161,10 @@ spec:
 
         signedKmodsPath="$(params.signedKmodsPath)"
         signingAuthor="$(params.signingAuthor)"
-        # Remove newline in signing variables 
+        # Remove newline in signing variables
         signUser="${signUser//$'\n'/}"
         signHost="${signHost//$'\n'/}"
-         
+
         echo "Signing OOT modules from $(params.dataDir)/$signedKmodsPath.."
         SIGNED_KMODS_PATH="$(params.dataDir)/$signedKmodsPath"
         SSH_OPTS=(
@@ -172,28 +172,41 @@ spec:
           -o GSSAPIAuthentication=yes
           -o GSSAPIDelegateCredentials=yes
         )
-        sign_kmods() {
-             signing_author="$signingAuthor"
-             export signing_author
-             export signKey
-             echo "Executing SSH command to sign OOT kernel module for PipelineRun"
-             ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" 'export KEY="'"${signKey}"'"; bash -s' <<'EOF'
-             echo "Signing OOT kernel modules using $KEY key..."
-             for kmod in ~/kmods/*.ko; do
-                 if [ -f "$kmod" ]; then
-                     echo "Remote: Signing kernel module $kmod"
-                     rh-signing-client --key "$KEY" --onbehalfof "${signing_author}" --lkmsign "$kmod"
-                     if [ $? -ne 0 ]; then
-                         echo "Remote: ERROR failed to sign $kmod"
-                         exit 1
-                     fi
-                 else
-                     echo "Remote: Skipping entry $kmod (not a regular file or no .ko files found)"
-                 fi
-             done
-             echo "Remote: Finished signing process for PR"
+
+        # Function to sign kernel modules for a specific architecture
+        sign_kmods_for_arch() {
+            local arch_name="$1"
+            local remote_dir="$HOME/kmods"
+            if [ "$arch_name" != "single" ]; then
+                remote_dir="$HOME/kmods/$arch_name"
+            fi
+
+            signing_author="$signingAuthor"
+            export signing_author
+            export signKey
+            echo "Executing SSH command to sign OOT kernel modules for architecture: $arch_name"
+            # shellcheck disable=SC2029  # Intentional client-side expansion
+            ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+            "export KEY='${signKey}'; export ARCH='${arch_name}'; export REMOTE_DIR='${remote_dir}'; \
+             bash -s" <<'EOF'
+        echo "Remote: Signing OOT kernel modules for architecture $ARCH using $KEY key..."
+        for kmod in $REMOTE_DIR/*.ko; do
+            if [ -f "$kmod" ]; then
+                echo "Remote: Signing kernel module $kmod for $ARCH"
+                rh-signing-client --key "$KEY" --onbehalfof "${signing_author}" --lkmsign "$kmod"
+                if [ $? -ne 0 ]; then
+                    echo "Remote: ERROR failed to sign $kmod for $ARCH"
+                    exit 1
+                fi
+            else
+                echo "Remote: Skipping entry $kmod (not a regular file or no .ko files found for $ARCH)"
+            fi
+        done
+        echo "Remote: Finished signing process for architecture $ARCH"
         EOF
         }
+
+        # Set up Kerberos and SSH
         KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
         export KRB5CCNAME
         kinit -kt /etc/sec-keytab/keytab-build-and-sign.keytab "${signUser}@$(params.kerberosRealm)"
@@ -203,38 +216,173 @@ spec:
         cp /etc/sec-checksum/checksumFingerprint ~/.ssh/known_hosts
         chmod 600 ~/.ssh/known_hosts
 
-        cd "$SIGNED_KMODS_PATH"
+        # Check if we have architecture-specific directories (multi-arch) or single-arch
+        if [ -f "$(params.dataDir)/arch_count.txt" ]; then
+            arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+            echo "Processing $arch_count architecture(s) for signing"
 
-        # Backup envfile before signing process
-        if [ -f "envfile" ]; then
-            cp envfile /tmp/envfile.backup
-        fi
+            if [ "$arch_count" -gt 1 ]; then
+                echo "Multi-architecture signing process"
 
-        # Copy unsigned kmods to signing server
-        ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "mkdir -p ~/kmods"
-        scp "${SSH_OPTS[@]}" "${SIGNED_KMODS_PATH}"/*.ko "${signUser}@${signHost}:~/kmods/"
-        # Sign kmods
-        sign_kmods
-        # Copy back signed kmods to workspace
-        # Remove unsigned files first to ensure complete replacement
-        rm -f "${SIGNED_KMODS_PATH}"/*.ko
-        scp "${SSH_OPTS[@]}" "${signUser}@${signHost}:~/kmods/*.ko" "${SIGNED_KMODS_PATH}"/
+                # Clean up any existing remote kmods directory
+                ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "rm -rf ~/kmods && mkdir -p ~/kmods"
 
-        # Restore envfile after signing process
-        if [ -f "/tmp/envfile.backup" ]; then
-            cp /tmp/envfile.backup envfile
-        fi
+                # Process each architecture directory
+                for arch_dir in "$SIGNED_KMODS_PATH"/*/; do
+                    if [ -d "$arch_dir" ]; then
+                        arch_name=$(basename "$arch_dir")
+                        echo "Processing signing for architecture: $arch_name"
 
-        # Generate checksums for signed .ko files to ensure integrity in downstream tasks
-        echo "Generating checksums for signed .ko files..."
-        if ls "${SIGNED_KMODS_PATH}"/*.ko >/dev/null 2>&1; then
-            cd "${SIGNED_KMODS_PATH}"
-            sha256sum ./*.ko > signed_kmods_checksums.txt
-            echo "Generated checksums:"
-            cat signed_kmods_checksums.txt
+                        # Backup envfile if present
+                        if [ -f "$arch_dir/envfile" ]; then
+                            cp "$arch_dir/envfile" "/tmp/envfile.backup.$arch_name"
+                        fi
+
+                        # Verify we have .ko files to sign
+                        ko_files_found=false
+                        if ls "$arch_dir"/*.ko 1> /dev/null 2>&1; then
+                            ko_files_found=true
+                            ko_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+                            echo "Found $ko_count .ko files to sign for $arch_name"
+                        else
+                            echo "WARNING: No .ko files found for architecture $arch_name, skipping"
+                            continue
+                        fi
+
+                        if [ "$ko_files_found" = true ]; then
+                            # Create architecture-specific directory on signing server
+                            # shellcheck disable=SC2029
+                            ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                                "mkdir -p \$HOME/kmods/${arch_name}"
+
+                            # Copy unsigned kmods to signing server for this architecture
+                            scp "${SSH_OPTS[@]}" "$arch_dir"/*.ko \
+                                "${signUser}@${signHost}:\$HOME/kmods/${arch_name}/"
+
+                            # Sign kmods for this architecture
+                            sign_kmods_for_arch "$arch_name"
+
+                            # Copy back signed kmods to workspace
+                            # Remove unsigned files first to ensure complete replacement
+                            rm -f "$arch_dir"/*.ko
+                            scp "${SSH_OPTS[@]}" \
+                                "${signUser}@${signHost}:\$HOME/kmods/${arch_name}/*.ko" "$arch_dir/"
+
+                            # Restore envfile
+                            if [ -f "/tmp/envfile.backup.$arch_name" ]; then
+                                cp "/tmp/envfile.backup.$arch_name" "$arch_dir/envfile"
+                            fi
+
+                            # Generate checksums for this architecture
+                            echo "Generating checksums for $arch_name .ko files..."
+                            cd "$arch_dir"
+                            if ls ./*.ko >/dev/null 2>&1; then
+                                sha256sum ./*.ko > "signed_kmods_checksums_${arch_name}.txt"
+                                echo "Generated checksums for $arch_name:"
+                                cat "signed_kmods_checksums_${arch_name}.txt"
+                            fi
+                            echo "Completed signing for $arch_name"
+                        fi
+                    fi
+                done
+
+                # Create overall signing summary
+                echo "Multi-architecture signing summary:" > "$SIGNED_KMODS_PATH/signing_summary.txt"
+                echo "Total architectures processed: $arch_count" >> "$SIGNED_KMODS_PATH/signing_summary.txt"
+                echo "Signing details:" >> "$SIGNED_KMODS_PATH/signing_summary.txt"
+
+                for arch_dir in "$SIGNED_KMODS_PATH"/*/; do
+                    if [ -d "$arch_dir" ]; then
+                        arch_name=$(basename "$arch_dir")
+                        signed_count=0
+                        if ls "$arch_dir"/*.ko 1> /dev/null 2>&1; then
+                            signed_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+                        fi
+                        echo "  $arch_name: $signed_count signed .ko files" >> "$SIGNED_KMODS_PATH/signing_summary.txt"
+
+                        # Verify signature by checking if files have been modified
+                        if [ -f "$arch_dir/signed_kmods_checksums_${arch_name}.txt" ]; then
+                            echo "    Checksums: verified" >> "$SIGNED_KMODS_PATH/signing_summary.txt"
+                        fi
+                    fi
+                done
+
+                echo "Multi-architecture signing completed. Summary:"
+                cat "$SIGNED_KMODS_PATH/signing_summary.txt"
+
+            else
+                echo "Single architecture, using existing signing logic"
+                cd "$SIGNED_KMODS_PATH"
+
+                # Backup envfile before signing process
+                if [ -f "envfile" ]; then
+                    cp envfile /tmp/envfile.backup
+                fi
+
+                # Copy unsigned kmods to signing server
+                ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "mkdir -p ~/kmods"
+                scp "${SSH_OPTS[@]}" "${SIGNED_KMODS_PATH}"/*.ko "${signUser}@${signHost}:~/kmods/"
+
+                # Sign kmods
+                sign_kmods_for_arch "single"
+
+                # Copy back signed kmods to workspace
+                rm -f "${SIGNED_KMODS_PATH}"/*.ko
+                scp "${SSH_OPTS[@]}" "${signUser}@${signHost}:~/kmods/*.ko" "${SIGNED_KMODS_PATH}"/
+
+                # Restore envfile after signing process
+                if [ -f "/tmp/envfile.backup" ]; then
+                    cp /tmp/envfile.backup envfile
+                fi
+
+                # Generate checksums for signed .ko files
+                echo "Generating checksums for signed .ko files..."
+                if ls "${SIGNED_KMODS_PATH}"/*.ko >/dev/null 2>&1; then
+                    cd "${SIGNED_KMODS_PATH}"
+                    sha256sum ./*.ko > signed_kmods_checksums.txt
+                    echo "Generated checksums:"
+                    cat signed_kmods_checksums.txt
+                else
+                    echo "ERROR: No .ko files found after signing process"
+                    exit 1
+                fi
+            fi
         else
-            echo "ERROR: No .ko files found after signing process"
-            exit 1
+            echo "No architecture information found, falling back to single-arch logic"
+            cd "$SIGNED_KMODS_PATH"
+
+            # Backup envfile before signing process
+            if [ -f "envfile" ]; then
+                cp envfile /tmp/envfile.backup
+            fi
+
+            # Copy unsigned kmods to signing server
+            ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "mkdir -p ~/kmods"
+            scp "${SSH_OPTS[@]}" "${SIGNED_KMODS_PATH}"/*.ko "${signUser}@${signHost}:~/kmods/"
+
+            # Sign kmods
+            sign_kmods_for_arch "single"
+
+            # Copy back signed kmods to workspace
+            rm -f "${SIGNED_KMODS_PATH}"/*.ko
+            scp "${SSH_OPTS[@]}" "${signUser}@${signHost}:~/kmods/*.ko" "${SIGNED_KMODS_PATH}"/
+
+            # Restore envfile after signing process
+            if [ -f "/tmp/envfile.backup" ]; then
+                cp /tmp/envfile.backup envfile
+            fi
+
+            # Generate checksums for signed .ko files
+            echo "Generating checksums for signed .ko files..."
+            if ls "${SIGNED_KMODS_PATH}"/*.ko >/dev/null 2>&1; then
+                cd "${SIGNED_KMODS_PATH}"
+                sha256sum ./*.ko > signed_kmods_checksums.txt
+                echo "Generated checksums:"
+                cat signed_kmods_checksums.txt
+            else
+                echo "ERROR: No .ko files found after signing process"
+                exit 1
+            fi
         fi
     - name: create-trusted-artifact
       computeResources:

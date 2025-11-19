@@ -1,0 +1,223 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-build-oot-kmods-rpms-multiarch
+spec:
+  description: Test RPM building for multi-architecture kernel modules.
+  params:
+    - name: ociStorage
+      type: string
+    - name: dataDir
+      type: string
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: taskGitUrl
+      type: string
+      default: https://github.com/enriquebelarte/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      default: signed-kmods-release
+  tasks:
+    - name: setup-multiarch-rpm-test
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: ociStorage
+            type: string
+          - name: orasOptions
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: 1d
+        steps:
+          - name: setup-data
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # For testing multi-arch logic without cross-compilation issues,
+              # simulate multiple architectures using the native architecture
+              echo "Setting up multi-arch test simulation (testing logic without cross-compilation)"
+              echo "2" > "$(params.dataDir)/$(context.pipelineRun.uid)/arch_count.txt"
+              echo "2" > "$(params.dataDir)/arch_count.txt"
+
+              SIGNED_KMODS_PATH="$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods"
+
+              # Create two architecture directories but use compatible kernel versions
+              # This tests the multi-arch logic without requiring cross-compilation
+              mkdir -p "$SIGNED_KMODS_PATH/amd64" "$SIGNED_KMODS_PATH/x86_64"
+
+              # First "architecture" - amd64 directory
+              echo "SIGNED_ARCH1_KO" > "$SIGNED_KMODS_PATH/amd64/test.ko"
+              echo "DRIVER_VENDOR=test-vendor" > "$SIGNED_KMODS_PATH/amd64/envfile"
+              echo "DRIVER_VERSION=1.0.0" >> "$SIGNED_KMODS_PATH/amd64/envfile"
+              echo "KERNEL_VERSION=5.4.0-1.el8.x86_64" >> "$SIGNED_KMODS_PATH/amd64/envfile"
+              cd "$SIGNED_KMODS_PATH/amd64" && sha256sum ./*.ko > signed_kmods_checksums_amd64.txt && cd -
+
+              # Second "architecture" - x86_64 directory (same arch, different kernel version)
+              echo "SIGNED_ARCH2_KO" > "$SIGNED_KMODS_PATH/x86_64/test.ko"
+              echo "DRIVER_VENDOR=test-vendor" > "$SIGNED_KMODS_PATH/x86_64/envfile"
+              echo "DRIVER_VERSION=1.0.0" >> "$SIGNED_KMODS_PATH/x86_64/envfile"
+              echo "KERNEL_VERSION=5.15.0-1.el9.x86_64" >> "$SIGNED_KMODS_PATH/x86_64/envfile"
+              cd "$SIGNED_KMODS_PATH/x86_64" && sha256sum ./*.ko > signed_kmods_checksums_x86_64.txt && cd -
+
+              echo "Multi-arch simulation test setup complete (2 compatible architectures)"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+              - name: orasOptions
+                value: $(params.orasOptions)
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+
+    - name: run-rpm-build
+      taskRef:
+        name: build-oot-kmods-rpms
+      params:
+        - name: signedKmodsPath
+          value: $(context.pipelineRun.uid)/signed-kmods
+        - name: rpmOutputPath
+          value: $(context.pipelineRun.uid)/rpms
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup-multiarch-rpm-test.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: orasOptions
+          value: $(params.orasOptions)
+      runAfter:
+        - setup-multiarch-rpm-test
+
+    - name: check-rpm-result
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: ociStorage
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: taskGitUrl
+            type: string
+          - name: taskGitRevision
+            type: string
+          - name: orasOptions
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: validate-rpm
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== Multi-Architecture RPM Build Test ==="
+
+              RPM_OUTPUT="$(params.dataDir)/$(context.pipelineRun.uid)/rpms"
+
+              # Check for architecture-specific RPM outputs (using simulation directories)
+              if [ -d "$RPM_OUTPUT/amd64" ] && [ -d "$RPM_OUTPUT/x86_64" ]; then
+                echo "SUCCESS: Multi-arch simulation directories found (amd64, x86_64)"
+
+                # Check for architecture-specific packages with correct naming
+                if ls "$RPM_OUTPUT/amd64"/*x86_64.rpm 1> /dev/null 2>&1; then
+                  echo "SUCCESS: First arch (amd64 dir) RPM packages found with correct x86_64 naming"
+                  ls -la "$RPM_OUTPUT/amd64"/*x86_64.rpm
+                else
+                  echo "ERROR: No RPM packages found with x86_64 naming in amd64 directory"
+                  ls -la "$RPM_OUTPUT/amd64/" || echo "amd64 directory empty"
+                  exit 1
+                fi
+
+                if ls "$RPM_OUTPUT/x86_64"/*x86_64.rpm 1> /dev/null 2>&1; then
+                  echo "SUCCESS: Second arch (x86_64 dir) RPM packages found with correct x86_64 naming"
+                  ls -la "$RPM_OUTPUT/x86_64"/*x86_64.rpm
+                else
+                  echo "ERROR: No RPM packages found with x86_64 naming in x86_64 directory"
+                  ls -la "$RPM_OUTPUT/x86_64/" || echo "x86_64 directory empty"
+                  exit 1
+                fi
+
+                # Verify different packages were created (different kernel versions)
+                amd64_rpm=$(find "$RPM_OUTPUT/amd64" -name "*aarch64.rpm" | head -1)
+                x86_64_rpm=$(find "$RPM_OUTPUT/x86_64" -name "*x86_64.rpm" | head -1)
+
+                if [ "$(basename "$amd64_rpm")" != "$(basename "$x86_64_rpm")" ]; then
+                  echo "SUCCESS: Different RPM packages created for different kernel versions"
+                  echo "  AMD64 dir: $(basename "$amd64_rpm")"
+                  echo "  x86_64 dir: $(basename "$x86_64_rpm")"
+                else
+                  echo "WARNING: Both directories contain identically named RPMs"
+                fi
+              else
+                echo "ERROR: Architecture-specific RPM directories not found"
+                ls -la "$RPM_OUTPUT" || echo "RPM output directory does not exist"
+                exit 1
+              fi
+
+              echo "SUCCESS: Multi-architecture RPM build test completed with correct naming!"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-rpm-build.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: orasOptions
+          value: $(params.orasOptions)
+      runAfter:
+        - run-rpm-build

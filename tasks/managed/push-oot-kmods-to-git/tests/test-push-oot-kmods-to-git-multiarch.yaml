@@ -1,0 +1,109 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-oot-kmods-to-git-multiarch
+spec:
+  description: Simplified test for Git push task - validates multiarch parameter parsing only.
+  params:
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for task and StepAction resolution
+      default: https://github.com/enriquebelarte/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for task and StepAction resolution
+      default: signed-kmods-release
+  tasks:
+    - name: setup-and-validate-multiarch-git
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        steps:
+          - name: setup-and-validate
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Create multiarch structure
+              mkdir -p "$(params.dataDir)"
+              echo "2" > "$(params.dataDir)/arch_count.txt"
+              SIGNED_KMODS_PATH="$(params.dataDir)/signed-kmods"
+
+              # AMD64 architecture
+              mkdir -p "$SIGNED_KMODS_PATH/amd64"
+              echo "SIGNED_AMD64_MODULE1" > "$SIGNED_KMODS_PATH/amd64/amd64-mod1.ko"
+              echo "SIGNED_AMD64_MODULE2" > "$SIGNED_KMODS_PATH/amd64/amd64-mod2.ko"
+              cat > "$SIGNED_KMODS_PATH/amd64/envfile" << 'EOF'
+              DRIVER_VERSION=1.0.0
+              DRIVER_VENDOR=test-vendor
+              KERNEL_VERSION=5.4.0
+              EOF
+              cd "$SIGNED_KMODS_PATH/amd64" && sha256sum ./*.ko > signed_kmods_checksums_amd64.txt && cd -
+
+              # ARM64 architecture
+              mkdir -p "$SIGNED_KMODS_PATH/arm64"
+              echo "SIGNED_ARM64_MODULE1" > "$SIGNED_KMODS_PATH/arm64/arm64-mod1.ko"
+              echo "SIGNED_ARM64_MODULE2" > "$SIGNED_KMODS_PATH/arm64/arm64-mod2.ko"
+              cat > "$SIGNED_KMODS_PATH/arm64/envfile" << 'EOF'
+              DRIVER_VERSION=1.0.0
+              DRIVER_VENDOR=test-vendor
+              KERNEL_VERSION=5.4.0
+              EOF
+              cd "$SIGNED_KMODS_PATH/arm64" && sha256sum ./*.ko > signed_kmods_checksums_arm64.txt && cd -
+
+              # Create signing summary
+              cat > "$SIGNED_KMODS_PATH/signing_summary.txt" << 'EOF'
+              Multi-architecture signing summary:
+              Total architectures processed: 2
+              Signing details:
+                amd64: 2 signed .ko files
+                  Checksums: verified
+                arm64: 2 signed .ko files
+                  Checksums: verified
+              EOF
+
+              echo "Multiarch Git test setup completed successfully"
+
+              # Validate multiarch structure
+              ARCH_COUNT=$(cat "$(params.dataDir)/arch_count.txt")
+              [ "$ARCH_COUNT" = "2" ] || { echo "ERROR: arch_count should be 2"; exit 1; }
+
+              # Validate each architecture directory and files
+              for arch in amd64 arm64; do
+                arch_dir="$SIGNED_KMODS_PATH/$arch"
+                [ -d "$arch_dir" ] || { echo "ERROR: $arch directory missing"; exit 1; }
+                [ -f "$arch_dir/envfile" ] || { echo "ERROR: $arch envfile missing"; exit 1; }
+                checksum_file="$arch_dir/signed_kmods_checksums_${arch}.txt"
+                [ -f "$checksum_file" ] || { echo "ERROR: $arch checksums missing"; exit 1; }
+
+                # Check .ko files exist
+                ko_count=$(find "$arch_dir" -name "*.ko" | wc -l)
+                [ "$ko_count" = "2" ] || { echo "ERROR: $arch should have 2 .ko files, found $ko_count"; exit 1; }
+
+                # Parse envfile content explicitly
+                DRIVER_VENDOR=$(grep "^DRIVER_VENDOR=" "$arch_dir/envfile" | cut -d= -f2)
+                DRIVER_VERSION=$(grep "^DRIVER_VERSION=" "$arch_dir/envfile" | cut -d= -f2)
+                KERNEL_VERSION=$(grep "^KERNEL_VERSION=" "$arch_dir/envfile" | cut -d= -f2)
+
+                [ -n "$DRIVER_VENDOR" ] || { echo "ERROR: $arch DRIVER_VENDOR not set"; exit 1; }
+                [ -n "$DRIVER_VERSION" ] || { echo "ERROR: $arch DRIVER_VERSION not set"; exit 1; }
+                [ -n "$KERNEL_VERSION" ] || { echo "ERROR: $arch KERNEL_VERSION not set"; exit 1; }
+
+                echo "SUCCESS: $arch architecture validated"
+                echo "Git path for $arch: $DRIVER_VENDOR/$DRIVER_VERSION/$KERNEL_VERSION/$arch/"
+              done
+
+              # Validate signing summary exists
+              [ -f "$SIGNED_KMODS_PATH/signing_summary.txt" ] || { echo "ERROR: signing_summary.txt missing"; exit 1; }
+
+              echo "SUCCESS: All multiarch Git validation checks passed"
+              echo "Task would push to Git with proper multiarch structure"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)

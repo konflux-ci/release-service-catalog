@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-extract-kmods-from-image
+  name: test-extract-kmods-multiarch
 spec:
   description: >-
-    Run the extract kernel modules task from an image in a specific directory.
+    Test extracting kernel modules from a multi-architecture container image.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -50,7 +50,19 @@ spec:
               # Create the trusted artifacts data directory structure
               mkdir -p "$(params.dataDir)"
 
-              echo "Basic setup completed - mocks will be handled by pre-apply-task-hook.sh"
+              # Create multiarch test marker for mocks to detect
+              touch /tmp/multiarch_test_marker
+
+              # Create mock snapshot.json with multiarch image reference
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
+              {
+                "components": [
+                  {
+                    "containerImage": "quay.io/mock/multiarch@sha256:multiarchdigest"
+                  }
+                ]
+              }
+              EOF
       params:
         - name: dataDir
           value: $(params.dataDir)
@@ -64,7 +76,7 @@ spec:
         - name: signedKmodsPath
           value: signed-kmods
         - name: snapshot
-          value: my-snapshot
+          value: my-multiarch-snapshot
         - name: snapshotPath
           value: snapshot.json
         - name: ociStorage
@@ -79,13 +91,9 @@ spec:
           value: ""
         - name: dataDir
           value: $(params.dataDir)
-        - name: taskGitUrl
-          value: $(params.taskGitUrl)
-        - name: taskGitRevision
-          value: $(params.taskGitRevision)
       runAfter:
         - setup
-    - name: check-result
+    - name: check-multiarch-result
       taskSpec:
         params:
           - name: dataDir
@@ -120,34 +128,81 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
-          - name: check-values
+          - name: check-multiarch-extraction
             image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
               #!/usr/bin/env bash
               set -eux
 
-                if [ -d "$(params.dataDir)/signed-kmods" ]; then
-                  echo "SUCCESS: Signed kmods directory was found in dataDir"
+              echo "=== Multi-Architecture Extraction Test ==="
 
-                  # Check if any .ko files exist in the signed-kmods directory
-                  if ls "$(params.dataDir)/signed-kmods"/*.ko 1> /dev/null 2>&1; then
-                    echo "Kernel module files were extracted successfully"
-                    echo "Found files:"
-                    ls -la "$(params.dataDir)/signed-kmods"
-                  else
-                    echo "Warning: No .ko files found in signed-kmods directory"
-                    echo "Directory contents:"
-                    ls -la "$(params.dataDir)/signed-kmods" || echo "Directory does not exist or is empty"
-                  fi
+              SIGNED_KMODS_PATH="$(params.dataDir)/signed-kmods"
 
-                  # Check if envfile was copied
-                  if [ -f "$(params.dataDir)/signed-kmods/envfile" ]; then
-                    echo "Environment file was copied successfully"
-                    cat "$(params.dataDir)/signed-kmods/envfile"
-                  else
-                    echo "Warning: envfile not found"
-                  fi
+              # Check if architecture count file was created
+              if [ -f "$(params.dataDir)/arch_count.txt" ]; then
+                arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+                echo "SUCCESS: Architecture count detected: $arch_count"
+
+                if [ "$arch_count" -eq 2 ]; then
+                  echo "SUCCESS: Correct number of architectures detected (2)"
+                else
+                  echo "ERROR: Expected 2 architectures, found $arch_count"
+                  exit 1
                 fi
+              else
+                echo "ERROR: arch_count.txt not found"
+                exit 1
+              fi
+
+              # Check if architectures.json was created
+              if [ -f "$(params.dataDir)/architectures.json" ]; then
+                echo "SUCCESS: architectures.json found"
+                cat "$(params.dataDir)/architectures.json"
+              else
+                echo "ERROR: architectures.json not found"
+                exit 1
+              fi
+
+              # Check for architecture-specific directories
+              expected_archs=("amd64" "arm64")
+              for arch in "${expected_archs[@]}"; do
+                arch_dir="$SIGNED_KMODS_PATH/$arch"
+                if [ -d "$arch_dir" ]; then
+                  echo "SUCCESS: Architecture directory found: $arch_dir"
+
+                  # Check for .ko files in this architecture
+                  if ls "$arch_dir"/*.ko 1> /dev/null 2>&1; then
+                    echo "SUCCESS: .ko files found in $arch:"
+                    ls -la "$arch_dir"/*.ko
+                  else
+                    echo "ERROR: No .ko files found in $arch directory"
+                    exit 1
+                  fi
+
+                  # Check for envfile
+                  if [ -f "$arch_dir/envfile" ]; then
+                    echo "SUCCESS: envfile found for $arch"
+                    cat "$arch_dir/envfile"
+                  else
+                    echo "ERROR: envfile not found for $arch"
+                    exit 1
+                  fi
+                else
+                  echo "ERROR: Architecture directory not found: $arch_dir"
+                  exit 1
+                fi
+              done
+
+              # Check for extraction summary
+              if [ -f "$SIGNED_KMODS_PATH/extraction_summary.txt" ]; then
+                echo "SUCCESS: Extraction summary found:"
+                cat "$SIGNED_KMODS_PATH/extraction_summary.txt"
+              else
+                echo "ERROR: extraction_summary.txt not found"
+                exit 1
+              fi
+
+              echo "SUCCESS: Multi-architecture extraction test completed successfully!"
       params:
         - name: dataDir
           value: $(params.dataDir)

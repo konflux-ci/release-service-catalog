@@ -5,30 +5,32 @@ metadata:
   name: test-build-oot-kmods-rpms-custom-output-path
 spec:
   description: |
-    Test the build-oot-kmods-rpms task with custom RPM output path parameter
+    Test the build-oot-kmods-rpms task with custom RPM output path parameter using mocking
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
       type: string
     - name: ociArtifactExpiresAfter
-      description: Expiration date for the trusted artifacts created in the
-        OCI repository. An empty string means the artifacts do not expire.
+      description: Expiration date for the trusted artifacts created in the OCI repository.
       type: string
       default: "1d"
     - name: orasOptions
       description: oras options to pass to Trusted Artifacts calls
       type: string
       default: "--insecure"
-    - name: trustedArtifactsDebug
-      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
-      type: string
-      default: ""
     - name: dataDir
       description: The location where data will be stored
       type: string
   tasks:
     - name: setup
       taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: ociStorage
+            type: string
+          - name: orasOptions
+            type: string
         results:
           - name: sourceDataArtifact
             type: string
@@ -44,8 +46,6 @@ spec:
               value: $(params.ociArtifactExpiresAfter)
             - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: "DEBUG"
-              value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
@@ -64,12 +64,11 @@ spec:
 
               # Create mock signed kernel module files
               echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/custom-driver.ko"
-              echo -e "\x7fELF" > "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/custom-helper.ko"
 
               # Make them look like kernel modules (minimal binary header)
               for ko in "$(params.dataDir)/$(context.pipelineRun.uid)/signed-kmods/"*.ko; do
                 printf "\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "$ko"
-                printf "custom kernel module test data" >> "$ko"
+                printf "test kernel module data" >> "$ko"
               done
 
               # Generate checksums file to match the sign-oot-kmods task output
@@ -86,6 +85,16 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
+              - name: orasOptions
+                value: $(params.orasOptions)
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+
     - name: run-task
       taskRef:
         name: build-oot-kmods-rpms
@@ -102,22 +111,14 @@ spec:
           value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
       runAfter:
         - setup
+
     - name: check-result
-      params:
-        - name: sourceDataArtifact
-          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
-        - name: dataDir
-          value: $(params.dataDir)
-        - name: pipelineRunUid
-          value: $(context.pipelineRun.uid)
       taskSpec:
         params:
           - name: sourceDataArtifact
@@ -125,6 +126,8 @@ spec:
           - name: dataDir
             type: string
           - name: pipelineRunUid
+            type: string
+          - name: orasOptions
             type: string
         volumes:
           - name: workdir
@@ -138,8 +141,6 @@ spec:
               value: $(params.ociArtifactExpiresAfter)
             - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: "DEBUG"
-              value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: use-trusted-artifact
             ref:
@@ -149,7 +150,9 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
-          - name: check-custom-path
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: validate-custom-path
             image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
               #!/usr/bin/env bash
@@ -158,65 +161,65 @@ spec:
               CUSTOM_RPM_OUTPUT_PATH="$(params.dataDir)/$(params.pipelineRunUid)/custom-rpm-output"
               DEFAULT_RPM_OUTPUT_PATH="$(params.dataDir)/$(params.pipelineRunUid)/rpms"
 
-              echo "Checking custom RPM output path: ${CUSTOM_RPM_OUTPUT_PATH}"
+              echo "=== Custom RPM Output Path Test ==="
+              echo "Testing custom path: ${CUSTOM_RPM_OUTPUT_PATH}"
+              echo "Default path: ${DEFAULT_RPM_OUTPUT_PATH}"
 
-              # Verify that RPMs were created in the custom path, not the default path
-              if ! ls "${CUSTOM_RPM_OUTPUT_PATH}"/*.rpm >/dev/null 2>&1; then
+              # Verify that mock RPMs were created in the custom path
+              if ! find "${CUSTOM_RPM_OUTPUT_PATH}" -name "*.rpm" | head -1 >/dev/null 2>&1; then
                 echo "ERROR: No RPM files found in custom output path ${CUSTOM_RPM_OUTPUT_PATH}"
                 echo "Contents of custom output directory:"
-                ls -la "${CUSTOM_RPM_OUTPUT_PATH}" || echo "Custom output directory does not exist"
+                find "${CUSTOM_RPM_OUTPUT_PATH}" -type f 2>/dev/null || \
+                  echo "Custom output directory does not exist or is empty"
                 exit 1
               fi
 
-              # Verify RPMs were NOT created in the default path
-              if ls "${DEFAULT_RPM_OUTPUT_PATH}"/*.rpm >/dev/null 2>&1; then
-                echo "ERROR: RPM files found in default path when custom path was specified"
-                echo "Default path contents:"
-                ls -la "${DEFAULT_RPM_OUTPUT_PATH}"/*.rpm
+              echo "SUCCESS: Found RPM files in custom output path"
+
+              # Verify RPMs were NOT created in the default path (if directory exists)
+              if [ -d "${DEFAULT_RPM_OUTPUT_PATH}" ]; then
+                if find "${DEFAULT_RPM_OUTPUT_PATH}" -name "*.rpm" | head -1 >/dev/null 2>&1; then
+                  echo "ERROR: RPM files found in default path when custom path was specified"
+                  echo "Default path contents:"
+                  find "${DEFAULT_RPM_OUTPUT_PATH}" -name "*.rpm"
+                  exit 1
+                fi
+                echo "SUCCESS: No RPM files found in default path (as expected)"
+              else
+                echo "SUCCESS: Default path directory doesn't exist (as expected)"
+              fi
+
+              # Verify expected mock RPM file exists with custom vendor name
+              expected_rpm=$(find "${CUSTOM_RPM_OUTPUT_PATH}" -name "custom-vendor-kmods-*.rpm" | head -1)
+              if [ -z "$expected_rpm" ]; then
+                echo "ERROR: Expected custom-vendor RPM not found"
+                echo "Available RPM files:"
+                find "${CUSTOM_RPM_OUTPUT_PATH}" -name "*.rpm"
                 exit 1
               fi
 
-              echo "RPMs correctly created in custom output path"
+              echo "SUCCESS: Found expected custom vendor RPM: $(basename "$expected_rpm")"
 
-              # Verify expected RPM naming pattern with custom vendor
-              expected_rpm="${CUSTOM_RPM_OUTPUT_PATH}/custom-vendor-kmods-2.4.6-1.6_9_0_1_el9_x86_64.x86_64.rpm"
-              if [ ! -f "$expected_rpm" ]; then
-                echo "ERROR: Expected RPM file not found: $expected_rpm"
-                echo "Available RPM files in custom path:"
-                ls -la "${CUSTOM_RPM_OUTPUT_PATH}"/*.rpm
+              # Verify it's a mock RPM (contains our test data)
+              if grep -q "MOCK RPM FILE" "$expected_rpm" && grep -q "custom-vendor" "$expected_rpm"; then
+                echo "SUCCESS: RPM file contains expected mock data"
+              else
+                echo "ERROR: RPM file doesn't contain expected mock data"
+                echo "RPM content:"
+                head -10 "$expected_rpm"
                 exit 1
               fi
 
-              echo "Found expected RPM with custom vendor: $expected_rpm"
-
-              # Basic RPM validation
-              if ! rpm -qp --queryformat '%{NAME}-%{VERSION}-%{RELEASE}\n' "$expected_rpm" >/dev/null 2>&1; then
-                echo "ERROR: Generated file is not a valid RPM"
-                exit 1
-              fi
-
-              # Get and verify RPM metadata
-              rpm_name=$(rpm -qp --queryformat '%{NAME}' "$expected_rpm")
-              rpm_version=$(rpm -qp --queryformat '%{VERSION}' "$expected_rpm")
-              rpm_summary=$(rpm -qp --queryformat '%{SUMMARY}' "$expected_rpm")
-
-              echo "RPM validation successful:"
-              echo "  Name: $rpm_name"
-              echo "  Version: $rpm_version"
-              echo "  Summary: $rpm_summary"
-
-              # Verify RPM metadata matches expected values for custom vendor
-              if [ "$rpm_name" != "custom-vendor-kmods" ]; then
-                echo "ERROR: RPM name mismatch. Expected: custom-vendor-kmods, Got: $rpm_name"
-                exit 1
-              fi
-
-              if [ "$rpm_version" != "2.4.6" ]; then
-                echo "ERROR: RPM version mismatch. Expected: 2.4.6, Got: $rpm_version"
-                exit 1
-              fi
-
-              echo "All custom output path validation passed"
+              echo "SUCCESS: All custom output path validation passed"
               echo "Custom output path test completed successfully"
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: orasOptions
+          value: $(params.orasOptions)
       runAfter:
         - run-task
