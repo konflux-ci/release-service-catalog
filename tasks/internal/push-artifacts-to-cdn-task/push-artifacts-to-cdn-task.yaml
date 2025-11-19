@@ -58,22 +58,10 @@ spec:
       type: string
       description: Secret containing SSH private key for the Mac signing host
       default: mac-ssh-key
-    - name: checksumUser
+    - name: checksumCredentials
       type: string
-      description: User to interact with the checksum host
-      default: konflux-release-signing-sa
-    - name: checksumHost
-      type: string
-      description: Hostname of the checksum host
-      default: etera-worker.hosted.upshift.rdu2.redhat.com
-    - name: checksumFingerprint
-      type: string
-      description: Secret containing the fingerprint for the checksum host
-      default: checksum-fingerprint
-    - name: checksumKeytab
-      type: string
-      description: Secret containing the keytab for the checksum host
-      default: checksum-keytab
+      description: Secret containing the keytab, user, host, and fingerprint for the checksum host
+      default: checksum-credentials
     - name: kerberosRealm
       type: string
       description: Kerberos realm for the checksum host
@@ -121,13 +109,9 @@ spec:
       secret:
         secretName: windows-ssh-key
         defaultMode: 0444
-    - name: checksum-fingerprint-vol
+    - name: checksum-credentials-vol
       secret:
-        secretName: checksum-fingerprint
-        defaultMode: 0444
-    - name: checksum-keytab-vol
-      secret:
-        secretName: checksum-keytab
+        secretName: $(params.checksumCredentials)
         defaultMode: 0444
     - name: redhat-workloads-token
       secret:
@@ -720,10 +704,8 @@ spec:
       volumeMounts:
         - name: shared-dir
           mountPath: /shared
-        - name: checksum-fingerprint-vol
-          mountPath: /mnt/secrets_fingerprint
-        - name: checksum-keytab-vol
-          mountPath: /mnt/secrets_keytab
+        - name: checksum-credentials-vol
+          mountPath: /mnt/checksum_credentials
         - name: quay-secret
           mountPath: /mnt/quaySecret
       env:
@@ -788,10 +770,12 @@ spec:
                     -o GSSAPIDelegateCredentials=yes \
                     -o IdentitiesOnly=yes"
 
+        # Read checksum configuration from secret
+        checksum_user=$(cat /mnt/checksum_credentials/user)
+        checksum_host=$(cat /mnt/checksum_credentials/host)
+
         sign_file() {
             sign_method=$1  # The signing method: --clearsign or --gpgsign
-            checksum_user=$(params.checksumUser)
-            checksum_host=$(params.checksumHost)
             pipeline_run_uid=$(context.taskRun.uid)
             output_path="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt.$2"
             input_file="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt"
@@ -808,12 +792,12 @@ spec:
         # so we use GSSAPI Delegate (in ssh opts) to transfer the ticket to the checksum host
         KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
         export KRB5CCNAME
-        base64 -d /mnt/secrets_keytab/keytab > /tmp/sa.keytab
-        retry 5 kinit -kt /tmp/sa.keytab "$(params.checksumUser)@$(params.kerberosRealm)"
+        base64 -d /mnt/checksum_credentials/keytab > /tmp/sa.keytab
+        retry 5 kinit -kt /tmp/sa.keytab "${checksum_user}@$(params.kerberosRealm)"
 
         mkdir -p /tmp/.ssh
         chmod 700 /tmp/.ssh
-        cp "/mnt/secrets_fingerprint/fingerprint" /tmp/.ssh/known_hosts
+        cp "/mnt/checksum_credentials/fingerprint" /tmp/.ssh/known_hosts
         chmod 600 /tmp/.ssh/known_hosts
 
         # get all of the signed binaries into a common directory
@@ -850,21 +834,21 @@ spec:
         done
         # Send sha256sum.txt to the checksum host for signing
         # shellcheck disable=SC2029,SC2086
-        ssh $SSH_OPTS "$(params.checksumUser)@$(params.checksumHost)" "mkdir -p ~/$(context.taskRun.uid)/checksum"
+        ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "mkdir -p ~/$(context.taskRun.uid)/checksum"
         # shellcheck disable=SC2086
         scp $SSH_OPTS "${SHA_SUM_PATH}" \
-        "$(params.checksumUser)@$(params.checksumHost):~/$(context.taskRun.uid)/checksum"
+        "${checksum_user}@${checksum_host}:~/$(context.taskRun.uid)/checksum"
 
         sign_file --clearsign sig
         sign_file --gpgsign gpg
 
         # scp the two files back to the content directory
         scp "$SSH_OPTS" \
-        "$(params.checksumUser)@$(params.checksumHost):~/$(context.taskRun.uid)/checksum/sha256sum.txt.sig" \
+        "${checksum_user}@${checksum_host}:~/$(context.taskRun.uid)/checksum/sha256sum.txt.sig" \
         "${SIGNED_DIR}/sha256sum.txt.sig"
 
         scp "$SSH_OPTS" \
-        "$(params.checksumUser)@$(params.checksumHost):~/$(context.taskRun.uid)/checksum/sha256sum.txt.gpg" \
+        "${checksum_user}@${checksum_host}:~/$(context.taskRun.uid)/checksum/sha256sum.txt.gpg" \
         "${SIGNED_DIR}/sha256sum.txt.gpg"
 
         mv "$SHA_SUM_PATH" "${SIGNED_DIR}/sha256sum.txt"

@@ -40,7 +40,7 @@ kubectl create secret generic redhat-workloads-token --from-literal=.dockerconfi
 # create ssh secrets
 
 # cleaning up secrets first
-for secret in checksum-fingerprint checksum-keytab quay-credentials windows-credentials mac-host-credentials mac-signing-credentials; do
+for secret in checksum-credentials quay-credentials windows-credentials mac-host-credentials mac-signing-credentials; do
     kubectl delete secret "$secret" --ignore-not-found
 done
 
@@ -51,8 +51,11 @@ for OS in windows mac; do
     kubectl create secret generic "${OS}-ssh-key" --from-file="${OS}_id_rsa=${TMPDIR}/${OS}" --from-literal="${OS}"_fingerprint="$(ssh-keygen -lf "${TMPDIR}/${OS}.pub")"
 done
 ssh-keygen -f "${TMPDIR}/checksum" -N ""
-kubectl create secret generic "checksum-fingerprint" --from-literal=fingerprint="$(ssh-keygen -lf "${TMPDIR}/checksum.pub")"
-kubectl create secret generic "checksum-keytab" --from-literal=keytab=""
+kubectl create secret generic "checksum-credentials" \
+    --from-literal=keytab="" \
+    --from-literal=user="konflux-release-signing-sa" \
+    --from-literal=host="etera-worker.hosted.upshift.rdu2.redhat.com" \
+    --from-literal=fingerprint="$(ssh-keygen -lf "${TMPDIR}/checksum.pub")"
 
 # create quay, windows and mac secrets
 kubectl create secret generic quay-credentials --from-literal=username="testuser" --from-literal=password="testpass"
