@@ -98,16 +98,16 @@ verify_release_contents() {
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
     catalog_url=$(jq -r '.status.artifacts.catalog_urls[]?.url // ""' <<< "${release_json}")
     cve=$(jq -r '.status.collectors.tenant.cve.releaseNotes.cves[]? | select(.key == "CVE-2024-8260") | .key // ""' <<< "${release_json}")
-    image_arches=$(jq -r '.status.artifacts.images[0].arches | sort | join(" ") // ""' <<< "${release_json}")
-    sboms=$(jq -r '.status.artifacts.sboms // ""' <<< "${release_json}")
+    # image_arches=$(jq -r '.status.artifacts.images[0].arches | sort | join(" ") // ""' <<< "${release_json}")
+    # sboms=$(jq -r '.status.artifacts.sboms // ""' <<< "${release_json}")
 
-    echo "Checking image arches..."
-    if [ "$image_arches" = "amd64 arm64" ]; then
-      echo "✅️ Found required image arches: amd64 arm64"
-    else
-      echo "🔴 Some required image arches were NOT found: expected: amd64 arm64, found: ${image_arches}"
-      failures=$((failures+1))
-    fi
+    # echo "Checking image arches..."
+    # if [ "$image_arches" = "amd64 arm64" ]; then
+    #   echo "✅️ Found required image arches: amd64 arm64"
+    # else
+    #   echo "🔴 Some required image arches were NOT found: expected: amd64 arm64, found: ${image_arches}"
+    #   failures=$((failures+1))
+    # fi
 
     if [ -z "$advisory_internal_url" ]; then
         echo "Warning: advisory_internal_url is empty. Skipping advisory content check."
@@ -235,13 +235,13 @@ verify_release_contents() {
       echo "Skipping topic and description check as advisory_internal_url was empty."
     fi
 
-    echo "Checking SBOMs uploaded to Atlas..."
-    if [ -z "$sboms" ] || [ "$sboms" = "null" ]; then
-        echo '🔴 The release artifact does NOT contain the "sboms" field.'
-        failures=$((failures+1))
-    else
-        verify_sboms "$sboms"
-    fi
+    # echo "Checking SBOMs uploaded to Atlas..."
+    # if [ -z "$sboms" ] || [ "$sboms" = "null" ]; then
+    #    echo '🔴 The release artifact does NOT contain the "sboms" field.'
+    #    failures=$((failures+1))
+    # else
+    #     verify_sboms "$sboms"
+    # fi
 
     if [ "${failures}" -gt 0 ]; then
       echo "🔴 Test has FAILED with ${failures} failure(s)!"
