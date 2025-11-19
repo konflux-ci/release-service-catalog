@@ -115,50 +115,170 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: detect-architectures
+      image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        snapshot_json=$(cat "$(params.dataDir)/$(params.snapshotPath)")
+        source_image=$(jq -r '.components[0].containerImage' <<< "$snapshot_json")
+        echo "Detecting architectures for image: $source_image"
+
+        # Use the existing get-image-architectures utility
+        arch_json="$(get-image-architectures "${source_image}")"
+        echo "Architecture data: $arch_json"
+
+        # Save architecture information for later steps
+        echo "$arch_json" > "$(params.dataDir)/architectures.json"
+
+        # Count architectures and save for later use
+        arch_count=$(echo "$arch_json" | jq -s 'length')
+        echo "Found $arch_count architecture(s)"
+        echo "$arch_count" > "$(params.dataDir)/arch_count.txt"
+
+        # Log architecture details
+        echo "$arch_json" | jq -c '.' | while IFS= read -r arch_info; do
+            platform_arch=$(echo "$arch_info" | jq -r '.platform.architecture')
+            arch_digest=$(echo "$arch_info" | jq -r '.digest')
+            echo "  Architecture: $platform_arch, Digest: $arch_digest"
+        done
     - name: extract-kmods
       image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
       computeResources:
         limits:
-          memory: 512Mi
+          memory: 1Gi
         requests:
-          memory: 512Mi
-          cpu: 250m 
+          memory: 1Gi
+          cpu: 500m
       script: |
         #!/usr/bin/env bash
         set -ex
         export DOCKER_CONFIG
-        
+
         # Debug: Show what dataDir we're using
         echo "DEBUG: dataDir parameter value: $(params.dataDir)"
-        # Copy image to tmp
+
         KMODS_PATH=$(params.kmodsPath)
         SIGNED_KMODS_PATH=$(params.signedKmodsPath)
         snapshot_json=$(cat "$(params.dataDir)/$(params.snapshotPath)")
         source_image=$(jq -r '.components[0].containerImage' <<< "$snapshot_json")
-        tmp_dir=$(mktemp -d)
-        echo "Copying $source_image to $tmp_dir..."
-        skopeo copy docker://"$source_image" dir:"$tmp_dir"
-        echo "Inspecting layers to find OOT kernel modules and envfile"
-        for LAYER in $(jq -r '.layers[].digest' "$tmp_dir/manifest.json"); do
-            LAYER=${LAYER#sha256:}
-            # Check if the archive contains the KMODS_PATH directory
-            if tar -tf "$tmp_dir/$LAYER" | grep -q "^${KMODS_PATH#/}/"; then
-                echo "Extracting $KMODS_PATH/ from $LAYER..."
-                tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "${KMODS_PATH#/}" --no-same-owner
-                mkdir -p "$(params.dataDir)/$SIGNED_KMODS_PATH/"
-                cp -r "$tmp_dir$KMODS_PATH"/*.ko "$(params.dataDir)/$SIGNED_KMODS_PATH/"
-                echo "Copying envfile to get versions data..."
-                # Also extract envfile if it exists in this layer
-                DRIVERS_DIR="$(dirname "${KMODS_PATH#/}")"
-                ENVFILE_PATH="${DRIVERS_DIR}/envfile"
-                if tar -tf "$tmp_dir/$LAYER" | grep -q "^${ENVFILE_PATH}$"; then
-                   tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "$ENVFILE_PATH" --no-same-owner
-                    cp "$tmp_dir/$ENVFILE_PATH" "$(params.dataDir)/$SIGNED_KMODS_PATH/"
+
+        # Read architecture count
+        arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+        echo "Processing $arch_count architecture(s)"
+
+        # Function to extract kmods for a specific image
+        extract_single_arch() {
+            local img="$1"
+            local dest_dir="$2"
+            local arch_name="$3"
+
+            echo "Extracting .ko files from $img to $dest_dir (arch: $arch_name)"
+
+            tmp_dir=$(mktemp -d)
+            echo "Copying $img to $tmp_dir..."
+            skopeo copy docker://"$img" dir:"$tmp_dir"
+
+            echo "Inspecting layers to find OOT kernel modules and envfile for $arch_name"
+            extracted=false
+
+            for LAYER in $(jq -r '.layers[].digest' "$tmp_dir/manifest.json"); do
+                LAYER=${LAYER#sha256:}
+                # Check if the archive contains the KMODS_PATH directory
+                if tar -tf "$tmp_dir/$LAYER" | grep -q "^${KMODS_PATH#/}/"; then
+                    echo "Extracting $KMODS_PATH/ from $LAYER for $arch_name..."
+                    tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "${KMODS_PATH#/}" --no-same-owner
+
+                    mkdir -p "$dest_dir"
+                    if ls "$tmp_dir$KMODS_PATH"/*.ko 1> /dev/null 2>&1; then
+                        cp -r "$tmp_dir$KMODS_PATH"/*.ko "$dest_dir/"
+                        extracted=true
+                        ko_count=$(find "$dest_dir" -name "*.ko" -type f | wc -l)
+                        echo "Extracted .ko files for $arch_name: $ko_count files"
+                    fi
+
+                    echo "Copying envfile to get versions data for $arch_name..."
+                    # Also extract envfile if it exists in this layer
+                    DRIVERS_DIR="$(dirname "${KMODS_PATH#/}")"
+                    ENVFILE_PATH="${DRIVERS_DIR}/envfile"
+                    if tar -tf "$tmp_dir/$LAYER" | grep -q "^${ENVFILE_PATH}$"; then
+                        tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "$ENVFILE_PATH" --no-same-owner
+                        cp "$tmp_dir/$ENVFILE_PATH" "$dest_dir/"
+                        echo "Extracted envfile for $arch_name"
+                    fi
+                    break
+                else
+                    echo "$KMODS_PATH not found in $LAYER, continuing..."
                 fi
+            done
+
+            rm -rf "$tmp_dir"
+
+            if [ "$extracted" = true ]; then
+                echo "Successfully extracted kernel modules for $arch_name"
             else
-                echo "$KMODS_PATH not found in $LAYER so skipping layer..."
+                echo "WARNING: No kernel modules found for $arch_name"
             fi
-        done
+        }
+
+        if [ "$arch_count" -eq 1 ]; then
+            echo "Single architecture image, using standard extraction"
+            extract_single_arch "$source_image" "$(params.dataDir)/$SIGNED_KMODS_PATH" "single"
+        else
+            echo "Multi-architecture image detected, processing each architecture separately"
+
+            # Read architecture data and process each one
+            arch_data=$(cat "$(params.dataDir)/architectures.json")
+
+            echo "$arch_data" | jq -c '.' | while IFS= read -r arch_info; do
+                platform_arch=$(echo "$arch_info" | jq -r '.platform.architecture')
+                arch_digest=$(echo "$arch_info" | jq -r '.digest')
+
+                echo "Processing architecture: $platform_arch (digest: $arch_digest)"
+
+                # Create architecture-specific directory
+                arch_dir="$(params.dataDir)/$SIGNED_KMODS_PATH/$platform_arch"
+
+                # Extract for this specific architecture using manifest digest
+                arch_specific_image="$source_image@$arch_digest"
+                extract_single_arch "$arch_specific_image" "$arch_dir" "$platform_arch"
+            done
+
+            # Create a summary of what was extracted
+            summary_file="$(params.dataDir)/$SIGNED_KMODS_PATH/extraction_summary.txt"
+            echo "Multi-architecture extraction summary:" > "$summary_file"
+            echo "Total architectures processed: $arch_count" >> "$summary_file"
+            echo "Extraction details:" >> "$summary_file"
+
+            for arch_dir in "$(params.dataDir)/$SIGNED_KMODS_PATH"/*/; do
+                if [ -d "$arch_dir" ]; then
+                    arch_name=$(basename "$arch_dir")
+                    ko_count=0
+                    if ls "$arch_dir"/*.ko 1> /dev/null 2>&1; then
+                        ko_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+                    fi
+                    echo "  $arch_name: $ko_count .ko files" >> "$summary_file"
+
+                    # List the specific .ko files found
+                    if [ "$ko_count" -gt 0 ]; then
+                        echo "    Files:" >> "$summary_file"
+                        find "$arch_dir" -name "*.ko" -type f | while read -r ko_file; do
+                            echo "      $(basename "$ko_file")" >> "$summary_file"
+                        done
+                    fi
+                fi
+            done
+
+            echo "Multi-architecture extraction completed. Summary:"
+            cat "$summary_file"
+        fi
     - name: create-trusted-artifact
       computeResources:
         limits:

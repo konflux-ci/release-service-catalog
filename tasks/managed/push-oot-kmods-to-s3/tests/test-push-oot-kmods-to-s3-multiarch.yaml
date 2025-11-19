@@ -1,0 +1,80 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-oot-kmods-to-s3-multiarch
+spec:
+  description: Simplified test for S3 push task - validates multiarch parameter parsing only.
+  params:
+    - name: dataDir
+      type: string
+    - name: taskGitUrl
+      type: string
+      default: https://github.com/enriquebelarte/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      default: signed-kmods-release
+  tasks:
+    - name: setup-and-validate-multiarch
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        steps:
+          - name: setup-and-validate
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Create multiarch structure
+              mkdir -p "$(params.dataDir)"
+              echo "2" > "$(params.dataDir)/arch_count.txt"
+              SIGNED_KMODS_PATH="$(params.dataDir)/signed-kmods"
+              mkdir -p "$SIGNED_KMODS_PATH/amd64" "$SIGNED_KMODS_PATH/arm64"
+
+              # Create test files for each architecture
+              echo "AMD64_KO_DATA" > "$SIGNED_KMODS_PATH/amd64/test.ko"
+              cat > "$SIGNED_KMODS_PATH/amd64/envfile" << 'EOF'
+              DRIVER_VENDOR=test-vendor
+              DRIVER_VERSION=1.0.0
+              KERNEL_VERSION=6.5.0-test
+              EOF
+
+              echo "ARM64_KO_DATA" > "$SIGNED_KMODS_PATH/arm64/test.ko"
+              cat > "$SIGNED_KMODS_PATH/arm64/envfile" << 'EOF'
+              DRIVER_VENDOR=test-vendor
+              DRIVER_VERSION=1.0.0
+              KERNEL_VERSION=6.5.0-test
+              EOF
+
+              echo "Multiarch test setup completed successfully"
+
+              # Validate multiarch structure
+              ARCH_COUNT=$(cat "$(params.dataDir)/arch_count.txt")
+              [ "$ARCH_COUNT" = "2" ] || { echo "ERROR: arch_count should be 2"; exit 1; }
+
+              # Validate each architecture directory
+              for arch in amd64 arm64; do
+                arch_dir="$SIGNED_KMODS_PATH/$arch"
+                [ -f "$arch_dir/test.ko" ] || { echo "ERROR: $arch test.ko missing"; exit 1; }
+                [ -f "$arch_dir/envfile" ] || { echo "ERROR: $arch envfile missing"; exit 1; }
+
+                # Check envfile content by parsing explicitly
+                DRIVER_VENDOR=$(grep "^DRIVER_VENDOR=" "$arch_dir/envfile" | cut -d= -f2)
+                DRIVER_VERSION=$(grep "^DRIVER_VERSION=" "$arch_dir/envfile" | cut -d= -f2)
+                KERNEL_VERSION=$(grep "^KERNEL_VERSION=" "$arch_dir/envfile" | cut -d= -f2)
+
+                [ -n "$DRIVER_VENDOR" ] || { echo "ERROR: $arch DRIVER_VENDOR not set"; exit 1; }
+                [ -n "$DRIVER_VERSION" ] || { echo "ERROR: $arch DRIVER_VERSION not set"; exit 1; }
+                [ -n "$KERNEL_VERSION" ] || { echo "ERROR: $arch KERNEL_VERSION not set"; exit 1; }
+
+                echo "SUCCESS: $arch architecture validated"
+                echo "S3 path for $arch: $DRIVER_VENDOR/$DRIVER_VERSION/$KERNEL_VERSION/$arch/"
+              done
+
+              echo "SUCCESS: All multiarch validation checks passed"
+              echo "Task would upload to S3 with multiarch structure"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)

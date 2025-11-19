@@ -59,7 +59,7 @@ function scp() {
     "-o UserKnownHostsFile=~/.ssh/known_hosts -o GSSAPIAuthentication=yes -o GSSAPIDelegateCredentials=yes"*)
       # Check if this is the download command (contains *.ko in remote path)
       if [[ "$*" == *"~/kmods/*.ko"* ]]; then
-        # This is the download command - extract destination directory (last argument)
+        # This is the download command for single arch - extract destination directory (last argument)
         local args=($*)
         local dest_path="${args[-1]}"
         echo "Mock scp: Creating signed files in destination: $dest_path"
@@ -75,8 +75,42 @@ function scp() {
         else
           echo "Mock scp: Warning - destination directory $dest_path does not exist"
         fi
+      elif [[ "$*" == *"~/kmods/amd64/*.ko"* ]]; then
+        # This is the download command for amd64 arch
+        local args=($*)
+        local dest_path="${args[-1]}"
+        echo "Mock scp: Creating signed amd64 files in destination: $dest_path"
+        if [ -d "$dest_path" ]; then
+          echo "SIGNED_AMD64_MODULE1" > "$dest_path/amd64-mod1.ko"
+          echo "SIGNED_AMD64_MODULE2" > "$dest_path/amd64-mod2.ko"
+          echo "Mock scp: Created signed amd64 files in $dest_path"
+
+          # Generate architecture-specific checksums file
+          cd "$dest_path"
+          sha256sum *.ko > signed_kmods_checksums_amd64.txt
+          echo "Mock scp: Generated amd64 checksums file in $dest_path"
+        else
+          echo "Mock scp: Warning - destination directory $dest_path does not exist"
+        fi
+      elif [[ "$*" == *"~/kmods/arm64/*.ko"* ]]; then
+        # This is the download command for arm64 arch
+        local args=($*)
+        local dest_path="${args[-1]}"
+        echo "Mock scp: Creating signed arm64 files in destination: $dest_path"
+        if [ -d "$dest_path" ]; then
+          echo "SIGNED_ARM64_MODULE1" > "$dest_path/arm64-mod1.ko"
+          echo "SIGNED_ARM64_MODULE2" > "$dest_path/arm64-mod2.ko"
+          echo "Mock scp: Created signed arm64 files in $dest_path"
+
+          # Generate architecture-specific checksums file
+          cd "$dest_path"
+          sha256sum *.ko > signed_kmods_checksums_arm64.txt
+          echo "Mock scp: Generated arm64 checksums file in $dest_path"
+        else
+          echo "Mock scp: Warning - destination directory $dest_path does not exist"
+        fi
       fi
-      # For upload command, we don't need to do anything special
+      # For upload commands, we don't need to do anything special
       ;;
     *)
       echo "Error: Incorrect scp parameters"

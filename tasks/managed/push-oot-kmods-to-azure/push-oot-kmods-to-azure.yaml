@@ -110,10 +110,14 @@ spec:
         ACCOUNT="$(params.azureStorageAccount)"
         CONTAINER="$(params.azureContainer)"
 
-        # shellcheck source=/dev/null
-        . "${SIGNED_KMODS_FULL_PATH}/envfile"
-
-        AZURE_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/"
+        # Check if this is a multi-architecture build
+        if [ -f "$(params.dataDir)/arch_count.txt" ]; then
+            arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+            echo "Processing $arch_count architecture(s) for Azure upload"
+        else
+            echo "No architecture information found, assuming single architecture"
+            arch_count=1
+        fi
 
         echo "Logging into Azure..."
         az login --service-principal \
@@ -122,27 +126,160 @@ spec:
           --tenant "$AZURE_TENANT_ID" \
           --allow-no-subscriptions
         set -x # enable logging after the credentials are logged in
-        
+
         echo "Ensuring container '${CONTAINER}' exists..."
         az storage container create \
           --name "$CONTAINER" \
           --account-name "$ACCOUNT" \
           --auth-mode login >/dev/null
 
-        echo "Uploading signed kernel modules to Azure Blob Storage: ${ACCOUNT}/${CONTAINER}/${AZURE_TARGET_PATH}"
+        # Function to upload artifacts for a specific architecture
+        upload_arch_artifacts() {
+            local arch_name="$1"
+            local source_dir="$2"
+            local arch_suffix=""
 
-        for f in "${SIGNED_KMODS_FULL_PATH}"/*.ko; do
-          if [ -f "$f" ]; then
-            BLOB_NAME="${AZURE_TARGET_PATH}$(basename "$f")"
-            echo "Uploading ${f} to ${BLOB_NAME}..."
-            az storage blob upload \
-              --account-name "$ACCOUNT" \
-              --container-name "$CONTAINER" \
-              --name "$BLOB_NAME" \
-              --file "$f" \
-              --auth-mode login \
-              --overwrite
-          fi
-        done
+            # Add architecture suffix for multi-arch builds
+            if [ "$arch_count" -gt 1 ]; then
+                arch_suffix="/${arch_name}"
+            fi
 
-        echo "Upload complete."
+            echo "Processing Azure upload for architecture: $arch_name"
+
+            # Read envfile to get version information
+            if [ -f "$source_dir/envfile" ]; then
+                # shellcheck source=/dev/null
+                . "$source_dir/envfile"
+            else
+                echo "ERROR: envfile not found in $source_dir"
+                return 1
+            fi
+
+            AZURE_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}${arch_suffix}/"
+            echo "Azure target path for $arch_name: ${ACCOUNT}/${CONTAINER}/${AZURE_TARGET_PATH}"
+
+            # Upload .ko files
+            if ls "$source_dir"/*.ko 1> /dev/null 2>&1; then
+                echo "Uploading .ko files for $arch_name"
+                for f in "$source_dir"/*.ko; do
+                    if [ -f "$f" ]; then
+                        BLOB_NAME="${AZURE_TARGET_PATH}$(basename "$f")"
+                        echo "Uploading ${f} to ${BLOB_NAME}..."
+                        az storage blob upload \
+                          --account-name "$ACCOUNT" \
+                          --container-name "$CONTAINER" \
+                          --name "$BLOB_NAME" \
+                          --file "$f" \
+                          --auth-mode login \
+                          --overwrite
+                    fi
+                done
+            else
+                echo "WARNING: No .ko files found for architecture $arch_name"
+                return 1
+            fi
+
+            # Upload checksum file
+            if [ "$arch_count" -gt 1 ]; then
+                if [ -f "$source_dir/signed_kmods_checksums_${arch_name}.txt" ]; then
+                    echo "Uploading architecture-specific checksums for $arch_name"
+                    CHECKSUM_BLOB_NAME="${AZURE_TARGET_PATH}signed_kmods_checksums_${arch_name}.txt"
+                    az storage blob upload \
+                      --account-name "$ACCOUNT" \
+                      --container-name "$CONTAINER" \
+                      --name "$CHECKSUM_BLOB_NAME" \
+                      --file "$source_dir/signed_kmods_checksums_${arch_name}.txt" \
+                      --auth-mode login \
+                      --overwrite
+                fi
+            else
+                if [ -f "$source_dir/signed_kmods_checksums.txt" ]; then
+                    echo "Uploading checksums for single architecture"
+                    CHECKSUM_BLOB_NAME="${AZURE_TARGET_PATH}signed_kmods_checksums.txt"
+                    az storage blob upload \
+                      --account-name "$ACCOUNT" \
+                      --container-name "$CONTAINER" \
+                      --name "$CHECKSUM_BLOB_NAME" \
+                      --file "$source_dir/signed_kmods_checksums.txt" \
+                      --auth-mode login \
+                      --overwrite
+                fi
+            fi
+
+            # Upload envfile for reference
+            if [ -f "$source_dir/envfile" ]; then
+                echo "Uploading envfile for $arch_name"
+                ENVFILE_BLOB_NAME="${AZURE_TARGET_PATH}envfile"
+                az storage blob upload \
+                  --account-name "$ACCOUNT" \
+                  --container-name "$CONTAINER" \
+                  --name "$ENVFILE_BLOB_NAME" \
+                  --file "$source_dir/envfile" \
+                  --auth-mode login \
+                  --overwrite
+            fi
+
+            return 0
+        }
+
+        # Process architectures
+        if [ "$arch_count" -gt 1 ]; then
+            echo "Multi-architecture build detected, processing each architecture"
+
+            # Upload summary files first
+            if [ -f "${SIGNED_KMODS_FULL_PATH}/signing_summary.txt" ]; then
+                # Use first architecture's envfile for base path information
+                first_arch_dir=$(find "${SIGNED_KMODS_FULL_PATH}" -mindepth 1 -maxdepth 1 -type d | head -1)
+                if [ -n "$first_arch_dir" ] && [ -f "$first_arch_dir/envfile" ]; then
+                    # shellcheck source=/dev/null
+                    . "$first_arch_dir/envfile"
+                    summary_azure_path="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/multi-arch-summary/"
+
+                    echo "Uploading multi-architecture summary to Azure: ${ACCOUNT}/${CONTAINER}/${summary_azure_path}"
+                    az storage blob upload \
+                      --account-name "$ACCOUNT" \
+                      --container-name "$CONTAINER" \
+                      --name "${summary_azure_path}signing_summary.txt" \
+                      --file "${SIGNED_KMODS_FULL_PATH}/signing_summary.txt" \
+                      --auth-mode login \
+                      --overwrite
+
+                    if [ -f "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" ]; then
+                        az storage blob upload \
+                          --account-name "$ACCOUNT" \
+                          --container-name "$CONTAINER" \
+                          --name "${summary_azure_path}extraction_summary.txt" \
+                          --file "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" \
+                          --auth-mode login \
+                          --overwrite
+                    fi
+                fi
+            fi
+
+            # Process each architecture directory
+            for arch_dir in "${SIGNED_KMODS_FULL_PATH}"/*/; do
+                if [ -d "$arch_dir" ]; then
+                    arch_name=$(basename "$arch_dir")
+                    echo "Processing Azure upload for architecture: $arch_name"
+
+                    if upload_arch_artifacts "$arch_name" "$arch_dir"; then
+                        echo "Successfully uploaded $arch_name to Azure"
+                    else
+                        echo "ERROR: Failed to upload $arch_name to Azure"
+                        exit 1
+                    fi
+                fi
+            done
+
+        else
+            echo "Single architecture build, using standard upload"
+
+            if upload_arch_artifacts "single" "${SIGNED_KMODS_FULL_PATH}"; then
+                echo "Successfully uploaded single architecture to Azure"
+            else
+                echo "ERROR: Failed to upload single architecture to Azure"
+                exit 1
+            fi
+        fi
+
+        echo "Azure upload complete for $arch_count architecture(s)."
