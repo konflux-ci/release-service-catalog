@@ -3,7 +3,9 @@ set -eux
 
 # mocks to be injected into task step scripts
 function internal-request() {
-  printf '%s\n' "$*" >> $(params.dataDir)/mock_internal-request.txt
+  # Use WORKDIR env var instead of $(params.dataDir) for subshell compatibility
+  local WORKDIR="${WORKDIR:-/var/workdir/release}"
+  printf '%s\n' "$*" >> "$WORKDIR/mock_internal-request.txt"
 
   # Extract unique identifier from the task context that we can use for labeling
   PIPELINE_UID=""
@@ -15,12 +17,15 @@ function internal-request() {
   done
 
   # set to async and capture output
-  /home/utils/internal-request "$@" -s false | tee $(params.dataDir)/ir-output-${PIPELINE_UID:-default}.tmp
+  # Use a unique temp file for each internal-request call to avoid race conditions in parallel execution
+  local ir_output_file
+  ir_output_file="$WORKDIR/ir-output-${PIPELINE_UID:-default}-$$.tmp"
+  /home/utils/internal-request "$@" -s false | tee "$ir_output_file"
 
   sleep 1
   
   # Extract the IR name from the captured output specific to this pipeline
-  IR_NAME=$(awk -F"'" '/created/ { print $2 }' $(params.dataDir)/ir-output-${PIPELINE_UID:-default}.tmp)
+  IR_NAME=$(awk -F"'" '/created/ { print $2 }' "$ir_output_file")
   
   if [ -z "$IR_NAME" ]; then
       # Fallback: try to find IR with matching pipeline UID label
@@ -43,7 +48,10 @@ function internal-request() {
       exit 1
   fi
 
-  if [[ "$*" == *"fbcFragments="*"fail.io"* ]]; then
+  # Check if fbcFragments contains the fail.io pattern
+  # The parameter comes in format: -p fbcFragments=["fail.io/image0@sha256:0000"]
+  # Any image with "fail.io" in the registry/path will trigger a failure
+  if [[ "$*" =~ fbcFragments=.*fail\.io ]]; then
       set_ir_status $IR_NAME 1
   else
       set_ir_status $IR_NAME 0
@@ -53,7 +61,8 @@ function internal-request() {
 function set_ir_status() {
     NAME=$1
     EXITCODE=$2
-    PATCH_FILE=$(params.dataDir)/${NAME}-patch.json
+    local WORKDIR="${WORKDIR:-/var/workdir/release}"
+    PATCH_FILE="$WORKDIR/${NAME}-patch.json"
 
     # Determine condition status based on exit code - matches internal-services behavior
     if [ "${EXITCODE}" -eq 0 ]; then
@@ -127,14 +136,15 @@ EOF
 }
 
 function date() {
-  echo $* >> $(params.dataDir)/mock_date.txt
+  local WORKDIR="${WORKDIR:-/var/workdir/release}"
+  echo $* >> "$WORKDIR/mock_date.txt"
 
   case "$*" in
       "+%Y-%m-%dT%H:%M:%SZ")
-          echo "2023-10-10T15:00:00Z" |tee $(params.dataDir)/mock_date_iso_format.txt
+          echo "2023-10-10T15:00:00Z" |tee "$WORKDIR/mock_date_iso_format.txt"
           ;;
       "+%s")
-          echo "1696946200" | tee $(params.dataDir)/mock_date_epoch.txt
+          echo "1696946200" | tee "$WORKDIR/mock_date_epoch.txt"
           ;;
       "-u +%Hh%Mm%Ss -d @"*)
           /usr/bin/date $*
@@ -148,6 +158,9 @@ function date() {
           ;;
   esac
 }
+
+# Set WORKDIR for subshell compatibility (replaces $(params.dataDir) which doesn't expand in subshells)
+export WORKDIR="$(params.dataDir)"
 
 # Export functions so they're available to the task scripts
 export -f internal-request

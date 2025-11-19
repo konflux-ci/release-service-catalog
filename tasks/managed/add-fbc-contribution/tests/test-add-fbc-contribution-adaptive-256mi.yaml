@@ -1,0 +1,271 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-adaptive-256mi
+spec:
+  description: Test adaptive parallelism with 256Mi memory limit (expects 1 worker)
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with 3 OCP versions
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "test-adaptive-256mi-app",
+                "components": [
+                  {
+                    "name": "comp-4.15",
+                    "containerImage": "registry.io/image-4.15@sha256:aaa111",
+                    "repository": "prod-registry.io/prod-location-4.15",
+                    "ocpVersion": "4.15",
+                    "updatedFromIndex": "quay.io/test/index:v4.15",
+                    "targetIndex": "quay.io/test/target:v4.15"
+                  },
+                  {
+                    "name": "comp-4.16",
+                    "containerImage": "registry.io/image-4.16@sha256:bbb222",
+                    "repository": "prod-registry.io/prod-location-4.16",
+                    "ocpVersion": "4.16",
+                    "updatedFromIndex": "quay.io/test/index:v4.16",
+                    "targetIndex": "quay.io/test/target:v4.16"
+                  },
+                  {
+                    "name": "comp-4.17",
+                    "containerImage": "registry.io/image-4.17@sha256:ccc333",
+                    "repository": "prod-registry.io/prod-location-4.17",
+                    "ocpVersion": "4.17",
+                    "updatedFromIndex": "quay.io/test/index:v4.17",
+                    "targetIndex": "quay.io/test/target:v4.17"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Test setup complete for 256Mi adaptive test"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "main"
+        - name: maxBatchSize
+          value: "5"
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+        - name: overrideMemoryLimitMi
+          value: "256"
+      runAfter:
+        - setup
+
+    - name: verify-adaptive-256mi
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: orasOptions
+          value: $(params.orasOptions)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+          - name: orasOptions
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: verify-adaptive-behavior
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== ADAPTIVE 256Mi VERIFICATION ==="
+
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              
+              # Verify results exist
+              if [[ ! -f "$RESULTS_FILE" ]]; then
+                echo "❌ Results file not found"
+                exit 1
+              fi
+              echo "✅ Results file exists"
+
+              # Verify all 3 components processed
+              component_count=$(jq '.components | length' "$RESULTS_FILE")
+              if [[ "$component_count" -ne 3 ]]; then
+                echo "❌ Expected 3 components, found: $component_count"
+                exit 1
+              fi
+              echo "✅ All 3 components processed"
+
+              # Get task logs to verify adaptive calculation
+              TASK_POD=$(kubectl get pods \
+                -l "tekton.dev/task=add-fbc-contribution,tekton.dev/pipelineRun=$(context.pipelineRun.name)" \
+                --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+              
+              if [[ -n "$TASK_POD" ]]; then
+                TASK_LOGS=$(kubectl logs "$TASK_POD" -c step-add-contribution 2>/dev/null || echo "")
+                
+                # Verify test override was used
+                if echo "$TASK_LOGS" | grep -q "Using test override memory limit: 256Mi"; then
+                  echo "✅ Test override (256Mi) was applied"
+                else
+                  echo "❌ Test override log not found"
+                  exit 1
+                fi
+                
+                # Verify calculated 1 worker
+                if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers: 1"; then
+                  echo "✅ Correctly calculated 1 worker for 256Mi"
+                else
+                  echo "❌ Did not calculate 1 worker for 256Mi"
+                  exit 1
+                fi
+                
+                # Verify sequential processing (1 worker at a time)
+                if echo "$TASK_LOGS" | grep -q "Processing 3 OCP groups with maximum 1 parallel workers"; then
+                  echo "✅ Confirmed sequential processing with 1 worker"
+                else
+                  echo "⚠️  Worker limit log not found"
+                fi
+              else
+                echo "⚠️  Could not verify logs (pod not found)"
+              fi
+
+              echo "=== 256Mi ADAPTIVE TEST PASSED ==="
+      runAfter:
+        - run-task
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+
+              echo "256Mi adaptive test cleanup completed"

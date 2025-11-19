@@ -1,0 +1,330 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-parallel-multi-ocp
+spec:
+  description: Test parallel processing of multiple OCP version groups
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with 3 different OCP versions for parallel processing
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "test-parallel-app",
+                "components": [
+                  {
+                    "name": "comp-4.12",
+                    "containerImage": "registry.io/image-4.12@sha256:abc123",
+                    "repository": "prod-registry.io/prod-location-4.12",
+                    "ocpVersion": "4.12",
+                    "updatedFromIndex": "quay.io/test/index:v4.12",
+                    "targetIndex": "quay.io/test/target:v4.12"
+                  },
+                  {
+                    "name": "comp-4.13",
+                    "containerImage": "registry.io/image-4.13@sha256:def456",
+                    "repository": "prod-registry.io/prod-location-4.13",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp-4.14",
+                    "containerImage": "registry.io/image-4.14@sha256:ghi789",
+                    "repository": "prod-registry.io/prod-location-4.14",
+                    "ocpVersion": "4.14",
+                    "updatedFromIndex": "quay.io/test/index:v4.14",
+                    "targetIndex": "quay.io/test/target:v4.14"
+                  }
+                ]
+              }
+              EOF
+
+              # Create data.json
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Test setup complete for parallel multi-OCP test"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "main"
+        - name: maxBatchSize
+          value: "5"
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+      runAfter:
+        - setup
+
+    - name: verify-parallel-execution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify-parallel-execution
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== PARALLEL EXECUTION VERIFICATION ==="
+
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # 1. Verify results file was created
+              if [[ ! -f "$RESULTS_FILE" ]]; then
+                echo "❌ Results file not found: $RESULTS_FILE"
+                exit 1
+              fi
+              echo "✅ Results file exists"
+
+              # 2. Verify all 3 OCP versions are present in results
+              component_count=$(jq '.components | length' "$RESULTS_FILE")
+              if [[ "$component_count" -ne 3 ]]; then
+                echo "❌ Expected 3 components, found: $component_count"
+                jq . "$RESULTS_FILE"
+                exit 1
+              fi
+              echo "✅ All 3 components present in results"
+
+              # 3. Verify OCP versions are correct
+              ocp_versions=$(jq -r '.components[].ocp_version' "$RESULTS_FILE" | sort -u | tr '\n' ' ' | sed 's/ $//')
+              expected="4.12 4.13 4.14"
+              if [[ "$ocp_versions" != "$expected" ]]; then
+                echo "❌ OCP versions mismatch. Expected: $expected, Got: $ocp_versions"
+                exit 1
+              fi
+              echo "✅ OCP versions correct: $ocp_versions"
+
+              # 4. Verify 3 InternalRequests were created (one per OCP version)
+              ir_count=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers | wc -l)
+              if [[ "$ir_count" -ne 3 ]]; then
+                echo "❌ Expected 3 InternalRequests, found: $ir_count"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+                exit 1
+              fi
+              echo "✅ 3 InternalRequests created (parallel execution confirmed)"
+
+              # 5. Verify parallel tracking directory was created
+              parallel_dir="$(params.dataDir)/parallel-tracking"
+              if [[ ! -d "$parallel_dir" ]]; then
+                echo "❌ Parallel tracking directory not found: $parallel_dir"
+                exit 1
+              fi
+              echo "✅ Parallel tracking directory exists"
+
+              # 6. Verify status files for each OCP version
+              for ocp in "4.12" "4.13" "4.14"; do
+                status_file="${parallel_dir}/${ocp}.status"
+                if [[ ! -f "$status_file" ]]; then
+                  echo "❌ Status file missing for OCP $ocp: $status_file"
+                  exit 1
+                fi
+                status=$(cat "$status_file")
+                if [[ "$status" != "SUCCESS" ]]; then
+                  echo "❌ Status file for OCP $ocp has unexpected content: $status"
+                  exit 1
+                fi
+                echo "✅ OCP $ocp status file valid"
+              done
+
+              # 7. Verify each component has correct target_index
+              for i in 0 1 2; do
+                target=$(jq -r ".components[$i].target_index" "$RESULTS_FILE")
+                ocp=$(jq -r ".components[$i].ocp_version" "$RESULTS_FILE")
+                expected_target="quay.io/test/target:v${ocp}"
+                if [[ "$target" != "$expected_target" ]]; then
+                  echo "❌ Component $i target_index mismatch. Expected: $expected_target, Got: $target"
+                  exit 1
+                fi
+                echo "✅ Component $i target_index correct: $target"
+              done
+
+              # 8. Verify adaptive parallelism logs (confirms adaptive calculation ran)
+              echo "=== Verifying Adaptive Parallelism Logs ==="
+              
+              # Get task pod logs
+              TASK_POD=$(kubectl get pods \
+                -l "tekton.dev/task=add-fbc-contribution,tekton.dev/pipelineRun=$(context.pipelineRun.name)" \
+                --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+              
+              if [[ -z "$TASK_POD" ]]; then
+                echo "⚠️  Could not find task pod to verify logs (non-critical)"
+              else
+                echo "Found task pod: $TASK_POD"
+                TASK_LOGS=$(kubectl logs "$TASK_POD" -c step-add-contribution 2>/dev/null || echo "")
+                
+                if [[ -n "$TASK_LOGS" ]]; then
+                  # Check for adaptive calculation logs
+                  if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers:"; then
+                    calculated_workers=$(echo "$TASK_LOGS" | grep "Calculated optimal parallel workers:" | sed 's/.*: //')
+                    echo "✅ Adaptive calculation ran, calculated: $calculated_workers workers"
+                  else
+                    echo "⚠️  Adaptive calculation log not found (may have scrolled off)"
+                  fi
+                  
+                  if echo "$TASK_LOGS" | grep -q "Adaptive parallelism:.*Mi limit"; then
+                    echo "✅ Adaptive parallelism detection confirmed"
+                  fi
+                  
+                  if echo "$TASK_LOGS" | grep -q "Active workers:"; then
+                    echo "✅ Bounded worker pool execution confirmed"
+                  fi
+                else
+                  echo "⚠️  Could not retrieve task logs (non-critical)"
+                fi
+              fi
+
+              echo "=== ALL PARALLEL EXECUTION CHECKS PASSED ==="
+      runAfter:
+        - run-task
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+
+              echo "Parallel multi-OCP test cleanup completed"

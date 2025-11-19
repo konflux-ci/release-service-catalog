@@ -17,9 +17,13 @@ spec:
     target index metadata for each component.
 
     In this task, we split fragments up by their OCP versions and then process each of these
-    in series. For each OCP version, we chain together batches so that the final targetIndex
-    produced will have all fragments added. This means that the index_image from one internal
-    request will be set as the fromIndex for the next request within that OCP version.
+    in parallel. Multiple OCP version groups are processed simultaneously, as IIB is capable
+    of handling updates to index images for different OCP versions in parallel (but only one
+    request at a time for a given version). For each OCP version, we chain together batches so that
+    the final targetIndex produced will have all fragments added. This means that the index_image
+    from one internal request will be set as the fromIndex for the next request within that OCP
+    version. This parallel approach significantly reduces FBC release duration, as the total time
+    is only as long as the slowest IIB run rather than the sum of all IIB run durations.
 
     Since we have seen flakiness in IIB requests in the past, we retry and failed batches
     and internal requests can attach onto currently in progress IIB requests. We retry batches
@@ -99,6 +103,10 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: overrideMemoryLimitMi
+      type: string
+      description: Override memory limit for testing adaptive calculation (empty = auto-detect from cgroups)
+      default: ""
   results:
     - name: buildTimestamp
       description: Build timestamp used in the tag
@@ -214,9 +222,9 @@ spec:
         timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
         timestamp=$(date "+${timestamp_format}")
 
-        # Extract OCP versions from snapshot
-        ocp_versions=$(jq -r '.components[].ocpVersion' "$SNAPSHOT_PATH" | sort -u)
-        echo "INFO: Found OCP versions: $(echo "$ocp_versions" | tr '\n' ' ')"
+        # Extract OCP versions from snapshot directly into array
+        readarray -t ocp_versions_array < <(jq -r '.components[].ocpVersion' "$SNAPSHOT_PATH" | sort -u)
+        echo "INFO: Found OCP versions: ${ocp_versions_array[*]}"
 
         echo "INFO: Using pre-determined values from prepare-fbc-parameters:"
         echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
@@ -279,10 +287,11 @@ spec:
         # Group components by OCP version for isolated processing
         group_components_by_ocp_version() {
             local snapshot_file="$1"
-            local ocp_versions="$2"
+            shift  # Remove first argument, remaining are ocp versions
+            local ocp_versions=("$@")
 
             # Group components by OCP version
-            for ocp_version in $ocp_versions; do
+            for ocp_version in "${ocp_versions[@]}"; do
                 local group_file="${groups_dir}/${ocp_version}.json"
                 jq --arg ocp_version "$ocp_version" \
                     '.components | map(select(.ocpVersion == $ocp_version))' \
@@ -295,23 +304,237 @@ spec:
         }
 
         # Group components by OCP versions
-        group_components_by_ocp_version "$SNAPSHOT_PATH" "$ocp_versions"
+        group_components_by_ocp_version "$SNAPSHOT_PATH" "${ocp_versions_array[@]}"
 
-        # Process all OCP groups sequentially
+        # Calculate optimal parallelism based on available memory
+        # TODO: This cgroups detection logic will be replaced with a uniform solution for all tasks
+        calculate_max_parallel_workers() {
+            local memory_limit_bytes=0
+            local memory_limit_mib=0
+            
+            # Check for test override first
+            if [ -n "$(params.overrideMemoryLimitMi)" ]; then
+                memory_limit_mib=$(params.overrideMemoryLimitMi)
+                echo "INFO: Using test override memory limit: ${memory_limit_mib}Mi" >&2
+            else
+                # Try cgroups v2 first (newer systems)
+                if [ -f /sys/fs/cgroup/memory.max ]; then
+                    local mem_max
+                    mem_max=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "max")
+                    if [ "$mem_max" != "max" ]; then
+                        memory_limit_bytes=$mem_max
+                        echo "INFO: Detected cgroups v2 memory limit: $memory_limit_bytes bytes" >&2
+                    else
+                        # cgroups v2 exists but reports no limit - return conservative default
+                        echo "INFO: cgroups v2 reports no memory limit (max), using conservative default" >&2
+                        echo "3"
+                        return
+                    fi
+                fi
+                
+                # Fallback to cgroups v1 (only if cgroups v2 not present)
+                if [ "$memory_limit_bytes" -eq 0 ] && [ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]; then
+                    memory_limit_bytes=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo "0")
+                    echo "INFO: Detected cgroups v1 memory limit: $memory_limit_bytes bytes" >&2
+                fi
+            
+                # If no limit detected or limit is absurdly high (no actual limit), use conservative default
+                if [ "$memory_limit_bytes" -eq 0 ] || [ "$memory_limit_bytes" -gt 107374182400 ]; then
+                    echo "WARN: No memory limit detected or limit too high, using conservative default" >&2
+                    echo "3"
+                    return
+                fi
+                
+                # Convert to MiB
+                memory_limit_mib=$((memory_limit_bytes / 1024 / 1024))
+                echo "INFO: Memory limit: ${memory_limit_mib}Mi" >&2
+            fi
+            
+            # Estimated memory usage per worker (based on observed usage):
+            # - JSON processing with jq: ~30-40Mi
+            # - kubectl operations and output buffers: ~30-40Mi
+            # - Bash subprocess overhead: ~10-20Mi
+            # - Safety margin: 20%
+            # Total: ~100Mi per worker conservatively
+            local memory_per_worker_mib=100
+            
+            # Reserve base memory for main script operations
+            # - Initial snapshot loading and parsing: ~50Mi
+            # - Results aggregation: ~30Mi
+            # - System overhead: ~50Mi
+            local base_memory_mib=130
+            
+            local available_for_workers=$((memory_limit_mib - base_memory_mib))
+            
+            if [ "$available_for_workers" -lt "$memory_per_worker_mib" ]; then
+                echo "WARN: Very low memory available (${available_for_workers}Mi), using single worker" >&2
+                echo "1"
+                return
+            fi
+            
+            local optimal_workers=$((available_for_workers / memory_per_worker_mib))
+            
+            local max_cap=8
+            if [ "$optimal_workers" -gt "$max_cap" ]; then
+                echo "INFO: Calculated $optimal_workers workers, capping at $max_cap to avoid IIB overload" >&2
+                optimal_workers=$max_cap
+            fi
+            
+            if [ "$optimal_workers" -lt 1 ]; then
+                optimal_workers=1
+            fi
+            
+            echo "INFO: Adaptive parallelism: ${memory_limit_mib}Mi limit, ${memory_per_worker_mib}Mi per worker" >&2
+            echo "INFO: Calculated optimal parallel workers: $optimal_workers" >&2
+            
+            echo "$optimal_workers"
+        }
+
+        # Process all OCP groups in parallel with bounded parallelism
         process_all_ocp_groups() {
-            echo "INFO: Starting group processing"
+            echo "INFO: Starting parallel group processing with adaptive worker limits"
 
-            for ocp_version in $ocp_versions; do
+            local parallel_dir
+            parallel_dir="$(params.dataDir)/parallel-tracking"
+            mkdir -p "$parallel_dir"
+            
+            export parallel_dir
+
+            # Calculate optimal parallelism based on available memory
+            local max_parallel_workers
+            max_parallel_workers=$(calculate_max_parallel_workers)
+            
+            local total_groups=${#ocp_versions_array[@]}
+            
+            echo "INFO: Processing $total_groups OCP groups with maximum $max_parallel_workers parallel workers"
+
+            # Arrays to track state
+            local pids=()
+            local pid_to_ocp=()
+            local failed_groups=()
+            local completed_count=0
+            local launched_count=0
+            
+            # Launch workers with bounded parallelism
+            for ocp_version in "${ocp_versions_array[@]}"; do
+                while [ ${#pids[@]} -ge "$max_parallel_workers" ]; do
+                    echo "INFO: At parallel limit ($max_parallel_workers active workers), waiting for completion..."
+                    
+                    # Wait for any worker to complete
+                    local completed_pid=""
+                    for pid in "${pids[@]}"; do
+                        if ! ps -p "$pid" > /dev/null 2>&1; then
+                            completed_pid=$pid
+                            break
+                        fi
+                    done
+                    
+                    if [ -z "$completed_pid" ]; then
+                        sleep 1
+                        continue
+                    fi
+                    
+                    if wait "$completed_pid" 2>/dev/null; then
+                        echo "INFO: Worker (PID: $completed_pid) completed successfully"
+                        completed_count=$((completed_count + 1))
+                    else
+                        local exit_code=$?
+                        echo "ERROR: Worker (PID: $completed_pid) failed with exit code $exit_code"
+                        failed_groups+=("$completed_pid")
+                    fi
+                    
+                    local new_pids=()
+                    for pid in "${pids[@]}"; do
+                        if [ "$pid" != "$completed_pid" ]; then
+                            new_pids+=("$pid")
+                        fi
+                    done
+                    pids=("${new_pids[@]}")
+                done
+                
                 local group_file="${groups_dir}/${ocp_version}.json"
-                echo "INFO: Processing OCP group: $ocp_version"
+                launched_count=$((launched_count + 1))
+                echo "INFO: Launching worker $launched_count/$total_groups for OCP group: $ocp_version"
 
                 local group_components
                 group_components=$(cat "$group_file")
 
-                process_ocp_group "$ocp_version" "$group_components"
+                (
+                    set -e
+                    
+                    echo "INFO: [Parallel Worker $ocp_version] Starting processing"
+                    
+                    process_ocp_group "$ocp_version" "$group_components"
+                    
+                    echo "SUCCESS" > "${parallel_dir}/${ocp_version}.status"
+                    echo "INFO: [Parallel Worker $ocp_version] Completed successfully"
+                ) &
+                
+                local pid=$!
+                pids+=("$pid")
+                pid_to_ocp+=("$pid:$ocp_version")
+                echo "INFO: Launched worker for OCP $ocp_version (PID: $pid)" \
+                     "[Active workers: ${#pids[@]}/$max_parallel_workers]"
             done
 
-            echo "INFO: Processing completed successfully"
+            echo "INFO: All $total_groups workers launched, waiting for final ${#pids[@]} to complete..."
+
+            # Wait for remaining background processes and track failures
+            for pid in "${pids[@]}"; do
+                local ocp_version="unknown"
+                for mapping in "${pid_to_ocp[@]}"; do
+                    if [[ "$mapping" == "$pid:"* ]]; then
+                        ocp_version="${mapping#*:}"
+                        break
+                    fi
+                done
+                
+                if wait "$pid"; then
+                    echo "INFO: Worker for OCP $ocp_version (PID: $pid) completed successfully"
+                    completed_count=$((completed_count + 1))
+                else
+                    local exit_code=$?
+                    echo "ERROR: Worker for OCP $ocp_version (PID: $pid) failed with exit code $exit_code"
+                    failed_groups+=("$ocp_version")
+                fi
+            done
+
+            # Check if any groups failed
+            # ToDo: verify if we can proceed with partial release
+            if [ ${#failed_groups[@]} -gt 0 ]; then
+                echo "ERROR: ${#failed_groups[@]} OCP group(s) failed processing" \
+                     "(adaptive limit: $max_parallel_workers):"
+                for failed_group in "${failed_groups[@]}"; do
+                    echo "  - OCP version: $failed_group"
+                done
+                echo "Cannot proceed with partial release - all OCP groups must succeed"
+                exit 1
+            fi
+
+            echo "INFO: All parallel processing completed successfully for $total_groups OCP groups"
+            echo "INFO: Adaptive parallelism used $max_parallel_workers concurrent workers"
+
+            echo "INFO: Merging results from all parallel workers"
+            for ocp_version in "${ocp_versions_array[@]}"; do
+                local worker_file="${parallel_dir}/${ocp_version}-results.json"
+                if [ -f "$worker_file" ]; then
+                    local worker_components
+                    worker_components=$(jq -c '.components[]' "$worker_file")
+                    if [ -n "$worker_components" ]; then
+                        while IFS= read -r component; do
+                            export component
+                            yq -i '.components += [ env(component) ]' "$RESULTS_FILE"
+                        done <<< "$worker_components"
+                        echo "INFO: Merged results from OCP $ocp_version worker"
+                    else
+                        echo "WARNING: Worker file for OCP $ocp_version is empty"
+                    fi
+                else
+                    echo "ERROR: Worker results file missing for OCP $ocp_version"
+                    exit 1
+                fi
+            done
+            echo "INFO: Results merge completed"
         }
 
         # Process OCP group
@@ -320,6 +543,11 @@ spec:
             local group_components="$2"
 
             echo "INFO: Processing OCP group $group_ocp_version"
+
+            # Create per-worker results file to avoid concurrent write conflicts
+            local worker_results_file="${parallel_dir}/${group_ocp_version}-results.json"
+            jq -n '{components: []}' > "$worker_results_file"
+            echo "INFO: Worker results will be written to $worker_results_file"
 
             # Get group-specific parameters from first component (all should have same values within group)
             local first_component
@@ -502,9 +730,9 @@ spec:
                       "iibLog": .iibLog
                     }' <<< "${results}")
 
-                    # Add to results file
+                    # Add to per-worker results file (avoids concurrent write conflicts)
                     export build_results
-                    yq -i '.components += [ env(build_results) ]' "$RESULTS_FILE"
+                    yq -i '.components += [ env(build_results) ]' "$worker_results_file"
 
                     fragment_index=$((fragment_index + 1))
                 done
@@ -679,7 +907,7 @@ spec:
         # Calculate total components processed across all OCP groups
         total_components=$(jq '.components | length' "$SNAPSHOT_PATH")
         echo "Multi-OCP batch processing completed successfully with $total_components components" \
-            "across $(echo "$ocp_versions" | wc -w) OCP versions"
+            "across ${#ocp_versions_array[@]} OCP versions"
         echo "Results file:"
         cat "$RESULTS_FILE"
     - name: create-trusted-artifact

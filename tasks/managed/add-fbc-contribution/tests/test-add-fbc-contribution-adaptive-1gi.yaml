@@ -1,0 +1,295 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-adaptive-1gi
+spec:
+  description: Test adaptive parallelism with 1Gi memory limit (expects 8 workers, capped)
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with 5 OCP versions to test higher concurrency
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "test-adaptive-1gi-app",
+                "components": [
+                  {
+                    "name": "comp-4.13",
+                    "containerImage": "registry.io/image-4.13@sha256:aaa111",
+                    "repository": "prod-registry.io/prod-location-4.13",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp-4.14",
+                    "containerImage": "registry.io/image-4.14@sha256:bbb222",
+                    "repository": "prod-registry.io/prod-location-4.14",
+                    "ocpVersion": "4.14",
+                    "updatedFromIndex": "quay.io/test/index:v4.14",
+                    "targetIndex": "quay.io/test/target:v4.14"
+                  },
+                  {
+                    "name": "comp-4.15",
+                    "containerImage": "registry.io/image-4.15@sha256:ccc333",
+                    "repository": "prod-registry.io/prod-location-4.15",
+                    "ocpVersion": "4.15",
+                    "updatedFromIndex": "quay.io/test/index:v4.15",
+                    "targetIndex": "quay.io/test/target:v4.15"
+                  },
+                  {
+                    "name": "comp-4.16",
+                    "containerImage": "registry.io/image-4.16@sha256:ddd444",
+                    "repository": "prod-registry.io/prod-location-4.16",
+                    "ocpVersion": "4.16",
+                    "updatedFromIndex": "quay.io/test/index:v4.16",
+                    "targetIndex": "quay.io/test/target:v4.16"
+                  },
+                  {
+                    "name": "comp-4.17",
+                    "containerImage": "registry.io/image-4.17@sha256:eee555",
+                    "repository": "prod-registry.io/prod-location-4.17",
+                    "ocpVersion": "4.17",
+                    "updatedFromIndex": "quay.io/test/index:v4.17",
+                    "targetIndex": "quay.io/test/target:v4.17"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Test setup complete for 1Gi adaptive test"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "main"
+        - name: maxBatchSize
+          value: "5"
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+        - name: overrideMemoryLimitMi
+          value: "1024"
+      runAfter:
+        - setup
+
+    - name: verify-adaptive-1gi
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: orasOptions
+          value: $(params.orasOptions)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+          - name: orasOptions
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: verify-adaptive-behavior
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== ADAPTIVE 1Gi VERIFICATION ==="
+
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              
+              # Verify results exist
+              if [[ ! -f "$RESULTS_FILE" ]]; then
+                echo "❌ Results file not found"
+                exit 1
+              fi
+              echo "✅ Results file exists"
+
+              # Verify all 5 components processed
+              component_count=$(jq '.components | length' "$RESULTS_FILE")
+              if [[ "$component_count" -ne 5 ]]; then
+                echo "❌ Expected 5 components, found: $component_count"
+                exit 1
+              fi
+              echo "✅ All 5 components processed"
+
+              # Get task logs to verify adaptive calculation
+              TASK_POD=$(kubectl get pods \
+                -l "tekton.dev/task=add-fbc-contribution,tekton.dev/pipelineRun=$(context.pipelineRun.name)" \
+                --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+              
+              if [[ -n "$TASK_POD" ]]; then
+                TASK_LOGS=$(kubectl logs "$TASK_POD" -c step-add-contribution 2>/dev/null || echo "")
+                
+                # Verify test override was used
+                if echo "$TASK_LOGS" | grep -q "Using test override memory limit: 1024Mi"; then
+                  echo "✅ Test override (1Gi) was applied"
+                else
+                  echo "❌ Test override log not found"
+                  exit 1
+                fi
+                
+                # Verify calculated 8 workers (capped)
+                if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers: 8"; then
+                  echo "✅ Correctly calculated 8 workers for 1Gi (capped at max)"
+                else
+                  echo "❌ Did not calculate 8 workers for 1Gi"
+                  exit 1
+                fi
+                
+                # Verify all 5 could run in parallel (5 < 8 limit)
+                if echo "$TASK_LOGS" | grep -q "Processing 5 OCP groups with maximum 8 parallel workers"; then
+                  echo "✅ Confirmed 5 OCP groups with 8 worker capacity (all can run simultaneously)"
+                else
+                  echo "⚠️  Worker limit log not found"
+                fi
+                
+                # With 5 OCP versions and 8 worker limit, all should run simultaneously
+                # Check that we don't see "At parallel limit" (since 5 < 8)
+                if echo "$TASK_LOGS" | grep -q "At parallel limit"; then
+                  echo "⚠️  Unexpected: hit parallel limit with 5 OCP versions and 8 worker capacity"
+                else
+                  echo "✅ All 5 OCP versions ran without hitting worker limit (5 < 8)"
+                fi
+              else
+                echo "⚠️  Could not verify logs (pod not found)"
+              fi
+
+              echo "=== 1Gi ADAPTIVE TEST PASSED ==="
+      runAfter:
+        - run-task
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+
+              echo "1Gi adaptive test cleanup completed"

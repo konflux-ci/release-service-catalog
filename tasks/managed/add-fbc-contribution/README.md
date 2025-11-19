@@ -9,9 +9,13 @@ The Snapshot has been previously augmented by prepare-fbc-snapshot to include OC
 target index metadata for each component.
 
 In this task, we split fragments up by their OCP versions and then process each of these
-in series. For each OCP version, we chain together batches so that the final targetIndex
-produced will have all fragments added. This means that the index_image from one internal
-request will be set as the fromIndex for the next request within that OCP version.
+in parallel. Multiple OCP version groups are processed simultaneously, as IIB is capable
+of handling updates to index images for different OCP versions in parallel (but only one
+request at a time for a given version). For each OCP version, we chain together batches so that
+the final targetIndex produced will have all fragments added. This means that the index_image
+from one internal request will be set as the fromIndex for the next request within that OCP
+version. This parallel approach significantly reduces FBC release duration, as the total time
+is only as long as the slowest IIB run rather than the sum of all IIB run durations.
 
 Since we have seen flakiness in IIB requests in the past, we retry and failed batches
 and internal requests can attach onto currently in progress IIB requests. We retry batches
@@ -43,3 +47,4 @@ queue to reduce the effect of a full queue on a single release.
 | batchRetryDelaySeconds      | Delay between batch retry attempts in seconds                                                                              | Yes      | 60                   |
 | caTrustConfigMapName        | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca           |
 | caTrustConfigMapKey         | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |
+| overrideMemoryLimitMi       | Override memory limit for testing adaptive calculation (empty = auto-detect from cgroups)                                  | Yes      | ""                   |
