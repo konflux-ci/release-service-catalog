@@ -195,7 +195,8 @@ function scp() {
 
 function kinit() {
     echo Mocking kinit call with: $*
-    if [ "$*" == "-kt /etc/secrets_keytab/keytab konflux-release-signing-sa@IPA.REDHAT.COM" ] ; then
+    # Accept any kinit call with -kt flag as the user and host are now dynamic
+    if [[ "$*" == *"-kt"* ]] ; then
         echo initialized
     fi
 }
