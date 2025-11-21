@@ -1,6 +1,6 @@
 # validate-single-component
 
-A tekton task that validates the snapshot only contains a 
+A tekton task that validates the snapshot only contains a
 single component. The task will fail otherwise.
 
 ## Parameters
