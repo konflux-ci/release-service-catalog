@@ -10,6 +10,9 @@ spec:
   description: |-
     Tekton task to ensure that components destination repositories names match the supplied image name label.
   params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
@@ -157,4 +160,57 @@ spec:
                     exit 1
                 fi
             fi
+        done
+    - name: enforce-cpe-label
+      image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+      computeResources:
+        limits:
+          memory: 100Mi
+        requests:
+          memory: 100Mi
+          cpu: 10m
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+        
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No valid data file was provided."
+            exit 1
+        fi
+        
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        
+        CPE_DATA=$(jq -r '.releaseNotes.cpe // empty' "${DATA_FILE}")
+        if [[ -z "$CPE_DATA" ]]; then
+            echo "Error: The required static value 'releaseNotes.cpe' is missing or empty in the data file." >&2
+            exit 1
+        fi
+        
+        num_components=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        
+        # Now iterate through components to check the label against the single fetched value
+        for ((i = 0; i < num_components; i++))
+        do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
+            name=$(jq -r '.name' <<< "$component")
+        
+            # Fetch the value of the 'cpe' label from the component's metadata
+            cpe_label=$(jq -r '.metadata.labels // [] | .[] | select(.name == "cpe")
+                | .value // empty' <<< "$component")
+        
+            # Check if the label was found. If not, we skip the enforcement.
+            if [[ -z "$cpe_label" ]]; then
+              echo "Info: Component '$name' is missing the 'cpe' label. Skipping enforcement."
+              continue
+            fi
+        
+            # Compare the label value with the single data value (CPE_DATA)
+            if [[ "$cpe_label" != "$CPE_DATA" ]]; then
+                echo "Error: Component '$name' 'cpe' label ('$cpe_label') does not match" \
+                  "the single required CPE value from the data file ('$CPE_DATA')." >&2
+                exit 1
+            fi
+        
+            echo "Success: Component '$name' 'cpe' label matches the data file value."
         done
