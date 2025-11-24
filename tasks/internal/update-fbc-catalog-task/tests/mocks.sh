@@ -29,6 +29,13 @@ buildJson=$(jq -cr '.items[0]' <<< "${buildSeed}")
 
 export buildSeed buildJson calls
 
+# Helper function to generate jq expression for auth-failure test build
+# Takes timestamp as parameter and returns jq expression string
+get_auth_failure_jq_expr() {
+  local timestamp="$1"
+  echo '.items[0] |= (.fbc_fragments = ["registry.io/image0@sha256:0000"] | .from_index = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .from_index_resolved = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:3d6fe02b28ab876d60af3c3df5100a6fe4c99b084651af547659173d680c6f4d" | .index_image = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .index_image_resolved = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:10b1d5b1d053d8c3a2263201baa983c760e6b61f3a50e3cde244fdaf68a4aed9" | .updated = "'"${timestamp}"'" | .state = "complete" | .state_reason = "The FBC fragment was successfully added in the index image")'
+}
+
 function mock_build_progress() {
 
     state_reason[1]="Resolving the fbc fragment"
@@ -73,10 +80,58 @@ function curl() {
     tempfile="$5"
     echo -e '{ "fbc_opt_in": true }' > "$tempfile"
 
-  elif [[ "$params" =~ "-s https://fakeiib.host/builds?user=iib@kerberos&from_index=quay.io/scoheb/fbc-index-testing:"* ]]; then
+  elif [[ "$params" == *"-s https://fakeiib.host/builds"* ]] && [[ "$params" == *"from_index="* ]] && [[ "$params" == *"state="* ]] && [[ "$params" != *"/builds/1"* ]] && [[ "$params" != *"/api/v1/builds"* ]]; then
+    # Check params directly for registry-proxy pattern (most reliable)
+    is_registry_proxy_test=false
+    if [[ "$params" =~ registry-proxy.engineering.redhat.com/rh-osbs/iib-pub ]]; then
+      is_registry_proxy_test=true
+    fi
+    # Extract from_index from params to help with debugging
+    # Handle both URL-encoded and non-encoded versions
+    extracted_from_index=""
+    # Try multiple patterns to extract from_index
+    # Expected formats in params:
+    #   - Non-encoded: "from_index=registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12"
+    #   - URL-encoded: "from_index%3Dregistry-proxy.engineering.redhat.com%2Frh-osbs%2Fiib-pub%3Av4.12"
+    #   (where %3D is '=', %2F is '/', %3A is ':')
+    if [[ "$params" =~ from_index=([^&\ ]+) ]]; then
+      extracted_from_index="${BASH_REMATCH[1]}"
+    elif [[ "$params" =~ from_index%3D([^&\ ]+) ]]; then
+      # URL-encoded equals sign (%3D = '=')
+      extracted_from_index="${BASH_REMATCH[1]}"
+    fi
+    # URL decode if needed (simple case for common characters)
+    if [[ -n "$extracted_from_index" ]]; then
+      extracted_from_index="${extracted_from_index//%3A/:}"
+      extracted_from_index="${extracted_from_index//%2F//}"
+      extracted_from_index="${extracted_from_index//%40/@}"
+      # If from_index contains registry-proxy, we should be in auth-failure test
+      if [[ "$extracted_from_index" =~ registry-proxy.engineering.redhat.com/rh-osbs/iib-pub ]]; then
+        is_registry_proxy_test=true
+      fi
+    fi
     build="${buildSeed}"
-    echo "DEBUG: Checking previous builds, taskrun name: $(context.taskRun.name)" >&2
-    case "$(context.taskRun.name)" in
+    taskrun_name="$(context.taskRun.name)"
+    
+    # Check if this is the auth-failure test by from_index value FIRST (more reliable)
+    # If from_index contains registry-proxy, treat it as auth-failure regardless of taskrun name
+    # For auth-failure test: return an OLD build (>24 hours) that should be rejected
+    if [[ "$is_registry_proxy_test" = "true" ]] || \
+       ([[ -n "$extracted_from_index" ]] && [[ "$extracted_from_index" =~ registry-proxy.engineering.redhat.com/rh-osbs/iib-pub ]]); then
+      # Set updated timestamp to 25 hours ago (old build that should be rejected)
+      old_timestamp=$(date -u -d '25 hours ago' --iso-8601=seconds 2>/dev/null || date -u -v-25H --iso-8601=seconds 2>/dev/null || echo "$(date -u --iso-8601=seconds)")
+      jq_expr="$(get_auth_failure_jq_expr "${old_timestamp}")"
+      build=$(jq -rc "$jq_expr" <<< "${build}")
+    else
+      # Fall back to taskrun name matching
+      case "${taskrun_name}" in
+        *auth-failure*)
+          # For auth-failure test, return an OLD build (>24 hours) that should be rejected
+          # Check this BEFORE *complete* to avoid pattern collision
+          old_timestamp=$(date -u -d '25 hours ago' --iso-8601=seconds 2>/dev/null || date -u -v-25H --iso-8601=seconds 2>/dev/null || echo "$(date -u --iso-8601=seconds)")
+          jq_expr="$(get_auth_failure_jq_expr "${old_timestamp}")"
+          build=$(jq -rc "$jq_expr" <<< "${build}")
+        ;;
         *complete*|*multiple-fragments-retry*|*multiple-fragments*)
           # For complete and multiple-fragments-retry tests, use "retry-complete" as the mock case
           # Added *multiple-fragments* to catch truncated names
@@ -118,13 +173,30 @@ function curl() {
           build=$(jq -rc '.items[0].state_reason = "The FBC fragment was successfully added in the index image"' <<< "${build}")
         ;;
         *)
-          echo "DEBUG: No case matched, using default" >&2
+          # Fallback: if from_index contains registry-proxy and we didn't match any case,
+          # treat it as auth-failure test (return old build)
+          if [[ -n "$extracted_from_index" ]] && [[ "$extracted_from_index" =~ registry-proxy.engineering.redhat.com/rh-osbs/iib-pub ]]; then
+            old_timestamp=$(date -u -d '25 hours ago' --iso-8601=seconds 2>/dev/null || date -u -v-25H --iso-8601=seconds 2>/dev/null || echo "$(date -u --iso-8601=seconds)")
+            jq_expr="$(get_auth_failure_jq_expr "${old_timestamp}")"
+            build=$(jq -rc "$jq_expr" <<< "${build}")
+          fi
         ;;
-    esac
-    echo "DEBUG: Final build response: $build" >&2
+      esac
+    fi
+    
+    # Final check: ALWAYS check params directly for registry-proxy pattern and fix if needed
+    # This is the most reliable check - just look for the pattern in the params string
+    current_from_index=$(jq -r '.items[0].from_index // empty' <<< "${build}")
+    if [[ "$params" == *"registry-proxy.engineering.redhat.com/rh-osbs/iib-pub"* ]]; then
+      if [[ "$current_from_index" != "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" ]]; then
+        old_timestamp=$(date -u -d '25 hours ago' --iso-8601=seconds 2>/dev/null || date -u -v-25H --iso-8601=seconds 2>/dev/null || echo "$(date -u --iso-8601=seconds)")
+        jq_expr="$(get_auth_failure_jq_expr "${old_timestamp}")"
+        build=$(jq -rc "$jq_expr" <<< "${build}")
+      fi
+    fi
     echo -en "${build}"
 
-  elif [[ "$params" == "-s https://fakeiib.host/builds/1" ]]; then
+  elif [[ "$params" == "-s https://fakeiib.host/builds/1" ]] || [[ "$params" == "-s https://fakeiib.host/builds/2" ]]; then
     set -x
     echo "$*" >> mock_build_progress_calls
     if [[ "$(context.taskRun.name)" =~ "test-update-fbc-catalog-error"* ]]; then
@@ -135,23 +207,26 @@ function curl() {
     buildJson="$(base64 -d < $(results.jsonBuildInfo.path) | gunzip)"
 
     # For index-mismatch test, keep default index_image to trigger validation failure
-    if [[ "$(context.taskRun.name)" =~ "index-mismatch" ]]; then
-        # Keep default index_image ("quay.io/scoheb/fbc-index-testing:latest")
-        # which won't match fromIndex ("quay.io/fbc/catalog:mismatch")
-        echo "DEBUG: index-mismatch test - keeping default index_image to trigger validation failure" >&2
-    fi
+    # (no action needed - default index_image won't match fromIndex)
 
     mock_build_progress "$(awk 'END{ print NR }' mock_build_progress_calls)" "$(base64 <<< "${buildJson}")" "$mock_error" | tee build_json
     export -n buildJson
     buildJson=$(cat build_json)
     export buildJson
 
-  elif [[ "$params" == "-s https://fakeiib.host/api/v1/builds/1/logs" ]]; then
+  elif [[ "$params" == "-s https://fakeiib.host/api/v1/builds/1/logs" ]] || [[ "$params" == "-s https://fakeiib.host/api/v1/builds/2/logs" ]]; then
     echo "Logs are for weaks"
 
   elif [[ "$params" =~ "-u : --negotiate -s -X POST -H Content-Type: application/json -d@".*" --insecure https://fakeiib.host/builds/fbc-operations" ]]; then
     # For POST requests, use the buildSeed template as the base
     buildJson=$(jq -cr '.items[0]' <<< "${buildSeed}")
+    
+    # Check if this is auth-failure test by taskrun name
+    if [[ "$(context.taskRun.name)" == *"auth-failure"* ]]; then
+      # For auth-failure test, set correct from_index and assign a NEW id (2) since old build (1) was rejected
+      buildJson=$(jq -c '.id = 2 | .from_index = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .index_image = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .logs.url = "https://fakeiib.host/api/v1/builds/2/logs"' <<< "${buildJson}")
+    fi
+    
     # For multiple fragments tests, update the buildJson to include the appropriate fbc_fragments array
     case "$(context.taskRun.name)" in
         *multiple-fragments*)
@@ -187,7 +262,19 @@ function curl() {
     # Return uncompressed JSON - the task will handle compression
     echo "${buildJson}"
   else
-    echo ""
+    # Catch-all: if no pattern matched, check if it looks like a check_previous_build call
+    if [[ "$params" == *"-s https://fakeiib.host/builds"* ]] && [[ "$params" == *"from_index="* ]] && [[ "$params" == *"state="* ]] && [[ "$params" != *"/builds/1"* ]] && [[ "$params" != *"/api/v1/builds"* ]]; then
+      # This should have been caught by the earlier pattern, but if not, handle it here
+      build="${buildSeed}"
+      if [[ "$params" == *"registry-proxy.engineering.redhat.com/rh-osbs/iib-pub"* ]]; then
+        old_timestamp=$(date -u -d '25 hours ago' --iso-8601=seconds 2>/dev/null || date -u -v-25H --iso-8601=seconds 2>/dev/null || echo "$(date -u --iso-8601=seconds)")
+        jq_expr="$(get_auth_failure_jq_expr "${old_timestamp}")"
+        build=$(jq -rc "$jq_expr" <<< "${build}")
+      fi
+      echo -en "${build}"
+    else
+      echo ""
+    fi
   fi
 }
 
@@ -229,11 +316,36 @@ function skopeo() {
         echo '{"created": "'"${today}"'"}'
     fi
 
+    # For auth-failure test: fail when inspecting from_index by tag (simulates auth error)
+    if [[ "$*" =~ "--retry-times 3 --config docker://registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" ]] && \
+       [[ "$(context.taskRun.name)" =~ "auth-failure" ]]; then
+        # Simulate auth failure - return error and exit with non-zero
+        echo "time=\"$(date -u --iso-8601=seconds)\" level=fatal msg=\"Error parsing image name \\\"docker://registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12\\\": reading manifest v4.12 in registry-proxy.engineering.redhat.com/rh-osbs/iib-pub: unauthorized: access to the requested resource is not authorized\"" >&2
+        return 1
+    fi
+
+    # For auth-failure test: also fail when inspecting from_index_resolved by digest
+    # This ensures freshness cannot be verified, and old build will be rejected
+    if [[ "$*" =~ "--retry-times 3 --config docker://registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:3d6fe02b28ab876d60af3c3df5100a6fe4c99b084651af547659173d680c6f4d" ]] && \
+       [[ "$(context.taskRun.name)" =~ "auth-failure" ]]; then
+        # Simulate auth failure for digest inspection too
+        echo "time=\"$(date -u --iso-8601=seconds)\" level=fatal msg=\"Error parsing image name \\\"docker://registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:3d6fe02b28ab876d60af3c3df5100a6fe4c99b084651af547659173d680c6f4d\\\": reading manifest sha256:3d6fe02b28ab876d60af3c3df5100a6fe4c99b084651af547659173d680c6f4d in registry-proxy.engineering.redhat.com/rh-osbs/iib-pub: unauthorized: access to the requested resource is not authorized\"" >&2
+        return 1
+    fi
+
+    # For auth-failure test: succeed when inspecting index_image_resolved (always works)
+    if [[ "$*" =~ "--retry-times 3 --config docker://registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:10b1d5b1d053d8c3a2263201baa983c760e6b61f3a50e3cde244fdaf68a4aed9" ]] && \
+       [[ "$(context.taskRun.name)" =~ "auth-failure" ]]; then
+        echo '{"created": "'"${today}"'"}'
+        return 0
+    fi
+
 }
 
 # the watch_build_state can't reach some mocks by default, so exporting them fixes it.
 export -f curl
 export -f mock_build_progress
+export -f get_auth_failure_jq_expr
 
 # The retry script won't see the kinit function unless we export it
 export -f kinit

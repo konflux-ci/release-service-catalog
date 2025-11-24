@@ -160,16 +160,79 @@ spec:
               jq -r .created)" "+%s")"
 
             create_auth_file
-            fromIndexCreated="$(skopeo inspect --retry-times 3 --config "docker://${from_index}" | \
+            # Try to get from_index creation date for freshness validation
+            # First attempt: use the tag directly
+            fromIndexCreated="$(skopeo inspect --retry-times 3 --config "docker://${from_index}" 2>/dev/null | \
               jq -r .created)"
 
-            if [ -z "${fromIndexCreated}" ]; then
-              return 0
+            # If tag inspection failed, try using from_index_resolved from the completed build
+            if [ -z "${fromIndexCreated}" ] || [ "${fromIndexCreated}" = "null" ]; then
+              fromIndexResolved="$(jq -r '.from_index_resolved // empty' <<< "${completed_build}")"
+              if [ -n "${fromIndexResolved}" ] && [ "${fromIndexResolved}" != "null" ]; then
+                fromIndexCreated="$(skopeo inspect --retry-times 3 --config \
+                  "docker://${fromIndexResolved}" 2>/dev/null | jq -r .created)"
+              fi
             fi
 
-            upstreamCatalogCreatedDate="$(date --date "${fromIndexCreated}" "+%s")"
-            if [ "${newCatalogCreatedDate}" -lt "${upstreamCatalogCreatedDate}" ]; then
-              return 0
+            if [ -n "${fromIndexCreated}" ] && [ "${fromIndexCreated}" != "null" ]; then
+              upstreamCatalogCreatedDate="$(date --date "${fromIndexCreated}" "+%s")"
+              if [ "${newCatalogCreatedDate}" -lt "${upstreamCatalogCreatedDate}" ]; then
+                echo "WARNING: Completed build is older than from_index, skipping reuse" >&2
+                return 0
+              fi
+            else
+              # Could not verify freshness via skopeo - check IIB to see if this build is still the latest
+              # for this from_index. If no newer builds exist, we can safely reuse it regardless of age.
+              completedFromIndex="$(jq -r '.from_index // empty' <<< "${completed_build}")"
+              buildUpdated="$(jq -r '.updated // empty' <<< "${completed_build}")"
+              
+              if [ "${completedFromIndex}" = "${from_index}" ] && [ -n "${buildUpdated}" ]; then
+                # Query IIB for all builds with the same from_index (regardless of fbc_fragments)
+                # If a newer build exists, from_index was updated by another product and we should
+                # reject to avoid race conditions where we'd remove fragments from the published catalog.
+                all_builds_data=$(curl -s \
+                  "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}&state=complete")
+                
+                if [ -n "${all_builds_data}" ] && [ "${all_builds_data}" != "null" ]; then
+                  # Extract the last build (most recent, regardless of fbc_fragments)
+                  last_build_updated=$(echo "${all_builds_data}" | jq \
+                    '[.items[] |
+                      select(.distribution_scope == "prod" or .distribution_scope == null) |
+                      select(.updated != null and .updated != "")
+                    ] | sort_by(.updated) | reverse | .[0].updated // empty')
+                  
+                  # Compare: if last build is newer than our candidate, from_index was updated
+                  # Use numeric comparison (Unix timestamps) to avoid locale-dependent string comparison
+                  if [ -n "${last_build_updated}" ] && [ "${last_build_updated}" != "null" ] && \
+                     [ "${last_build_updated}" != "${buildUpdated}" ]; then
+                    buildUpdatedSeconds="$(date --date "${buildUpdated}" "+%s" 2>/dev/null || echo "0")"
+                    lastBuildUpdatedSeconds="$(date --date "${last_build_updated}" "+%s" 2>/dev/null || echo "0")"
+                    
+                    if [ "${lastBuildUpdatedSeconds}" -gt "${buildUpdatedSeconds}" ]; then
+                      echo "ERROR: Could not verify from_index freshness via skopeo, and a newer build " \
+                        "exists for this from_index (last build: ${last_build_updated}, candidate: " \
+                        "${buildUpdated}). Skipping reuse to avoid race condition where concurrent " \
+                        "build updated from_index." >&2
+                      return 0
+                    fi
+                  fi
+                  
+                  # No newer builds found - this build is still the latest for this from_index
+                  # Safe to reuse regardless of age
+                  echo "WARNING: Could not verify from_index freshness via skopeo, but IIB confirms " \
+                    "no newer builds exist for this from_index. Proceeding with reuse." >&2
+                else
+                  # IIB query failed or returned empty - cannot verify, reject for safety
+                  echo "ERROR: Could not verify from_index freshness via skopeo, and IIB query " \
+                    "failed or returned empty. Skipping reuse for safety." >&2
+                  return 0
+                fi
+              else
+                # Missing required fields for IIB verification
+                echo "ERROR: Could not verify from_index freshness via skopeo, and cannot validate " \
+                  "via IIB (missing from_index or updated timestamp). Skipping reuse for safety." >&2
+                return 0
+              fi
             fi
 
             # Completed build is valid for reuse
@@ -205,6 +268,31 @@ spec:
           mkdir -p "${HOME}/.config/containers"
           fromIndex="$(params.fromIndex)"
           authName="${fromIndex%:*}"
+
+          # registry-proxy.engineering.redhat.com typically doesn't require credentials
+          # or uses Kerberos authentication (which skopeo doesn't support via auth.json)
+          if [[ "${authName}" =~ ^registry-proxy(\-stage)?.engineering.redhat.com ]]; then
+            # Remove any existing auth entry for this registry to avoid skopeo using invalid credentials
+            # If auth.json doesn't exist or is empty, create an empty one
+            if [ -f "${HOME}/.config/containers/auth.json" ]; then
+              jq "del(.auths.\"${authName}\")" \
+                "${HOME}/.config/containers/auth.json" > "${HOME}/.config/containers/auth.json.tmp" && \
+                mv "${HOME}/.config/containers/auth.json.tmp" \
+                  "${HOME}/.config/containers/auth.json" || \
+                echo '{}' > "${HOME}/.config/containers/auth.json"
+            else
+              mkdir -p "${HOME}/.config/containers"
+              echo '{}' > "${HOME}/.config/containers/auth.json"
+            fi
+            return 0
+          fi
+
+          # For other registries, use publishing credentials if available
+          if [ -z "${PUBLISHING_CREDENTIAL}" ]; then
+            echo "WARNING: No publishing credentials available for ${authName}" >&2
+            echo '{}' > "${HOME}/.config/containers/auth.json"
+            return 0
+          fi
 
           # disabling debug to not leak the token
           set +x
@@ -344,12 +432,49 @@ spec:
         watch_build_state() {
             build_id="$(base64 -d < "$(results.jsonBuildInfo.path)" | gunzip | jq -r ".id")"
             state=""
+            poll_count=0
+            start_time=$(date +%s)
+            last_log_time=${start_time}
+            
+            echo "INFO: Monitoring IIB build ${build_id}"
+            echo "INFO: IIB service URL: ${IIB_SERVICE_URL}"
+            
             while true; do
                 #
                 # fetching build information.
-                build_info=$(curl -s "${IIB_SERVICE_URL}/builds/${build_id}")
+                if ! build_info=$(curl -s "${IIB_SERVICE_URL}/builds/${build_id}") || [ -z "${build_info}" ]; then
+                    echo "WARNING: Failed to fetch build info from IIB service"
+                    sleep 30
+                    continue
+                fi
+                
+                # Check for errors in response
+                if echo "${build_info}" | jq -e '.error' >/dev/null 2>&1; then
+                    error_msg=$(echo "${build_info}" | jq -r '.error')
+                    echo "ERROR: IIB service returned error: ${error_msg}"
+                    sleep 30
+                    continue
+                fi
+                
                 # get state from the build information.
                 state="$(jq -r ".state" <<< "${build_info}")"
+                poll_count=$((poll_count + 1))
+                current_time=$(date +%s)
+                elapsed=$((current_time - start_time))
+                
+                # Log status every 5 minutes (10 polls at 30s intervals)
+                if [ $((current_time - last_log_time)) -ge 300 ]; then
+                    created_time=$(jq -r '.created // empty' <<< "${build_info}")
+                    updated_time=$(jq -r '.updated // empty' <<< "${build_info}")
+                    state_reason=$(jq -r '.state_reason // "none"' <<< "${build_info}")
+                    echo "INFO: Build status check #${poll_count} (elapsed: ${elapsed}s):"
+                    echo "  - State: ${state}"
+                    echo "  - State reason: ${state_reason}"
+                    echo "  - Created: ${created_time}"
+                    echo "  - Last updated: ${updated_time}"
+                    last_log_time=${current_time}
+                fi
+                
                 # remove the history as it breaks the results build up
                 jq -r 'del(.state_history)' <<< "${build_info}" | jq -c . | \
                   gzip -c | base64 -w0 > "$(results.jsonBuildInfo.path)"

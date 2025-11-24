@@ -1,0 +1,102 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-fbc-catalog-auth-failure
+spec:
+  description: |
+    Negative test: Tests that when skopeo authentication fails for from_index inspection
+    AND the existing build is too old (>24 hours), the build is correctly rejected and
+    a new build is created. This validates the safety mechanism that prevents reusing
+    stale builds when freshness cannot be verified.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: update-fbc-catalog-task
+      params:
+        - name: fbcFragments
+          value: '["registry.io/image0@sha256:0000"]'
+        - name: fromIndex
+          value: "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12"
+        - name: buildTags
+          value: '["v4.12"]'
+        - name: addArches
+          value: "[]"
+        - name: iibServiceAccountSecret
+          value: "iib-service-account-secret"
+        - name: publishingCredentials
+          value: "publishing-credentials"
+        - name: mustOverwriteFromIndexImage
+          value: "false"
+        - name: mustPublishIndexImage
+          value: "true"
+    - name: check-result
+      params:
+        - name: jsonBuildInfo
+          value: $(tasks.run-task.results.jsonBuildInfo)
+        - name: buildState
+          value: $(tasks.run-task.results.buildState)
+        - name: indexImageDigests
+          value: $(tasks.run-task.results.indexImageDigests)
+        - name: iibLog
+          value: $(tasks.run-task.results.iibLog)
+        - name: exitCode
+          value: $(tasks.run-task.results.exitCode)
+      taskSpec:
+        params:
+          - name: jsonBuildInfo
+            type: string
+          - name: buildState
+            type: string
+          - name: indexImageDigests
+            type: string
+          - name: iibLog
+            type: string
+          - name: exitCode
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
+            env:
+              - name: BUILD_STATE
+                value: $(params.buildState)
+              - name: JSON_BUILDINFO
+                value: $(params.jsonBuildInfo)
+            script: |
+              #!/bin/bash
+              set -x
+
+              # Verify the task completed successfully (new build was created)
+              state="$(jq -cr .state <<< "${BUILD_STATE}")"
+              if [ "$state" != "complete" ]; then
+                echo "ERROR: The task did not save a completed IIB build in buildState result"
+                exit 1
+              fi
+              if [ "$(params.exitCode)" != "0" ]; then
+                echo "ERROR: The task did not finish with a successful exit code"
+                exit 1
+              fi
+
+              # Verify a NEW build was created (not reused)
+              # This is a negative test: old build should be rejected, new one created
+              buildInfo=$(base64 -d <<< "${JSON_BUILDINFO}" | gunzip)
+              buildId=$(jq -r '.id' <<< "${buildInfo}")
+              
+              # The build ID should NOT be 1 (old build was rejected, new one created)
+              if [ "$buildId" = "1" ]; then
+                echo "ERROR: Expected a new build to be created (old build should be rejected), " \
+                  "but got reused build id=1"
+                exit 1
+              fi
+
+              # Verify from_index matches (new build should have correct from_index)
+              fromIndex=$(jq -r '.from_index' <<< "${buildInfo}")
+              expectedFromIndex="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12"
+              if [ "$fromIndex" != "$expectedFromIndex" ]; then
+                echo "ERROR: from_index mismatch. Expected: $expectedFromIndex, Got: $fromIndex"
+                exit 1
+              fi
+
+              echo "SUCCESS: Old build was correctly rejected and new build was created (id=$buildId)"
+      runAfter:
+        - run-task
