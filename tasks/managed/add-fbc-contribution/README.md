@@ -19,6 +19,9 @@ at the end to allow for timed out requests to finish so that we can just get the
 result. This will slightly compress the time in which batches are entered into the IIB
 queue to reduce the effect of a full queue on a single release.
 
+Timeout values can be configured per OCP version using .fbc.timeoutOverrides in the data
+file to accommodate versions that require longer build times.
+
 ## Parameters
 
 | Name                        | Description                                                                                                                | Optional | Default value        |

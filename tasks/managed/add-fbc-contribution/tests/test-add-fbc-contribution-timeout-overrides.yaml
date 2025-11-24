@@ -1,0 +1,272 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-timeout-overrides
+spec:
+  description: |
+    Test that timeout overrides are correctly applied per OCP version.
+    This test verifies that OCP-version-specific timeout configuration works.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create data.json with timeout overrides for v4.12
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 3600,
+                  "requestTimeoutSeconds": 3600,
+                  "timeoutOverrides": {
+                    "v4.12": {
+                      "requestTimeoutSeconds": 7200,
+                      "buildTimeoutSeconds": 7200
+                    }
+                  }
+                }
+              }
+              EOF
+
+              # Create snapshot with multi-OCP components
+              # v4.12 should use override timeout (7200s)
+              # v4.14 should use base timeout (3600s)
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp-v4-12",
+                    "containerImage": "registry.io/image-v4-12@sha256:0012",
+                    "repository": "prod-registry.io/prod-location",
+                    "updatedFromIndex": "quay.io/test/fbc-index-testing:v4.12",
+                    "targetIndex": "quay.io/test/fbc-target-index:v4.12",
+                    "ocpVersion": "v4.12"
+                  },
+                  {
+                    "name": "comp-v4-14",
+                    "containerImage": "registry.io/image-v4-14@sha256:0014",
+                    "repository": "prod-registry.io/prod-location",
+                    "updatedFromIndex": "quay.io/test/fbc-index-testing:v4.14",
+                    "targetIndex": "quay.io/test/fbc-target-index:v4.14",
+                    "ocpVersion": "v4.14"
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-timeout-overrides
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # Find all InternalRequests for this pipeline
+              internalRequests=$(kubectl get internalrequest \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers -o custom-columns=":metadata.name" \
+                --sort-by=.metadata.creationTimestamp)
+              
+              if [ -z "$internalRequests" ]; then
+                echo "ERROR: No InternalRequests found for pipeline ${PIPELINE_UID}"
+                exit 1
+              fi
+
+              echo "Found InternalRequests:"
+              echo "$internalRequests"
+
+              # We expect 2 InternalRequests (one for each OCP version)
+              request_count=$(echo "$internalRequests" | wc -l)
+              if [ "$request_count" -ne 2 ]; then
+                echo "ERROR: Expected 2 InternalRequests, found ${request_count}"
+                exit 1
+              fi
+
+              # Check each InternalRequest for correct timeout configuration
+              for ir in $internalRequests; do
+                echo "Checking InternalRequest: $ir"
+                
+                requestParams=$(kubectl get internalrequest "$ir" -o jsonpath="{.spec.params}")
+                buildTimeout=$(jq -r '.buildTimeoutSeconds' <<< "$requestParams")
+                fromIndex=$(jq -r '.fromIndex' <<< "$requestParams")
+                
+                echo "  fromIndex: $fromIndex"
+                echo "  buildTimeout: $buildTimeout"
+                
+                # Determine which OCP version this request is for based on fromIndex
+                if [[ "$fromIndex" == *"v4.12"* ]]; then
+                  echo "  This is v4.12 - should use override timeout (7200)"
+                  if [ "$buildTimeout" != "7200" ]; then
+                    echo "ERROR: v4.12 buildTimeout should be 7200, got: $buildTimeout"
+                    exit 1
+                  fi
+                  echo "  ✓ v4.12 timeout override correctly applied"
+                elif [[ "$fromIndex" == *"v4.14"* ]]; then
+                  echo "  This is v4.14 - should use base timeout (3600)"
+                  if [ "$buildTimeout" != "3600" ]; then
+                    echo "ERROR: v4.14 buildTimeout should be 3600, got: $buildTimeout"
+                    exit 1
+                  fi
+                  echo "  ✓ v4.14 base timeout correctly applied"
+                else
+                  echo "ERROR: Unexpected fromIndex: $fromIndex"
+                  exit 1
+                fi
+              done
+
+              # Verify results file has both components
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              component_count=$(jq '.components | length' "$RESULTS_FILE")
+              if [ "$component_count" -ne 2 ]; then
+                echo "ERROR: Expected 2 components in results, found ${component_count}"
+                exit 1
+              fi
+
+              echo "SUCCESS: Timeout overrides correctly applied per OCP version"
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
