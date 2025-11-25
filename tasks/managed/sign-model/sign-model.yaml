@@ -1,0 +1,182 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-model
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Signs a model before uploading to OCI registry
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: secretName
+      description: Name of secret containing needed credentials
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: secret-vol
+      secret:
+        secretName: $(params.secretName)
+        defaultMode: 0444
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - mountPath: "/etc/secrets"
+        name: secret-vol
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser:
+        1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: setup
+      image: quay.io/konflux-ci/release-service-utils:latest
+      computeResources:
+        limits:
+          memory: 2.5Gi
+        requests:
+          memory: 2.5Gi
+          cpu: "2"
+      script: |
+        #!/usr/bin/env bash
+        set -eu
+
+        IMAGE_NAMES=()
+        SNAPSHOT_PATH=$(params.dataDir)/$(params.snapshotPath)
+        COMPONENTS_LENGTH=$(jq '.components |length' "${SNAPSHOT_PATH}")
+        echo $COMPONENTS_LENGTH > $(params.dataDir)/componentslist.txt
+        cat $(params.dataDir)/componentslist.txt
+
+        for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
+
+          BUILD_CONTAINER_IMAGE==$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
+          IMAGE_NAMES+=$BUILD_CONTAINER_IMAGE
+
+          JSON_FILE_NAME="$(params.dataDir)/inspectdata_$COMPONENTS_INDEX.json"
+
+          skopeo inspect --raw $BUILD_CONTAINER_IMAGE > $JSON_FILE_NAME
+        
+        done
+
+        printf "%s\n" "${IMAGE_NAMES[@]}" > $(params.dataDir)/imagenames.txt
+
+    - name: sign
+      image: registry.redhat.io/rhtas/model-transparency-rhel9:0.0.3
+      computeResources:
+        limits:
+          memory: 2.5Gi
+        requests:
+          memory: 2.5Gi
+          cpu: "2"
+      script: |
+        #!/usr/bin/env bash
+        set -eu
+
+        SIGN_KEY="/etc/secrets/SIGN_KEY"
+
+        IMAGE_NAMES=()
+        readarray -t IMAGE_NAMES < $(params.dataDir)/imagenames.txt
+
+        comp_num=$(cat $(params.dataDir)/componentslist.txt)
+        COMPONENTS_LENGTH=$((comp_num + 0))
+
+        for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
+
+          BUILD_CONTAINER_IMAGE=$IMAGE_NAMES[$COMPONENTS_INDEX]
+          JSON_FILE_NAME="$(params.dataDir)/inspectdata_$COMPONENTS_INDEX.json"
+          SIG_NAME="$(params.dataDir)/model_$COMPONENTS_INDEX.sig"
+
+          model_signing sign key $JSON_FILE_NAME --private_key "$SIGN_KEY" --signature "$SIG_NAME"
+
+        done
+
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
