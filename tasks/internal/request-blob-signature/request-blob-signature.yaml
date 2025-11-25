@@ -1,0 +1,417 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: request-blob-signature
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to request a simple signature.
+    - This task is meant to be used in an internal pipeline that can be triggered frequently
+      and is expected to complete as quickly as possible.
+  params:
+    - description: A docker image of operator-pipeline-images for the steps to run in
+      name: pipeline_image
+      default: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
+      type: string
+    - description: Name of the user that requested the signing, for auditing purposes
+      name: requester
+      type: string
+    - description: Blob content to be signed, base64 encoded 
+      name: blob
+      type: string
+    - default: containerisvsign
+      description: NL separated signing key names that the content is signed with
+      name: sig_key_names
+      type: string
+    - default: operatorpipelines
+      description: Client name to connect to umb, usually a service account name
+      name: umb_client_name
+      type: string
+    - default: VirtualTopic.eng.robosignatory.isv.sign
+      description: umb topic to listen to for responses with signed content
+      name: umb_listen_topic
+      type: string
+    - default: VirtualTopic.eng.robosignatory.konflux.sign
+      description: batch signer umb topic to listen to for responses with signed content
+      name: umb_batch_listen_topic
+      type: string
+    - default: VirtualTopic.eng.operatorpipelines.isv.sign
+      description: umb topic to publish to for requesting signing
+      name: umb_publish_topic
+      type: string
+    - default: VirtualTopic.eng.hacbs-signing-pipeline.konflux.sign
+      description: batch signer umb topic to publish to for requesting signing
+      name: umb_batch_publish_topic
+      type: string
+    - default: umb.api.redhat.com
+      description: umb host to connect to for messaging
+      name: umb_url
+      type: string
+    - description: Kubernetes secret name that contains the umb SSL files
+      name: umb_ssl_cert_secret_name
+      type: string
+    - name: signature_data_file
+      description: The file where the signing response should be placed
+      default: "signing_response.json"
+      type: string
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  volumes:
+    - name: umb-ssl-cert-secret
+      secret:
+        secretName: $(params.umb_ssl_cert_secret_name)
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  results:
+    - name: certificate-issuer
+      description: issuer uid extracted from the certificate
+    - name: signed_payload
+      type: string
+  stepTemplate:
+    volumeMounts:
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+  steps:
+    - name: get-certificate-issuer
+      image: "$(params.pipeline_image)"
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 100m
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      workingDir: "$(workspaces.data.path)"
+      volumeMounts:
+        - name: umb-ssl-cert-secret
+          mountPath: /mnt/umb_ssl_cert_secret
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
+        issuer="$(openssl x509 -noout -subject <<< "$umb_cert" \
+          | awk '{print substr($0, index($0, "UID=")+4)}')"
+        echo -n "${issuer}" | tee "$(results.certificate-issuer.path)"
+
+    - name: build-pubtools-sign-config
+      image: "$(params.pipeline_image)"
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 100m
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      workingDir: "$(workspaces.data.path)"
+      env:
+        - name: UMB_CERT_PATH
+          value: "/tmp/crt"
+        - name: UMB_KEY_PATH
+          value: "/tmp/key"
+        - name: requester
+          value: $(params.requester)
+        - name: umb_client_name
+          value: $(params.umb_client_name)
+        - name: umb_listen_topic
+          value: $(params.umb_listen_topic)
+        - name: umb_batch_listen_topic
+          value: $(params.umb_batch_listen_topic)
+        - name: umb_publish_topic
+          value: $(params.umb_publish_topic)
+        - name: umb_batch_publish_topic
+          value: $(params.umb_batch_publish_topic)
+        - name: umb_url
+          value: $(params.umb_url)
+        - name: signature_data_file
+          value: "$(params.signature_data_file)"
+        - name: CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+      script: |
+        #!/usr/bin/env /bin/bash
+        set -x
+        creator=$(cat $(results.certificate-issuer.path))
+        if [ -z "$creator" ]; then
+          creator="{creator}"
+        fi
+
+        function get-task-id() {
+          if [[ -v CUSTOM_TASK_ID ]]; then
+            echo "${CUSTOM_TASK_ID}"
+          else
+            echo $(context.taskRun.uid)
+          fi
+        }
+        task_id=$(get-task-id)
+        cat <<EOF > "$(workspaces.data.path)/pubtools-sign-config.yaml"
+        msg_signer:
+          messaging_brokers:
+            - "amqps://${umb_url}:5671"
+          messaging_cert_key: /tmp/umb.pem.${task_id}
+          messaging_ca_cert: ${CA_BUNDLE}
+          topic_send_to: topic://${umb_publish_topic}
+          topic_listen_to: queue://Consumer.${creator}.${requester}-{task_id}.${umb_listen_topic}
+          environment: prod
+          service: ${umb_client_name}
+          timeout: 60
+          retries: 2
+          send_retries: 2
+          message_id_key: request_id
+          log_level: debug
+        msg_batch_signer:
+          messaging_brokers:
+            - "amqps://${umb_url}:5671"
+          messaging_cert_key: /tmp/umb.pem.${task_id}
+          messaging_ca_cert: ${CA_BUNDLE}
+          topic_send_to: topic://${umb_batch_publish_topic}
+          topic_listen_to: queue://Consumer.${creator}.${requester}-{task_id}.${umb_batch_listen_topic}.{task_id}
+          environment: prod
+          service: ${umb_client_name}
+          timeout: 60
+          retries: 2
+          send_retries: 2
+          message_id_key: request_id
+          log_level: debug
+          chunk_size: 200
+        EOF
+        echo "Using signing config:"
+        cat "$(workspaces.data.path)/pubtools-sign-config.yaml"
+    - name: check-umb-connection
+      image: "$(params.pipeline_image)"
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 100m
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      workingDir: "$(workspaces.data.path)"
+      volumeMounts:
+        - name: umb-ssl-cert-secret
+          mountPath: /mnt/umb_ssl_cert_secret
+          readOnly: true
+      env:
+        - name: umb_url
+          value: $(params.umb_url)
+        - name: CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+      script: |
+        #!/usr/bin/env /bin/bash
+        set -eo pipefail
+        openssl s_client -connect "${umb_url}:5671"\
+                        -cert "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)"\
+                        -key "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)"\
+                        -servername "$umb_url"\
+                        -CAfile "${CA_BUNDLE}" < /dev/null
+    - name: check-proton-ssl
+      image: "$(params.pipeline_image)"
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 100m
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      workingDir: "$(workspaces.data.path)"
+      volumeMounts:
+        - name: umb-ssl-cert-secret
+          mountPath: /mnt/umb_ssl_cert_secret
+          readOnly: true
+      env:
+        - name: umb_url
+          value: $(params.umb_url)
+        - name: CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+      script: |
+        #!/usr/bin/env /bin/bash
+        #
+        set -e
+        function get-task-id() {
+          if [[ -v CUSTOM_TASK_ID ]]; then
+            echo "${CUSTOM_TASK_ID}"
+          else
+            echo $(context.taskRun.uid)
+          fi
+        }
+        PY_SCRIPT=$(cat <<'END_HEREDOC'
+        import os
+        import proton
+        import sys
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        def validate_ssl_pair(cert_path, key_path):
+            try:
+                # 1. Load and Validate Certificate
+                with open(cert_path, "rb") as f:
+                    cert_data = f.read()
+                    cert = x509.load_pem_x509_certificate(cert_data)
+
+                # 2. Load and Validate Private Key
+                with open(key_path, "rb") as f:
+                    key_data = f.read()
+                    # If your key has a password, provide it in 'password='
+                    private_key = serialization.load_pem_private_key(key_data, password=None)
+
+                # 3. Check if they match
+                # We compare the public key derived from the cert vs the one from the private key
+                cert_pub_key = cert.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                )
+                key_pub_key = private_key.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo
+                )
+
+                if cert_pub_key == key_pub_key:
+                    return True, "Valid pair: Private key matches certificate."
+                else:
+                    return False, "Mismatch: Private key does not belong to this certificate."
+
+            except Exception as e:
+                return False, f"Validation error: {str(e)}"
+
+        print(f'Cert exists: {os.path.exists(sys.argv[1])}');
+        print(f'Cert is readable: {os.access(sys.argv[1], os.R_OK)}');
+        print(f'Proton SSL ready: {proton.SSL.present()}');
+
+        is_valid, message = validate_ssl_pair(sys.argv[1], sys.argv[1])
+        print(message)
+
+        ssl_domain=proton.SSLDomain(proton.SSLDomain.MODE_CLIENT);
+        ssl_domain.set_credentials(sys.argv[1], sys.argv[1], None)
+        END_HEREDOC
+        )
+        echo "$PY_SCRIPT" > /tmp/validate_ssl.py
+
+        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
+        umb_key="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)")"
+
+        echo "${umb_cert:?}" > /tmp/umb.pem.$(get-task-id)
+        echo "${umb_key:?}" >> /tmp/umb.pem.$(get-task-id)
+        cert="/tmp/umb.pem.$(get-task-id)"
+        python3 /tmp/validate_ssl.py "${cert}"
+
+    - name: request-signature
+      image: "$(params.pipeline_image)"
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 100m
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      workingDir: "$(workspaces.data.path)"
+      volumeMounts:
+        - name: umb-ssl-cert-secret
+          mountPath: /mnt/umb_ssl_cert_secret
+          readOnly: true
+      env:
+        - name: sig_key_names
+          value: "$(params.sig_key_names)"
+        - name: signature_data_file
+          value: "$(params.signature_data_file)"
+        - name: requester
+          value: "$(params.requester)"
+        - name: blob
+          value: "$(params.blob)"
+      script: |
+        #!/usr/bin/env /bin/bash
+        function get-task-id() {
+          if [[ -v CUSTOM_TASK_ID ]]; then
+            echo "${CUSTOM_TASK_ID}"
+          else
+            echo $(context.taskRun.uid)
+          fi
+        }
+        task_id=$(get-task-id)
+        cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)" > /tmp/umb.pem.$(get-task-id)
+        cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)" >> /tmp/umb.pem.$(get-task-id)
+        set -x
+        declare -a signing_key_args=()
+        declare -a signing_key_name_args=()
+
+        blob_file=$(mktemp)
+        echo -n "${blob}" > "${blob_file}"
+
+        for sig_key in $sig_key_names; do
+          signing_key_args+=("--signing-key")
+          signing_key_args+=("${sig_key}")
+          signing_key_name_args+=("--signing-key-name")
+          signing_key_name_args+=("${sig_key}")
+        done
+
+        pubtools-sign-msg-blob-sign \
+          --requester "${requester}" \
+          "${signing_key_args[@]}" \
+          "${signing_key_name_args[@]}" \
+          --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" \
+          --blob-file "${blob_file}" \
+          --signer-type "single" \
+          --task-id "$task_id" > "$(workspaces.data.path)/${signature_data_file}"
+        echo "Signing response was:"
+        fold "$(workspaces.data.path)/${signature_data_file}"
+    - name: check-signing-response
+      image: "$(params.pipeline_image)"
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 100m
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      workingDir: "$(workspaces.data.path)"
+      env:
+        - name: signature_data_file
+          value: "$(params.signature_data_file)"
+      script: |
+        #!/usr/bin/env /bin/bash
+        set -xe
+        STATUS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq -r ".signer_result.status")
+        ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.error_message")
+        if [ "${STATUS}" != "ok" ]; then
+          echo "Signing failed with error: ${ERRORS}"
+          exit 1
+        fi
+        SIGNATURE_ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" |\
+          jq -c '[.operation_results[]?[0]?.msg?.errors? // [] | select(length > 0)]')
+        if [ "$SIGNATURE_ERRORS" != "[]" ]; then
+          echo "Signing failed with errors:"
+          jq . <<< "${SIGNATURE_ERRORS}"
+          exit 1
+        fi
+
+        SIGNATURE_DATA=$(
+          cat "$(workspaces.data.path)/${signature_data_file}" | \
+          jq -cMr ".operation_results[][0].msg.signed_payload")
+        echo -n "${SIGNATURE_DATA}" > "$(results.signed_payload.path)"
+  workspaces:
+    - name: data
