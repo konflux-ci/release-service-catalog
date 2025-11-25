@@ -33,17 +33,3 @@ function ec() {
   exit 1
 }
 
-function curl() {
-  echo Mock curl called with: $* >&2
-  echo $* >> "$(params.dataDir)/mock_curl.txt"
-
-  # Mock successful API call to make repository public
-  if [[ "$*" =~ "quay.io/api/v1/repository".*"changevisibility" ]]; then
-      echo '{"success": true}'
-      return 0
-  fi
-  
-  # Pass through other curl calls
-  command curl "$@"
-}
-
