@@ -292,6 +292,9 @@ spec:
         read -ra repositories_a <<< "$REPOSITORIES"
         readarray -t sig_key_names_a <<< "$SIG_KEY_NAMES"
 
+        # production in this task means internal instances of pyxis as the task needs to run
+        # on internal cluster which doesn't have access to public pyxis instance. Same applies
+        # for stage
         if [[ "$(params.pyxisServer)" == "production" ]]
         then
           PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
@@ -299,8 +302,7 @@ spec:
         then
           PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
         else
-          echo "Invalid pyxisServer parameter. Only 'production','production-internal,'stage-internal' \
-              and 'stage' allowed."
+          echo "Invalid pyxisServer parameter. Only 'production' and 'stage' are allowed."
           exit 1
         fi
         PyxisCert="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_cert_file_name)")"
@@ -316,19 +318,35 @@ spec:
           reference="${reference_a[$i]}"
           digest="${digests_a[$i]}"
           repository="${repositories_a[$i]}"
+          repository_no_slashes="${repository//\//----}"
 
           find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
           --manifest_digest "${digest}" \
           --repository "${repository}" \
-          --output_file "/tmp/${digest}" &
+          --output_file "/tmp/${digest}" > "/tmp/find-signatures.${digest}.${repository_no_slashes}.out" 2>&1 &
           find_signatures_jobs+=($!)
         done
 
+        success=true
         echo "Waiting for ${#find_signatures_jobs[@]} find_signatures jobs to complete..."
         for job in "${find_signatures_jobs[@]}"; do
-          wait "$job"
+          wait "$job" || success=false
         done
         echo "All find_signatures jobs completed"
+
+        echo "Printing outputs for all find_signautres jobs..."
+        for i in "${!reference_a[@]}"; do
+          repository_no_slashes="${repository//\//----}"
+          digest="${digests_a[$i]}"
+        echo "=== ${reference} (${digest}) ==="
+          cat "/tmp/find-signatures.${digest}.${repository_no_slashes}.out"
+          echo
+        done
+
+        if [ $success != "true" ]; then
+          echo "ERROR: At least one find_signauture failed"
+          exit 1
+        fi
 
         declare -a to_sign_references=()
         declare -a to_sign_digests=()
@@ -447,7 +465,6 @@ spec:
           unset 'lines[0]'
           references=()
           manifest_digests=()
-          signing_keys=()
           for line in "${lines[@]}"; do
             IFS='|' read -r reference digest <<< "$line"
             references+=("$reference")

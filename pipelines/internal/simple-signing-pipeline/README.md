@@ -15,4 +15,4 @@ pipeline.
 | config_map_name  | A config map name with configuration                                                                                  | Yes      | hacbs-signing-pipeline-config                             |
 | taskGitUrl       | The url to the git repo where the release-service-catalog tasks to be used are stored                                 | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision  | The revision in the taskGitUrl repo to be used                                                                        | No       | -                                                         |
-| pyxisServer      | The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'                    | Yes      | production                                                |
+| pyxisServer      | The server type to use. Options are 'production' and 'stage'                                                          | Yes      | production                                                |
