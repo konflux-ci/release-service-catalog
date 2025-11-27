@@ -48,6 +48,8 @@ function koji() {
         echo '{"extra": {"sidetag": true}}'
     elif [[ "$*" == *getTag* ]]; then
         echo '{"extra": {"sidetag": false}}'
+    elif [[ "$*" == *listBuilds* ]]; then
+        echo '[{"build_id": 1,"creation_time": "2025-11-25 11:20:08"},{"build_id": 2,"creation_time": "2025-11-25 11:20:18"}]'
     elif [[ "$*" == *buildinfo* ]]; then
         # Simulate build not existing
         echo "No such build: $*" >&2

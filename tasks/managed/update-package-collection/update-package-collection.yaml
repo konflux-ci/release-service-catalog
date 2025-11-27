@@ -155,6 +155,7 @@ spec:
         set -e
 
         # Set parameters as local variables
+        PUSH_TYPE="$(params.pushType)"
         MAX_RETRIES="$(params.max_retries)"
         COMMAND_TIMEOUT="$(params.command_timeout)"
         GIT_AUTHOR_EMAIL="$(cat /mnt/package_collection_secret/git_author_email)"
@@ -166,6 +167,8 @@ spec:
         export GIT_AUTHOR_EMAIL GIT_REPO GIT_AUTHOR_NAME GITLAB_HOST ACCESS_TOKEN
 
         set -uxo pipefail
+
+        log_error() { echo "ERROR: $*" >&2; }
 
         # Validate JSON files first
         validate_json_file() {
@@ -214,14 +217,16 @@ spec:
         # Setup environment variables from JSON files
         setup_environment_variables() {
           # Now safe to parse
-          APPLICATION=$(jq -r '.application // empty' "${SNAPSHOT_SPEC_FILE}")
+          APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
           NUM_COMPONENTS=$(jq '.components | length // 0' "${SNAPSHOT_SPEC_FILE}")
-          PRODUCT_SHORT_NAME=$(jq -r '.releaseNotes.product_short_name // empty' "$DATA_FILE")  # No -e flag
-          INTENTION=$(jq -r '.intention // empty' "$DATA_FILE")
-          PRINCIPAL=$(jq -r '.pushOptions.pushKeytab.principal // empty' "${DATA_FILE}")
-          KEYTAB_FILE=$(jq -r '.pushOptions.pushKeytab.name // empty' "${DATA_FILE}")
-          KOJI_PROFILE=$(jq -r '.pushOptions.koji_profile // empty' "${DATA_FILE}")
-          KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft // "false"' "${DATA_FILE}")
+          PRODUCT_SHORT_NAME=$(jq -r '.releaseNotes.product_short_name' "$DATA_FILE")  # No -e flag
+          INTENTION=$(jq -r '.intention' "$DATA_FILE")
+          PRINCIPAL=$(jq -r '.pushOptions.pushKeytab.principal' "${DATA_FILE}")
+          KEYTAB_FILE=$(jq -r '.pushOptions.pushKeytab.name' "${DATA_FILE}")
+          DOWNLOAD_KOJI_BASE_URL=$(jq -r '.pushOptions.download_koji_base_url' "${DATA_FILE}")
+          KOJI_PROFILE=$(jq -r '.pushOptions.koji_profile' "${DATA_FILE}")
+          KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft' "${DATA_FILE}")
+
           # Validate required variables
           validate_required_vars
         }
@@ -238,6 +243,11 @@ spec:
             exit 1
           fi
 
+          if [ -z "$DOWNLOAD_KOJI_BASE_URL" ] || [ "$DOWNLOAD_KOJI_BASE_URL" = "null" ]; then
+            echo "ERROR: .data.pushOption.download_koji_base_url is required in RPA"
+            exit 1
+          fi
+
           ENV=$(convert_intention_to_env "$INTENTION")
           PRODUCT=$(echo "$PRODUCT_SHORT_NAME" | tr '[:lower:]' '[:upper:]' )
         }
@@ -251,13 +261,41 @@ spec:
           esac
         }
 
+        extract_build_info() {
+            local component_json="$1"
+            local git_url commit_hash commit_url user_name builds build_id
+
+            git_url=$(jq -r '.source.git.url' <<< "$component_json")
+            commit_hash=$(jq -r '.source.git.revision' <<< "$component_json")
+            commit_url="git+$git_url#$commit_hash"
+            user_name=$(echo "$PRINCIPAL" | cut -d'@' -f1)
+
+            builds=$(koji-cmd call --json-output listBuilds \
+                userID="$user_name" \
+                state=1 \
+                source="$commit_url" \
+                draft=True)
+
+            if [[ -z "$builds" || "$builds" == "null" ]]; then
+                log_error "No builds found for component"
+                return 1
+            fi
+
+            build_id=$(jq -r 'max_by(.creation_time).build_id' <<< "$builds")
+
+            if [[ -z "$build_id" || "$build_id" == "null" ]]; then
+                log_error "Required variable is missing or empty: $build_id"
+                return 1
+            fi
+
+            download_url="${DOWNLOAD_KOJI_BASE_URL}/buildinfo?buildID=${build_id}"
+
+            echo "$download_url $build_id"
+        }
+
         # Setup Kerberos authentication
         setup_kerberos_auth() {
 
-          # Skip the init as it's not draft push
-          if [[ "$KOJI_IMPORT_DRAFT" != "true" ]]; then
-            return 0
-          fi
           local keytab_path
           keytab_path="./${KEYTAB_FILE}"
 
@@ -436,6 +474,13 @@ spec:
 
           echo "INFO: Processing component: $component_name"
 
+          # Extract build information
+          if ! result=$(extract_build_info "$component_json"); then
+            log_error "Failed to extract build info for $component_name"
+            return 1
+          fi
+          read -r download_url build_id <<< "$result"
+
           # Pull container image and extract SRPM
           pull_container_image "$container_image"
           local srpm_file package_nvr pkg_collections
@@ -452,8 +497,13 @@ spec:
           # Extract the NVR (Name-Version-Release) from the SRPM file
           package_nvr=$(basename "$srpm_file" .src.rpm)
 
-          # Display the package NVR
-          echo "Package NVR: $package_nvr"
+          # Add the postfix ",draft_${build_id}" if it is a import draft build
+          if [[ "$KOJI_IMPORT_DRAFT" != "false" && "$PUSH_TYPE" != "promote" ]]; then
+              package_nvr="${package_nvr},draft_${build_id}"
+          fi
+
+          echo "Download URL: $download_url"
+          echo "Final NVR: $package_nvr"
 
           # Get package collections(includes koji_target as one of the items) and remove duplicates in one step
           pkg_collections=()
@@ -463,8 +513,7 @@ spec:
           echo "INFO: All package collections (including Koji target): ${pkg_collections[*]}"
 
           # Remove the '-draft' suffix when push type is 'promote'.
-          push_type="$(params.pushType)"
-          if [[ "$push_type" == "promote" ]]; then
+          if [[ "$PUSH_TYPE" == "promote" ]]; then
               echo "INFO: Promoting collections - removing draft suffixes"
               for i in "${!pkg_collections[@]}"; do
                   pkg_collections[i]="${pkg_collections[i]%-draft}"
@@ -473,7 +522,7 @@ spec:
 
           # Process each package collection
           for collection in "${pkg_collections[@]}"; do
-            process_package_collection "$collection" "$package_nvr" "$container_image"
+            process_package_collection "$collection" "$package_nvr" "$download_url"
           done
         }
 
