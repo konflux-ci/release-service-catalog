@@ -323,34 +323,28 @@ spec:
                     continue
                 fi
 
-                # Sign rh-registry-repo references (always) and registry-access-repo references
-                # (only if signatures for this registry are required)
-                REGISTRY_REFERENCES=("${rh_registry_repo}")
-                if [ "$registry_access_repo" != "" ] && [ "$registry_access_repo" != "null" ] && \
-                   grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
-                    REGISTRY_REFERENCES+=("${registry_access_repo}")
-                fi
-
-                # Collect data for signing
+                # Collect data for signing - rh-registry-repo references only
+                # We process rh-registry-repo and registry-access-repo separately to avoid
+                # race conditions when signing the same image with both references in parallel.
                 # Sign each manifest in the manifest list
                 if [ $LIST -eq 1 ]; then
-                    for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                        for MDIGEST in $MANIFEST_DIGESTS; do
-                            for TAG in $REPO_TAGS; do
-                                to_sign+=("${REGISTRY_REF}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
-                            done
+                    for MDIGEST in $MANIFEST_DIGESTS; do
+                        for TAG in $REPO_TAGS; do
+                            to_sign+=("${rh_registry_repo}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
                         done
                     done
                 fi
                 # Sign manifest list itself or manifest if it's not list
-                for REGISTRY_REF in "${REGISTRY_REFERENCES[@]}"; do
-                    for TAG in $REPO_TAGS; do
-                        to_sign+=("${REGISTRY_REF}:${TAG}@${DIGEST}#${INTERNAL_CONTAINER_REF}")
-                    done
+                for TAG in $REPO_TAGS; do
+                    to_sign+=("${rh_registry_repo}:${TAG}@${DIGEST}#${INTERNAL_CONTAINER_REF}")
                 done
             done
         done
-        echo "${to_sign[@]}" | python3 -c "
+
+        # Process and sign all rh-registry-repo references first
+        echo "Processing rh-registry-repo references..."
+        if [ ${#to_sign[@]} -gt 0 ]; then
+          echo "${to_sign[@]}" | python3 -c "
         import sys
         from itertools import zip_longest
         digest_groups = {}
@@ -369,26 +363,148 @@ spec:
             print(' '.join(entry))
           print('---') # group separator
         " | while read -r ENTRY; do
-          if [ "$ENTRY" = "---" ]; then
-            echo "... waiting for group to be signed ..."
-            # wait for group to finish
-            while (( ${RUNNING_JOBS@P} > 0 )); do
+            if [ "$ENTRY" = "---" ]; then
+              echo "... waiting for group to be signed ..."
+              # wait for group to finish
+              while (( ${RUNNING_JOBS@P} > 0 )); do
+                wait -n
+              done
+              continue
+            fi
+            INTERNAL_REF=$(echo "$ENTRY" | cut -d' ' -f1)
+            PUBLIC_REF=$(echo "$ENTRY" | cut -d' ' -f2)
+            DIGEST=$(echo "$ENTRY" | cut -d' ' -f3)
+            TAG=$(echo "$ENTRY" | cut -d' ' -f4)
+            while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
               wait -n
             done
-            continue
-          fi
-          INTERNAL_REF=$(echo "$ENTRY" | cut -d' ' -f1)
-          PUBLIC_REF=$(echo "$ENTRY" | cut -d' ' -f2)
-          DIGEST=$(echo "$ENTRY" | cut -d' ' -f3)
-          TAG=$(echo "$ENTRY" | cut -d' ' -f4)
-          while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
-            wait -n
+            check_and_sign "${PUBLIC_REF}:${TAG}" "${INTERNAL_REF}" "${DIGEST}" &
           done
-          check_and_sign "${PUBLIC_REF}:${TAG}" "${INTERNAL_REF}" "${DIGEST}" &
+          while (( ${RUNNING_JOBS@P} > 0 )); do
+              wait -n
+          done
+          echo "Completed signing rh-registry-repo references"
+        fi
+
+        # Now collect and process registry-access-repo references
+        # This runs serially after rh-registry-repo to avoid race conditions
+        echo "Processing registry-access-repo references..."
+        declare -a to_sign_registry_access=()
+        for (( COMPONENTS_INDEX=0; COMPONENTS_INDEX<COMPONENTS_LENGTH; COMPONENTS_INDEX++ )); do
+            COMPONENT_NAME=$(jq -r ".components[${COMPONENTS_INDEX}].name" "${SNAPSHOT_PATH}")
+
+            COMPONENT=$(jq -c ".components[${COMPONENTS_INDEX}]" "${SNAPSHOT_PATH}")
+
+            # Check if image is manifest list
+            BUILD_CONTAINER_IMAGE=$(jq -r ".components[${COMPONENTS_INDEX}].containerImage" "${SNAPSHOT_PATH}")
+            DIGEST="${BUILD_CONTAINER_IMAGE/*@}"
+            LIST=0
+            MANIFEST_DIGESTS=""
+
+            # First, try to get imageDigests from the snapshot
+            IMAGE_DIGESTS=$(jq -c ".components[${COMPONENTS_INDEX}].imageDigests // []" "${SNAPSHOT_PATH}")
+            IMAGE_DIGESTS_LENGTH=$(jq 'length' <<< "$IMAGE_DIGESTS")
+
+            if [ "$IMAGE_DIGESTS_LENGTH" -gt 0 ]; then
+              LIST=1
+              MANIFEST_DIGESTS=$(jq -r '.[]' <<< "$IMAGE_DIGESTS")
+            else
+              IMAGE=$(skopeo inspect --raw "docker://${BUILD_CONTAINER_IMAGE}")
+              MEDIA_TYPE=$(echo "$IMAGE" | jq -r '.mediaType')
+              if [ "$MEDIA_TYPE" = "application/vnd.docker.distribution.manifest.list.v2+json" ]; then LIST=1; fi
+              if [ "$MEDIA_TYPE" = "application/vnd.oci.image.index.v1+json" ]; then LIST=1; fi
+              if [ $LIST -eq 1 ]; then
+                MANIFEST_DIGESTS=$(echo "$IMAGE" | jq -r '.manifests[]|.digest')
+              fi
+            fi
+
+            # Process repositories array
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$COMPONENT")
+            for (( i = 0; i < NUM_REPOSITORIES; i++ )); do
+                REPOSITORY_OBJECT=$(jq -c ".repositories[${i}]" <<< "$COMPONENT")
+
+                INTERNAL_CONTAINER_REF=$(jq -r '.url' <<< "$REPOSITORY_OBJECT")
+                rh_registry_repo=$(jq -r '."rh-registry-repo" // empty' <<< "$REPOSITORY_OBJECT")
+                registry_access_repo=$(jq -r '."registry-access-repo" // empty' <<< "$REPOSITORY_OBJECT")
+
+                # Skip if no rh-registry-repo or no registry-access-repo
+                if [ "$rh_registry_repo" = "" ] || [ "$rh_registry_repo" = "null" ]; then
+                    continue
+                fi
+                if [ "$registry_access_repo" = "" ] || [ "$registry_access_repo" = "null" ]; then
+                    continue
+                fi
+
+                repository="${rh_registry_repo#*/}"
+
+                # Only process if this repository requires registry-access signatures
+                if ! grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
+                    continue
+                fi
+
+                # Get tags from repository object
+                REPO_TAGS=$(jq -r '.tags[]? // empty' <<< "$REPOSITORY_OBJECT")
+                if [ -z "$REPO_TAGS" ]; then
+                    continue
+                fi
+
+                # Collect registry-access-repo references for signing
+                if [ $LIST -eq 1 ]; then
+                    for MDIGEST in $MANIFEST_DIGESTS; do
+                        for TAG in $REPO_TAGS; do
+                            to_sign_registry_access+=("${registry_access_repo}:${TAG}@${MDIGEST}#${INTERNAL_CONTAINER_REF}")
+                        done
+                    done
+                fi
+                # Sign manifest list itself or manifest if it's not list
+                for TAG in $REPO_TAGS; do
+                    to_sign_registry_access+=("${registry_access_repo}:${TAG}@${DIGEST}#${INTERNAL_CONTAINER_REF}")
+                done
+            done
         done
-        while (( ${RUNNING_JOBS@P} > 0 )); do
-            wait -n
-        done
+
+        if [ ${#to_sign_registry_access[@]} -gt 0 ]; then
+          echo "${to_sign_registry_access[@]}" | python3 -c "
+        import sys
+        from itertools import zip_longest
+        digest_groups = {}
+        # #
+        # Make groups based on reference + digest to avoid signing same digest in parallel
+        # #
+        for x in sys.stdin.read().strip().split(' '):
+          rest, internal_ref = x.split('#')
+          rest, digest = rest.split('@')
+          public_ref, tag = rest.split(':')
+          digest_groups.setdefault(internal_ref+'@'+digest, []).append(
+            (internal_ref, public_ref, digest, tag)
+          )
+        for to_yield in zip_longest(*digest_groups.values()):
+          for entry in filter(None, to_yield):
+            print(' '.join(entry))
+          print('---') # group separator
+        " | while read -r ENTRY; do
+            if [ "$ENTRY" = "---" ]; then
+              echo "... waiting for group to be signed ..."
+              # wait for group to finish
+              while (( ${RUNNING_JOBS@P} > 0 )); do
+                wait -n
+              done
+              continue
+            fi
+            INTERNAL_REF=$(echo "$ENTRY" | cut -d' ' -f1)
+            PUBLIC_REF=$(echo "$ENTRY" | cut -d' ' -f2)
+            DIGEST=$(echo "$ENTRY" | cut -d' ' -f3)
+            TAG=$(echo "$ENTRY" | cut -d' ' -f4)
+            while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
+              wait -n
+            done
+            check_and_sign "${PUBLIC_REF}:${TAG}" "${INTERNAL_REF}" "${DIGEST}" &
+          done
+          while (( ${RUNNING_JOBS@P} > 0 )); do
+              wait -n
+          done
+          echo "Completed signing registry-access-repo references"
+        fi
         echo "done"
     - name: create-trusted-artifact
       computeResources:
