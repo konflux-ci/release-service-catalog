@@ -2,13 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: enforce-labels
+  name: check-labels
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task to ensure that components destination repositories names match the supplied image name label.
+    Tekton task to ensure that components destination repositories names and cpes match the supplied image labels.
+    With enforce parameter set to false, the task will just output warnings whenever the values don't match.
   params:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
@@ -16,6 +17,13 @@ spec:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
+    - name: enforce
+      description: |-
+        If set to true, validation failures will be logged as errors, causing the task to fail.
+        If set to false (the default), validation failures will be logged as warnings instead, allowing the task to
+        complete successfully
+      type: string
+      default: "false"
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
@@ -103,6 +111,16 @@ spec:
             exit 1
         fi
 
+        fail_or_warn() {
+            # Use $* to join all arguments with a single space
+            local msg="$*"
+            if [ "$(params.enforce)" == "true" ]; then
+                echo "Error: ${msg}" >&2
+                exit 1
+            fi
+            echo "Warning: ${msg}" >&2
+        }
+
         # derive namespace/repo from a container image URL
         derive_name_from_url() {
             local url="$1"
@@ -122,8 +140,9 @@ spec:
 
             # Check if the label was found. It is always required.
             if [[ -z "$name_label" || "$name_label" == "null" ]]; then
-              echo "Error: Component '$name' is missing the required container label 'name' in its metadata."
-              exit 1
+              fail_or_warn "Component '$name' is missing the required container label" \
+                "'name' in its metadata."
+              continue
             fi
 
             # Fetch canonicalName from the component root
@@ -143,23 +162,21 @@ spec:
                 derived_name=$(derive_name_from_url "$url")
 
                 if [[ "$name_label" != "$derived_name" ]]; then
-                    echo "Error: Component '$name' name label ('$name_label') does not match" \
-                      "derived name from URL ('$derived_name')" >&2
-                    exit 1
+                    fail_or_warn "Component '$name' name label ('$name_label') does not match" \
+                        "derived name from URL ('$derived_name')"
                 fi
             elif [[ "$num_repos" -gt 1 ]]; then
                 # --- MULTIPLE REPOSITORY LOGIC ---
                 # A component-level canonicalName is REQUIRED and must match the name label.
                 if [[ -z "$canonical_name" ]]; then
-                    echo "Error: Component '$name' has multiple repositories, but is missing the" \
-                      "component-level 'canonicalName'." >&2
-                    exit 1
+                    fail_or_warn "Component '$name' has multiple repositories, but is missing the" \
+                        "component-level 'canonicalName'."
+                    continue
                 fi
 
                 if [[ "$name_label" != "$canonical_name" ]]; then
-                    echo "Error: Component '$name' name label ('$name_label') does not match" \
-                      "component-level canonicalName ('$canonical_name')" >&2
-                    exit 1
+                    fail_or_warn "Component '$name' name label ('$name_label') does not match" \
+                        "component-level canonicalName ('$canonical_name')"
                 fi
             fi
         done
@@ -182,6 +199,16 @@ spec:
         fi
         
         SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        
+        fail_or_warn() {
+            # Use $* to join all arguments with a single space
+            local msg="$*"
+            if [ "$(params.enforce)" == "true" ]; then
+                echo "Error: ${msg}" >&2
+                exit 1
+            fi
+            echo "Warning: ${msg}" >&2
+        }
         
         CPE_DATA=$(jq -r '.releaseNotes.cpe // empty' "${DATA_FILE}")
         if [[ -z "$CPE_DATA" ]]; then
@@ -209,9 +236,9 @@ spec:
         
             # Compare the label value with the single data value (CPE_DATA)
             if [[ "$cpe_label" != "$CPE_DATA" ]]; then
-                echo "Error: Component '$name' 'cpe' label ('$cpe_label') does not match" \
-                  "the single required CPE value from the data file ('$CPE_DATA')." >&2
-                exit 1
+                fail_or_warn "Component '$name' 'cpe' label ('$cpe_label') does not match" \
+                    "the single required CPE value from the data file ('$CPE_DATA')."
+                continue
             fi
         
             echo "Success: Component '$name' 'cpe' label matches the data file value."
