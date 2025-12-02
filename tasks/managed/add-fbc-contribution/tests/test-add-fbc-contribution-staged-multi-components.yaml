@@ -1,0 +1,255 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-staged-multi-components
+spec:
+  description: Test add-fbc-contribution task for a staged multi-components releases with
+    empty targetIndex
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+    - name: sourceDataArtifact
+      description: Location of trusted artifacts to be used to populate data directory
+      type: string
+      default: ""
+  tasks:
+    - name: setup
+      params:
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+            description: Location of trusted artifacts to be used to populate data directory
+          - name: dataDir
+            type: string
+            description: The location where data will be stored
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Ensure data directory exists
+              mkdir -p "$(params.dataDir)"
+
+              # Create snapshot with prepared FBC components (already processed by prepare-fbc-snapshot)
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
+              {
+                "components": [
+                  {
+                    "name": "test-fbc-component-staged-4.13-1",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-first-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                    "repository": "quay.io/test/test-fbc-component-staged",
+                    "ocpVersion": "v4.13",
+                    "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.13",
+                    "targetIndex": ""
+                  },
+                  {
+                    "name": "test-fbc-component-staged-4.13-2",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-last-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                    "repository": "quay.io/test/test-fbc-component-staged",
+                    "ocpVersion": "v4.13",
+                    "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.13",
+                    "targetIndex": ""
+                  },
+                  {
+                    "name": "test-fbc-component-staged-4.14-1",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                    "repository": "quay.io/test/test-fbc-component-staged",
+                    "ocpVersion": "v4.14",
+                    "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.14",
+                    "targetIndex": ""
+                  }
+                ]
+              }
+              EOF
+
+              # Create FBC data configuration for staged release
+              cat > "$(params.dataDir)/data.json" << 'EOF'
+              {
+                "fbc": {
+                  "fromIndex": "quay.io/redhat/redhat-operator-index:{{ OCP_VERSION }}",
+                  "targetIndex": "",
+                  "hotfix": false,
+                  "preGA": false,
+                  "stagedIndex": true,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              # Create mock results directory structure
+              mkdir -p "$(params.dataDir)/results"
+
+              echo "Staged test data created for add-fbc-contribution"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: resultsDirPath
+          value: results
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "development"
+        - name: maxBatchSize
+          value: "5"
+        - name: mustPublishIndexImage
+          value: "false"
+        - name: mustOverwriteFromIndexImage
+          value: "false"
+        - name: iibServiceAccountSecret
+          value: "iib-services-config"
+      runAfter:
+        - setup
+
+    - name: verify-results
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+            description: Location of trusted artifacts to be used to populate data directory
+          - name: dataDir
+            type: string
+            description: The location where data will be stored
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: verify-staged-processing
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== STAGED RELEASE VERIFICATION ==="
+
+              # Verify results file was created
+              RESULTS_FILE="$(params.dataDir)/results/internal-requests-results.json"
+              if [[ -f "$RESULTS_FILE" ]]; then
+                echo "✅ Results file exists"
+                echo "Results contents:"
+                jq . "$RESULTS_FILE"
+              else
+                echo "❌ Results file missing at $RESULTS_FILE"
+                exit 1
+              fi
+
+              # Verify components were processed despite empty targetIndex
+              COMPONENTS_COUNT=$(jq '.components | length' "$RESULTS_FILE")
+              if [[ "$COMPONENTS_COUNT" -gt 0 ]]; then
+                echo "✅ Components were processed successfully: $COMPONENTS_COUNT"
+              else
+                echo "❌ No components processed"
+                exit 1
+              fi
+
+              # Verify staged release specific behavior
+              FIRST_COMPONENT_TARGET=$(jq -r '.components[0].target_index' "$RESULTS_FILE")
+              if [[ "$FIRST_COMPONENT_TARGET" == "" ]]; then
+                echo "✅ Target index is empty for staged release"
+              else
+                echo "❌ Expected empty target index, got: $FIRST_COMPONENT_TARGET"
+                exit 1
+              fi
+
+              echo "=== STAGED RELEASE TEST PASSED ==="
+      runAfter:
+        - run-task

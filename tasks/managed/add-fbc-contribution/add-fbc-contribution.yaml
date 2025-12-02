@@ -614,18 +614,32 @@ spec:
         # Execute the multi-OCP processing
         process_all_ocp_groups
 
-        # Deduplicate results: keep only the last component per unique target_index (the last one)
-        # This ensures downstream tasks (collect-index-images, create-pyxis-image) use the correct digest
+        # Classify the targets by `target_index`, but if this is a staging build, we should classify
+        # the targets by `ocp_version` instead, as `target_index` will be missing for this case.
         UNIQUE_TARGETS=$(jq -r '[.components[].target_index] | unique | length' "$RESULTS_FILE")
-        TOTAL_COMPONENTS=$(jq -r '.components | length' "$RESULTS_FILE")
 
+        isStage=$(jq '.fbc.stagedIndex // false' "${DATA_FILE}")
+        if [ "${isStage}" == "true" ]; then
+          UNIQUE_TARGETS=$(jq -r '[.components[].ocp_version] | unique | length' "$RESULTS_FILE")
+        fi
+
+        # Deduplicate results: keep only the last component per unique target_index (the last one), or
+        # by ocp_version when target_index is set to an empty string.
+        # This ensures downstream tasks (collect-index-images, create-pyxis-image) use the correct digest.
+        TOTAL_COMPONENTS=$(jq -r '.components | length' "$RESULTS_FILE")
         if [[ "$TOTAL_COMPONENTS" -gt "$UNIQUE_TARGETS" ]]; then
           echo "Found $TOTAL_COMPONENTS components for $UNIQUE_TARGETS unique targets"
           echo "Keeping only the last (most recent) index for each OCP target"
 
           RESULTS_TEMP_FILE="/tmp/results-temp.json"
-          jq '[.components | group_by(.target_index) | .[] | last] | {components: .}' \
-            "$RESULTS_FILE" > "$RESULTS_TEMP_FILE"
+          jq '[
+            .components
+              | group_by(
+                  (.target_index | select(.!="")) // .ocp_version
+                )
+              | .[] | last ]
+              | { components: . }' "$RESULTS_FILE" | tee "$RESULTS_TEMP_FILE"
+
           mv "$RESULTS_TEMP_FILE" "$RESULTS_FILE"
 
           DEDUPLICATED_COUNT=$(jq -r '.components | length' "$RESULTS_FILE")
