@@ -128,23 +128,46 @@ function oras() {
         touch testproduct-binary-windows-amd64.zip
         touch testproduct-binary-darwin-amd64.tar.gz
         touch testproduct-binary-linux-amd64.tar.gz
+    elif [[ "$*" =~ pull.*-o.* ]]; then
+        # Handle oras pull with -o output directory (used for signed binaries)
+        echo Simulating oras pull with output directory
+        local output_dir=""
+        local args=($*)
+        for ((i=0; i<${#args[@]}; i++)); do
+            if [[ "${args[$i]}" == "-o" ]]; then
+                output_dir="${args[$((i+1))]}"
+                break
+            fi
+        done
+        if [[ -n "$output_dir" ]]; then
+            mkdir -p "$output_dir"
+            # Determine component from the pull URL
+            if [[ "$*" =~ testproduct2/signed ]]; then
+                touch "$output_dir/testproduct2-binary-darwin-amd64"
+                touch "$output_dir/testproduct2-binary-windows-amd64.exe"
+            elif [[ "$*" =~ testproduct3/signed ]]; then
+                touch "$output_dir/testproduct3-binary-darwin-amd64"
+                touch "$output_dir/testproduct3-binary-windows-amd64.exe"
+            else
+                touch "$output_dir/testproduct-binary-darwin-amd64"
+                touch "$output_dir/testproduct-binary-windows-amd64.exe"
+            fi
+        fi
     elif [[ "$*" =~ pull.* ]]; then
         echo Simulating oras pull
-        mkdir -p windows linux macos
-        touch windows/testproduct-binary-windows-amd64.exe
-        touch linux/testproduct-binary-linux-amd64
-        touch macos/testproduct-binary-darwin-amd64
-        # when testing with multiple components
-        if [ -f "/shared/artifacts/linux/testproduct2-binary-linux-amd64" ]; then
+        # Determine component from the pull URL and create appropriate files
+        if [[ "$*" =~ testproduct2/signed ]] || [[ "$*" =~ testproduct2/unsigned ]]; then
+            mkdir -p windows macos
             touch windows/testproduct2-binary-windows-amd64.exe
-            touch linux/testproduct2-binary-linux-amd64
             touch macos/testproduct2-binary-darwin-amd64
-        fi
-
-        if [ -f "/shared/artifacts/linux/testproduct3-binary-linux-amd64" ]; then
+        elif [[ "$*" =~ testproduct3/signed ]] || [[ "$*" =~ testproduct3/unsigned ]]; then
+            mkdir -p windows macos
             touch windows/testproduct3-binary-windows-amd64.exe
-            touch linux/testproduct3-binary-linux-amd64
             touch macos/testproduct3-binary-darwin-amd64
+        else
+            mkdir -p windows macos
+            touch windows/testproduct-binary-windows-amd64.exe
+            touch macos/testproduct-binary-darwin-amd64
         fi
     fi
 }
@@ -186,9 +209,11 @@ function ssh() {
 
 function scp() {
     echo Mocking scp call with: $*
-    if [[ "$*" =~ .*digest.txt.* ]]; then
+    # Handle digest file copies - write mock digest to destination
+    if [[ "$*" =~ .*digest.txt.* ]] || [[ "$*" =~ .*_digest.txt ]]; then
         args=($@)
-        echo sha256:$(echo | sha256sum |awk '{ print $1}') > ${args[-1]}
+        dest="${args[-1]}"
+        echo sha256:$(echo | sha256sum |awk '{ print $1}') > "$dest"
     fi
     echo
 }

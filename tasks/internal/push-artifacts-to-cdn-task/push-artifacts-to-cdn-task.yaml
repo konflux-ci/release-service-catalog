@@ -96,14 +96,6 @@ spec:
   results:
     - name: result
       description: Success if the task succeeds, the error otherwise
-    - name: signedMacDigest
-      description: Digest for signed Mac files
-    - name: unsignedMacDigest
-      description: Digest for unsigned Mac files
-    - name: signedWindowsDigest
-      description: Digest from signed Windows files
-    - name: unsignedWindowsDigest
-      description: Digest from unsigned Windows files
     - name: publishedFiles
       description: List of published files
   volumes:
@@ -224,24 +216,21 @@ spec:
         echo "$DOCKER_CONFIG_JSON" | sed -r 's/(^|\})[^{}]+(\{|$)/\1\2/g' > ~/.docker/config.json
         set -x
 
-        DISK_IMAGE_DIR="/shared/artifacts"
-        export DISK_IMAGE_DIR
-        mkdir -p "$DISK_IMAGE_DIR"
+        CONTENT_DIR="/shared/artifacts"
+        export CONTENT_DIR
+        mkdir -p "$CONTENT_DIR"
 
-        process_component() { # Expected argument is [component json]
+        process_component() { # Expected arguments: [component json] [component index (0-based)]
             COMPONENT=$1
+            COMPONENT_INDEX=$2
+            COMPONENT_NUM=$((COMPONENT_INDEX + 1))  # 1-based for error messages
+            # Use component.name for directory isolation
+            COMPONENT_NAME=$(jq -er '.name' <<< "${COMPONENT}") \
+                  || (echo "Component ${COMPONENT_NUM} is missing 'name'" >&2 && exit 1 )
             PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}") \
-                  || (echo "Missing containerImage for component." >&2 && exit 1 )
-
-            STAGED_DESTINATION=$(jq -r '.staged.destination // empty' <<< "${COMPONENT}")
-
-            if [ -z "$STAGED_DESTINATION" ]; then
-              # Use a default destination if not provided
-              DESTINATION="${DISK_IMAGE_DIR}/default/FILES"
-              echo "No staged.destination specified for component; using default destination: $DESTINATION"
-            else
-              DESTINATION="${DISK_IMAGE_DIR}/${STAGED_DESTINATION}/FILES"
-            fi
+                  || (echo "Component ${COMPONENT_NAME} is missing 'containerImage'" >&2 && exit 1 )
+            DESTINATION="${CONTENT_DIR}/${COMPONENT_NAME}"
+            echo "Extracting component '${COMPONENT_NAME}' to: $DESTINATION"
 
             mkdir -p "${DESTINATION}"
 
@@ -328,7 +317,7 @@ spec:
             while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
                 wait -n
             done
-            process_component "$COMPONENT" 2> "$STDERR_FILE" &
+            process_component "$COMPONENT" "$i" 2> "$STDERR_FILE" &
         done
 
         # Wait for remaining processes to finish
@@ -348,6 +337,9 @@ spec:
           mountPath: /shared
         - name: quay-secret
           mountPath: /mnt/quaySecret
+      env:
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
       script: |
         #!/usr/bin/env bash
         set -eu
@@ -385,63 +377,75 @@ spec:
         trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
 
         CONTENT_DIR=/shared/artifacts
-        find $CONTENT_DIR
-        UNSIGNED_DIR=$CONTENT_DIR/unsigned
-        MAC_CONTENT=$UNSIGNED_DIR/macos
-        WINDOWS_CONTENT=$UNSIGNED_DIR/windows
-        LINUX_CONTENT=$CONTENT_DIR/linux
-
-        mkdir -p "$MAC_CONTENT" "$WINDOWS_CONTENT" "$LINUX_CONTENT"
-        cd "$CONTENT_DIR"
-
-        # First unpack all archives in place (removing the archives)
-        find "$CONTENT_DIR" -type f -iregex ".*\.zip\|.*\.gz" 2>/dev/null | while read -r file; do
-          dir=$(dirname "$file")
-          case "$file" in
-            (*.tar.gz)
-              tar -xzf "$file" -C "$dir" && rm "$file"
-              ;;
-            (*.gz)
-              gzip -d "$file"
-              ;;
-            (*.zip)
-              unzip "$file" -d "$dir" && rm "$file"
-              ;;
-          esac
-        done
-
-        # Then move unpacked files to appropriate directories based on architecture
-        find "$CONTENT_DIR" -type f 2>/dev/null | while read -r file; do
-          case "$file" in
-            (*darwin*)
-              mv "$file" unsigned/macos/
-              ;;
-            (*windows*)
-              mv "$file" unsigned/windows/
-              ;;
-            (*linux*)
-              mv "$file" linux/
-              ;;
-          esac
-        done
-
-        cd "$UNSIGNED_DIR"
 
         echo "Logging into Quay..."
         set +x
         oras login quay.io -u "${QUAY_USER}" -p "${QUAY_PASS}" > /dev/null 2>&1
         set -x
-        echo "Pushing unsigned Macos content to $(params.quayURL)..."
-        output=$(oras push "$(params.quayURL)/unsigned" macos)
-        mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
-        echo "Digest for mac content: $mac_digest"
-        echo -n "$mac_digest" > "$(results.unsignedMacDigest.path)"
 
-        echo "Pushing unsigned Windows content to $(params.quayURL)..."
-        output=$(oras push "$(params.quayURL)/unsigned" windows)
-        windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
-        echo "Digest for windows content: $windows_digest"
-        echo -n "$windows_digest" > "$(results.unsignedWindowsDigest.path)"
+        # Process each component separately
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          
+          echo "Processing component: $COMPONENT_NAME"
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+          UNSIGNED_DIR="$COMPONENT_DIR/unsigned"
+          MAC_CONTENT="$UNSIGNED_DIR/macos"
+          WINDOWS_CONTENT="$UNSIGNED_DIR/windows"
+          LINUX_CONTENT="$COMPONENT_DIR/linux"
+
+          mkdir -p "$MAC_CONTENT" "$WINDOWS_CONTENT" "$LINUX_CONTENT"
+
+          # First unpack all archives in place (removing the archives)
+          find "$COMPONENT_DIR" -maxdepth 1 -type f -iregex ".*\.zip\|.*\.gz" 2>/dev/null | while read -r file; do
+            dir=$(dirname "$file")
+            case "$file" in
+              (*.tar.gz)
+                tar -xzf "$file" -C "$dir" && rm "$file"
+                ;;
+              (*.gz)
+                gzip -d "$file"
+                ;;
+              (*.zip)
+                unzip "$file" -d "$dir" && rm "$file"
+                ;;
+            esac
+          done
+
+          # Then move unpacked files to appropriate directories based on OS
+          find "$COMPONENT_DIR" -maxdepth 1 -type f 2>/dev/null | while read -r file; do
+            case "$file" in
+              (*darwin*)
+                mv "$file" "$MAC_CONTENT/"
+                ;;
+              (*windows*)
+                mv "$file" "$WINDOWS_CONTENT/"
+                ;;
+              (*linux*)
+                mv "$file" "$LINUX_CONTENT/"
+                ;;
+            esac
+          done
+
+          # Push unsigned content for this component
+          cd "$UNSIGNED_DIR"
+
+          echo "Pushing unsigned Macos content for $COMPONENT_NAME to $(params.quayURL)..."
+          output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" macos)
+          mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+          echo "Digest for $COMPONENT_NAME mac content: $mac_digest"
+          echo -n "$mac_digest" > "$COMPONENT_DIR/unsigned_mac_digest.txt"
+
+          echo "Pushing unsigned Windows content for $COMPONENT_NAME to $(params.quayURL)..."
+          output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" windows)
+          windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+          echo "Digest for $COMPONENT_NAME windows content: $windows_digest"
+          echo -n "$windows_digest" > "$COMPONENT_DIR/unsigned_windows_digest.txt"
+
+          cd "$CONTENT_DIR"
+        done
     - name: sign-mac-binaries
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
       computeResources:
@@ -466,6 +470,8 @@ spec:
           value: $(params.quayURL)
         - name: PIPELINE_UID
           value: $(context.taskRun.uid)
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
       script: |
         #!/usr/bin/env bash
         set -eu
@@ -517,78 +523,91 @@ spec:
 
         SSH_OPTS=(-i /tmp/.ssh/id_rsa -o UserKnownHostsFile=/tmp/.ssh/known_hosts -o IdentitiesOnly=yes)
 
-        # shell check complains about the variable (unsigned_digest) not being used but it is used in the script
-        # shellcheck disable=SC2034
-        unsigned_digest=$(cat "$(results.unsignedMacDigest.path)")
-        mac_signing_script="/tmp/mac_signing_script_$(context.taskRun.uid).sh"
+        CONTENT_DIR=/shared/artifacts
 
-        TEMP_DIR="/tmp/$(context.taskRun.uid)"
-        BINARY_PATH="$TEMP_DIR/unsigned/macos"
-        ZIP_PATH="$TEMP_DIR/signed_content.zip"
-        DIGEST_FILE="$TEMP_DIR/push_digest.txt"
+        # Process each component sequentially
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
 
-        cat << EOF > "$mac_signing_script"
-        #!/bin/bash
-        set -eux
+          echo "Signing Mac binaries for component: $COMPONENT_NAME"
 
-        mkdir -p "$TEMP_DIR"
-        mkdir -p "$BINARY_PATH"
+          # Read unsigned digest for this component
+          unsigned_digest=$(cat "$COMPONENT_DIR/unsigned_mac_digest.txt")
+          mac_signing_script="/tmp/mac_signing_script_$(context.taskRun.uid)_${COMPONENT_NAME}.sh"
 
-        cd "$TEMP_DIR"
-        set +x
-        /usr/local/bin/oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
-        set -x
-        /usr/local/bin/oras pull $(params.quayURL)/unsigned@$unsigned_digest -o "$BINARY_PATH"
-        # This is the directory where the content was extracted
-        CONTENT_DIR=\$(find "$BINARY_PATH" -maxdepth 1 -type d | tail -n 1)
+          TEMP_DIR="/tmp/$(context.taskRun.uid)_${COMPONENT_NAME}"
+          BINARY_PATH="$TEMP_DIR/unsigned/macos"
+          ZIP_PATH="$TEMP_DIR/signed_content.zip"
+          DIGEST_FILE="$TEMP_DIR/push_digest.txt"
 
-        set +x
-        security unlock-keychain -p $KEYCHAIN_PASSWORD login.keychain
-        set -x
-        echo "Signing files in the \$CONTENT_DIR directory..."
-        find "\$CONTENT_DIR" -type f | while read file; do
-            echo "Signing: \$file"
-            if ! xcrun codesign --sign "Developer ID Application: $SIGNING_IDENTITY" \
-                --options runtime --timestamp --force "\$file"; then
-                echo "Failed to sign file: \$file"
-                exit 1
-            fi
-        done
+          cat << EOF > "$mac_signing_script"
+          #!/bin/bash
+          set -eux
 
-        cd "$BINARY_PATH"
-        NEW_CONTENT_DIR=\$(basename "\$CONTENT_DIR")
-        zip -r "$ZIP_PATH" "\$NEW_CONTENT_DIR"
+          mkdir -p "$TEMP_DIR"
+          mkdir -p "$BINARY_PATH"
 
-        echo "Submitting ZIP file to Apple notary service..."
-        set +x
-        xcrun notarytool submit "$ZIP_PATH" \
-            --wait \
-            --apple-id "$APPLE_ID" \
-            --team-id "$TEAM_ID" \
-            --password "$APP_SPECIFIC_PASSWORD"
-        set -x
+          cd "$TEMP_DIR"
+          set +x
+          /usr/local/bin/oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
+          set -x
+          /usr/local/bin/oras pull $(params.quayURL)/${COMPONENT_NAME}/unsigned@$unsigned_digest -o "$BINARY_PATH"
+          # This is the directory where the content was extracted
+          CONTENT_DIR_MAC=\$(find "$BINARY_PATH" -maxdepth 1 -type d | tail -n 1)
 
-        PUSH_OUTPUT=\$(/usr/local/bin/oras push "$QUAY_URL/signed:$(context.taskRun.uid)-mac" "\$NEW_CONTENT_DIR")
-        SIGNED_DIGEST=\$(echo "\$PUSH_OUTPUT" | grep 'Digest:' | awk '{print \$2}')
-        echo -n "\$SIGNED_DIGEST" >> "$DIGEST_FILE"
-        echo "Process completed successfully."
+          set +x
+          security unlock-keychain -p $KEYCHAIN_PASSWORD login.keychain
+          set -x
+          echo "Signing files in the \$CONTENT_DIR_MAC directory..."
+          find "\$CONTENT_DIR_MAC" -type f | while read file; do
+              echo "Signing: \$file"
+              if ! xcrun codesign --sign "Developer ID Application: $SIGNING_IDENTITY" \
+                  --options runtime --timestamp --force "\$file"; then
+                  echo "Failed to sign file: \$file"
+                  exit 1
+              fi
+          done
+
+          cd "$BINARY_PATH"
+          NEW_CONTENT_DIR=\$(basename "\$CONTENT_DIR_MAC")
+          zip -r "$ZIP_PATH" "\$NEW_CONTENT_DIR"
+
+          echo "Submitting ZIP file to Apple notary service..."
+          set +x
+          xcrun notarytool submit "$ZIP_PATH" \
+              --wait \
+              --apple-id "$APPLE_ID" \
+              --team-id "$TEAM_ID" \
+              --password "$APP_SPECIFIC_PASSWORD"
+          set -x
+
+          SIGNED_TAG="$(context.taskRun.uid)-mac"
+          PUSH_OUTPUT=\$(/usr/local/bin/oras push \
+            "$QUAY_URL/${COMPONENT_NAME}/signed:\$SIGNED_TAG" "\$NEW_CONTENT_DIR")
+          SIGNED_DIGEST=\$(echo "\$PUSH_OUTPUT" | grep 'Digest:' | awk '{print \$2}')
+          echo -n "\$SIGNED_DIGEST" >> "$DIGEST_FILE"
+          echo "Process completed successfully."
         EOF
 
-        # Copy the script to the Mac host
-        scp "${SSH_OPTS[@]}" "$mac_signing_script" "${MAC_USER}@${MAC_HOST}:${mac_signing_script}"
+          # Copy the script to the Mac host
+          scp "${SSH_OPTS[@]}" "$mac_signing_script" "${MAC_USER}@${MAC_HOST}:${mac_signing_script}"
 
-        # Execute the script on the Mac host
-        # shellcheck disable=SC2029
-        ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash "${mac_signing_script}"
+          # Execute the script on the Mac host
+          # shellcheck disable=SC2029
+          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash "${mac_signing_script}"
 
-        # Copy the signed digest back to the pipeline
-        scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:/tmp/$(context.taskRun.uid)/push_digest.txt" \
-            "$(results.signedMacDigest.path)"
+          # Copy the signed digest back to the shared volume for this component
+          scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:${TEMP_DIR}/push_digest.txt" \
+              "$COMPONENT_DIR/signed_mac_digest.txt"
 
-        # Clean up the Mac host now that we are done
-        # shell check complains about the variable $(context.taskRun.uid) being evaluated on the client side
-        # shellcheck disable=SC2029
-        ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf /tmp/$(context.taskRun.uid) ${mac_signing_script}"
+          # Clean up the Mac host now that we are done with this component
+          # shell check complains the variables evaluate on the client side, but we want that here
+          # shellcheck disable=SC2029
+          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf ${TEMP_DIR} ${mac_signing_script}"
+        done
     - name: sign-windows-binaries
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
       computeResources:
@@ -606,6 +625,9 @@ spec:
           mountPath: /mnt/quaySecret
         - name: windows-credentials
           mountPath: /mnt/windowsCredentials
+      env:
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
       script: |
         #!/usr/bin/env bash
         set -eu
@@ -656,66 +678,82 @@ spec:
         SCP_OPTS=(-i /tmp/.ssh/id_rsa -o UserKnownHostsFile=/tmp/.ssh/known_hosts \
           -o IdentitiesOnly=yes -P "${WINDOWS_PORT}")
 
-        unsigned_digest=$(cat "$(results.unsignedWindowsDigest.path)")
-        # Create the batch script
-        windows_signing_script_file="/tmp/windows_signing_script_file_$(context.taskRun.uid).bat"
-        WINDOWS_SIGNING_SCRIPT_PATH="C:/Users/${WINDOWS_USER}/AppData/Local/Temp/windows_signing_script_file_$(context.taskRun.uid).bat"
-        set +x
-        cat << EOF > "$windows_signing_script_file"
+        CONTENT_DIR=/shared/artifacts
 
-        mkdir %TEMP%\$(context.taskRun.uid) && cd /d %TEMP%\$(context.taskRun.uid)
-        @echo off
-        oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
-        @echo on
-        oras pull $(params.quayURL)/unsigned@${unsigned_digest}
+        # Process each component sequentially
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
 
-        signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 ^
-        %TEMP%\$(context.taskRun.uid)\windows\*
+          echo "Signing Windows binaries for component: $COMPONENT_NAME"
 
-        if errorlevel 1 (
-          echo Signing of binaries failed
-          exit /B %ERRORLEVEL%
-        )
+          # Read unsigned digest for this component
+          unsigned_digest=$(cat "$COMPONENT_DIR/unsigned_windows_digest.txt")
 
-        signtool verify /v /pa %TEMP%\$(context.taskRun.uid)\windows\*
+          # Create the batch script
+          windows_signing_script_file="/tmp/windows_signing_script_file_$(context.taskRun.uid)_${COMPONENT_NAME}.bat"
+          WINDOWS_TEMP_DIR="$(context.taskRun.uid)_${COMPONENT_NAME}"
+          WIN_TEMP="C:/Users/${WINDOWS_USER}/AppData/Local/Temp"
+          WINDOWS_SIGNING_SCRIPT_PATH="${WIN_TEMP}/windows_signing_script_file_${WINDOWS_TEMP_DIR}.bat"
+          set +x
+          cat << EOF > "$windows_signing_script_file"
 
-        if errorlevel 1 (
-          echo Verification of binaries failed
-          exit /B %ERRORLEVEL%
-        )
+          mkdir %TEMP%\\${WINDOWS_TEMP_DIR} && cd /d %TEMP%\\${WINDOWS_TEMP_DIR}
+          @echo off
+          oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
+          @echo on
+          oras pull $(params.quayURL)/${COMPONENT_NAME}/unsigned@${unsigned_digest}
 
-        echo [%DATE% %TIME%] Signing of Windows binaries completed successfully
+          signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 ^
+          %TEMP%\\${WINDOWS_TEMP_DIR}\\windows\\*
 
-        oras push $(params.quayURL)/signed:$(context.taskRun.uid)-windows windows \
-        > oras_push_output.txt 2>&1
+          if errorlevel 1 (
+            echo Signing of binaries failed
+            exit /B %ERRORLEVEL%
+          )
 
-        for /f "tokens=2,3 delims=: " %%a in ('findstr "Digest:" oras_push_output.txt') do @echo %%a:%%b > digest.txt
+          signtool verify /v /pa %TEMP%\\${WINDOWS_TEMP_DIR}\\windows\\*
+
+          if errorlevel 1 (
+            echo Verification of binaries failed
+            exit /B %ERRORLEVEL%
+          )
+
+          echo [%DATE% %TIME%] Signing of Windows binaries for ${COMPONENT_NAME} completed successfully
+
+          oras push $(params.quayURL)/${COMPONENT_NAME}/signed:$(context.taskRun.uid)-windows windows \
+          > oras_push_output.txt 2>&1
+
+          for /f "tokens=2,3 delims=: " %%a in ('findstr "Digest:" oras_push_output.txt') do @echo %%a:%%b > digest.txt
         EOF
-        set -x
-        # shellcheck disable=SC2086
-        scp "${SCP_OPTS[@]}" "$windows_signing_script_file" \
-        "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_SIGNING_SCRIPT_PATH}"
+          set -x
+          # shellcheck disable=SC2086
+          scp "${SCP_OPTS[@]}" "$windows_signing_script_file" \
+          "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_SIGNING_SCRIPT_PATH}"
 
-        # Execute the script on the Windows host
-        # shellcheck disable=SC2029,SC2086
-        ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" \
-          "${WINDOWS_SIGNING_SCRIPT_PATH}"
+          # Execute the script on the Windows host
+          # shellcheck disable=SC2029,SC2086
+          ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" \
+            "${WINDOWS_SIGNING_SCRIPT_PATH}"
 
-        # disable shellcheck for escaping the taskRun.uid as we want that evaluated on client side
-        # shellcheck disable=SC2029,SC2086
-        scp "${SCP_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}:\
-        C:/Users/${WINDOWS_USER}/AppData/Local/Temp/$(context.taskRun.uid)/digest.txt" \
-        "$(results.signedWindowsDigest.path)"
+          # Copy signed digest back to shared volume for this component
+          # shellcheck disable=SC2029,SC2086
+          WINDOWS_DIGEST_PATH="C:/Users/${WINDOWS_USER}/AppData/Local/Temp/${WINDOWS_TEMP_DIR}/digest.txt"
+          scp "${SCP_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_DIGEST_PATH}" \
+          "$COMPONENT_DIR/signed_windows_digest.txt"
 
-        # Remove trailing spaces, carriage returns, newlines
-        sed -i 's/[[:space:]]*$//; s/\r//g; :a;N;$!ba;s/\n//g' "$(results.signedWindowsDigest.path)"
+          # Remove trailing spaces, carriage returns, newlines
+          sed -i 's/[[:space:]]*$//; s/\r//g; :a;N;$!ba;s/\n//g' "$COMPONENT_DIR/signed_windows_digest.txt"
 
-        # Clean up the windows host now that we are done
-        # disable shellcheck for escaping the taskRun.uid as we want that evaluated on client side
-        # shellcheck disable=SC2029,SC2086
-        ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" "Remove-Item -LiteralPath \
-        C:\\Users\\${WINDOWS_USER}\\AppData\\Local\\Temp\\$(context.taskRun.uid) -Force -Recurse; \
-        Remove-Item -LiteralPath ${WINDOWS_SIGNING_SCRIPT_PATH} -Force"
+          # Clean up the windows host now that we are done with this component
+          WINDOWS_CLEANUP_PATH="C:\\Users\\${WINDOWS_USER}\\AppData\\Local\\Temp\\${WINDOWS_TEMP_DIR}"
+          # shellcheck disable=SC2029,SC2086
+          ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" \
+            "Remove-Item -LiteralPath ${WINDOWS_CLEANUP_PATH} -Force -Recurse; \
+            Remove-Item -LiteralPath ${WINDOWS_SIGNING_SCRIPT_PATH} -Force"
+        done
     - name: generate-checksums
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
       computeResources:
@@ -736,6 +774,8 @@ spec:
           value: $(params.author)
         - name: SIGNING_KEY_NAME
           value: $(params.signingKeyName)
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
       script: |
         #!/usr/bin/env bash
         set -eu
@@ -798,12 +838,14 @@ spec:
         checksum_host=$(cat /mnt/checksum_credentials/host)
 
         sign_file() {
-            sign_method=$1  # The signing method: --clearsign or --gpgsign
+            local component_name=$1
+            local sign_method=$2  # The signing method: --clearsign or --gpgsign
+            local extension=$3
             pipeline_run_uid=$(context.taskRun.uid)
-            output_path="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt.$2"
-            input_file="/home/$checksum_user/$pipeline_run_uid/checksum/sha256sum.txt"
+            output_path="/home/$checksum_user/${pipeline_run_uid}_${component_name}/checksum/sha256sum.txt.$extension"
+            input_file="/home/$checksum_user/${pipeline_run_uid}_${component_name}/checksum/sha256sum.txt"
 
-            echo "Executing SSH command with sign method: $sign_method"
+            echo "Executing SSH command with sign method: $sign_method for component: $component_name"
             # shellcheck disable=SC2029,SC2086
             ssh $SSH_OPTS "$checksum_user@$checksum_host" \
             "rpm-sign --nat $sign_method --key $SIGNING_KEY_NAME --onbehalfof=$AUTHOR \
@@ -823,58 +865,74 @@ spec:
         cp "/mnt/checksum_credentials/fingerprint" /tmp/.ssh/known_hosts
         chmod 600 /tmp/.ssh/known_hosts
 
-        # get all of the signed binaries into a common directory
         CONTENT_DIR=/shared/artifacts
-        SIGNED_DIR="$CONTENT_DIR/signed"
-        mkdir -p "$SIGNED_DIR"
-        mkdir -p "$CONTENT_DIR"/linux
-        cp -r "$CONTENT_DIR"/linux/* "$SIGNED_DIR"
-        cd "$SIGNED_DIR"
+
         set +x
         oras login quay.io -u "$QUAY_USER" -p "$QUAY_PASS"
         set -x
-        signed_mac_digest=$(cat "$(results.signedMacDigest.path)")
-        signed_windows_digest=$(cat "$(results.signedWindowsDigest.path)")
-        signed_windows_digest=${signed_windows_digest//[[:space:]]/}
-        # shellcheck disable=SC2086,SC2046
-        oras pull $(params.quayURL)/signed@${signed_mac_digest}
-        # shellcheck disable=SC2086,SC2046
-        oras pull $(params.quayURL)/signed@${signed_windows_digest}
 
-        # Copy everything to SIGNED_DIR and remove mac,windows dirs
-        cp macos/* .
-        cp windows/* .
-        rm -r macos/ windows/
+        # Process each component separately
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
 
-        # generate checksums for all of the binaries
-        SHA_SUM_PATH="${CONTENT_DIR}/sha256sum.txt"
-        touch "$SHA_SUM_PATH"
-        for file in *; do
-            if [ -f "$file" ]; then
-                checksum=$(sha256sum "$file" | awk '{ print $1 }')
-                echo "$checksum  $file" >> "$SHA_SUM_PATH"
-            fi
+          echo "Generating checksums for component: $COMPONENT_NAME"
+
+          # Create signed directory structure for this component
+          SIGNED_DIR="$COMPONENT_DIR/signed"
+          mkdir -p "$SIGNED_DIR/macos" "$SIGNED_DIR/windows" "$SIGNED_DIR/linux"
+
+          # Copy linux files to signed directory
+          cp -r "$COMPONENT_DIR/linux/"* "$SIGNED_DIR/linux/" 2>/dev/null || true
+
+          # Pull signed Mac binaries for this component
+          signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
+          cd "$SIGNED_DIR"
+          # shellcheck disable=SC2086
+          oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}" -o macos
+
+          # Pull signed Windows binaries for this component
+          signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
+          signed_windows_digest=${signed_windows_digest//[[:space:]]/}
+          # shellcheck disable=SC2086
+          oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}" -o windows
+
+          # Generate checksums for all binaries in this component's signed directory
+          SHA_SUM_PATH="$SIGNED_DIR/sha256sum.txt"
+          touch "$SHA_SUM_PATH"
+          find macos windows linux -type f 2>/dev/null | while read -r file; do
+              checksum=$(sha256sum "$file" | awk '{ print $1 }')
+              echo "$checksum  $file" >> "$SHA_SUM_PATH"
+          done
+
+          # Send sha256sum.txt to the checksum host for signing (component-specific path)
+          REMOTE_DIR="$(context.taskRun.uid)_${COMPONENT_NAME}"
+          # shellcheck disable=SC2029,SC2086
+          ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "mkdir -p ~/${REMOTE_DIR}/checksum"
+          # shellcheck disable=SC2086
+          scp $SSH_OPTS "${SHA_SUM_PATH}" \
+          "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum"
+
+          sign_file "$COMPONENT_NAME" --clearsign sig
+          sign_file "$COMPONENT_NAME" --gpgsign gpg
+
+          # Copy the signed checksum files back
+          scp "$SSH_OPTS" \
+          "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum/sha256sum.txt.sig" \
+          "${SIGNED_DIR}/sha256sum.txt.sig"
+
+          scp "$SSH_OPTS" \
+          "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum/sha256sum.txt.gpg" \
+          "${SIGNED_DIR}/sha256sum.txt.gpg"
+
+          # Clean up remote checksum directory
+          # shellcheck disable=SC2029,SC2086
+          ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "rm -rf ~/${REMOTE_DIR}"
+
+          cd "$CONTENT_DIR"
         done
-        # Send sha256sum.txt to the checksum host for signing
-        # shellcheck disable=SC2029,SC2086
-        ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "mkdir -p ~/$(context.taskRun.uid)/checksum"
-        # shellcheck disable=SC2086
-        scp $SSH_OPTS "${SHA_SUM_PATH}" \
-        "${checksum_user}@${checksum_host}:~/$(context.taskRun.uid)/checksum"
-
-        sign_file --clearsign sig
-        sign_file --gpgsign gpg
-
-        # scp the two files back to the content directory
-        scp "$SSH_OPTS" \
-        "${checksum_user}@${checksum_host}:~/$(context.taskRun.uid)/checksum/sha256sum.txt.sig" \
-        "${SIGNED_DIR}/sha256sum.txt.sig"
-
-        scp "$SSH_OPTS" \
-        "${checksum_user}@${checksum_host}:~/$(context.taskRun.uid)/checksum/sha256sum.txt.gpg" \
-        "${SIGNED_DIR}/sha256sum.txt.gpg"
-
-        mv "$SHA_SUM_PATH" "${SIGNED_DIR}/sha256sum.txt"
 
     - name: compress-artifacts
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
@@ -921,11 +979,19 @@ spec:
         trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
 
         CONTENT_DIR=/shared/artifacts
-        COMPRESSED_DIR="$CONTENT_DIR/compressed"
 
-        function compress_components {
-          mkdir -p "$COMPRESSED_DIR"
+        function compress_component {
           COMPONENT_JSON="$1"
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT_JSON")
+          
+          # Per-component directories
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+          SIGNED_DIR="$COMPONENT_DIR/signed"
+          COMPRESSED_DIR="$COMPONENT_DIR/compressed"
+          
+          mkdir -p "$COMPRESSED_DIR"
+          echo "Compressing artifacts for component: $COMPONENT_NAME"
+
           NUM_MAPPED_FILES=$(jq '.files | length' <<< "${COMPONENT_JSON}")
           UPDATED_FILES="[]"
 
@@ -946,37 +1012,44 @@ spec:
               if [ "$FORMAT" = "compressed" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
-                    # Archive the extracted macos binaries
-                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${CONTENT_DIR}" unsigned/macos
-                    # Add compressed filename to actual files
-                    ACTUAL_FILES=$(jq --arg filename "$SOURCE_FILENAME" --argjson file "$FILE" \
-                      '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
+                    # Archive the signed macos binaries
+                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" macos
+                    # Add file to actual files (filename derived from source)
+                    ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
                     ;;
                   (*linux*)
-                    # Archive the extracted linux binaries
-                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${CONTENT_DIR}" linux
-                    # Add compressed filename to actual files
-                    ACTUAL_FILES=$(jq --arg filename "$SOURCE_FILENAME" --argjson file "$FILE" \
-                      '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
+                    # Archive the linux binaries
+                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" linux
+                    # Add file to actual files (filename derived from source)
+                    ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
                     ;;
                   (*windows*)
-                    # Archive the extracted windows binaries (zip doesn't have -C, so use full path)
+                    # Archive the signed windows binaries (zip doesn't have -C, so use full path)
                     WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
-                    (cd "${CONTENT_DIR}" && zip -r "${COMPRESSED_DIR}/${WINDOWS_FILENAME}" unsigned/windows)
-                    # Add compressed filename (with .zip extension) to actual files
-                    ACTUAL_FILES=$(jq --arg filename "$WINDOWS_FILENAME" --argjson file "$FILE" \
-                      '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
+                    (cd "${SIGNED_DIR}" && zip -r "${COMPRESSED_DIR}/${WINDOWS_FILENAME}" windows)
+                    # Add file with updated source path (.zip instead of .tar.gz)
+                    WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
+                    ACTUAL_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
+                      '. + [($file | .source = $src)]' <<< "$ACTUAL_FILES")
                     ;;
                 esac
               fi
 
-              # if "raw" is listed in the delivery_mode, make sure the binaries will be also pushed
+              # if "raw" is listed in the delivery_mode, copy the specific platform's raw files
               if [ "$FORMAT" = "raw" ]; then
-                find "${CONTENT_DIR}/unsigned" "${CONTENT_DIR}/linux" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
-                # Add raw filename (without extension) to actual files
-                RAW_FILENAME="${SOURCE_FILENAME%.tar.gz}"
-                ACTUAL_FILES=$(jq --arg filename "$RAW_FILENAME" --argjson file "$FILE" \
-                  '. + [($file | .filename = $filename)]' <<< "$ACTUAL_FILES")
+                case "${SOURCE}" in
+                  (*darwin*)
+                    find "${SIGNED_DIR}/macos" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                    ;;
+                  (*linux*)
+                    find "${SIGNED_DIR}/linux" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                    ;;
+                  (*windows*)
+                    find "${SIGNED_DIR}/windows" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                    ;;
+                esac
+                # Add file to actual files (filename derived from source)
+                ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
               fi
             done
 
@@ -984,8 +1057,12 @@ spec:
             UPDATED_FILES=$(jq --argjson actual_files "$ACTUAL_FILES" '. + $actual_files' <<< "$UPDATED_FILES")
           done
 
+          # Copy checksum files to compressed directory
+          cp "${SIGNED_DIR}/sha256sum.txt" "${COMPRESSED_DIR}/" 2>/dev/null || true
+          cp "${SIGNED_DIR}/sha256sum.txt.sig" "${COMPRESSED_DIR}/" 2>/dev/null || true
+          cp "${SIGNED_DIR}/sha256sum.txt.gpg" "${COMPRESSED_DIR}/" 2>/dev/null || true
+
           # Update the component in SNAPSHOT_JSON with the corrected filenames
-          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT_JSON")
           SNAPSHOT_JSON=$(jq --arg name "$COMPONENT_NAME" --argjson updated_files "$UPDATED_FILES" '
             .components |= map(
               if .name == $name then
@@ -999,14 +1076,14 @@ spec:
         NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
         for ((c = 0; c < NUM_COMPONENTS; c++)) ; do
             COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            compress_components "$COMPONENT" 2> "$STDERR_FILE"
+            compress_component "$COMPONENT" 2> "$STDERR_FILE"
         done
 
         # Save the modified snapshot to shared volume so subsequent steps can use it
         echo "$SNAPSHOT_JSON" > /shared/snapshot.json
 
     - name: push-artifacts
-      image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
+      image: quay.io/konflux-ci/release-service-utils:d26b427ea3024a0bd0e8dafb996bba3570760e00
       computeResources:
         limits:
           memory: 512Mi
@@ -1104,43 +1181,11 @@ spec:
         echo "$UDC_KEY" > "$UDCACHE_KEY"
         set -x
 
-        DISK_IMAGE_DIR="/shared/artifacts/compressed"
-        export DISK_IMAGE_DIR
-        RELATIVE_PATHS=""
+        CONTENT_DIR="/shared/artifacts"
 
-        # save the results
-        find "${DISK_IMAGE_DIR}" -type f -exec basename {} \; | tail -c 512 | tee "$(results.publishedFiles.path)"
-
-        push_to_pulp() {
-          # use the 1st component's version for STAGED_JSON
-          version=$(jq -cr '.components[0].staged.version // ""' <<< "$SNAPSHOT_JSON")
-          # Check if staged.destination exists in any component
-          has_staged_destination=$(jq 'any(.components[]?.staged?.destination; . != null)' <<< "$SNAPSHOT_JSON")
-          if [[ -z "$version" || "$has_staged_destination" != "true" ]]; then
-            echo "Error: Pulp push requires both staged.version and components[].staged.destination to be set" >&2
-            exit 1
-          fi
-
-          echo "Pushing to customer portal with pulp"
-          staged_json='{"header":{"version": "0.2"},"payload":{"files":[]}}'
-          # Add the files to the payload
-          # shell check wants us to find ./* but that adds `./` to the paths which breaks the script
-          # shellcheck disable=SC2035
-          while IFS= read -r -d '' file ; do
-              staged_json=$(jq --arg filename "$(basename "$file")" --arg path "$file" \
-                --arg version "$version" \
-                '.payload.files[.payload.files | length] =
-                {"filename": $filename, "relative_path": $path, "version": $version}' <<< "$staged_json")
-          done < <(find * -type f -print0)
-          echo "$staged_json" | yq -P -I 4 > staged.yaml
-
-          pulp_push_wrapper --debug --source "${DISK_IMAGE_DIR}" --pulp-url "$PULP_URL" \
-            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL"
-          RELATIVE_PATHS=$(jq -erc '.payload.files[].relative_path' <<< "$staged_json")
-
-          # Clean up file to avoid uploading it in exodus-rsync as an artifact.
-          rm -f staged.yaml
-         }
+        # save the results - list all files from all component compressed directories
+        find "${CONTENT_DIR}"/*/compressed -type f -exec basename {} \; 2>/dev/null \
+          | tail -c 512 | tee "$(results.publishedFiles.path)"
 
         create_exodus_conf() {
           echo "Creating Exodus configuration file....."
@@ -1160,68 +1205,114 @@ spec:
           set -x
         }
 
-        push_to_cdn () {
-            echo "Pushing to CDN with exodus-rsync"
-            create_exodus_conf
-            prefix="exodus:/content/origin/files/sha256"
-            files_output="{}"
-            # shell check wants us to find ./* but that adds `./` to the paths which breaks the script
-            # shellcheck disable=SC2035
-            while IFS= read -r -d '' file; do
-              set +x
-              file_name=$(basename "$file")
-              checksum=$(sha256sum "$file" | awk '{print $1}')
-              destination_path="$prefix/${checksum:0:2}/$checksum/$file_name"
-              files_output=$(jq --arg key "$file" \
-                --arg value "$destination_path" '.[$key]=$value' <<< "$files_output")
-              set -x
+        push_component_to_pulp() {
+          local component_name=$1
+          local component_dir="${CONTENT_DIR}/${component_name}/compressed"
+          
+          # Get version and destination from the component's staged config
+          version=$(jq -cr --arg name "$component_name" '
+            .components[] | select(.name == $name) | .staged.version // ""
+          ' <<< "$SNAPSHOT_JSON")
+          
+          staged_destination=$(jq -cr --arg name "$component_name" '
+            .components[] | select(.name == $name) | .staged.destination // ""
+          ' <<< "$SNAPSHOT_JSON")
+          
+          if [[ -z "$version" || -z "$staged_destination" ]]; then
+            echo "Error: Pulp push requires both staged.version and staged.destination" \
+              "for component $component_name" >&2
+            exit 1
+          fi
 
-              # We're using exodus-rsync as a drop-in replacement for rsync, by overriding the rsync binary.
-              rsync --exodus-conf "$EXODUS_CONF_PATH" "$file" "$destination_path"
-            done < <(find * -type f -print0)
-            RELATIVE_PATHS=$(jq -erc 'keys[]' <<< "$files_output")
+          echo "Pushing component $component_name to customer portal with pulp"
+          cd "$component_dir"
+          
+          staged_json='{"header":{"version": "0.2"},"payload":{"files":[]}}'
+          # shellcheck disable=SC2035
+          while IFS= read -r -d '' file ; do
+              staged_json=$(jq --arg filename "$(basename "$file")" --arg path "$file" \
+                --arg version "$version" \
+                '.payload.files[.payload.files | length] =
+                {"filename": $filename, "relative_path": $path, "version": $version}' <<< "$staged_json")
+          done < <(find * -type f -print0)
+          echo "$staged_json" | yq -P -I 4 > staged.yaml
+
+          pulp_push_wrapper --debug --source "$component_dir" --pulp-url "$PULP_URL" \
+            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL"
+
+          rm -f staged.yaml
+          cd "$CONTENT_DIR"
         }
 
-        publish_to_cgw() {
-          NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
-          i=0
-          for path in $RELATIVE_PATHS; do
-            [[ $i -ge "$NUM_COMPONENTS" ]] && break  # stop once we've processed all components
-            component_destination="${DISK_IMAGE_DIR}/$(dirname "$path")"
+        push_component_to_cdn() {
+          local component_name=$1
+          local component_dir="${CONTENT_DIR}/${component_name}/compressed"
+          
+          echo "Pushing component $component_name to CDN with exodus-rsync"
+          create_exodus_conf
+          prefix="exodus:/content/origin/files/sha256"
+          
+          cd "$component_dir"
+          # shellcheck disable=SC2035
+          while IFS= read -r -d '' file; do
+            set +x
+            file_name=$(basename "$file")
+            checksum=$(sha256sum "$file" | awk '{print $1}')
+            destination_path="$prefix/${checksum:0:2}/$checksum/$file_name"
+            set -x
 
-            SNAPSHOT_JSON=$(
-              jq --argjson i "$i" --arg dir "$component_destination" '
-                .components[$i] |=
-                  if .contentGateway? then
-                    .contentGateway.contentDir = $dir
-                  else
-                    . # components without contentGateway will not be published.
-                  end
-              ' <<<"$SNAPSHOT_JSON"
-            )
-            ((++i))
-          done
+            rsync --exodus-conf "$EXODUS_CONF_PATH" "$file" "$destination_path"
+          done < <(find * -type f -print0)
+          cd "$CONTENT_DIR"
+        }
 
-          ## Process Files for Developer Portal / CGW
-          ## Validation of fields done inside CGW wrapper.
+        publish_component_to_cgw() {
+          local component_name=$1
+          local component_dir="${CONTENT_DIR}/${component_name}/compressed"
+          
+          # Update contentDir for this component in SNAPSHOT_JSON
+          SNAPSHOT_JSON=$(
+            jq --arg name "$component_name" --arg dir "$component_dir" '
+              .components |= map(
+                if .name == $name and .contentGateway? then
+                  .contentGateway.contentDir = $dir
+                else
+                  .
+                end
+              )
+            ' <<<"$SNAPSHOT_JSON"
+          )
+        }
+
+        # Process each component
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          
+          HAS_STAGED=$(jq -r '.staged | length > 0' <<< "$COMPONENT")
+          HAS_CGW=$(jq -r '.contentGateway | length > 0' <<< "$COMPONENT")
+
+          echo "Processing component: $COMPONENT_NAME (staged=$HAS_STAGED, cgw=$HAS_CGW)"
+
+          if [[ "$HAS_STAGED" == "true" ]]; then
+            # Push to customer portal (pulp) - CDN push not needed when using pulp
+            push_component_to_pulp "$COMPONENT_NAME" 2> "$STDERR_FILE"
+          elif [[ "$HAS_CGW" == "true" ]]; then
+            # Only push to CDN when NOT pushing to pulp
+            push_component_to_cdn "$COMPONENT_NAME" > >(tee "$STDERR_FILE") 2>&1 || true
+          fi
+          
+          if [[ "$HAS_CGW" == "true" ]]; then
+            publish_component_to_cgw "$COMPONENT_NAME"
+          fi
+        done
+
+        # Final CGW publish with all components' contentDir set
+        CGW_PUSH=$(jq 'any(.components[]?.contentGateway?; length > 0)' <<< "$SNAPSHOT_JSON")
+        if [[ "$CGW_PUSH" == "true" ]]; then
+          echo "Publishing all components to CGW..."
           publish_to_cgw_wrapper \
             --cgw_host "$(params.cgwHostname)" \
-            --data_json "$SNAPSHOT_JSON"
-        }
-
-        # Change to the subdir with the images
-        cd "${DISK_IMAGE_DIR}"
-
-        # Check if any component has staged defined further validation of fields done inside the function.
-        CUSTOMER_PORTAL_PUSH=$(jq 'any(.components[]?.staged?; length > 0)' <<< "$SNAPSHOT_JSON")
-        # Check if any component has contentGateway defined validaion of field done inside CGW wrapper.
-        CGW_PUSH=$(jq 'any(.components[]?.contentGateway?; length > 0)' <<< "$SNAPSHOT_JSON")
-        if [[ "$CUSTOMER_PORTAL_PUSH" == "true" && "$CGW_PUSH" == "true" ]]; then
-          push_to_pulp 2> "$STDERR_FILE"
-          publish_to_cgw 2> >(tee "$STDERR_FILE" >&2)
-        elif [[ "$CUSTOMER_PORTAL_PUSH" == "true" ]]; then
-          push_to_pulp 2> "$STDERR_FILE"
-        elif [[ "$CGW_PUSH" == "true" ]]; then
-          push_to_cdn > >(tee "$STDERR_FILE") 2>&1
-          publish_to_cgw 2> >(tee "$STDERR_FILE" >&2)
+            --data_json "$SNAPSHOT_JSON" 2> >(tee "$STDERR_FILE" >&2)
         fi
