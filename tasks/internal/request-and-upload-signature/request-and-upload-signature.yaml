@@ -214,7 +214,7 @@ spec:
           messaging_cert_key: /tmp/umb.pem
           messaging_ca_cert: ${CA_BUNDLE}
           topic_send_to: topic://${umb_batch_publish_topic}
-          topic_listen_to: queue://Consumer.${creator}.${REQUESTER}-{task_id}.${umb_batch_listen_topic}
+          topic_listen_to: queue://Consumer.${creator}.${REQUESTER}-{task_id}.${umb_batch_listen_topic}.{task_id}
           environment: prod
           service: ${umb_client_name}
           timeout: 60
@@ -400,7 +400,7 @@ spec:
           fi
         done
 
-        group_index_file="$(workspaces.data.path)/signing_groups_index.txt"
+        group_index_file="$(workspaces.data.path)/signing_groups_index-$(context.taskRun.uid).txt"
         touch "$(workspaces.data.path)/signing_groups_index.txt"
         for keyset in "${!keys_to_ref_dig_map[@]}"; do
           group_file="$(workspaces.data.path)/${keyset}.txt"
@@ -456,7 +456,9 @@ spec:
         echo "${umb_cert:?}" > /tmp/umb.pem
         echo "${umb_key:?}" >> /tmp/umb.pem
         set -x
-        group_index_file="$(workspaces.data.path)/signing_groups_index.txt"
+        group_index_file="$(workspaces.data.path)/signing_groups_index-$(context.taskRun.uid).txt"
+        signature_data_file="$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
+
         while read -r keyset; do
           group_file="$(workspaces.data.path)/${keyset}.txt"
           echo "Processing signing group with keys: ${keyset}"
@@ -507,8 +509,7 @@ spec:
             "${signing_key_args[@]}" \
             --task-id "$task_id" >> "$(workspaces.data.path)/last_sr"
           echo "Signing response was:"
-          fold "$(workspaces.data.path)/last_sr"
-          jq -c "." "$(workspaces.data.path)/last_sr" >> "$(workspaces.data.path)/${SIGNATURE_DATA_FILE}"
+          jq -c "." "$(workspaces.data.path)/last_sr" >> "$signature_data_file"
         done < "$group_index_file"
 
     - name: check-signing-response
@@ -559,27 +560,21 @@ spec:
           elif [ "$SIGNER_TYPE" == "batch" ]; then
             SIGNATURE_DATA=$(
               echo "$line" | \
-              jq -cM '[
-                [(.operation_results|.[]|.[0].msg.claims),
-                 [range(0; (.operation_results|.[]|.[0].msg.claims)|length) as $x |
-                  (.operation_results|.[]|.[0].msg.repo)]
-                ]
-                |transpose
-                |.[]
-                |(.[0].signed_claims|to_entries|.[]) as $x
-                |{reference:(.[0].claim_file | @base64d | fromjson | .critical.identity."docker-reference"),
-                  manifest_digest:.[0].manifest_digest,
-                  repo:.[1],
+              jq -cM '[.operation_results|.[]|.[0].msg.claims|.[]
+                |(.signed_claims|to_entries|.[]) as $x
+                |{reference:(.claim_file | @base64d | fromjson | .critical.identity."docker-reference"),
+                  manifest_digest:.manifest_digest,
+                  repository:.repo,
                   signature_data: $x.value,
-                  sig_key_id: $x.key}
-              ]')
+                  sig_key_id: $x.key}]')
           else
             echo "Unknown signer_type: $SIGNER_TYPE"
             exit 1
           fi
           echo "${SIGNATURE_DATA}" >> "/tmp/pyxis_signatures.json"
-        done < "$(workspaces.data.path)/${SIGNATURE_DATA_FILE}"
-        jq -s '[.[]|.[]]' "/tmp/pyxis_signatures.json" > "$(workspaces.data.path)/${SIGNATURE_DATA_FILE}"
+        done < "$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
+        signature_data_file="$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
+        jq -s '[.[]|.[]]' "/tmp/pyxis_signatures.json" > "${signature_data_file}-to-upload"
 
     - name: upload-signature
       image: "$(params.pipeline_image)"
@@ -612,6 +607,7 @@ spec:
         
         PyxisCert="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_cert_file_name)")"
         PyxisKey="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_key_file_name)")"
+        signature_data_file="$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
 
         # This helps with Shellcheck warning
         echo "${PyxisCert:?}" > "${PYXIS_CERT_PATH}"
@@ -622,6 +618,6 @@ spec:
           --pyxis-ssl-crtfile "${PYXIS_CERT_PATH}" \
           --pyxis-ssl-keyfile "${PYXIS_KEY_PATH}" \
           --request-threads "${PYXIS_THREADS}" \
-          --signatures @"${SIGNATURE_DATA_FILE}"
+          --signatures @"${signature_data_file}-to-upload"
   workspaces:
     - name: data
