@@ -52,7 +52,7 @@ spec:
       runAsUser: 1001
   steps:
     - name: check-embargoed-cves
-      image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
+      image: quay.io/konflux-ci/release-service-utils:c9eaaf83f50b44697b08a491e815db64ad6148d8
       computeResources:
         limits:
           memory: 32Mi
@@ -62,57 +62,12 @@ spec:
       volumeMounts:
         - name: osidb-service-account-vol
           mountPath: /mnt/osidb-service-account
-      script: |
-          #!/usr/bin/env bash
-          set -eo pipefail
-
-          SERVICE_ACCOUNT_NAME="$(cat /mnt/osidb-service-account/name)"
-          SERVICE_ACCOUNT_KEYTAB="$(cat /mnt/osidb-service-account/base64_keytab)"
-          OSIDB_URL="$(cat /mnt/osidb-service-account/osidb_url)"
-
-          # shellcheck disable=SC2317 # shellcheck calls all the commands in exitfunc unreachable because it is called
-          # via trap
-          exitfunc() {
-              local err="$1"
-              local line="$2"
-              local command="$3"
-              if [ "$err" -eq 0 ] ; then
-                  echo -n "Success" > "$(results.result.path)"
-              else
-                  echo -n \
-                    "$0: ERROR '$command' failed at line $line - exited with status $err" > "$(results.result.path)"
-              fi
-              exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
-          }
-          # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
-          trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
-
-          echo -n "" > "$(results.embargoed_cves.path)"
-
-          # write keytab to file
-          echo -n "${SERVICE_ACCOUNT_KEYTAB}" | base64 --decode > /tmp/keytab
-          # workaround kinit: Invalid UID in persistent keyring name while getting default ccache
-          KRB5CCNAME=$(mktemp)
-          export KRB5CCNAME
-          KRB5_CONFIG=$(mktemp)
-          export KRB5_CONFIG
-          export KRB5_TRACE=/dev/stderr
-          sed '/\[libdefaults\]/a\    dns_canonicalize_hostname = false' /etc/krb5.conf > "${KRB5_CONFIG}"
-          retry 5 kinit "${SERVICE_ACCOUNT_NAME}" -k -t /tmp/keytab
-
-          RC=0
-          for CVE in $(params.cves); do
-              echo "Checking CVE ${CVE}"
-              # Get token. They are short lived, so get one for before each request
-              TOKEN=$(curl --retry 3 --negotiate -u : "${OSIDB_URL}"/auth/token | jq -r '.access')
-              EMBARGOED=$(curl --retry 3 -H 'Content-Type: application/json' -H "Authorization: Bearer ${TOKEN}" \
-                  "${OSIDB_URL}/osidb/api/v2/flaws?cve_id=${CVE}&include_fields=cve_id,embargoed" \
-                  | jq .results[0].embargoed)
-              # null would mean no access to the CVE, which may mean embargoed, and true means embargoed
-              if [ "$EMBARGOED" != "false" ] ; then
-                  echo "CVE ${CVE} is embargoed"
-                  echo -n "${CVE} " >> "$(results.embargoed_cves.path)"
-                  RC=1
-              fi
-          done
-          exit $RC
+      env:
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+        - name: RESULT_EMBARGOED_CVES
+          value: $(results.embargoed_cves.path)
+      command: ["/home/scripts/bash/tasks/internal/check-embargoed-cves.sh"]
+      args:
+        - --cves
+        - $(params.cves)

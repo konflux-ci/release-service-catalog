@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -eux
 
 # mocks to be injected into task step scripts
@@ -28,5 +28,6 @@ function curl() {
   fi
 }
 
-# The retry script won't see the kinit function unless we export it
+# The external script won't see these functions unless we export them
 export -f kinit
+export -f curl
