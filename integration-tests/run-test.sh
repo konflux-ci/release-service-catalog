@@ -13,6 +13,11 @@
 #   The script is designed to be generic, with suite-specific configurations
 #   and test logic loaded from a specified suite directory.
 #
+#   The script automatically detects and runs custom test variants. If files
+#   named test-*.sh and test-*.env exist (e.g., test-idempotent.sh), they are
+#   executed as custom variants before the regular test. This allows testing
+#   multiple scenarios (idempotent, multiarch, etc.) without code duplication.
+#
 # Usage:
 #   ./run-test.sh <suite_name> [options]
 #
@@ -24,6 +29,9 @@
 #                           This suite directory must contain:
 #                             - test.env: Environment variables for the suite.
 #                             - test.sh: Suite-specific test logic and functions.
+#                           Optionally, it may contain custom variants:
+#                             - test-<variant>.env: Variant-specific environment.
+#                             - test-<variant>.sh: Variant-specific test logic.
 #
 # Options:
 #   -sc, --skip-cleanup   : If set, the script will not perform cleanup operations
@@ -91,29 +99,81 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 
 SUITE_DIR="${SCRIPT_DIR}/${suite}" # e.g. "${SCRIPT_DIR}/fbc-release"
 
-# Source environment variables (ensure this file exists and is correctly populated)
-if [ -f "${SUITE_DIR}/test.env" ]; then
-    . "${SUITE_DIR}/test.env"
-else
-    echo "error: test.env not found in ${SUITE_DIR}"
-    exit 1
-fi
+# Detect custom test variants (e.g., test-idempotent.sh)
+# A custom variant requires both test-*.sh and test-*.env files
+CUSTOM_VARIANTS=()
+for test_file in "${SUITE_DIR}"/test-*.sh; do
+    [ -f "$test_file" ] || continue
+    variant_name=$(basename "$test_file" .sh | sed 's/^test-//')
+    [ -f "${SUITE_DIR}/test-${variant_name}.env" ] && CUSTOM_VARIANTS+=("$variant_name")
+done
 
-# Source the function library
-if [ -f "${LIB_DIR}/test-functions.sh" ]; then
-    . "${LIB_DIR}/test-functions.sh"
-else
-    echo "error: Function library test-functions.sh not found in ${LIB_DIR}"
-    exit 1
-fi
+# Function to run a test variant
+run_test_variant() {
+    local variant=$1
+    local env_file=$2
+    local test_file=$3
+    local cleanup_after=$4  # "true" to cleanup after completion
+    
+    echo ""
+    echo "════════════════════════════════════════════════════════════════════"
+    echo "Running: ${variant} test"
+    echo "════════════════════════════════════════════════════════════════════"
+    
+    # Source environment variables (ensure this file exists and is correctly populated)
+    if [ -f "${env_file}" ]; then
+        . "${env_file}"
+    else
+        echo "error: ${env_file} not found"
+        exit 1
+    fi
 
-# Source test script (ensure this file exists and is correctly populated)
-if [ -f "${SUITE_DIR}/test.sh" ]; then
-    . "${SUITE_DIR}/test.sh"
-else
-    echo "error: test.sh not found in ${SUITE_DIR}"
-    exit 1
-fi
+    # Source the function library
+    if [ -f "${LIB_DIR}/test-functions.sh" ]; then
+        . "${LIB_DIR}/test-functions.sh"
+    else
+        echo "error: Function library test-functions.sh not found in ${LIB_DIR}"
+        exit 1
+    fi
+
+    # Source test script (ensure this file exists and is correctly populated)
+    if [ -f "${test_file}" ]; then
+        . "${test_file}"
+    else
+        echo "error: ${test_file} not found"
+        exit 1
+    fi
+
+    check_env_vars "$@" # Pass all args for consistency, though check_env_vars doesn't use them
+    parse_options "$@" # Parses options and sets CLEANUP, NO_CVE
+
+    decrypt_secrets "${SUITE_DIR}"
+    create_github_repository
+    patch_component_source
+    setup_namespaces # Ensures correct context before resource creation
+    cleanup_old_resources "${originating_tool}"
+    create_kubernetes_resources # tmpDir is set here
+
+    wait_for_component_initialization # component_pr and pr_number are set here
+    patch_component_source_before_merge
+    merge_github_pr # SHA is set here
+
+    wait_for_plr_to_appear # component_push_plr_name is set here
+    wait_for_plr_to_complete
+
+    wait_for_releases # RELEASE_NAME, RELEASE_NAMESPACE are set and exported here
+    verify_release_contents
+
+    echo "✅ ${variant} test completed successfully."
+    
+    # Cleanup if requested (for non-final variants)
+    if [ "$cleanup_after" = "true" ]; then
+        echo "Cleaning up ${variant} test resources..."
+        trap - EXIT  # Remove trap temporarily
+        cleanup_resources 0 0 ""
+        trap 'cleanup_resources $? $LINENO "$BASH_COMMAND"' EXIT  # Restore trap
+    fi
+}
 
 # --- Main Script Execution ---
 
@@ -121,25 +181,20 @@ fi
 # Pass error code, line number, and command to the cleanup function
 trap 'cleanup_resources $? $LINENO "$BASH_COMMAND"' EXIT
 
-check_env_vars "$@" # Pass all args for consistency, though check_env_vars doesn't use them
-parse_options "$@" # Parses options and sets CLEANUP, NO_CVE
+# Run custom variants first (if any), then regular test
+if [ ${#CUSTOM_VARIANTS[@]} -gt 0 ]; then
+    echo "Custom test variant(s) detected: ${CUSTOM_VARIANTS[*]}"
+    for variant in "${CUSTOM_VARIANTS[@]}"; do
+        run_test_variant "${variant}" \
+            "${SUITE_DIR}/test-${variant}.env" \
+            "${SUITE_DIR}/test-${variant}.sh" \
+            "true"
+    done
+fi
 
-decrypt_secrets "${SUITE_DIR}"
-create_github_repository
-patch_component_source
-setup_namespaces # Ensures correct context before resource creation
-cleanup_old_resources "${originating_tool}"
-create_kubernetes_resources # tmpDir is set here
+# Run regular test (EXIT trap handles cleanup)
+run_test_variant "regular" "${SUITE_DIR}/test.env" "${SUITE_DIR}/test.sh" "false"
 
-wait_for_component_initialization # component_pr and pr_number are set here
-patch_component_source_before_merge
-merge_github_pr # SHA is set here
-
-wait_for_plr_to_appear # component_push_plr_name is set here
-wait_for_plr_to_complete
-
-wait_for_releases # RELEASE_NAME, RELEASE_NAMESPACE are set and exported here
-verify_release_contents
-
-echo "✅️ End-to-end test script completed successfully."
+echo ""
+echo "✅ All end-to-end tests completed successfully."
 exit 0
