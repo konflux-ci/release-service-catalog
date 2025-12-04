@@ -338,8 +338,24 @@ spec:
                 (.failed_test_cases // [])[]?' <<<"${TEST_RESULT}" || true)
 
               for testcase in "${RUN_TESTCASES[@]}"; do
-                # shellcheck disable=SC1090
+                # shellcheck disable=SC1090,SC1091
                 . "/home/e2e/tests/${testcase}/test.env"
+                # Source base-test.env and finalize to get computed variables
+                # shellcheck disable=SC1091
+                if [ -f "/home/e2e/tests/shared/base-test.env" ]; then
+                  . "/home/e2e/tests/shared/base-test.env"
+                  finalize_test_env
+                fi
+
+                # Call test-specific post-init function if defined
+                # component_type comes from sourced test.env; bash syntax is intentional
+                # shellcheck disable=SC2154,SC3060
+                post_init_func="_post_init_${component_type//-/_}"
+                # shellcheck disable=SC3044
+                if declare -F "$post_init_func" > /dev/null 2>&1; then
+                  echo "Calling post-init function: $post_init_func"
+                  "$post_init_func"
+                fi
 
                 # decrypt the secrets since they are part of the resources to be deleted
                 decrypt_secrets "/home/e2e/tests/${testcase}"
@@ -348,15 +364,16 @@ spec:
                 "/home/e2e/tests/scripts/delete-repository.sh" "${component_repo_name:?}"
 
                 tmpDir=$(mktemp -d)
+                testDir="/home/e2e/tests/${testcase}"
                 # we need to rebuild the resources (without applying them)
                 # so that we can use their names to delete them
                 echo "Building tenant resources to prepare for deletion..."
-                kustomize build "/home/e2e/tests/${testcase}/resources/tenant" \
-                  | envsubst > "$tmpDir/tenant-resources.yaml"
+                kustomize build --load-restrictor=LoadRestrictionsNone \
+                  "$testDir/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
 
                 echo "Building managed resources to prepare for deletion..."
-                kustomize build "/home/e2e/tests/${testcase}/resources/managed" \
-                  | envsubst > "$tmpDir/managed-resources.yaml"
+                kustomize build --load-restrictor=LoadRestrictionsNone \
+                  "$testDir/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
 
                 # actually delete the k8s resources and ignore failures since
                 # they might be already deleted from the cleanup trap

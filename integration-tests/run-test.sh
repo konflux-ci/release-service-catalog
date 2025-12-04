@@ -88,15 +88,43 @@ fi
 # --- Configuration & Global Variables ---
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 LIB_DIR="${SCRIPT_DIR}/lib"
+SHARED_DIR="${SCRIPT_DIR}/shared"
 
 SUITE_DIR="${SCRIPT_DIR}/${suite}" # e.g. "${SCRIPT_DIR}/fbc-release"
 
-# Source environment variables (ensure this file exists and is correctly populated)
+# --- UUID Generation (MUST happen before test.env is sourced) ---
+# Generate a unique identifier for this test run if not already set
+# This ensures parallel test runs have distinct resource names
+uuid=${uuid:-"$(openssl rand -hex 4)"}
+uuid="${uuid:0:8}"
+export uuid
+echo "Test run UUID: ${uuid}"
+
+# Source test-specific environment variables first (for component_type, etc.)
+# These are needed before base-test.env can compute derived variables
+# NOTE: test.env can reference ${uuid} since it's now already set
 if [ -f "${SUITE_DIR}/test.env" ]; then
     . "${SUITE_DIR}/test.env"
 else
     echo "error: test.env not found in ${SUITE_DIR}"
     exit 1
+fi
+
+# Source base environment variables (shared configuration)
+# This provides common defaults and the finalize_test_env function
+if [ -f "${SHARED_DIR}/base-test.env" ]; then
+    . "${SHARED_DIR}/base-test.env"
+    # Finalize test environment with computed defaults
+    finalize_test_env
+    
+    # Call test-specific post-init function if defined
+    # This allows tests to define variables that depend on computed values
+    if declare -F _post_init_${component_type//-/_} > /dev/null 2>&1; then
+        echo "Calling post-init function for ${component_type}..."
+        _post_init_${component_type//-/_}
+    fi
+else
+    echo "warning: base-test.env not found in ${SHARED_DIR}, using legacy mode"
 fi
 
 # Source the function library
