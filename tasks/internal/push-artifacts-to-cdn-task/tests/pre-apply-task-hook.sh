@@ -4,11 +4,24 @@ set -x
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Add mocks to the beginning of task step script
-#
+# Mount mocks as ConfigMap instead of prepending to each step script.
+# This avoids the "argument list too long" error from Tekton's place-scripts
+# init container. After the recent changes,
+# the task scripts grew large enough that prepending 8KB mocks to each of the
+# 7 steps pushed the base64-encoded sh -c argument over the ~131KB ARG_MAX.
+kubectl delete configmap test-mocks --ignore-not-found
+kubectl create configmap test-mocks --from-file=mocks.sh="$SCRIPT_DIR/mocks.sh"
+
+# Add a volume for the mocks ConfigMap
+yq -i '.spec.volumes += [{"name": "test-mocks", "configMap": {"name": "test-mocks"}}]' "$TASK_PATH"
+
+# Add volumeMount and source line to each step
 STEPS="$(yq '.spec.steps |length' "$TASK_PATH")"
 for((i=0;i<STEPS;i++)); do
-    yq -i '.spec.steps['$i'].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps['$i'].script' "$TASK_PATH"
+    # Add volumeMount to the step
+    yq -i '.spec.steps['$i'].volumeMounts += [{"name": "test-mocks", "mountPath": "/mnt/test-mocks"}]' "$TASK_PATH"
+    # Insert source command AFTER the shebang line (not before, or bash won't be used)
+    yq -i '.spec.steps['$i'].script |= sub("^(#![^\n]*\n)", "${1}source /mnt/test-mocks/mocks.sh\n")' "$TASK_PATH"
 done
 
 # Create a dummy exodus secret (and delete it first if it exists)
