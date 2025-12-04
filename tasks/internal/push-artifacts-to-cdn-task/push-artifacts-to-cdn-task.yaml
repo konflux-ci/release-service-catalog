@@ -945,30 +945,50 @@ spec:
 
           # Create signed directory structure for this component
           SIGNED_DIR="$COMPONENT_DIR/signed"
-          mkdir -p "$SIGNED_DIR/macos" "$SIGNED_DIR/windows" "$SIGNED_DIR/linux"
+          mkdir -p "$SIGNED_DIR"
 
-          # Copy linux files to signed directory
-          cp -r "$COMPONENT_DIR/linux/"* "$SIGNED_DIR/linux/" 2>/dev/null || true
+          # Copy linux files to signed directory (if linux content exists)
+          if [ -f "$COMPONENT_DIR/has_linux" ]; then
+            mkdir -p "$SIGNED_DIR/linux"
+            cp -r "$COMPONENT_DIR/linux/"* "$SIGNED_DIR/linux/" 2>/dev/null || true
+          fi
 
-          # Pull signed Mac binaries for this component
-          signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
           cd "$SIGNED_DIR"
-          # shellcheck disable=SC2086
-          oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}" -o macos
 
-          # Pull signed Windows binaries for this component
-          signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
-          signed_windows_digest=${signed_windows_digest//[[:space:]]/}
-          # shellcheck disable=SC2086
-          oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}" -o windows
+          # Pull signed Mac binaries for this component (if mac content exists)
+          if [ -f "$COMPONENT_DIR/has_mac" ]; then
+            mkdir -p "$SIGNED_DIR/macos"
+            signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
+            # shellcheck disable=SC2086
+            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}" -o macos
+          fi
+
+          # Pull signed Windows binaries for this component (if windows content exists)
+          if [ -f "$COMPONENT_DIR/has_windows" ]; then
+            mkdir -p "$SIGNED_DIR/windows"
+            signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
+            signed_windows_digest=${signed_windows_digest//[[:space:]]/}
+            # shellcheck disable=SC2086
+            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}" -o windows
+          fi
 
           # Generate checksums for all binaries in this component's signed directory
           SHA_SUM_PATH="$SIGNED_DIR/sha256sum.txt"
           touch "$SHA_SUM_PATH"
-          find macos windows linux -type f 2>/dev/null | while read -r file; do
-              checksum=$(sha256sum "$file" | awk '{ print $1 }')
-              echo "$checksum  $file" >> "$SHA_SUM_PATH"
-          done
+          # Build a list of platform directories (macos, windows, linux) that exist
+          # conditional on the os directories being present (-d "macos")
+          CHECKSUM_DIRS=""
+          [ -d "macos" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS macos"
+          [ -d "windows" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS windows"
+          [ -d "linux" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS linux"
+          
+          if [ -n "$CHECKSUM_DIRS" ]; then
+            # shellcheck disable=SC2086
+            find $CHECKSUM_DIRS -type f 2>/dev/null | while read -r file; do
+                checksum=$(sha256sum "$file" | awk '{ print $1 }')
+                echo "$checksum  $file" >> "$SHA_SUM_PATH"
+            done
+          fi
 
           # Send sha256sum.txt to the checksum host for signing (component-specific path)
           REMOTE_DIR="$(context.taskRun.uid)_${COMPONENT_NAME}"
