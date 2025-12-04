@@ -309,6 +309,31 @@ do
         echo "  Pipelinerun $TEST_NAME succeeded"
       else
         echo "  Pipelinerun $TEST_NAME failed"
+
+        # Debug: Get init container logs from failed TaskRuns
+        echo "  === DEBUG: Fetching init container logs from failed TaskRuns ==="
+        for TR in $(kubectl get pr $PIPELINERUN -o json | jq -r '.status.childReferences[]?.name // empty'); do
+          TR_STATUS=$(kubectl get tr $TR -o jsonpath='{.status.conditions[0].status}' 2>/dev/null || echo "Unknown")
+          if [ "$TR_STATUS" == "False" ]; then
+            echo "  --- TaskRun $TR failed ---"
+            POD=$(kubectl get tr $TR -o jsonpath='{.status.podName}' 2>/dev/null)
+            if [ ! -z "$POD" ]; then
+              echo "  Pod: $POD"
+              echo "  --- Pod Events ---"
+              kubectl get events --field-selector involvedObject.name=$POD 2>/dev/null || true
+              echo "  --- Pod Describe (init containers) ---"
+              kubectl get pod $POD -o jsonpath='{range .status.initContainerStatuses[*]}Init Container: {.name} - State: {.state}{"\n"}{end}' 2>/dev/null || true
+              echo "  --- place-scripts init container logs ---"
+              kubectl logs $POD -c place-scripts 2>/dev/null || echo "  (no logs available)"
+              echo "  --- place-scripts command and args ---"
+              kubectl get pod $POD -o json | jq '.spec.initContainers[] | select(.name == "place-scripts") | {command, args}' 2>/dev/null | head -c 5000 || true
+              echo "  --- place-scripts args count and sizes ---"
+              kubectl get pod $POD -o json | jq '.spec.initContainers[] | select(.name == "place-scripts") | {arg_count: (.args | length), total_size: (.args | join("") | length), individual_sizes: (.args | to_entries | map({index: .key, size: (.value | length)}))}' 2>/dev/null || true
+            fi
+          fi
+        done
+        echo "  === END DEBUG ==="
+
         exit 1
       fi
     fi
