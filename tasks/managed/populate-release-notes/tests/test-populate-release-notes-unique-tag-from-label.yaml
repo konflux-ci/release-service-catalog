@@ -1,0 +1,215 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-unique-tag-from-label
+spec:
+  description: |
+    Run the populate-release-notes task with a single image in the snapshot JSON and verify
+    the data JSON has the proper content
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "releaseNotes": {
+                  "product_id": [
+                    123
+                  ],
+                  "product_name": "Red Hat Openstack Product",
+                  "product_version": "123",
+                  "cpe": "cpe:/a:example:openstack:el8",
+                  "type": "RHSA",
+                  "issues": {
+                    "fixed": [
+                      {
+                        "id": "RHOSP-12345",
+                        "source": "issues.example.com"
+                      },
+                      {
+                        "id": 1234567,
+                        "source": "bugzilla.example.com"
+                      }
+                    ]
+                  },
+                  "synopsis": "test synopsis",
+                  "topic": "test topic",
+                  "description": "test description",
+                  "solution": "test solution",
+                  "references": [
+                    "https://docs.example.com/some/example/release-notes"
+                  ]
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "metadata": {
+                      "labels": [
+                        {
+                          "name": "org.opencontainers.image.created",
+                          "value": "2025-04-14T02:14:26Z"
+                        }
+                      ]
+                    },
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-prod/product----repo",
+                        "rh-registry-repo": "registry.redhat.io/product/repo",
+                        "tags": [
+                          "foo",
+                          "bar"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              imagearch1=$(jq '.releaseNotes.content.images[0]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
+              test "$(jq -r '.architecture' <<< "$imagearch1")" == "amd64"
+              test "$(jq -r '.containerImage' <<< "$imagearch1")" == "registry.redhat.io/product/repo@sha256:abcdefg"
+              test "$(jq -r '.purl' <<< "$imagearch1")" == \
+                "pkg:oci/repo@sha256%3Aabcdefg?arch=amd64&repository_url=registry.redhat.io/product&tag=1744596866"
+              test "$(jq -r '.repository' <<< "$imagearch1")" == "registry.redhat.io/product/repo"
+              test "$(jq -rc '.tags' <<< "$imagearch1")" == '["foo","bar"]'
+              test "$(jq -rc '.component' <<< "$imagearch1")" == "comp"
+
+              imagearch2=$(jq '.releaseNotes.content.images[1]' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
+              test "$(jq -r '.architecture' <<< "$imagearch2")" == "s390x"
+              test "$(jq -r '.containerImage' <<< "$imagearch2")" == "registry.redhat.io/product/repo@sha256:deadbeef"
+              test "$(jq -r '.purl' <<< "$imagearch2")" == \
+                "pkg:oci/repo@sha256%3Adeadbeef?arch=s390x&repository_url=registry.redhat.io/product&tag=1744596866"
+              test "$(jq -r '.repository' <<< "$imagearch2")" == "registry.redhat.io/product/repo"
+              test "$(jq -rc '.tags' <<< "$imagearch2")" == '["foo","bar"]'
+              test "$(jq -rc '.component' <<< "$imagearch2")" == "comp"
+      runAfter:
+        - run-task
