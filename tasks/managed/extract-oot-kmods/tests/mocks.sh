@@ -257,6 +257,94 @@ EOF
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
       ;;
+    "copy docker://quay.io/mock/multiarch@sha256:amd64digest123 dir:"*)
+      # Handle multiarch amd64 case
+      cat > "$tmp_dir/manifest.json" << 'EOF'
+{
+  "layers": [
+    {"digest": "sha256:amd64layer123"}
+  ]
+}
+EOF
+
+      LAYER_BUILD_DIR=$(mktemp -d)
+      mkdir -p "$LAYER_BUILD_DIR/kmods"
+
+      echo "amd64-kmod1" > "$LAYER_BUILD_DIR/kmods/amd64-mod1.ko"
+      echo "amd64-kmod2" > "$LAYER_BUILD_DIR/kmods/amd64-mod2.ko"
+      echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
+      echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
+      echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+
+      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
+      rm -rf "$LAYER_BUILD_DIR"
+      ;;
+    "copy docker://quay.io/mock/multiarch@sha256:arm64digest456 dir:"*)
+      # Handle multiarch arm64 case
+      cat > "$tmp_dir/manifest.json" << 'EOF'
+{
+  "layers": [
+    {"digest": "sha256:arm64layer456"}
+  ]
+}
+EOF
+
+      LAYER_BUILD_DIR=$(mktemp -d)
+      mkdir -p "$LAYER_BUILD_DIR/kmods"
+
+      echo "arm64-kmod1" > "$LAYER_BUILD_DIR/kmods/arm64-mod1.ko"
+      echo "arm64-kmod2" > "$LAYER_BUILD_DIR/kmods/arm64-mod2.ko"
+      echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
+      echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
+      echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+
+      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
+      rm -rf "$LAYER_BUILD_DIR"
+      ;;
+    "copy docker://quay.io/mock/image@sha256:amd64digest123 dir:"*)
+      # Handle mock/image amd64 case (for multiarch test with different base image name)
+      cat > "$tmp_dir/manifest.json" << 'EOF'
+{
+  "layers": [
+    {"digest": "sha256:amd64layer123"}
+  ]
+}
+EOF
+
+      LAYER_BUILD_DIR=$(mktemp -d)
+      mkdir -p "$LAYER_BUILD_DIR/kmods"
+
+      echo "amd64-kmod1" > "$LAYER_BUILD_DIR/kmods/amd64-mod1.ko"
+      echo "amd64-kmod2" > "$LAYER_BUILD_DIR/kmods/amd64-mod2.ko"
+      echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
+      echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
+      echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+
+      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
+      rm -rf "$LAYER_BUILD_DIR"
+      ;;
+    "copy docker://quay.io/mock/image@sha256:arm64digest456 dir:"*)
+      # Handle mock/image arm64 case (for multiarch test with different base image name)
+      cat > "$tmp_dir/manifest.json" << 'EOF'
+{
+  "layers": [
+    {"digest": "sha256:arm64layer456"}
+  ]
+}
+EOF
+
+      LAYER_BUILD_DIR=$(mktemp -d)
+      mkdir -p "$LAYER_BUILD_DIR/kmods"
+
+      echo "arm64-kmod1" > "$LAYER_BUILD_DIR/kmods/arm64-mod1.ko"
+      echo "arm64-kmod2" > "$LAYER_BUILD_DIR/kmods/arm64-mod2.ko"
+      echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
+      echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
+      echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+
+      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
+      rm -rf "$LAYER_BUILD_DIR"
+      ;;
     *)
       echo "Error: Unexpected skopeo call: $*"
       exit 1
