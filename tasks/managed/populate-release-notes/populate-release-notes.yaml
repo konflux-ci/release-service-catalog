@@ -282,6 +282,22 @@ spec:
                 CVEsJson=$(jq --argjson cve "$cveJson" '.cves.fixed += $cve' <<< "$CVEsJson")
             done
         
+            created_label=$(jq -r '.metadata.labels[]? | select(.name == "org.opencontainers.image.created")
+                | .value' <<< "$component")
+
+            timestamp_tag=""
+            if [[ -n "$created_label" ]]; then
+                # Attempt to convert RFC3339 date to unix epoch (seconds)
+                if ! timestamp_tag=$(date -d "${created_label}" +%s 2>/dev/null); then
+                    echo "Warning: Component '${name}' has 'org.opencontainers.image.created' label" \
+                        "('$created_label') but it could not be parsed as a date." >&2
+                    timestamp_tag=""
+                fi
+            else
+                echo "Warning: Component '${name}' is missing the 'org.opencontainers.image.created'" \
+                     "label. Conforma should have blocked this release. Falling back to regex tag matching." >&2
+            fi
+
             arch_digests=$(get-image-architectures "${image}")
         
             # Iterate over repositories (new schema only)
@@ -301,15 +317,24 @@ spec:
                     purl="pkg:oci/${deliveryRepo##*/}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
     
                     uniqueTag=""
-                    NUM_TAGS=$(jq length <<< "$tags")
-                    for ((j = 0; j < NUM_TAGS; j++)) ; do
-                        tag=$(jq -r --argjson j "$j" '.[$j]' <<< "$tags")
-                        if [[ $tag =~ $UNIQUE_TAG_REGEX ]] && [[ ${#tag} > ${#uniqueTag} ]] ; then
-                            uniqueTag="${tag}"
-                        fi
-                    done
-    
-                    # if a unique tag is found, then purl will become:
+        
+                    # If we found a valid timestamp label, prefer that
+                    if [[ -n "$timestamp_tag" ]]; then
+                        uniqueTag="${timestamp_tag}"
+                    else
+                        # Fallback to finding unique tag via Regex
+                        NUM_TAGS=$(jq length <<< "$tags")
+                        for ((j = 0; j < NUM_TAGS; j++)) ; do
+                            tag=$(jq -r --argjson j "$j" '.[$j]' <<< "$tags")
+                            if [[ $tag =~ $UNIQUE_TAG_REGEX ]] && [[ ${#tag} > ${#uniqueTag} ]] ; then
+                                uniqueTag="${tag}"
+                            fi
+                        done
+                    fi
+
+                    # for values derived from org.opencontainers.image.created, the purl will become
+                    # pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo&tag=1742843776
+                    # OR if the label is not present and a unique tag is found, purl will look like:
                     # pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo&tag=0.1-12345678
                     if [[ -n $uniqueTag ]] ; then
                         purl="${purl}&tag=${uniqueTag}"
