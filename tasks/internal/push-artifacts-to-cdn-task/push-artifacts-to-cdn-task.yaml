@@ -324,6 +324,45 @@ spec:
         while (( ${RUNNING_JOBS@P} > 0 )); do
             wait -n
         done
+
+        # Create flag files based on OS types specified in the RPA mapping (files array)
+        # This ensures we only process OS types that are configured for release, not everything in the container
+        FILES_QUERY='(.files[]?, .staged.files[]?)'
+        for ((i = 0; i < NUM_COMPONENTS; i++)); do
+          COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          component_dir="$CONTENT_DIR/$COMPONENT_NAME"
+          
+          echo "Checking configured OS types for component: $COMPONENT_NAME"
+          
+          # Check for macOS(darwin) in both .files[] and .staged.files[]
+          if jq -e "$FILES_QUERY | select(.os == \"darwin\")" <<< "$COMPONENT" >/dev/null 2>&1 || \
+             jq -e "$FILES_QUERY | select((.source // \"\") | contains(\"darwin\"))" \
+               <<< "$COMPONENT" >/dev/null 2>&1 || \
+             jq -e "$FILES_QUERY | select((.filename // \"\") | contains(\"darwin\"))" \
+               <<< "$COMPONENT" >/dev/null 2>&1; then
+            touch "$component_dir/has_mac"
+            echo "  - macOS content detected"
+          fi
+          # Check for Windows in both .files[] and .staged.files[]
+          if jq -e "$FILES_QUERY | select(.os == \"windows\")" <<< "$COMPONENT" >/dev/null 2>&1 || \
+             jq -e "$FILES_QUERY | select((.source // \"\") | contains(\"windows\"))" \
+               <<< "$COMPONENT" >/dev/null 2>&1 || \
+             jq -e "$FILES_QUERY | select((.filename // \"\") | contains(\"windows\"))" \
+               <<< "$COMPONENT" >/dev/null 2>&1; then
+            touch "$component_dir/has_windows"
+            echo "  - Windows content detected"
+          fi
+          # Check for Linux in both .files[] and .staged.files[]
+          if jq -e "$FILES_QUERY | select(.os == \"linux\")" <<< "$COMPONENT" >/dev/null 2>&1 || \
+             jq -e "$FILES_QUERY | select((.source // \"\") | contains(\"linux\"))" \
+               <<< "$COMPONENT" >/dev/null 2>&1 || \
+             jq -e "$FILES_QUERY | select((.filename // \"\") | contains(\"linux\"))" \
+               <<< "$COMPONENT" >/dev/null 2>&1; then
+            touch "$component_dir/has_linux"
+            echo "  - Linux content detected"
+          fi
+        done
     - name: push-unsigned-using-oras
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
       computeResources:
@@ -396,7 +435,10 @@ spec:
           WINDOWS_CONTENT="$UNSIGNED_DIR/windows"
           LINUX_CONTENT="$COMPONENT_DIR/linux"
 
-          mkdir -p "$MAC_CONTENT" "$WINDOWS_CONTENT" "$LINUX_CONTENT"
+          # Create directories only for OS types that have content (based on flag files from extract step)
+          [ -f "$COMPONENT_DIR/has_mac" ] && mkdir -p "$MAC_CONTENT"
+          [ -f "$COMPONENT_DIR/has_windows" ] && mkdir -p "$WINDOWS_CONTENT"
+          [ -f "$COMPONENT_DIR/has_linux" ] && mkdir -p "$LINUX_CONTENT"
 
           # First unpack all archives in place (removing the archives)
           find "$COMPONENT_DIR" -maxdepth 1 -type f -iregex ".*\.zip\|.*\.gz" 2>/dev/null | while read -r file; do
@@ -415,16 +457,27 @@ spec:
           done
 
           # Then move unpacked files to appropriate directories based on OS
+          # Note: Skip has_* flag files - they must stay in the component root directory
+          # Only move files if the target directory exists (i.e., that OS type is configured in RPA)
           find "$COMPONENT_DIR" -maxdepth 1 -type f 2>/dev/null | while read -r file; do
             case "$file" in
+              (*/has_mac)
+                # Skip flag files - they need to stay in the component root directory
+                ;;
+              (*/has_windows)
+                # Skip flag files - they need to stay in the component root directory
+                ;;
+              (*/has_linux)
+                # Skip flag files - they need to stay in the component root directory
+                ;;
               (*darwin*)
-                mv "$file" "$MAC_CONTENT/"
+                [ -d "$MAC_CONTENT" ] && mv "$file" "$MAC_CONTENT/"
                 ;;
               (*windows*)
-                mv "$file" "$WINDOWS_CONTENT/"
+                [ -d "$WINDOWS_CONTENT" ] && mv "$file" "$WINDOWS_CONTENT/"
                 ;;
               (*linux*)
-                mv "$file" "$LINUX_CONTENT/"
+                [ -d "$LINUX_CONTENT" ] && mv "$file" "$LINUX_CONTENT/"
                 ;;
             esac
           done
@@ -432,17 +485,25 @@ spec:
           # Push unsigned content for this component
           cd "$UNSIGNED_DIR"
 
-          echo "Pushing unsigned Macos content for $COMPONENT_NAME to $(params.quayURL)..."
-          output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" macos)
-          mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
-          echo "Digest for $COMPONENT_NAME mac content: $mac_digest"
-          echo -n "$mac_digest" > "$COMPONENT_DIR/unsigned_mac_digest.txt"
+          if [ -f "$COMPONENT_DIR/has_mac" ]; then
+            echo "Pushing unsigned Macos content for $COMPONENT_NAME to $(params.quayURL)..."
+            output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" macos)
+            mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+            echo "Digest for $COMPONENT_NAME mac content: $mac_digest"
+            echo -n "$mac_digest" > "$COMPONENT_DIR/unsigned_mac_digest.txt"
+          else
+            echo "No macOS content for $COMPONENT_NAME, skipping unsigned push..."
+          fi
 
-          echo "Pushing unsigned Windows content for $COMPONENT_NAME to $(params.quayURL)..."
-          output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" windows)
-          windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
-          echo "Digest for $COMPONENT_NAME windows content: $windows_digest"
-          echo -n "$windows_digest" > "$COMPONENT_DIR/unsigned_windows_digest.txt"
+          if [ -f "$COMPONENT_DIR/has_windows" ]; then
+            echo "Pushing unsigned Windows content for $COMPONENT_NAME to $(params.quayURL)..."
+            output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" windows)
+            windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
+            echo "Digest for $COMPONENT_NAME windows content: $windows_digest"
+            echo -n "$windows_digest" > "$COMPONENT_DIR/unsigned_windows_digest.txt"
+          else
+            echo "No Windows content for $COMPONENT_NAME, skipping unsigned push..."
+          fi
 
           cd "$CONTENT_DIR"
         done
@@ -531,6 +592,12 @@ spec:
           COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
           COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
           COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+
+          # Skip if no macOS content for this component
+          if [ ! -f "$COMPONENT_DIR/has_mac" ]; then
+            echo "No macOS content for component $COMPONENT_NAME, skipping Mac signing..."
+            continue
+          fi
 
           echo "Signing Mac binaries for component: $COMPONENT_NAME"
 
@@ -686,6 +753,12 @@ spec:
           COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
           COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
           COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+
+          # Skip if no Windows content for this component
+          if [ ! -f "$COMPONENT_DIR/has_windows" ]; then
+            echo "No Windows content for component $COMPONENT_NAME, skipping Windows signing..."
+            continue
+          fi
 
           echo "Signing Windows binaries for component: $COMPONENT_NAME"
 
@@ -882,30 +955,50 @@ spec:
 
           # Create signed directory structure for this component
           SIGNED_DIR="$COMPONENT_DIR/signed"
-          mkdir -p "$SIGNED_DIR/macos" "$SIGNED_DIR/windows" "$SIGNED_DIR/linux"
+          mkdir -p "$SIGNED_DIR"
 
-          # Copy linux files to signed directory
-          cp -r "$COMPONENT_DIR/linux/"* "$SIGNED_DIR/linux/" 2>/dev/null || true
+          # Copy linux files to signed directory (if linux content exists)
+          if [ -f "$COMPONENT_DIR/has_linux" ]; then
+            mkdir -p "$SIGNED_DIR/linux"
+            cp -r "$COMPONENT_DIR/linux/"* "$SIGNED_DIR/linux/" 2>/dev/null || true
+          fi
 
-          # Pull signed Mac binaries for this component
-          signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
           cd "$SIGNED_DIR"
-          # shellcheck disable=SC2086
-          oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}" -o macos
 
-          # Pull signed Windows binaries for this component
-          signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
-          signed_windows_digest=${signed_windows_digest//[[:space:]]/}
-          # shellcheck disable=SC2086
-          oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}" -o windows
+          # Pull signed Mac binaries for this component (if mac content exists)
+          if [ -f "$COMPONENT_DIR/has_mac" ]; then
+            mkdir -p "$SIGNED_DIR/macos"
+            signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
+            # shellcheck disable=SC2086
+            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}" -o macos
+          fi
+
+          # Pull signed Windows binaries for this component (if windows content exists)
+          if [ -f "$COMPONENT_DIR/has_windows" ]; then
+            mkdir -p "$SIGNED_DIR/windows"
+            signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
+            signed_windows_digest=${signed_windows_digest//[[:space:]]/}
+            # shellcheck disable=SC2086
+            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}" -o windows
+          fi
 
           # Generate checksums for all binaries in this component's signed directory
           SHA_SUM_PATH="$SIGNED_DIR/sha256sum.txt"
           touch "$SHA_SUM_PATH"
-          find macos windows linux -type f 2>/dev/null | while read -r file; do
-              checksum=$(sha256sum "$file" | awk '{ print $1 }')
-              echo "$checksum  $file" >> "$SHA_SUM_PATH"
-          done
+          # Build a list of platform directories (macos, windows, linux) that exist
+          # conditional on the os directories being present (-d "macos")
+          CHECKSUM_DIRS=""
+          [ -d "macos" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS macos"
+          [ -d "windows" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS windows"
+          [ -d "linux" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS linux"
+          
+          if [ -n "$CHECKSUM_DIRS" ]; then
+            # shellcheck disable=SC2086
+            find $CHECKSUM_DIRS -type f 2>/dev/null | while read -r file; do
+                checksum=$(sha256sum "$file" | awk '{ print $1 }')
+                echo "$checksum  $file" >> "$SHA_SUM_PATH"
+            done
+          fi
 
           # Send sha256sum.txt to the checksum host for signing (component-specific path)
           REMOTE_DIR="$(context.taskRun.uid)_${COMPONENT_NAME}"
@@ -1012,25 +1105,37 @@ spec:
               if [ "$FORMAT" = "compressed" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
-                    # Archive the signed macos binaries
-                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" macos
-                    # Add file to actual files (filename derived from source)
-                    ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    # Archive the signed macos binaries (if macos content exists)
+                    if [ -d "${SIGNED_DIR}/macos" ]; then
+                      tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" macos
+                      # Add file to actual files (filename derived from source)
+                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    else
+                      echo "No macos directory found, skipping darwin archive"
+                    fi
                     ;;
                   (*linux*)
-                    # Archive the linux binaries
-                    tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" linux
-                    # Add file to actual files (filename derived from source)
-                    ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    # Archive the linux binaries (if linux content exists)
+                    if [ -d "${SIGNED_DIR}/linux" ]; then
+                      tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" linux
+                      # Add file to actual files (filename derived from source)
+                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    else
+                      echo "No linux directory found, skipping linux archive"
+                    fi
                     ;;
                   (*windows*)
-                    # Archive the signed windows binaries (zip doesn't have -C, so use full path)
-                    WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
-                    (cd "${SIGNED_DIR}" && zip -r "${COMPRESSED_DIR}/${WINDOWS_FILENAME}" windows)
-                    # Add file with updated source path (.zip instead of .tar.gz)
-                    WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
-                    ACTUAL_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
-                      '. + [($file | .source = $src)]' <<< "$ACTUAL_FILES")
+                    # Archive the signed windows binaries (if windows content exists)
+                    if [ -d "${SIGNED_DIR}/windows" ]; then
+                      WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
+                      (cd "${SIGNED_DIR}" && zip -r "${COMPRESSED_DIR}/${WINDOWS_FILENAME}" windows)
+                      # Add file with updated source path (.zip instead of .tar.gz)
+                      WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
+                      ACTUAL_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
+                        '. + [($file | .source = $src)]' <<< "$ACTUAL_FILES")
+                    else
+                      echo "No windows directory found, skipping windows archive"
+                    fi
                     ;;
                 esac
               fi
@@ -1039,17 +1144,24 @@ spec:
               if [ "$FORMAT" = "raw" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
-                    find "${SIGNED_DIR}/macos" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                    if [ -d "${SIGNED_DIR}/macos" ]; then
+                      find "${SIGNED_DIR}/macos" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    fi
                     ;;
                   (*linux*)
-                    find "${SIGNED_DIR}/linux" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                    if [ -d "${SIGNED_DIR}/linux" ]; then
+                      find "${SIGNED_DIR}/linux" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    fi
                     ;;
                   (*windows*)
-                    find "${SIGNED_DIR}/windows" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                    if [ -d "${SIGNED_DIR}/windows" ]; then
+                      find "${SIGNED_DIR}/windows" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
+                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                    fi
                     ;;
                 esac
-                # Add file to actual files (filename derived from source)
-                ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
               fi
             done
 
