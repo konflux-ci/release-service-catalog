@@ -1,0 +1,78 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-signing-certificates
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to verify the expiration of signing certificates (UMB and Pyxis)
+  params:
+    - name: umb_ssl_cert_secret_name
+      type: string
+      description: Kubernetes secret name for UMB
+    - name: umb_ssl_cert_file_name
+      type: string
+      description: The name of the file with the UMB certificate in the secret
+    - name: pyxis_ssl_cert_secret_name
+      type: string
+      description: Kubernetes secret name for Pyxis
+    - name: pyxis_ssl_cert_file_name
+      type: string
+      description: The name of the file with the Pyxis certificate in the secret
+    - name: certExpirationWarnDays
+      type: string
+      description: Number of days before expiration to warn about certificate expiration
+      default: "7"
+  volumes:
+    - name: umb-ssl-cert-secret
+      secret:
+        secretName: $(params.umb_ssl_cert_secret_name)
+        optional: false
+    - name: pyxis-ssl-cert-secret
+      secret:
+        secretName: $(params.pyxis_ssl_cert_secret_name)
+        optional: false
+  steps:
+    - name: check-certificates
+      image: quay.io/konflux-ci/release-service-utils:7072b5b5aa2cc0fc44baf8fb9f8e4a3540fc4fed
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      volumeMounts:
+        - name: umb-ssl-cert-secret
+          mountPath: /mnt/umb_ssl_cert_secret
+          readOnly: true
+        - name: pyxis-ssl-cert-secret
+          mountPath: /mnt/pyxis_ssl_cert_secret
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        echo "=== Checking signing certificate expiration ==="
+
+        # Check UMB certificate
+        UMB_CERT_FILE="/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)"
+        echo "Checking UMB certificate: ${UMB_CERT_FILE}"
+        if ! check_cert_expiration "${UMB_CERT_FILE}" "$(params.certExpirationWarnDays)"; then
+          echo "ERROR: UMB certificate validation failed"
+          exit 1
+        fi
+        echo "✓ UMB certificate is valid"
+
+        # Check Pyxis certificate
+        PYXIS_CERT_FILE="/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_cert_file_name)"
+        echo "Checking Pyxis certificate: ${PYXIS_CERT_FILE}"
+        if ! check_cert_expiration "${PYXIS_CERT_FILE}" "$(params.certExpirationWarnDays)"; then
+          echo "ERROR: Pyxis certificate validation failed"
+          exit 1
+        fi
+        echo "✓ Pyxis certificate is valid"
+
+        echo "=== All signing certificates are valid ==="
