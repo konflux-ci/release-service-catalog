@@ -195,6 +195,29 @@ function pulp_push_wrapper() {
     if [[ "$*" != *"--pulp-url https://pulp.com"* ]]; then
         printf "Mocked failure of pulp_push_wrapper" > /nonexistent/location
     fi
+
+    # Verify the staged.yaml has the correct structure with pulp repo path in relative_path
+    # Extract the source directory from the --source argument
+    local source_dir=""
+    local args=($*)
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "--source" ]]; then
+            source_dir="${args[$((i+1))]}"
+            break
+        fi
+    done
+
+    if [[ -n "$source_dir" && -f "$source_dir/staged.yaml" ]]; then
+        echo "Checking staged.yaml structure in $source_dir"
+        # Verify relative_path contains the pulp repo directory structure (e.g., "destination/FILES/file")
+        if ! grep -q "relative_path:.*FILES/" "$source_dir/staged.yaml"; then
+            echo "ERROR: staged.yaml relative_path should contain 'destination/FILES/' structure"
+            echo "Contents of staged.yaml:"
+            cat "$source_dir/staged.yaml"
+            exit 1
+        fi
+        echo "staged.yaml structure verified - relative_path includes pulp repo path"
+    fi
 }
 
 function rsync() {

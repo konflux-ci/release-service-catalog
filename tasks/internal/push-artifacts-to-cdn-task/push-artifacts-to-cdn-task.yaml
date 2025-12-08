@@ -1119,101 +1119,122 @@ spec:
           # Per-component directories
           COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
           SIGNED_DIR="$COMPONENT_DIR/signed"
-          COMPRESSED_DIR="$COMPONENT_DIR/compressed"
+          READY_FOR_DIST_DIR="$COMPONENT_DIR/ready_for_distribution"
           
-          mkdir -p "$COMPRESSED_DIR"
+          mkdir -p "$READY_FOR_DIST_DIR"
           echo "Compressing artifacts for component: $COMPONENT_NAME"
 
-          NUM_MAPPED_FILES=$(jq '.files | length' <<< "${COMPONENT_JSON}")
-          UPDATED_FILES="[]"
-
-          for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
-            FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT_JSON")
+          # Helper function to compress a single file entry
+          # Args: $1 = FILE JSON, $2 = "files" or "staged" (for logging)
+          compress_file_entry() {
+            local FILE="$1"
+            local ARRAY_NAME="$2"
+            local SOURCE
             if ! SOURCE=$(jq -er '.source' <<< "$FILE" 2>/dev/null); then
-              echo "Missing files.source for component." >&2
-              exit 1
+              echo "Missing ${ARRAY_NAME}[].source for component." >&2
+              return 1
             fi
             # Extract just the filename from the source path (remove /releases/ prefix)
+            local SOURCE_FILENAME
             SOURCE_FILENAME=$(basename "$SOURCE")
+            local DELIVERY_FORMAT
             DELIVERY_FORMAT=$(jq -r '.delivery_format // ["compressed"] | sort | .[]' <<< "$FILE")
-
-            # Track actual filenames created for this file entry
-            ACTUAL_FILES="[]"
 
             for FORMAT in $DELIVERY_FORMAT; do
               if [ "$FORMAT" = "compressed" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
-                    # Archive the signed macos binaries (if macos content exists)
                     if [ -d "${SIGNED_DIR}/macos" ]; then
-                      tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" macos
-                      # Add file to actual files (filename derived from source)
-                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
-                    else
-                      echo "No macos directory found, skipping darwin archive"
+                      # Skip if already created
+                      if [ ! -f "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" ]; then
+                        tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" macos
+                        echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
+                      fi
                     fi
                     ;;
                   (*linux*)
-                    # Archive the linux binaries (if linux content exists)
                     if [ -d "${SIGNED_DIR}/linux" ]; then
-                      tar -czf "${COMPRESSED_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" linux
-                      # Add file to actual files (filename derived from source)
-                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
-                    else
-                      echo "No linux directory found, skipping linux archive"
+                      if [ ! -f "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" ]; then
+                        tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" linux
+                        echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
+                      fi
                     fi
                     ;;
                   (*windows*)
-                    # Archive the signed windows binaries (if windows content exists)
                     if [ -d "${SIGNED_DIR}/windows" ]; then
-                      WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
-                      (cd "${SIGNED_DIR}" && zip -r "${COMPRESSED_DIR}/${WINDOWS_FILENAME}" windows)
-                      # Add file with updated source path (.zip instead of .tar.gz)
-                      WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
-                      ACTUAL_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
-                        '. + [($file | .source = $src)]' <<< "$ACTUAL_FILES")
-                    else
-                      echo "No windows directory found, skipping windows archive"
+                      local WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
+                      if [ ! -f "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" ]; then
+                        (cd "${SIGNED_DIR}" && zip -r "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" windows)
+                        echo "  Created (${ARRAY_NAME}): ${WINDOWS_FILENAME}"
+                      fi
                     fi
                     ;;
                 esac
               fi
 
-              # if "raw" is listed in the delivery_mode, copy the specific platform's raw files
               if [ "$FORMAT" = "raw" ]; then
                 case "${SOURCE}" in
                   (*darwin*)
                     if [ -d "${SIGNED_DIR}/macos" ]; then
-                      find "${SIGNED_DIR}/macos" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
-                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                      find "${SIGNED_DIR}/macos" -type f -exec cp -n "{}" "${READY_FOR_DIST_DIR}/" \;
                     fi
                     ;;
                   (*linux*)
                     if [ -d "${SIGNED_DIR}/linux" ]; then
-                      find "${SIGNED_DIR}/linux" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
-                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                      find "${SIGNED_DIR}/linux" -type f -exec cp -n "{}" "${READY_FOR_DIST_DIR}/" \;
                     fi
                     ;;
                   (*windows*)
                     if [ -d "${SIGNED_DIR}/windows" ]; then
-                      find "${SIGNED_DIR}/windows" -type f -exec cp "{}" "${COMPRESSED_DIR}/" \;
-                      ACTUAL_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$ACTUAL_FILES")
+                      find "${SIGNED_DIR}/windows" -type f -exec cp -n "{}" "${READY_FOR_DIST_DIR}/" \;
                     fi
                     ;;
                 esac
               fi
             done
+          }
 
-            # Add all actual files for this original file entry to the updated files list
-            UPDATED_FILES=$(jq --argjson actual_files "$ACTUAL_FILES" '. + $actual_files' <<< "$UPDATED_FILES")
-          done
+          # Process files[] array (Developer Portal files)
+          NUM_MAPPED_FILES=$(jq '.files | length // 0' <<< "${COMPONENT_JSON}")
+          UPDATED_FILES="[]"
+          
+          if [ "$NUM_MAPPED_FILES" -gt 0 ]; then
+            echo "  Processing ${NUM_MAPPED_FILES} files from files[] (Developer Portal):"
+            for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
+              FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT_JSON")
+              compress_file_entry "$FILE" "files"
+              
+              # Track files for SNAPSHOT_JSON update
+              SOURCE=$(jq -er '.source' <<< "$FILE" 2>/dev/null) || continue
+              SOURCE_FILENAME=$(basename "$SOURCE")
+              if [[ "$SOURCE" == *"windows"* ]]; then
+                WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
+                UPDATED_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
+                  '. + [($file | .source = $src)]' <<< "$UPDATED_FILES")
+              else
+                UPDATED_FILES=$(jq --argjson file "$FILE" '. + [$file]' <<< "$UPDATED_FILES")
+              fi
+            done
+          fi
 
-          # Copy checksum files to compressed directory
-          cp "${SIGNED_DIR}/sha256sum.txt" "${COMPRESSED_DIR}/" 2>/dev/null || true
-          cp "${SIGNED_DIR}/sha256sum.txt.sig" "${COMPRESSED_DIR}/" 2>/dev/null || true
-          cp "${SIGNED_DIR}/sha256sum.txt.gpg" "${COMPRESSED_DIR}/" 2>/dev/null || true
+          # Process staged.files[] array (Customer Portal files)
+          # These may be different files than files[], need separate compression
+          NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "${COMPONENT_JSON}")
+          
+          if [ "$NUM_STAGED_FILES" -gt 0 ]; then
+            echo "  Processing ${NUM_STAGED_FILES} files from staged.files[] (Customer Portal):"
+            for ((i = 0; i < NUM_STAGED_FILES; i++)) ; do
+              FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT_JSON")
+              compress_file_entry "$FILE" "staged.files"
+            done
+          fi
 
-          # Update the component in SNAPSHOT_JSON with the corrected filenames
+          # Copy checksum files to ready_for_distribution directory (for Developer Portal)
+          cp "${SIGNED_DIR}/sha256sum.txt" "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
+          cp "${SIGNED_DIR}/sha256sum.txt.sig" "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
+          cp "${SIGNED_DIR}/sha256sum.txt.gpg" "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
+
+          # Update the component in SNAPSHOT_JSON with the corrected filenames (for files[] array)
           SNAPSHOT_JSON=$(jq --arg name "$COMPONENT_NAME" --argjson updated_files "$UPDATED_FILES" '
             .components |= map(
               if .name == $name then
@@ -1255,6 +1276,10 @@ spec:
       env:
         - name: "SNAPSHOT_JSON"
           value: "$(params.snapshot_json)"
+        # Force Python requests to use system CA bundle (which includes RH internal CAs)
+        # instead of certifi's bundled CAs. This was causing SSL verification failures with pulp
+        - name: "REQUESTS_CA_BUNDLE"
+          value: "/etc/pki/tls/certs/ca-bundle.crt"
       script: |
         #!/usr/bin/env bash
         set -e
@@ -1361,8 +1386,8 @@ spec:
 
         CONTENT_DIR="/shared/artifacts"
 
-        # save the results - list all files from all component compressed directories
-        find "${CONTENT_DIR}"/*/compressed -type f -exec basename {} \; 2>/dev/null \
+        # save the results - list all files from all component ready_for_distribution directories
+        find "${CONTENT_DIR}"/*/ready_for_distribution -type f -exec basename {} \; 2>/dev/null \
           | tail -c 512 | tee "$(results.publishedFiles.path)"
 
         create_exodus_conf() {
@@ -1385,7 +1410,7 @@ spec:
 
         push_component_to_pulp() {
           local component_name=$1
-          local component_dir="${CONTENT_DIR}/${component_name}/compressed"
+          local component_dir="${CONTENT_DIR}/${component_name}/ready_for_distribution"
           
           # Get version and destination from the component's staged config
           version=$(jq -cr --arg name "$component_name" '
@@ -1403,8 +1428,63 @@ spec:
           fi
 
           echo "Pushing component $component_name to customer portal with pulp"
-          cd "$component_dir"
           
+          # Create proper directory structure for Pulp with the destination (pulp repo) path
+          # The relative_path in staged.yaml must include the pulp repo name for content
+          # to be properly mapped and exposed via repo notes on the Customer Portal
+          staging_dir=$(mktemp -d)
+          mkdir -p "${staging_dir}/${staged_destination}/FILES"
+          
+          # Get the list of files to include from RPA - Customer Portal uses staged.files ONLY
+          # Checksums go to Developer Portal automatically but NOT to Customer Portal unless listed
+          COMPONENT_JSON=$(jq -c --arg name "$component_name" '
+            .components[] | select(.name == $name)
+          ' <<< "$SNAPSHOT_JSON")
+          
+          # Check if there are Customer Portal files to push
+          NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "$COMPONENT_JSON")
+          if [[ "$NUM_STAGED_FILES" -eq 0 ]]; then
+            echo "Warning: No staged.files specified in RPA for Customer Portal push" >&2
+            echo "  Customer Portal requires explicit staged.files array" >&2
+            rm -rf "$staging_dir"
+            return 0
+          fi
+          
+          # Copy only the files listed in staged.files to the staging directory
+          for ((i = 0; i < NUM_STAGED_FILES; i++)); do
+            source_path=$(jq -r --arg i "$i" '.staged.files[$i|tonumber].source // empty' <<< "$COMPONENT_JSON")
+            # Get destination filename from staged.files[].filename (for renaming)
+            dest_filename=$(jq -r --arg i "$i" '.staged.files[$i|tonumber].filename // empty' <<< "$COMPONENT_JSON")
+            if [[ -n "$source_path" ]]; then
+              # Get the source filename from path (basename) - this is what the file is named locally
+              source_filename=$(basename "$source_path")
+              # Handle windows files that may have been converted from .tar.gz to .zip
+              if [[ "$source_filename" == *"windows"* && "$source_filename" == *.tar.gz ]]; then
+                zip_filename="${source_filename%.tar.gz}.zip"
+                if [[ -f "$component_dir/$zip_filename" ]]; then
+                  source_filename="$zip_filename"
+                  # Also update dest_filename if it was .tar.gz
+                  if [[ "$dest_filename" == *.tar.gz ]]; then
+                    dest_filename="${dest_filename%.tar.gz}.zip"
+                  fi
+                fi
+              fi
+              # Use dest_filename if specified, otherwise fall back to source_filename
+              if [[ -z "$dest_filename" ]]; then
+                dest_filename="$source_filename"
+              fi
+              if [[ -f "$component_dir/$source_filename" ]]; then
+                cp "$component_dir/$source_filename" "${staging_dir}/${staged_destination}/FILES/${dest_filename}"
+                echo "  Including file for Customer Portal: $source_filename -> $dest_filename"
+              else
+                echo "  Warning: File not found: $source_filename" >&2
+              fi
+            fi
+          done
+          
+          cd "$staging_dir"
+          
+          # Generate staged.yaml only for files that were copied
           staged_json='{"header":{"version": "0.2"},"payload":{"files":[]}}'
           # shellcheck disable=SC2035
           while IFS= read -r -d '' file ; do
@@ -1415,16 +1495,17 @@ spec:
           done < <(find * -type f -print0)
           echo "$staged_json" | yq -P -I 4 > staged.yaml
 
-          pulp_push_wrapper --debug --source "$component_dir" --pulp-url "$PULP_URL" \
-            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL"
+          pulp_push_wrapper --source "$staging_dir" --pulp-url "$PULP_URL" \
+            --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL" \
+            2> "$STDERR_FILE"
 
-          rm -f staged.yaml
+          rm -rf "$staging_dir"
           cd "$CONTENT_DIR"
         }
 
         push_component_to_cdn() {
           local component_name=$1
-          local component_dir="${CONTENT_DIR}/${component_name}/compressed"
+          local component_dir="${CONTENT_DIR}/${component_name}/ready_for_distribution"
           
           echo "Pushing component $component_name to CDN with exodus-rsync"
           create_exodus_conf
@@ -1446,7 +1527,7 @@ spec:
 
         publish_component_to_cgw() {
           local component_name=$1
-          local component_dir="${CONTENT_DIR}/${component_name}/compressed"
+          local component_dir="${CONTENT_DIR}/${component_name}/ready_for_distribution"
           
           # Update contentDir for this component in SNAPSHOT_JSON
           SNAPSHOT_JSON=$(
@@ -1475,7 +1556,7 @@ spec:
 
           if [[ "$HAS_STAGED" == "true" ]]; then
             # Push to customer portal (pulp) - CDN push not needed when using pulp
-            push_component_to_pulp "$COMPONENT_NAME" 2> "$STDERR_FILE"
+            push_component_to_pulp "$COMPONENT_NAME" 2> >(tee "$STDERR_FILE" >&2)
           elif [[ "$HAS_CGW" == "true" ]]; then
             # Only push to CDN when NOT pushing to pulp
             push_component_to_cdn "$COMPONENT_NAME" > >(tee "$STDERR_FILE") 2>&1 || true
