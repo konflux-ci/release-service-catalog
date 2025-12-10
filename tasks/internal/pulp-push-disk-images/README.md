@@ -17,3 +17,5 @@ Tekton task to push disk images with Pulp
 | caTrustConfigMapName   | The name of the ConfigMap to read CA bundle data from                 | Yes      | trusted-ca    |
 | caTrustConfigMapKey    | The name of the key in the ConfigMap that contains the CA bundle data | Yes      | ca-bundle.crt |
 | certExpirationWarnDays | Number of days before expiration to warn about certificate expiration | Yes      | 7             |
+| sendSlackNotification  | Whether to send Slack notifications for certificate expiration alerts | Yes      | true          |
+| slackWebhookUrl        | Override default Slack webhook URL for notifications (optional)       | Yes      | ""            |

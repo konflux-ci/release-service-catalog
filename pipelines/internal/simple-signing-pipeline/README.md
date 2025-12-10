@@ -17,3 +17,5 @@ pipeline.
 | taskGitRevision        | The revision in the taskGitUrl repo to be used                                                                        | No       | -                                                         |
 | pyxisServer            | The server type to use. Options are 'production' and 'stage'                                                          | Yes      | production                                                |
 | certExpirationWarnDays | Number of days before expiration to warn about certificate expiration                                                 | Yes      | 7                                                         |
+| sendSlackNotification  | Whether to send Slack notifications for certificate expiration alerts                                                 | Yes      | true                                                      |
+| slackWebhookUrl        | Override default Slack webhook URL for notifications (optional)                                                       | Yes      | ""                                                        |
