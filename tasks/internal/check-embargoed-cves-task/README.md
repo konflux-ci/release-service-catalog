@@ -1,4 +1,4 @@
-# check-embargoed-cves-task
+# check-embargoed-cves-task-FOO
 
 Checks if any passed CVEs are embargoed.
 The task will always exit 0 even if something fails. This is because the task result will not be
