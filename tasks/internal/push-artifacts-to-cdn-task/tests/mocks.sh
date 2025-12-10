@@ -88,6 +88,12 @@ EOF
             create_mock_tgz "testproduct3-binary-windows-amd64.tar.gz"
             create_mock_tgz "testproduct3-binary-darwin-amd64.tar.gz"
             create_mock_tgz "testproduct3-binary-linux-amd64.tar.gz"
+        elif [[ "$*" =~ extrafiles999 ]]; then
+            # Test component with extra files in container not in RPA
+            # The RPA will only list linux, but container has all three
+            create_mock_tgz "extrafiles-binary-windows-amd64.tar.gz"
+            create_mock_tgz "extrafiles-binary-darwin-amd64.tar.gz"
+            create_mock_tgz "extrafiles-binary-linux-amd64.tar.gz"
         else
             # Default test component (abcdef12345 or any other SHA)
             create_mock_tgz "testproduct-binary-windows-amd64.tar.gz"

@@ -1,0 +1,106 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-artifacts-to-cdn-skip-no-files-component
+spec:
+  description: |
+    Test that components without files or staged.files are skipped gracefully.
+    This simulates a snapshot with an operator image (no files array) alongside
+    a binary component (has files array). The task should skip the operator
+    and only process the binary component.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: push-artifacts-to-cdn-task
+      params:
+        - name: snapshot_json
+          value: >-
+            {
+              "application": "mixed-components-test",
+              "artifacts": {},
+              "components": [
+                {
+                  "containerImage": "quay.io/org/tenant/operator@sha256:operatoronly123",
+                  "name": "operator-component",
+                  "source": {
+                    "git": {
+                      "url": "https://github.com/example/operator.git",
+                      "revision": "main"
+                    }
+                  }
+                },
+                {
+                  "containerImage": "quay.io/org/tenant/test@sha256:abcdef12345",
+                  "contentGateway": {
+                    "productCode": "Code",
+                    "productName": "BinaryProduct",
+                    "productVersionName": "1.0-staging"
+                  },
+                  "name": "testproduct",
+                  "staged": {
+                    "destination": "testproduct-amd64",
+                    "version": "1.0"
+                  },
+                  "files": [
+                    {
+                      "filename": "testproduct-binary-linux-amd64.tar.gz",
+                      "source": "/releases/testproduct-binary-linux-amd64.tar.gz",
+                      "os": "linux"
+                    },
+                    {
+                      "filename": "testproduct-binary-darwin-amd64.tar.gz",
+                      "source": "/releases/testproduct-binary-darwin-amd64.tar.gz",
+                      "os": "darwin"
+                    },
+                    {
+                      "filename": "testproduct-binary-windows-amd64.tar.gz",
+                      "source": "/releases/testproduct-binary-windows-amd64.tar.gz",
+                      "os": "windows"
+                    }
+                  ]
+                }
+              ]
+            }
+        - name: exodusGwSecret
+          value: "pulp-task-exodus-secret"
+        - name: exodusGwEnv
+          value: "pre"
+        - name: pulpSecret
+          value: "pulp-task-pulp-secret"
+        - name: udcacheSecret
+          value: "pulp-task-udc-secret"
+        - name: cgwHostname
+          value: "https://content-gateway.com"
+        - name: cgwSecret
+          value: "pulp-task-cgw-secret"
+        - name: author
+          value: testuser
+        - name: signingKeyName
+          value: testkey
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:7072b5b5aa2cc0fc44baf8fb9f8e4a3540fc4fed
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              # The task should succeed - operator component should be skipped,
+              # binary component should be processed normally
+              if [[ "$(params.result)" != "Success" ]]; then
+                echo Error: result task result expected to be Success but was not
+                echo "Result was: $(params.result)"
+                exit 1
+              fi
+
+              echo "Test passed: Task succeeded, skipping component without files"

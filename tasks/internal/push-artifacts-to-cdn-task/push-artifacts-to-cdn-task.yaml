@@ -231,6 +231,15 @@ spec:
             # Use component.name for directory isolation
             COMPONENT_NAME=$(jq -er '.name' <<< "${COMPONENT}") \
                   || (echo "Component ${COMPONENT_NUM} is missing 'name'" >&2 && exit 1 )
+            
+            # Check if component has files or staged.files - skip if neither exists
+            NUM_FILES=$(jq '.files | length // 0' <<< "${COMPONENT}")
+            NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "${COMPONENT}")
+            if [ "$NUM_FILES" -eq 0 ] && [ "$NUM_STAGED_FILES" -eq 0 ]; then
+              echo "Skipping component '${COMPONENT_NAME}' - no files defined (not a binary artifact component)"
+              return 0
+            fi
+            
             PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}") \
                   || (echo "Component ${COMPONENT_NAME} is missing 'containerImage'" >&2 && exit 1 )
             DESTINATION="${CONTENT_DIR}/${COMPONENT_NAME}"
@@ -250,7 +259,9 @@ spec:
 
             cd "$TMP_DIR"
 
-            # Determine which directories to extract from source paths in files or staged.files
+            # Build list of specific files to extract from files[] and staged.files[]
+            # We only want files explicitly listed in the RPA, not everything in the container
+            WANTED_FILES=()
             EXTRACT_DIRS=()
 
             # Check .files[].source paths
@@ -258,7 +269,9 @@ spec:
             for ((i = 0; i < NUM_FILES; i++)); do
                 SOURCE_PATH=$(jq -r --arg i "$i" '.files[$i|tonumber].source // empty' <<< "${COMPONENT}")
                 if [ -n "$SOURCE_PATH" ]; then
-                    # Extract directory part (e.g., "/releases/file.gz" -> "releases")
+                    # Store the full path (without leading /) for extraction
+                    WANTED_FILES+=("${SOURCE_PATH#/}")
+                    # Extract directory part for tar extraction
                     DIR_PATH=$(dirname "$SOURCE_PATH" | sed 's|^/||')
                     if [ "$DIR_PATH" != "." ] && [ -n "$DIR_PATH" ]; then
                         EXTRACT_DIRS+=("$DIR_PATH")
@@ -271,7 +284,9 @@ spec:
             for ((i = 0; i < NUM_STAGED_FILES; i++)); do
                 SOURCE_PATH=$(jq -r --arg i "$i" '.staged.files[$i|tonumber].source // empty' <<< "${COMPONENT}")
                 if [ -n "$SOURCE_PATH" ]; then
-                    # Extract directory part (e.g., "/releases/file.gz" -> "releases")
+                    # Store the full path (without leading /) for extraction
+                    WANTED_FILES+=("${SOURCE_PATH#/}")
+                    # Extract directory part for tar extraction
                     DIR_PATH=$(dirname "$SOURCE_PATH" | sed 's|^/||')
                     if [ "$DIR_PATH" != "." ] && [ -n "$DIR_PATH" ]; then
                         EXTRACT_DIRS+=("$DIR_PATH")
@@ -284,9 +299,13 @@ spec:
                 EXTRACT_DIRS=("releases")
             fi
 
-            # Remove duplicates and extract each unique directory
+            # Remove duplicates
             mapfile -t UNIQUE_DIRS < <(printf "%s\n" "${EXTRACT_DIRS[@]}" | sort -u)
+            mapfile -t UNIQUE_FILES < <(printf "%s\n" "${WANTED_FILES[@]}" | sort -u)
 
+            echo "Files to extract from RPA: ${UNIQUE_FILES[*]}"
+
+            # Extract the directories from container layers
             for IMAGE_PATH in "${UNIQUE_DIRS[@]}"; do
                 echo "Looking for directory: $IMAGE_PATH"
                 for DIGEST in $(jq -r ".layers[].digest" manifest.json); do
@@ -299,10 +318,14 @@ spec:
                         echo "skipping $FILE. It doesn't contain the $IMAGE_PATH dir"
                     fi
                 done
+            done
 
-                # Copy extracted files directly to destination (flattened like extract-binaries-from-image)
-                if [ -d "$IMAGE_PATH" ]; then
-                    cp "$IMAGE_PATH"/* "$DESTINATION"/ 2>/dev/null || echo "No files found in $IMAGE_PATH directory"
+            # Copy ONLY files explicitly listed in the RPA (not all files from the directory)
+            for wanted_file in "${UNIQUE_FILES[@]}"; do
+                if [ -f "$wanted_file" ]; then
+                    cp "$wanted_file" "$DESTINATION"/
+                else
+                    echo "Warning: Expected file not found in container: $wanted_file"
                 fi
             done
 
@@ -433,6 +456,15 @@ spec:
           COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
           
           echo "Processing component: $COMPONENT_NAME"
+          
+          # Skip components without files or staged.files (not binary artifact components)
+          NUM_FILES=$(jq '.files | length // 0' <<< "$COMPONENT")
+          NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "$COMPONENT")
+          if [ "$NUM_FILES" -eq 0 ] && [ "$NUM_STAGED_FILES" -eq 0 ]; then
+            echo "Skipping component '$COMPONENT_NAME' - no files or staged.files defined"
+            continue
+          fi
+          
           COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
           UNSIGNED_DIR="$COMPONENT_DIR/unsigned"
           MAC_CONTENT="$UNSIGNED_DIR/macos"
@@ -445,6 +477,7 @@ spec:
           [ -f "$COMPONENT_DIR/has_linux" ] && mkdir -p "$LINUX_CONTENT"
 
           # First unpack all archives in place (removing the archives)
+          # Note: The || true prevents the while loop's exit code (1 from read at EOF) from triggering set -e
           find "$COMPONENT_DIR" -maxdepth 1 -type f -iregex ".*\.zip\|.*\.gz" 2>/dev/null | while read -r file; do
             dir=$(dirname "$file")
             case "$file" in
@@ -458,11 +491,12 @@ spec:
                 unzip "$file" -d "$dir" && rm "$file"
                 ;;
             esac
-          done
+          done || true
 
           # Then move unpacked files to appropriate directories based on OS
           # Note: Skip has_* flag files - they must stay in the component root directory
           # Only move files if the target directory exists (i.e., that OS type is configured in RPA)
+          # Note: The || true at the end prevents the while loop's exit code from triggering set -e
           find "$COMPONENT_DIR" -maxdepth 1 -type f 2>/dev/null | while read -r file; do
             case "$file" in
               (*/has_mac)
@@ -484,32 +518,33 @@ spec:
                 [ -d "$LINUX_CONTENT" ] && mv "$file" "$LINUX_CONTENT/"
                 ;;
             esac
-          done
+          done || true
 
-          # Push unsigned content for this component
-          cd "$UNSIGNED_DIR"
-
+          # Push unsigned Mac content
           if [ -f "$COMPONENT_DIR/has_mac" ]; then
+            pushd "$UNSIGNED_DIR" > /dev/null
             echo "Pushing unsigned Macos content for $COMPONENT_NAME to $(params.quayURL)..."
             output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" macos)
             mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
             echo "Digest for $COMPONENT_NAME mac content: $mac_digest"
             echo -n "$mac_digest" > "$COMPONENT_DIR/unsigned_mac_digest.txt"
+            popd > /dev/null
           else
             echo "No macOS content for $COMPONENT_NAME, skipping unsigned push..."
           fi
 
+          # Push unsigned Windows content
           if [ -f "$COMPONENT_DIR/has_windows" ]; then
+            pushd "$UNSIGNED_DIR" > /dev/null
             echo "Pushing unsigned Windows content for $COMPONENT_NAME to $(params.quayURL)..."
             output=$(oras push "$(params.quayURL)/${COMPONENT_NAME}/unsigned" windows)
             windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
             echo "Digest for $COMPONENT_NAME windows content: $windows_digest"
             echo -n "$windows_digest" > "$COMPONENT_DIR/unsigned_windows_digest.txt"
+            popd > /dev/null
           else
             echo "No Windows content for $COMPONENT_NAME, skipping unsigned push..."
           fi
-
-          cd "$CONTENT_DIR"
         done
     - name: sign-mac-binaries
       image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6

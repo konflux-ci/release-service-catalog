@@ -1,0 +1,85 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-artifacts-to-cdn-extra-files-in-container
+spec:
+  description: |
+    Test that only files listed in the RPA are extracted from the container.
+    The container has windows, darwin, and linux files, but the RPA only lists linux.
+    Windows and darwin files should NOT be extracted or processed.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: push-artifacts-to-cdn-task
+      params:
+        - name: snapshot_json
+          value: >-
+            {
+              "application": "extra-files-test",
+              "artifacts": {},
+              "components": [
+                {
+                  "containerImage": "quay.io/org/tenant/test@sha256:extrafiles999",
+                  "contentGateway": {
+                    "productCode": "Code",
+                    "productName": "ExtraFilesTest",
+                    "productVersionName": "1.0-staging"
+                  },
+                  "name": "extrafiles",
+                  "staged": {
+                    "destination": "extrafiles-amd64",
+                    "version": "1.0"
+                  },
+                  "files": [
+                    {
+                      "filename": "extrafiles-binary-linux-amd64.tar.gz",
+                      "source": "/releases/extrafiles-binary-linux-amd64.tar.gz",
+                      "os": "linux"
+                    }
+                  ]
+                }
+              ]
+            }
+        - name: exodusGwSecret
+          value: "pulp-task-exodus-secret"
+        - name: exodusGwEnv
+          value: "pre"
+        - name: pulpSecret
+          value: "pulp-task-pulp-secret"
+        - name: udcacheSecret
+          value: "pulp-task-udc-secret"
+        - name: cgwHostname
+          value: "https://content-gateway.com"
+        - name: cgwSecret
+          value: "pulp-task-cgw-secret"
+        - name: author
+          value: testuser
+        - name: signingKeyName
+          value: testkey
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:7072b5b5aa2cc0fc44baf8fb9f8e4a3540fc4fed
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              # The task should succeed - only linux files were in RPA
+              # Windows and darwin files in container should have been ignored
+              if [[ "$(params.result)" != "Success" ]]; then
+                echo Error: result task result expected to be Success but was not
+                echo "Result was: $(params.result)"
+                exit 1
+              fi
+
+              echo "Test passed: Task succeeded with only RPA-listed files extracted"
