@@ -282,7 +282,6 @@ spec:
         #!/usr/bin/env /bin/bash
         umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
         umb_key="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)")"
-
         function get-task-id() {
           if [[ -v CUSTOM_TASK_ID ]]; then
             echo "${CUSTOM_TASK_ID}"
@@ -293,40 +292,48 @@ spec:
         echo "${umb_cert:?}" > /tmp/umb.pem
         echo "${umb_key:?}" >> /tmp/umb.pem
         set -x
-        declare -a reference_args=()
-        declare -a digest_args=()
-        declare -a signing_key_args=()
-        declare -a signing_key_name_args=()
-        for reference in $references; do
-          reference_args+=("--reference")
-          reference_args+=("${reference}")
-        done
-        for digest in $manifest_digests; do
-          digest_args+=("--digest")
-          digest_args+=("${digest}")
-        done
-        for sig_key in $sig_key_names; do
-          signing_key_args+=("--signing-key")
-          signing_key_args+=("${sig_key}")
-          signing_key_name_args+=("--signing-key-name")
-          signing_key_name_args+=("${sig_key}")
+        task_id=$(get-task-id)
+
+        signing_key_name_args=()
+        signing_key_args=()
+        echo "$sig_key_names"
+        readarray -t sig_key_name_array <<< "${sig_key_names}"
+        for key_name in "${sig_key_name_array[@]}"; do
+          if [ -z "$key_name" ]; then
+            continue
+          fi
+          echo "-- Using signing key name: $key_name"
+          signing_key_name_args+=("--signing-key-name" "$key_name")
+          signing_key_args+=("--signing-key" "$key_name")
         done
 
-        task_id=$(get-task-id)
+        reference_args=()
+        read -r -a reference_array <<< "${references}"
+        for ref in "${reference_array[@]}"; do
+          reference_args+=("--reference" "${ref}")
+        done
+
+        digest_args=()
+        read -r -a digest_array <<< "${manifest_digests}"
+        for digest in "${digest_array[@]}"; do
+          digest_args+=("--digest" "${digest}")
+        done
+
         echo "Running pubtools-sign-msg-container-sign "
-        echo "${signing_key_args[@]} ${signing_key_name_args[@]} "
-        echo "--config-file $(workspaces.data.path)/pubtools-sign-config.yaml "
-        echo "${reference_args[@]} ${digest_args[@]} --task-id $task_id"
+        echo "${signing_key_args[@]}" " --config-file $(workspaces.data.path)/pubtools-sign-config.yaml "
+        echo "${reference_args[@]}" " " "${digest_args[@]}" "--task-id $task_id"
 
         pubtools-sign-msg-container-sign \
           --requester "${requester}" \
-          "${signing_key_args[@]}" \
-          "${signing_key_name_args[@]}" \
-          --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" "${reference_args[@]}" "${digest_args[@]}" \
+          --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" \
+          "${reference_args[@]}" \
+          "${digest_args[@]}" \
           --signer-type "${signer_type}" \
-          --task-id $task_id > "$(workspaces.data.path)/${signature_data_file}"
+          "${signing_key_name_args[@]}" \
+          "${signing_key_args[@]}" \
+          --task-id "$task_id" > "$signature_data_file"
         echo "Signing response was:"
-        fold "$(workspaces.data.path)/${signature_data_file}"
+        jq "." "$signature_data_file"
     - name: check-signing-response
       image: "$(params.pipeline_image)"
       computeResources:

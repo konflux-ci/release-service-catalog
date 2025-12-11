@@ -15,3 +15,4 @@ pipeline.
 | taskGitUrl             | The url to the git repo where the release-service-catalog tasks to be used are stored                                 | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision        | The revision in the taskGitUrl repo to be used                                                                        | No       | -                                                         |
 | certExpirationWarnDays | Number of days before expiration to warn about certificate expiration                                                 | Yes      | 7                                                         |
+| signing_key_names      | Space separated list of signing key names to use                                                                      | No       | -                                                         |

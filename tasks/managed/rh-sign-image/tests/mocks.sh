@@ -307,7 +307,8 @@ function find_signatures() {
   touch "${file}"
 
   if [ "${repository}" == "already/signed" ]; then
-    echo "registry.redhat.io/already/signed:some-prefix" >> "${file}"
-    echo "registry.access.redhat.com/already/signed:some-prefix" >> "${file}"
+    echo "registry.redhat.io/already/signed:some-prefix-12345 redhate2etesting" >> "${file}"
+    echo "registry.redhat.io/already/signed:some-prefix redhate2etesting" >> "${file}"
+    echo "registry.access.redhat.com/already/signed:some-prefix redhate2etesting" >> "${file}"
   fi
 }

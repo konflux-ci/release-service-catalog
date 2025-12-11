@@ -2,11 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-rh-sign-image-multiple-components-multi-batch
+  name: test-rh-sign-image-multiple-components-already-signed
 spec:
   description: |
-    Test creating internal requests to sign images.
-    This test simulates creating multiple internal requests.
+    Test multiple components to be signed with multiple
+    signing keys where some of the images partially signed by
+    one key. Expectation is that images alredy signed with one key will be
+    signed only by the other one.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -49,10 +51,11 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:f10b4ad888634a7633f76ede29003ce1471aec2b76a7d9e01ad282a3011eb78f
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
               #!/usr/bin/env bash
               set -eux
+
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
@@ -102,6 +105,21 @@ spec:
                         ]
                       }
                     ]
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "registry.io/docker-image3@sha256:0003",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-pending/prod----repo3",
+                        "rh-registry-repo": "registry.redhat.io/already/signed",
+                        "registry-access-repo": "registry.access.redhat.com/already/signed",
+                        "tags": [
+                          "some-prefix-12345",
+                          "some-prefix"
+                        ]
+                      }
+                    ]
                   }
                 ]
               }
@@ -111,6 +129,11 @@ spec:
               {
                 "sign": {
                   "configMapName": "signing-config-map-multi-keys"
+                },
+                "mapping": {
+                  "defaults": {
+                    "pushSourceContainer": false
+                  }
                 }
               }
               EOF
@@ -145,6 +168,7 @@ spec:
               prod/repo0
               prod/repo1
               prod/repo2
+              prod/repo3
               EOF
           - name: create-trusted-artifact
             ref:
@@ -174,8 +198,6 @@ spec:
           value: test-create-pyxis-image-cert
         - name: signRegistryAccessPath
           value: $(context.pipelineRun.uid)/signRegistryAccess.txt
-        - name: batchLimit
-          value: 150
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -224,50 +246,83 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:f10b4ad888634a7633f76ede29003ce1471aec2b76a7d9e01ad282a3011eb78f
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.spec.params.manifest_digests | jq -c)"
               irsLength=$(jq ".items | length" <<< "${internalRequests}" )
 
-              echo "Checking ${irsLength} internal requests"
-
-              expectedReferences=()
-              expectedDigests=()
               for((i=0; i<3; i++)); do
-                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix-12345")
-                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix-12345-source")
-                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix-12345")
-                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix-12345-source")
-                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix")
-                expectedReferences+=("registry.stage.redhat.io/prod/repo${i}:some-prefix-source")
-                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix")
-                expectedReferences+=("registry.access.stage.redhat.com/prod/repo${i}:some-prefix-source")
-                expectedDigests+=("sha256:000${i}")
+                {
+                  echo "registry.stage.redhat.io/prod/repo${i}:some-prefix-12345";
+                  echo "registry.access.stage.redhat.com/prod/repo${i}:some-prefix-12345";
+                  echo "registry.stage.redhat.io/prod/repo${i}:some-prefix";
+                  echo "registry.access.stage.redhat.com/prod/repo${i}:some-prefix";
+                } >> /tmp/expected_refs0.txt
+                {
+                  echo "sha256:000${i}";
+                  echo "sha256:000${i}";
+                  echo "sha256:000${i}";
+                  echo "sha256:000${i}";
+                } >> /tmp/expected_digs0.txt
               done
 
-              for ref in "${expectedReferences[@]}"; do
-                echo "${ref}" >> /tmp/expected_references.txt
-              done
+              {
+                echo "redhate2etesting";
+                echo "redhate2etesting2"
+              } >> /tmp/expected_keys0.txt
 
-              foundReferences=()
-              foundDigests=()
+              sort < /tmp/expected_refs0.txt > /tmp/expected_refs0.sorted
+              sort < /tmp/expected_digs0.txt > /tmp/expected_digs0.sorted
+              sort < /tmp/expected_keys0.txt > /tmp/expected_keys0.sorted
+
+              {
+                echo "registry.redhat.io/already/signed:some-prefix";
+                echo "registry.redhat.io/already/signed:some-prefix-12345"
+              } >> /tmp/expected_refs1.sorted
+              {
+                echo "sha256:0003";
+                echo "sha256:0003"
+              } >> /tmp/expected_digs1.sorted
+              echo "redhate2etesting2" >> /tmp/expected_keys1.sorted
+
               for((ir=0; ir<irsLength; ir++)); do
                 params=$(jq -r ".items[$ir].spec.params" <<< "${internalRequests}")
                 refsValue=$(jq -r '.references' <<< "${params}")
-                manifestDigests=$(jq -r '.manifest_digests' <<< "${params}")
+
                 for ref in $refsValue; do
-                  foundReferences+=("${ref}")
+                  echo "$ref" >> /tmp/found_refs${ir}.txt
                 done
+
+                manifestDigests=$(jq -r '.manifest_digests' <<< "${params}")
                 for digest in $manifestDigests; do
-                  foundDigests+=("${digest}")
+                  echo "$digest" >> /tmp/found_digs${ir}.txt
                 done
+
+                signing_keys=$(jq -r '.signing_key_names' <<< "${params}")
+                for key in $signing_keys; do
+                  echo "$key" >> /tmp/found_keys${ir}.txt
+                done
+
+                sort < /tmp/found_refs${ir}.txt > /tmp/found_refs${ir}.sorted
+                sort < /tmp/found_digs${ir}.txt > /tmp/found_digs${ir}.sorted
+                sort < /tmp/found_keys${ir}.txt > /tmp/found_keys${ir}.sorted
+
+                diff -Naur /tmp/expected_refs${ir}.sorted /tmp/found_refs${ir}.sorted
+                diff -Naur /tmp/expected_digs${ir}.sorted /tmp/found_digs${ir}.sorted
+                diff -Naur /tmp/expected_keys${ir}.sorted /tmp/found_keys${ir}.sorted
 
                 if [ "$(jq -r '.config_map_name' <<< "${params}")" != "signing-config-map-multi-keys" ]
                 then
                   echo "config_map_name does not match"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.requester' <<< "${params}")" != "testuser-multiple" ]
+                then
+                  echo "requester does not match"
                   exit 1
                 fi
 
@@ -279,16 +334,6 @@ spec:
                 fi
               done
 
-              for ref in "${foundReferences[@]}"; do
-                echo "${ref}" >> /tmp/found_references.txt
-              done
-
-              sort < /tmp/expected_references.txt > /tmp/expected_references.sorted
-              sort < /tmp/found_references.txt > /tmp/found_references.sorted
-
-              echo "Checking expected references:"
-              diff -Naur /tmp/expected_references.sorted /tmp/found_references.sorted
-
       runAfter:
         - run-task
   finally:
@@ -296,7 +341,7 @@ spec:
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:f10b4ad888634a7633f76ede29003ce1471aec2b76a7d9e01ad282a3011eb78f
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
             script: |
               #!/usr/bin/env bash
               set -eux
