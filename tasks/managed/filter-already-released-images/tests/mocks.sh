@@ -157,22 +157,6 @@ function oras() {
       return 1
       ;;
     
-    # Secure registry test (autherror - should trigger real error)
-    *"registry.io/secure:"*|*"@sha256:autherror"|*":autherror")
-      echo "Error: unauthorized: authentication required" >&2
-      return 1
-      ;;
-    
-    # Error scenarios for testing error handling
-    *"@sha256:realerror"|*":realerror")
-      echo "Error: connection refused: unable to connect to registry" >&2
-      return 1
-      ;;
-    *"@sha256:networkerror"|*":networkerror")
-      echo "Error: dial tcp: lookup registry.example.com: no such host" >&2
-      return 1
-      ;;
-    
     *)
       # Handle regex patterns that need variable extraction
       if [[ "$image_ref" =~ ^registry\.io/image-([0-9]+)@sha256:(.+)$ ]]; then
@@ -303,26 +287,6 @@ function skopeo() {
     # Registry error test (notfound - image not found in registry)
     "registry.io/image:"*)
       echo "Error: manifest unknown: manifest unknown" >&2
-      return 1
-      ;;
-
-    # Secure registry test (autherror - should trigger real error)
-    *"registry.io/secure:"*)
-      echo "Error: unauthorized: authentication required" >&2
-      return 1
-      ;;
-
-    # Error scenarios for testing error handling
-    *"@sha256:autherror"|*":autherror")
-      echo "Error: unauthorized: authentication required" >&2
-      return 1
-      ;;
-    *"@sha256:realerror"|*":realerror")
-      echo "Error: connection refused: unable to connect to registry" >&2
-      return 1
-      ;;
-    *"@sha256:networkerror"|*":networkerror")
-      echo "Error: dial tcp: lookup registry.example.com: no such host" >&2
       return 1
       ;;
 
