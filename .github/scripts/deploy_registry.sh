@@ -24,6 +24,9 @@ retry() {
 }
 
 deploy_cert_manager() {
+  # Download cert-manager.yaml first - kustomize misinterprets github.com release URLs as git repos
+  curl -sL https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml \
+    -o "${script_path}/../resources/cert-manager/cert-manager.yaml"
   kubectl apply -k "${script_path}/../resources/cert-manager"
   sleep 5
   retry "kubectl wait --for=condition=Ready --timeout=120s -l app.kubernetes.io/instance=cert-manager -n cert-manager pod" \
