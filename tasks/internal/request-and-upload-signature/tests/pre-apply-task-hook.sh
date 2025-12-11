@@ -3,7 +3,7 @@
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-for i in `seq 0 6`; do
+for i in `seq 0 5`; do
   yq -i '.spec.steps['$i'].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps['$i'].script' "$TASK_PATH"
 done
 
