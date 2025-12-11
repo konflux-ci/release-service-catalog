@@ -1,6 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Fetch curl-with-retry from release-service-utils if not already cached
+CURL_WITH_RETRY="${SCRIPT_DIR}/.curl-with-retry"
+if [ ! -f "$CURL_WITH_RETRY" ]; then
+    echo "Fetching curl-with-retry from release-service-utils..." >&2
+    curl -sSL -o "$CURL_WITH_RETRY" \
+        "https://raw.githubusercontent.com/konflux-ci/release-service-utils/main/utils/curl-with-retry"
+    chmod +x "$CURL_WITH_RETRY"
+fi
+
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log_error() { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 log_warning() { echo -e "${YELLOW}[WARNING]${NC} $1" >&2; }
@@ -60,8 +71,10 @@ delete_file() {
 }
 
 check_branch_exists() {
-    local response=$(curl -s -H "Authorization: token $3" -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/$1/branches/$2" 2>/dev/null || echo "")
+    local repo="$1" branch="$2" token="$3"
+    local response=$("$CURL_WITH_RETRY" --retry 3 --retry-all-errors -s \
+        -H "Authorization: token $token" -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/$repo/branches/$branch" 2>/dev/null || echo "")
     [[ -n "$response" ]] && echo "$response" | jq -e '.name' >/dev/null 2>&1
 }
 
