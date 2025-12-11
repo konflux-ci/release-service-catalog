@@ -101,11 +101,14 @@ Before a pull request can be merged:
 ### Image References
 
 Most tasks in this repo use the release-service-utils image defined in [the release-service-utils repo](https://github.com/konflux-ci/release-service-utils).
-When referencing this image, the url should be `quay.io/konflux-ci/release-service-utils:$tag` where `$tag` is the Git SHA based tag.
+When referencing this image, the image URL must be in digest form, for example: `quay.io/konflux-ci/release-service-utils@sha256:...`, where `sha256:...` is the image digest.
 
-For other images, the reference should always either specify an image by a non-moving tag (e.g. `registry.access.redhat.com/ubi8/ubi:8.8-1067.1698056881`)
-or by its digest (e.g. `registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded`).
-Floating tags like `latest` or `8.8` in the case of the ubi image should be avoided.
+This repo uses [MintMaker](https://konflux-ci.dev/docs/mintmaker/user/) to automatically update images referenced in tasks, stepactions, and pipelines. The MintMaker configuration is defined in [renovate.json](renovate.json).
+
+All other images should be referenced the same way as the release-service-utils image, by digest. For example:
+`registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded` This allows MintMaker to 
+automatically manage and update image versions. When adding a new image, you must also add it to the MintMaker configuration
+in `renovate.json` so it can be updated automatically.
 
 ### Compute Resources
 
