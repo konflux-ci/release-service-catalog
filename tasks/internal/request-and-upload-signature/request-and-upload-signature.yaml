@@ -28,11 +28,6 @@ spec:
         e.g. registry.com/ns/image:v4.9 registry.com/ns/image:v4.10
       name: references
       type: string
-    - description: |
-        List of space separated repositories,
-        e.g. repository1 repository2
-      name: repositories
-      type: string
     - default: containerisvsign
       description: NL separated signing key names that the content is signed with
       name: sig_key_names
@@ -89,8 +84,8 @@ spec:
       type: string
     - name: signature_data_file
       description: The file where the signing response should be placed
+      default: "signing_response.json"
       type: string
-      default: signing_response.json
     - name: signer_type
       description: Determines if a single or batch signing should be used
       default: "single"
@@ -103,9 +98,6 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
-    - name: pyxisServer
-      type: string
-      description: The server type to use. Options are 'production','production-internal,'stage-internal' and 'stage'
   volumes:
     - name: umb-ssl-cert-secret
       secret:
@@ -167,7 +159,7 @@ spec:
           value: "/tmp/crt"
         - name: UMB_KEY_PATH
           value: "/tmp/key"
-        - name: REQUESTER
+        - name: requester
           value: $(params.requester)
         - name: manifest_digests
           value: $(params.manifest_digests)
@@ -183,6 +175,8 @@ spec:
           value: $(params.umb_batch_publish_topic)
         - name: umb_url
           value: $(params.umb_url)
+        - name: signature_data_file
+          value: "$(params.signature_data_file)"
         - name: CA_BUNDLE
           value: /etc/pki/tls/certs/ca-bundle.crt
       script: |
@@ -200,7 +194,7 @@ spec:
           messaging_cert_key: /tmp/umb.pem
           messaging_ca_cert: ${CA_BUNDLE}
           topic_send_to: topic://${umb_publish_topic}
-          topic_listen_to: queue://Consumer.${creator}.${REQUESTER}-{task_id}.${umb_listen_topic}
+          topic_listen_to: queue://Consumer.${creator}.${requester}-{task_id}.${umb_listen_topic}
           environment: prod
           service: ${umb_client_name}
           timeout: 60
@@ -214,7 +208,7 @@ spec:
           messaging_cert_key: /tmp/umb.pem
           messaging_ca_cert: ${CA_BUNDLE}
           topic_send_to: topic://${umb_batch_publish_topic}
-          topic_listen_to: queue://Consumer.${creator}.${REQUESTER}-{task_id}.${umb_batch_listen_topic}.{task_id}
+          topic_listen_to: queue://Consumer.${creator}.${requester}-{task_id}.${umb_batch_listen_topic}.{task_id}
           environment: prod
           service: ${umb_client_name}
           timeout: 60
@@ -258,167 +252,6 @@ spec:
                         -servername "$umb_url"\
                         -CAfile "${CA_BUNDLE}" < /dev/null
 
-    - name: filter-existing-signatures
-      image: "$(params.pipeline_image)"
-      computeResources:
-        limits:
-          memory: 128Mi
-        requests:
-          memory: 128Mi
-          cpu: 100m
-      workingDir: "$(workspaces.data.path)"
-      volumeMounts:
-        - name: pyxis-ssl-cert-secret
-          mountPath: /mnt/pyxis_ssl_cert_secret
-          readOnly: true
-      env:
-        - name: PYXIS_CERT_PATH
-          value: "/tmp/pyxisCert"
-        - name: PYXIS_KEY_PATH
-          value: "/tmp/pyxisKey"
-        - name: MANIFEST_DIGESTS
-          value: $(params.manifest_digests)
-        - name: REFERENCES
-          value: $(params.references)
-        - name: SIG_KEY_NAMES
-          value: $(params.sig_key_names)
-        - name: REPOSITORIES
-          value: $(params.repositories)
-      script: |
-        #!/usr/bin/env bash
-        set -xe
-        read -ra reference_a <<< "$REFERENCES"
-        read -ra digests_a <<< "$MANIFEST_DIGESTS"
-        read -ra repositories_a <<< "$REPOSITORIES"
-        readarray -t sig_key_names_a <<< "$SIG_KEY_NAMES"
-
-        # production in this task means internal instances of pyxis as the task needs to run
-        # on internal cluster which doesn't have access to public pyxis instance. Same applies
-        # for stage
-        if [[ "$(params.pyxisServer)" == "production"  || "$(params.pyxisServer)" == "production-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
-        elif [[ "$(params.pyxisServer)" == "stage" || "$(params.pyxisServer)" == "stage-internal" ]]
-        then
-          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
-        else
-          echo "Invalid pyxisServer parameter."
-          echo "Only 'production', 'stage', 'production-internal', 'stage-internal' are allowed."
-          exit 1
-        fi
-        PyxisCert="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_cert_file_name)")"
-        PyxisKey="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_key_file_name)")"
-
-        # This helps with Shellcheck warning
-        echo "${PyxisCert:?}" > "${PYXIS_CERT_PATH}"
-        echo "${PyxisKey:?}" > "${PYXIS_KEY_PATH}"
-
-        declare -a find_signatures_jobs=()
-
-        for i in "${!reference_a[@]}"; do
-          reference="${reference_a[$i]}"
-          digest="${digests_a[$i]}"
-          repository="${repositories_a[$i]}"
-          repository_no_slashes="${repository//\//----}"
-
-          if [ ! -f "/tmp/${repository_no_slashes}-${digest}" ]; then
-            find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-            --manifest_digest "${digest}" \
-            --repository "${repository}" \
-            --output_file "/tmp/${repository_no_slashes}-${digest}" \
-              > "/tmp/find-signatures.${digest}.${repository_no_slashes}.out" 2>&1 &
-            find_signatures_jobs+=($!)
-          fi
-        done
-
-        success=true
-        echo "Waiting for ${#find_signatures_jobs[@]} find_signatures jobs to complete..."
-        for job in "${find_signatures_jobs[@]}"; do
-          wait "$job" || success=false
-        done
-        echo "All find_signatures jobs completed"
-
-        echo "Printing outputs for all find_signautres jobs..."
-        for i in "${!reference_a[@]}"; do
-          repository_no_slashes="${repository//\//----}"
-          digest="${digests_a[$i]}"
-        echo "=== ${reference} (${digest}) ==="
-          cat "/tmp/find-signatures.${digest}.${repository_no_slashes}.out"
-          echo
-        done
-
-        if [ $success != "true" ]; then
-          echo "ERROR: At least one find_signauture failed"
-          exit 1
-        fi
-
-        declare -a to_sign_references=()
-        declare -a to_sign_digests=()
-        declare -a to_sign_keys=()
-
-        declare -A ref_dig_to_keys_map=()
-        declare -A keys_to_ref_dig_map=()
-
-        # Filter out already signed reference-digest-key combinations
-        for sig_key_name in "${sig_key_names_a[@]}"; do
-          echo "Processing signing key: ${sig_key_name}"
-          for i in "${!reference_a[@]}"; do
-            reference="${reference_a[$i]}"
-            digest="${digests_a[$i]}"
-            repository="${repositories_a[$i]}"
-            repository_no_slashes="${repository//\//----}"
-            if ! grep -q "^${reference} ${sig_key_name}$" "/tmp/${repository_no_slashes}-${digest}" ; then
-              echo "Signature ${reference} ${sig_key_name} ${digest} not found"
-              to_sign_references+=("${reference}")
-              to_sign_digests+=("${digest}")
-              to_sign_keys+=("${sig_key_name}")
-            fi
-          done
-        done
-
-        # For each reference-digest pair, build a map of signing keys which need to be signed
-        for i in "${!to_sign_references[@]}"; do
-          ref="${to_sign_references[$i]}"
-          dig="${to_sign_digests[$i]}"
-          key="${to_sign_keys[$i]}"
-          pair="${ref}|${dig}"
-          if [[ ",${ref_dig_to_keys_map[$pair]-}," != *",$key,"* ]]; then
-            if [[ -n "${ref_dig_to_keys_map[$pair]-}" ]]; then
-              ref_dig_to_keys_map[$pair]+=",$key"
-            else
-              ref_dig_to_keys_map[$pair]="${key}"
-            fi
-          fi
-        done
-
-        # Create mapping of keysets to reference-digest pairs
-        for pair in "${!ref_dig_to_keys_map[@]}"; do
-          # sort keys
-          IFS=',' read -r -a karr <<< "${ref_dig_to_keys_map[$pair]}"
-          mapfile -t sorted_keys < <(IFS=' ' printf '%s\n' "${karr[@]}" | sort)
-          keyset="${sorted_keys[*]}"
-          keyset="${keyset//$' '/,}"  # join with commas
-
-          if [[ -n "${keys_to_ref_dig_map[$keyset]-}" ]]; then
-            keys_to_ref_dig_map["$keyset"]+="#${pair}"
-          else
-            keys_to_ref_dig_map["$keyset"]="${pair}"
-          fi
-        done
-
-        group_index_file="$(workspaces.data.path)/signing_groups_index-$(context.taskRun.uid).txt"
-        touch "$(workspaces.data.path)/signing_groups_index.txt"
-        for keyset in "${!keys_to_ref_dig_map[@]}"; do
-          group_file="$(workspaces.data.path)/${keyset}.txt"
-          echo "${keyset}" >> "$group_index_file"
-          touch "${group_file}"
-          echo "$keyset" > "${group_file}"
-          IFS="#" read -r -a pairs <<< "${keys_to_ref_dig_map[$keyset]}"
-          for pair in "${pairs[@]}"; do
-            echo "${pair}" >> "${group_file}"
-          done
-        done
-
     - name: request-signature
       image: "$(params.pipeline_image)"
       computeResources:
@@ -439,16 +272,14 @@ spec:
           value: $(params.references)
         - name: sig_key_names
           value: "$(params.sig_key_names)"
-        - name: SIGNATURE_DATA_FILE
+        - name: signature_data_file
           value: "$(params.signature_data_file)"
-        - name: REQUESTER
+        - name: requester
           value: "$(params.requester)"
-        - name: SIGNER_TYPE
+        - name: signer_type
           value: "$(params.signer_type)"
-        - name: TASK_UID
-          value: "$(context.taskRun.uid)"
       script: |
-        #!/usr/bin/env bash
+        #!/usr/bin/env /bin/bash
         umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
         umb_key="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)")"
 
@@ -456,68 +287,46 @@ spec:
           if [[ -v CUSTOM_TASK_ID ]]; then
             echo "${CUSTOM_TASK_ID}"
           else
-            echo "${TASK_UID}"
+            echo $(context.taskRun.uid)
           fi
         }
         echo "${umb_cert:?}" > /tmp/umb.pem
         echo "${umb_key:?}" >> /tmp/umb.pem
         set -x
-        group_index_file="$(workspaces.data.path)/signing_groups_index-$(context.taskRun.uid).txt"
-        signature_data_file="$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
+        declare -a reference_args=()
+        declare -a digest_args=()
+        declare -a signing_key_args=()
+        declare -a signing_key_name_args=()
+        for reference in $references; do
+          reference_args+=("--reference")
+          reference_args+=("${reference}")
+        done
+        for digest in $manifest_digests; do
+          digest_args+=("--digest")
+          digest_args+=("${digest}")
+        done
+        for sig_key in $sig_key_names; do
+          signing_key_args+=("--signing-key")
+          signing_key_args+=("${sig_key}")
+          signing_key_name_args+=("--signing-key-name")
+          signing_key_name_args+=("${sig_key}")
+        done
 
-        while read -r keyset; do
-          group_file="$(workspaces.data.path)/${keyset}.txt"
-          echo "Processing signing group with keys: ${keyset}"
-          mapfile -t lines < "${group_file}"
-          # First line is the keyset
-          unset 'lines[0]'
-          references=()
-          manifest_digests=()
-          for line in "${lines[@]}"; do
-            IFS='|' read -r reference digest <<< "$line"
-            references+=("$reference")
-            manifest_digests+=("$digest")
-          done
-          declare -a reference_args=()
-          declare -a digest_args=()
-          declare -a signing_key_args=()
-          declare -a signing_key_name_args=()
+        task_id=$(get-task-id)
+        echo "Running pubtools-sign-msg-container-sign "
+        echo "${signing_key_args[@]} ${signing_key_name_args[@]} "
+        echo "--config-file $(workspaces.data.path)/pubtools-sign-config.yaml "
+        echo "${reference_args[@]} ${digest_args[@]} --task-id $task_id"
 
-          for reference in "${references[@]}"; do
-            reference_args+=("--reference")
-            reference_args+=("${reference}")
-          done
-          for digest in "${manifest_digests[@]}"; do
-            digest_args+=("--digest")
-            digest_args+=("${digest}")
-          done
-          IFS=',' read -r -a signing_keys <<< "${keyset}"
-          for sig_key_name in "${signing_keys[@]}"; do
-            signing_key_name_args+=("--signing-key-name")
-            signing_key_name_args+=("${sig_key_name}")
-            signing_key_args+=("--signing-key")
-            signing_key_args+=("${sig_key_name}")
-          done
-
-          task_id=$(get-task-id)
-
-          echo "Running pubtools-sign-msg-container-sign "
-          echo "${signing_key_args[@]}" " --config-file $(workspaces.data.path)/pubtools-sign-config.yaml "
-          echo "${reference_args[@]}" " " "${digest_args[@]}" "--task-id $task_id"
-
-          pubtools-sign-msg-container-sign \
-            --requester "${REQUESTER}" \
-            --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" \
-            "${reference_args[@]}" \
-            "${digest_args[@]}" \
-            --signer-type "${SIGNER_TYPE}" \
-            "${signing_key_name_args[@]}" \
-            "${signing_key_args[@]}" \
-            --task-id "$task_id" >> "$(workspaces.data.path)/last_sr"
-          echo "Signing response was:"
-          jq -c "." "$(workspaces.data.path)/last_sr" >> "$signature_data_file"
-        done < "$group_index_file"
-
+        pubtools-sign-msg-container-sign \
+          --requester "${requester}" \
+          "${signing_key_args[@]}" \
+          "${signing_key_name_args[@]}" \
+          --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" "${reference_args[@]}" "${digest_args[@]}" \
+          --signer-type "${signer_type}" \
+          --task-id $task_id > "$(workspaces.data.path)/${signature_data_file}"
+        echo "Signing response was:"
+        fold "$(workspaces.data.path)/${signature_data_file}"
     - name: check-signing-response
       image: "$(params.pipeline_image)"
       computeResources:
@@ -528,59 +337,62 @@ spec:
           cpu: 100m
       workingDir: "$(workspaces.data.path)"
       env:
-        - name: SIGNATURE_DATA_FILE
+        - name: signature_data_file
           value: "$(params.signature_data_file)"
-        - name: SIGNER_TYPE
+        - name: signer_type
           value: "$(params.signer_type)"
       script: |
-        #!/usr/bin/env bash
+        #!/usr/bin/env /bin/bash
         set -xe
-        while read -r line; do
-          STATUS=$(echo "$line" | jq ".signer_result.status" | tr -d \")
-          ERRORS=$(echo "$line" | jq ".signer_result.error_message")
-          if [ "${STATUS}" != "ok" ]; then
-            echo "Signing failed with error: ${ERRORS}"
-            exit 1
-          fi
-          SIGNATURE_ERRORS=$(echo "$line" |\
-            jq -c '[.operation_results[]?[0]?.msg?.errors? // [] | select(length > 0)]')
-          if [ "$SIGNATURE_ERRORS" != "[]" ]; then
-            echo "Signing failed with errors:"
-            jq . <<< "${SIGNATURE_ERRORS}"
-            exit 1
-          fi
+        STATUS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.status" | tr -d \")
+        ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.error_message")
+        if [ "${STATUS}" != "ok" ]; then
+          echo "Signing failed with error: ${ERRORS}"
+          exit 1
+        fi
+        SIGNATURE_ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" |\
+          jq -c '[.operation_results[]?[0]?.msg?.errors? // [] | select(length > 0)]')
+        if [ "$SIGNATURE_ERRORS" != "[]" ]; then
+          echo "Signing failed with errors:"
+          jq . <<< "${SIGNATURE_ERRORS}"
+          exit 1
+        fi
 
-          if [ "$SIGNER_TYPE" == "single" ]; then
-            SIGNATURE_DATA=$(
-              echo "$line" | \
-              jq -cM "[
-                [.operation_results, .operation.references]|
-                transpose|
-                .[]|
-                {reference:.[1],
-                 manifest_digest:.[0][0].msg.manifest_digest,
-                 repository:.[0][0].msg.repo,
-                 signature_data:.[0][0].msg.signed_claim,
-                 sig_key_id: .[0][0].msg.sig_key_id}
-              ]")
-          elif [ "$SIGNER_TYPE" == "batch" ]; then
-            SIGNATURE_DATA=$(
-              echo "$line" | \
-              jq -cM '[.operation_results|.[]|.[0].msg.claims|.[]
-                |(.signed_claims|to_entries|.[]) as $x
-                |{reference:(.claim_file | @base64d | fromjson | .critical.identity."docker-reference"),
-                  manifest_digest:.manifest_digest,
-                  repository:.repo,
-                  signature_data: $x.value,
-                  sig_key_id: $x.key}]')
-          else
-            echo "Unknown signer_type: $SIGNER_TYPE"
-            exit 1
-          fi
-          echo "${SIGNATURE_DATA}" >> "/tmp/pyxis_signatures.json"
-        done < "$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
-        signature_data_file="$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
-        jq -s '[.[]|.[]]' "/tmp/pyxis_signatures.json" > "${signature_data_file}-to-upload"
+        if [ "$signer_type" == "single" ]; then
+          SIGNATURE_DATA=$(
+            cat "$(workspaces.data.path)/${signature_data_file}" | \
+            jq -cM "[
+              [.operation_results, .operation.references]|
+              transpose|
+              .[]|
+              {reference:.[1],
+               manifest_digest:.[0][0].msg.manifest_digest,
+               repository:.[0][0].msg.repo,
+               signature_data:.[0][0].msg.signed_claim,
+               sig_key_id: .[0][0].msg.sig_key_id}
+            ]")
+        elif [ "$signer_type" == "batch" ]; then
+          SIGNATURE_DATA=$(
+            cat "$(workspaces.data.path)/${signature_data_file}" | \
+            jq -cM '[
+              [(.operation_results|.[]|.[0].msg.claims),
+               [range(0; (.operation_results|.[]|.[0].msg.claims)|length) as $x |
+                (.operation_results|.[]|.[0].msg.repo)]
+              ]
+              |transpose
+              |.[]
+              |(.[0].signed_claims|to_entries|.[]) as $x
+              |{reference:(.[0].claim_file | @base64d | fromjson | .critical.identity."docker-reference"),
+                manifest_digest:.[0].manifest_digest,
+                repo:.[1],
+                signature_data: $x.value,
+                sig_key_id: $x.key}
+            ]')
+        else
+          echo "Unknown signer_type: $signer_type"
+          exit 1
+        fi
+        echo "${SIGNATURE_DATA}" > "${signature_data_file}"
 
     - name: upload-signature
       image: "$(params.pipeline_image)"
@@ -602,28 +414,27 @@ spec:
           value: "/tmp/pyxisCert"
         - name: PYXIS_KEY_PATH
           value: "/tmp/pyxisKey"
-        - name: PYXIS_URL
+        - name: pyxis_url
           value: $(params.pyxis_url)
-        - name: PYXIS_THREADS
+        - name: pyxis_threads
           value: "$(params.pyxis_threads)"
-        - name: SIGNATURE_DATA_FILE
+        - name: signature_data_file
           value: "$(params.signature_data_file)"
       script: |
-        #!/usr/bin/env bash
+        #!/usr/bin/env /bin/bash
         
         PyxisCert="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_cert_file_name)")"
         PyxisKey="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_key_file_name)")"
-        signature_data_file="$(workspaces.data.path)/${SIGNATURE_DATA_FILE:-}-$(context.taskRun.uid)"
 
         # This helps with Shellcheck warning
         echo "${PyxisCert:?}" > "${PYXIS_CERT_PATH}"
         echo "${PyxisKey:?}" > "${PYXIS_KEY_PATH}"
         set -x
         pubtools-pyxis-upload-signatures\
-          --pyxis-server "${PYXIS_URL}" \
+          --pyxis-server "${pyxis_url}" \
           --pyxis-ssl-crtfile "${PYXIS_CERT_PATH}" \
           --pyxis-ssl-keyfile "${PYXIS_KEY_PATH}" \
-          --request-threads "${PYXIS_THREADS}" \
-          --signatures @"${signature_data_file}-to-upload"
+          --request-threads "${pyxis_threads}" \
+          --signatures @"${signature_data_file}"
   workspaces:
     - name: data
