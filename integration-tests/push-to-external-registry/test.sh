@@ -40,6 +40,45 @@ verify_release_contents() {
             failures=$((failures+1))
         fi
 
+        # Verify componentTags combination with defaults.tags and repository tags
+        echo "Verifying tag combination from all sources..."
+        image_urls=$(jq -r '.status.artifacts.images[0].urls[]? // ""' <<< "${release_json}")
+        url_count=$(jq -r '.status.artifacts.images[0].urls | length // 0' <<< "${release_json}")
+
+        echo "All image URLs with tags:"
+        echo "${image_urls}"
+        echo "Total tags applied: ${url_count}"
+
+        # Expected tags after deduplication:
+        # - defaults.tags: latest, {{ timestamp }}
+        # - componentTags: latest (duplicate, removed), {{ release_timestamp }}
+        # - repository tags: {{ git_sha }}, {{ git_short_sha }}, {{ digest_sha }}, v1.0.0, {{ oci_version }}
+        # Expected minimum: 8 unique tags (latest appears only once due to deduplication)
+        expected_min_tags=8
+
+        if [ "${url_count}" -ge "${expected_min_tags}" ]; then
+            echo "✅️ Found ${url_count} image URLs (expected at least ${expected_min_tags})"
+        else
+            echo "🔴 Found only ${url_count} image URLs, expected at least ${expected_min_tags}"
+            failures=$((failures+1))
+        fi
+
+        # Verify tags from defaults.tags
+        if echo "${image_urls}" | grep -q ":latest"; then
+            echo "✅️ Found 'latest' tag (from defaults.tags and componentTags, deduplicated)"
+        else
+            echo "🔴 Missing 'latest' tag from defaults.tags/componentTags"
+            failures=$((failures+1))
+        fi
+
+        # Verify tags from repository-specific tags
+        if echo "${image_urls}" | grep -q ":v1.0.0"; then
+            echo "✅️ Found 'v1.0.0' tag from repository tags"
+        else
+            echo "🔴 Missing 'v1.0.0' tag from repository tags"
+            failures=$((failures+1))
+        fi
+
         if [ "${failures}" -gt 0 ]; then
             echo "🔴 Test has FAILED with ${failures} failure(s)!"
             failed_releases="${RELEASE_NAME} ${failed_releases}"
