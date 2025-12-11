@@ -116,16 +116,6 @@ spec:
 
         SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
 
-        # Helper to detect "not found" style errors from oras that should be treated as
-        # an absent tag instead of a fatal registry error.
-        is_not_found_error() {
-            local err_msg="${1:-}"
-            if grep -qiE "manifest unknown|name unknown|was not found|not found" <<< "${err_msg}"; then
-                return 0
-            fi
-            return 1
-        }
-
         if [ ! -f "${SNAPSHOT_FILE}" ]; then
             echo "Error: Snapshot file not found: ${SNAPSHOT_FILE}"
             exit 1
@@ -150,30 +140,21 @@ spec:
                 echo '{}' > "${COMPONENT_AUTH_FILE}"
             fi
 
-            COMPONENT_ERROR_FILE=$(mktemp)
+            # Try to resolve the component image. If this fails for ANY reason
+            # (auth, network, not found, etc.), treat as "not released"
             if ! DIGEST=$(oras resolve --registry-config "${COMPONENT_AUTH_FILE}" \
-                "${CONTAINER_IMAGE}" 2>"${COMPONENT_ERROR_FILE}"); then
-                COMPONENT_ERROR_MSG=$(cat "${COMPONENT_ERROR_FILE}")
-                
-                # Check if it's a benign error (image not found in registry)
-                if is_not_found_error "${COMPONENT_ERROR_MSG}"; then
-                    # Treat as "not yet released", keep component for release
-                    echo "WARNING: Component image ${CONTAINER_IMAGE} not found in registry, " \
-                      "treating as not yet released"
-                    FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
-                    rm -f "${COMPONENT_ERROR_FILE}" "${COMPONENT_AUTH_FILE}"
-                    continue
-                fi
-                
-                # Critical error (auth, network, etc) - fail the task
-                echo "ERROR: Failed to resolve component image ${CONTAINER_IMAGE}: ${COMPONENT_ERROR_MSG}"
-                exit 1
+                "${CONTAINER_IMAGE}" 2>/dev/null); then
+                echo "WARNING: Cannot resolve component image ${CONTAINER_IMAGE}, treating as not yet released"
+                FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                rm -f "${COMPONENT_AUTH_FILE}"
+                continue
             fi
-            rm -f "${COMPONENT_ERROR_FILE}" "${COMPONENT_AUTH_FILE}"
+            rm -f "${COMPONENT_AUTH_FILE}"
 
             if [ -z "${DIGEST}" ]; then
-                echo "ERROR: oras returned an empty digest for ${CONTAINER_IMAGE}"
-                exit 1
+                echo "WARNING: Empty digest for ${CONTAINER_IMAGE}, treating as not yet released"
+                FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                continue
             fi
             
             echo "  Component digest: ${DIGEST}"
@@ -230,24 +211,16 @@ spec:
                         echo '{}' > "${TARGET_AUTH_FILE}"
                     fi
                     
-                    # Use oras resolve (same as push-snapshot) to get the manifest digest
-                    # This correctly handles multi-arch images
-                    TARGET_ERROR_FILE=$(mktemp)
+                    # Try to resolve the target image. If this fails for ANY reason,
+                    # treat as "not found" (repository doesn't exist, tag missing, etc.)
                     if ! ACTUAL_DIGEST=$(oras resolve --registry-config "${TARGET_AUTH_FILE}" \
-                        "${TARGET_IMAGE}" 2>"${TARGET_ERROR_FILE}"); then
-                        TARGET_ERROR_MSG=$(cat "${TARGET_ERROR_FILE}")
-
-                        if is_not_found_error "${TARGET_ERROR_MSG}"; then
-                            # Treat missing tag as "not released" and continue evaluating
-                            REPO_COMPLETE="false"
-                            rm -f "${TARGET_ERROR_FILE}" "${TARGET_AUTH_FILE}"
-                            break
-                        fi
-
-                        echo "ERROR: Failed to resolve target image ${TARGET_IMAGE}: ${TARGET_ERROR_MSG}"
-                        exit 1
+                        "${TARGET_IMAGE}" 2>/dev/null); then
+                        echo "    Tag ${TAG}: Cannot resolve (treating as not found)"
+                        REPO_COMPLETE="false"
+                        rm -f "${TARGET_AUTH_FILE}"
+                        break
                     fi
-                    rm -f "${TARGET_ERROR_FILE}" "${TARGET_AUTH_FILE}"
+                    rm -f "${TARGET_AUTH_FILE}"
 
                     if [ -z "${ACTUAL_DIGEST}" ]; then
                         # Tag doesn't exist
