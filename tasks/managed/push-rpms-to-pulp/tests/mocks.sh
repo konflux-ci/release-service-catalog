@@ -3,6 +3,9 @@ set -ex
 
 # mocks to be injected into task step scripts
 
+# Counter for generating unique hrefs
+UPLOAD_COUNTER=0
+
 function pulp() {
     echo $* >> $(params.dataDir)/mock_pulp.txt
     if [[ "$*" == *"domain show"* ]]; then
@@ -10,7 +13,12 @@ function pulp() {
     elif [[ "$*" == *"rpm repository list"* ]]; then
         echo "[ {\"name\": \"x86_64\"}, {\"name\": \"ppc64le\"}, {\"name\": \"s390x\"}, {\"name\": \"aarch64\"}, {\"name\": \"source\"} ]"
     elif [[ "$*" == *"rpm content upload"* ]]; then
-        echo "Uploaded"
+        # Return JSON with pulp_href for each upload
+        UPLOAD_COUNTER=$((UPLOAD_COUNTER + 1))
+        echo "{\"pulp_href\": \"/api/pulp/mock/api/v3/content/rpm/packages/mock-uuid-${UPLOAD_COUNTER}/\"}"
+    elif [[ "$*" == *"rpm repository content modify"* ]]; then
+        # Handle bulk content add - just acknowledge
+        echo "{\"task\": \"/api/pulp/mock/api/v3/tasks/mock-task-id/\"}"
     else
         echo Error: Unexpected call
         exit 1

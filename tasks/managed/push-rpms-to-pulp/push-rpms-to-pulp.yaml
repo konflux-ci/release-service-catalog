@@ -152,7 +152,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: push-rpms-to-pulp
-      image: quay.io/konflux-ci/release-service-utils@sha256:454e457cdadd5892b31fe2b7d4911b3d3a761f5705bb0cd30f864be0a597594b
+      image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9
       computeResources:
         limits:
           memory: 256Mi
@@ -299,15 +299,27 @@ spec:
               exit 1
           fi
 
-          # Upload arch-specific RPMs
+          # Collect hrefs for bulk add
+          HREFS_JSON="[]"
+
+          # Process arch-specific RPMs
           for pkg in "${FILES_TO_UPLOAD[@]}"; do
             if [[ "$pkg" == *."$arch".rpm ]]; then
               echo "Uploading $pkg to $arch repository..."
               set +e
-              pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
-                --file "${pkg}" --relative-path "$(basename "${pkg}")" \
-                --repository "$arch"
+              upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+                --file "${pkg}" --relative-path "$(basename "${pkg}")")
               set -e
+              href=$(jq -r '.pulp_href' <<< "$upload_response")
+              if [[ -z "$href" || "$href" == "null" ]]; then
+                echo "Error: Failed to get pulp_href for $pkg. Upload response: $upload_response"
+                exit 1
+              fi
+              echo "Uploaded $pkg -> $href"
+
+              # Add href to collection
+              HREFS_JSON=$(jq --arg href "$href" '. += [{"pulp_href": $href}]' <<< "$HREFS_JSON")
+
               jq --arg pkg "${pkg}" --arg arch "${arch}" --arg pulprepo "${PULP_DOMAIN}/${arch}" \
                 '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
@@ -316,31 +328,70 @@ spec:
             if [[ "$pkg" == *.noarch.rpm ]]; then
               echo "Uploading noarch $pkg to $arch repository..."
               set +e
-              pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
-                --file "${pkg}" --relative-path "$(basename "${pkg}")" \
-                --repository "$arch"
+              upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+                --file "${pkg}" --relative-path "$(basename "${pkg}")")
               set -e
+              href=$(jq -r '.pulp_href' <<< "$upload_response")
+              if [[ -z "$href" || "$href" == "null" ]]; then
+                echo "Error: Failed to get pulp_href for $pkg. Upload response: $upload_response"
+                exit 1
+              fi
+              echo "Uploaded $pkg -> $href"
+
+              # Add href to collection
+              HREFS_JSON=$(jq --arg href "$href" '. += [{"pulp_href": $href}]' <<< "$HREFS_JSON")
+
               jq --arg pkg "${pkg}" --arg arch "noarch" --arg pulprepo "${PULP_DOMAIN}/${arch}" \
                 '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
             fi
           done
+
+          # Bulk add all collected hrefs to repository
+          if [[ $(jq 'length' <<< "$HREFS_JSON") -gt 0 ]]; then
+            echo "Adding $(jq 'length' <<< "$HREFS_JSON") packages to $arch repository..."
+            set +e
+            pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm repository content modify \
+              --repository "$arch" \
+              --add-content "$HREFS_JSON"
+            set -e
+          fi
         done
 
-        # Upload .src.rpm files to source repository
+        # Upload and add .src.rpm files to source repository
+        SRC_HREFS_JSON="[]"
         for pkg in "${FILES_TO_UPLOAD[@]}"; do
           if [[ "$pkg" == *.src.rpm ]]; then
-            echo "Uploading source $pkg to source repository..."
+            echo "Uploading $pkg (arch: source)..."
             set +e
-            pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
-              --file "${pkg}" --relative-path "$(basename "${pkg}")" \
-              --repository "source"
+            upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+              --file "${pkg}" --relative-path "$(basename "${pkg}")")
             set -e
+            href=$(jq -r '.pulp_href' <<< "$upload_response")
+            if [[ -z "$href" || "$href" == "null" ]]; then
+              echo "Error: Failed to get pulp_href for $pkg. Upload response: $upload_response"
+              exit 1
+            fi
+            echo "Uploaded $pkg -> $href"
+
+            # Add href to collection
+            SRC_HREFS_JSON=$(jq --arg href "$href" '. += [{"pulp_href": $href}]' <<< "$SRC_HREFS_JSON")
+
             jq --arg pkg "${pkg}" --arg arch "source" --arg pulprepo "${PULP_DOMAIN}/source" \
               '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
               "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
           fi
         done
+
+        # Bulk add all source rpms to source repository
+        if [[ $(jq 'length' <<< "$SRC_HREFS_JSON") -gt 0 ]]; then
+          echo "Adding $(jq 'length' <<< "$SRC_HREFS_JSON") source packages to source repository..."
+          set +e
+          pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm repository content modify \
+            --repository "source" \
+            --add-content "$SRC_HREFS_JSON"
+          set -e
+        fi
 
         echo "Results written to: $RESULTS_FILE"
     - name: create-trusted-artifact
