@@ -236,19 +236,6 @@ decrypt_secrets() {
     else
       echo "Managed secrets already exist."
     fi
-
-    # Decrypt infrastructure secrets if they exist (these persist across test runs)
-    local managed_infra_secrets_vault="${suite_dir}/vault/managed-infra-secrets.yaml"
-    local managed_infra_secrets_file="${suite_dir}/resources/managed/secrets/managed-infra-secrets.yaml"
-    if [ -f "${managed_infra_secrets_vault}" ]; then
-      if [ ! -f "${managed_infra_secrets_file}" ]; then
-        echo "Managed infra secrets missing...decrypting ${managed_infra_secrets_vault}"
-        ansible-vault decrypt "${managed_infra_secrets_vault}" --output "${managed_infra_secrets_file}" --vault-password-file "$VAULT_PASSWORD_FILE"
-      else
-        echo "Managed infra secrets already exist."
-      fi
-    fi
-
     echo "Secret decryption check complete."
 }
 
