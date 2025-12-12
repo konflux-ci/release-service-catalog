@@ -1,0 +1,222 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-sign-oot-kmods-cleanup
+spec:
+  description: |
+    Test the sign-oot-kmods task to verify TaskRun UID isolation and cleanup functionality
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: "/var/workdir/release"
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for task and StepAction resolution
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for task and StepAction resolution
+      default: main
+  tasks:
+    - name: run-task
+      taskRef:
+        name: sign-oot-kmods
+      params:
+        - name: dataPath
+          value: data.json
+        - name: signedKmodsPath
+          value: signed-kmods
+        - name: signingAuthor
+          value: The dummy signer
+        - name: kerberosRealm
+          value: IPA.REDHAT.COM
+        - name: signing-secret
+          value: my-mocked-secret
+        - name: checksumFingerprint
+          value: checksum-fingerprint
+        - name: checksumKeytab
+          value: build-and-sign-keytab
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: ""
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+    - name: check-cleanup-and-isolation
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: ociStorage
+            type: string
+          - name: sourceDataArtifact
+            type: string
+            default: ""
+          - name: taskGitUrl
+            type: string
+          - name: taskGitRevision
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: "ORAS_OPTIONS"
+              value: "--insecure"
+            - name: "DEBUG"
+              value: ""
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: validate-supply-chain-integrity
+            image: quay.io/konflux-ci/release-service-utils@sha256:454e457cdadd5892b31fe2b7d4911b3d3a761f5705bb0cd30f864be0a597594b
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== Supply Chain Integrity Validation ==="
+
+              SSH_FILE="$(params.dataDir)/mock_ssh.txt"
+              SCP_FILE="$(params.dataDir)/mock_scp.txt"
+
+              # Verify SSH commands were logged
+              if [ ! -f "$SSH_FILE" ]; then
+                echo "ERROR: SSH commands were not logged"
+                exit 1
+              fi
+
+              echo "SSH Commands executed:"
+              cat "$SSH_FILE"
+              echo ""
+
+              # Test 1: Verify TaskRun UID directory creation
+              echo "Test 1: TaskRun UID Directory Creation"
+              if grep -E "mkdir -p ~/[a-f0-9\-]{8,}/kmods" "$SSH_FILE"; then
+                echo "✅ PASS: TaskRun UID directory creation found"
+              else
+                echo "❌ FAIL: TaskRun UID directory creation NOT found"
+                exit 1
+              fi
+
+              # Test 2: Verify TaskRun UID directory cleanup
+              echo "Test 2: TaskRun UID Directory Cleanup"
+              if grep -E "rm -rf ~/[a-f0-9\-]{8,}" "$SSH_FILE"; then
+                echo "✅ PASS: TaskRun UID directory cleanup found"
+              else
+                echo "❌ FAIL: TaskRun UID directory cleanup NOT found"
+                exit 1
+              fi
+
+              # Test 3: Verify unique directory pattern consistency
+              echo "Test 3: Directory Pattern Consistency"
+              # Extract TaskRun UIDs from mkdir and rm commands
+              MKDIR_UIDS=$(grep -oE "mkdir -p ~/[a-f0-9\-]{8,}" "$SSH_FILE" | sed 's/mkdir -p ~\///' | sort -u)
+              RM_UIDS=$(grep -oE "rm -rf ~/[a-f0-9\-]{8,}" "$SSH_FILE" | sed 's/rm -rf ~\///' | sort -u)
+
+              echo "Mkdir UIDs: $MKDIR_UIDS"
+              echo "Cleanup UIDs: $RM_UIDS"
+
+              # Verify that the UIDs match (each created directory is cleaned up)
+              for uid in $MKDIR_UIDS; do
+                if echo "$RM_UIDS" | grep -q "$uid"; then
+                  echo "✅ PASS: TaskRun UID $uid was properly cleaned up"
+                else
+                  echo "❌ FAIL: TaskRun UID $uid was created but NOT cleaned up"
+                  exit 1
+                fi
+              done
+
+              # Test 4: Verify SCP commands use TaskRun UID structure
+              if [ -f "$SCP_FILE" ]; then
+                echo "Test 4: SCP TaskRun UID Usage"
+                echo "SCP Commands executed:"
+                cat "$SCP_FILE"
+                echo ""
+
+                # Check if any SCP commands contain TaskRun UID paths
+                if grep -E "/[a-f0-9\-]{8,}/kmods/" "$SCP_FILE"; then
+                  echo "✅ PASS: SCP commands use TaskRun UID directory structure"
+                else
+                  echo "⚠️  WARNING: SCP commands may use individual file transfer (acceptable)"
+                fi
+              fi
+
+              # Test 5: Verify no hardcoded ~/kmods paths (supply chain integrity)
+              echo "Test 5: No Hardcoded Paths"
+              EXCLUDE_PATTERN="/[a-f0-9\-]{8,}/kmods|Creating unique TaskRun directory"
+              EXCLUDE_PATTERN="${EXCLUDE_PATTERN}|Cleaning up unique TaskRun directory"
+              if grep -v -E "$EXCLUDE_PATTERN" "$SSH_FILE" | grep -q "$HOME/kmods"; then
+                echo "❌ FAIL: Found hardcoded ~/kmods paths (supply chain integrity violation)"
+                grep -v -E "/[a-f0-9\-]{8,}/kmods" "$SSH_FILE" | grep "$HOME/kmods" || true
+                exit 1
+              else
+                echo "✅ PASS: No hardcoded ~/kmods paths found"
+              fi
+
+              # Test 6: Verify isolation (each TaskRun uses unique directory)
+              echo "Test 6: Process Isolation"
+              UNIQUE_UID_COUNT=$(echo "$MKDIR_UIDS" | wc -w)
+              if [ "$UNIQUE_UID_COUNT" -eq 1 ]; then
+                echo "✅ PASS: Single unique TaskRun UID used (proper isolation)"
+              elif [ "$UNIQUE_UID_COUNT" -gt 1 ]; then
+                echo "❌ FAIL: Multiple TaskRun UIDs found (unexpected)"
+                exit 1
+              else
+                echo "❌ FAIL: No TaskRun UID found"
+                exit 1
+              fi
+
+              echo ""
+              echo "=== Supply Chain Integrity Tests: ALL PASSED ✅ ==="
+              echo "TaskRun UID isolation and cleanup working correctly"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: $(tasks.run-task.results.sourceDataArtifact)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - run-task
