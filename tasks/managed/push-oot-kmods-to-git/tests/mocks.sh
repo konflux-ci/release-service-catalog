@@ -30,7 +30,7 @@ git() {
                     # For multi-arch, check for architecture-specific directories
                     expected_archs=("amd64" "arm64")
                     for arch in "${expected_archs[@]}"; do
-                        TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}_${arch}"
+                        TARGET_DIR="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/${arch}"
                         echo "Checking for files in architecture-specific target directory: ${TARGET_DIR}"
 
                         if [ -d "${TARGET_DIR}" ] && ls "${TARGET_DIR}"/*.ko 1> /dev/null 2>&1; then
@@ -42,15 +42,16 @@ git() {
                         fi
                     done
 
-                    # Also check for summary directory
-                    if ls multi-arch-summary_* 1> /dev/null 2>&1; then
-                        echo "SUCCESS: Found multi-arch summary directory"
+                    # Also check for summary directory under the kernel version path
+                    SUMMARY_DIR="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/multi-arch-summary"
+                    if [ -d "${SUMMARY_DIR}" ]; then
+                        echo "SUCCESS: Found multi-arch summary directory at ${SUMMARY_DIR}"
                     else
-                        echo "WARNING: No multi-arch summary directory found"
+                        echo "WARNING: No multi-arch summary directory found at ${SUMMARY_DIR}"
                     fi
                 else
                     # Single architecture
-                    TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
+                    TARGET_DIR="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}"
                     echo "Checking for files in single-arch target directory: ${TARGET_DIR}"
 
                     if [ -f "${TARGET_DIR}/mod1.ko" ] && [ -f "${TARGET_DIR}/mod2.ko" ]; then
@@ -63,7 +64,7 @@ git() {
                 fi
             else
                 # Fallback to original single-arch logic
-                TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}"
+                TARGET_DIR="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}"
                 echo "Checking for files in target directory: ${TARGET_DIR}"
 
                 if [ -f "${TARGET_DIR}/mod1.ko" ] && [ -f "${TARGET_DIR}/mod2.ko" ]; then

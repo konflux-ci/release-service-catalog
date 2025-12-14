@@ -138,12 +138,9 @@ spec:
         push_arch_artifacts() {
             local arch_name="$1"
             local source_dir="$2"
-            local arch_suffix=""
 
-            # Add architecture suffix for multi-arch builds
-            if [ "$arch_count" -gt 1 ]; then
-                arch_suffix="_${arch_name}"
-            fi
+            # Always include architecture suffix for consistent hierarchy
+            local arch_suffix="/${arch_name}"
 
             echo "Processing artifacts for architecture: $arch_name"
 
@@ -156,7 +153,7 @@ spec:
                 return 1
             fi
 
-            TARGET_DIR="${DRIVER_VENDOR}_${DRIVER_VERSION}_${KERNEL_VERSION}${arch_suffix}"
+            TARGET_DIR="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}${arch_suffix}"
             echo "Target directory for $arch_name: $TARGET_DIR"
 
             git sparse-checkout add "$TARGET_DIR"
@@ -238,18 +235,35 @@ spec:
 
             # Create multi-arch summary file in the repository
             if [ -f "${SIGNED_KMODS_PATH}/signing_summary.txt" ]; then
-                summary_target_dir="multi-arch-summary_$(date +%Y%m%d_%H%M%S)"
-                git sparse-checkout add "$summary_target_dir"
-                mkdir -p "$summary_target_dir"
-                cp "${SIGNED_KMODS_PATH}/signing_summary.txt" "$summary_target_dir/"
-                cp "${SIGNED_KMODS_PATH}/extraction_summary.txt" "$summary_target_dir/" 2>/dev/null || true
-                git add "$summary_target_dir"
+                # Use first architecture's envfile for base path information
+                first_arch_dir=$(find "${SIGNED_KMODS_PATH}" -mindepth 1 -maxdepth 1 -type d | head -1)
+                if [ -n "$first_arch_dir" ] && [ -f "$first_arch_dir/envfile" ]; then
+                    # shellcheck source=/dev/null
+                    . "$first_arch_dir/envfile"
+                    summary_target_dir="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION}/multi-arch-summary"
+
+                    echo "Creating multi-architecture summary in Git: ${summary_target_dir}"
+                    git sparse-checkout add "$summary_target_dir"
+                    mkdir -p "$summary_target_dir"
+                    cp "${SIGNED_KMODS_PATH}/signing_summary.txt" "$summary_target_dir/"
+                    cp "${SIGNED_KMODS_PATH}/extraction_summary.txt" "$summary_target_dir/" 2>/dev/null || true
+                    git add "$summary_target_dir"
+                fi
             fi
 
         else
             echo "Single architecture build, using standard upload"
 
-            cd "${SIGNED_KMODS_PATH}"
+            # Get the actual architecture directory name
+            arch_dir=$(find "${SIGNED_KMODS_PATH}" -mindepth 1 -maxdepth 1 -type d | head -1)
+            if [ -z "$arch_dir" ]; then
+                echo "ERROR: No architecture directory found in ${SIGNED_KMODS_PATH}"
+                exit 1
+            fi
+            actual_arch=$(basename "$arch_dir")
+            echo "Detected architecture: $actual_arch"
+
+            cd "$arch_dir"
             # Validate checksum file exists for single-arch
             if [ ! -f "signed_kmods_checksums.txt" ]; then
                 echo "ERROR: signed_kmods_checksums.txt not found for single architecture build"
@@ -260,10 +274,10 @@ spec:
             sha256sum -c signed_kmods_checksums.txt
             cd "${GIT_WORK_DIR}/local-artifacts"
 
-            if push_arch_artifacts "single" "${SIGNED_KMODS_PATH}"; then
-                echo "Successfully processed single architecture"
+            if push_arch_artifacts "$actual_arch" "$arch_dir"; then
+                echo "Successfully processed single architecture: $actual_arch"
             else
-                echo "ERROR: Failed to process single architecture"
+                echo "ERROR: Failed to process single architecture: $actual_arch"
                 exit 1
             fi
         fi
