@@ -165,15 +165,6 @@ spec:
           QUAY_URL="quay.io/konflux-artifacts/nonprod"
         fi
 
-        REQUESTTYPE=$(jq -r '.requestType // "internal-request"' "${DATA_FILE}")
-        if [ "${REQUESTTYPE}" == "internal-pipelinerun" ] ; then
-          requestType=internal-pipelinerun
-          requestK8sType=pipelinerun
-        else
-          requestType=internal-request
-          requestK8sType=internalrequest
-        fi
-
         # Remove .metadata from each component to avoid "arg list too long" errors
         # The internal task doesn't need metadata (env_variables, labels, etc.)
         snapshot=$(jq -c '.components |= map(del(.metadata))' "$(params.dataDir)/$(params.snapshotPath)")
@@ -220,9 +211,9 @@ spec:
           exit 1
         fi
 
-        echo "Creating ${requestType} to push artifacts..."
+        echo "Creating InternalRequest to push artifacts..."
 
-        ${requestType} --pipeline "${REQUEST}" \
+        internal-request --pipeline "${REQUEST}" \
           -p snapshot_json="${snapshot}" \
           -p author="${AUTHOR}" \
           -p signingKeyName="${signingKeyName}" \
@@ -244,49 +235,23 @@ spec:
           --finally-timeout 0h10m0s \
           -s true
 
-        # Since we expect no requests (IR or PLR) to fail
-        # we can assume that we'll have results at our disposal.
-        # Results are stored differently between IRs and PLRs
-        # therefore we need to address each case accordingly
-        #
-        NAME=$(kubectl get "${requestK8sType}" -l \
+        # Get the InternalRequest name to fetch results
+        NAME=$(kubectl get internalrequest -l \
           "${TASK_LABEL}=${TASK_ID},${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
           --no-headers -o custom-columns=":metadata.name" \
           --sort-by=.metadata.creationTimestamp | tail -1)
         if [ -z "${NAME}" ]; then
-          echo "Warning: Unable to get ${requestK8sType} name"
+          echo "Warning: Unable to get InternalRequest name"
         fi
 
-        if [ "${requestK8sType}" == "internalrequest" ]; then
-          results=$(kubectl get "${requestK8sType}" "${NAME}" -o=jsonpath='{.status.results}')
-          if [ "$(echo "${results}" | jq -r '.result')" == "Success" ]; then
-            echo "Artifacts pushed"
-            echo "${results}" | jq '.'
-          else
-            echo "Artifact push failed"
-            echo "${results}" | jq -r '.result'
-            exit 1
-          fi
+        results=$(kubectl get internalrequest "${NAME}" -o=jsonpath='{.status.results}')
+        if [ "$(echo "${results}" | jq -r '.result')" == "Success" ]; then
+          echo "Artifacts pushed"
+          echo "${results}" | jq '.'
         else
-          overallStatus=$(kubectl get "${requestK8sType}" "${NAME}" -o=jsonpath='{.status}')
-          status=$(jq -r '.conditions[0].status' <<< "${overallStatus}")
-          results=$(jq -c '.results' <<< "${overallStatus}")
-          # despite the assumption of never having a failed pipeline,
-          # let's try to at least still a log message about the abnormal
-          # failure
-          if [ "${status}" == "True" ]; then
-            resultValue=$(jq -r '.[]  | select(.name == "result").value' <<< "${results}")
-            if [ "${resultValue}" == "Success" ]; then
-              echo "Artifacts pushed: ${resultValue}"
-            else
-              echo "Artifact push failed:"
-              echo "${resultValue}"
-              exit 1
-            fi
-          else
-            echo "Artifact push abnormally failed"
-            exit 1
-          fi
+          echo "Artifact push failed"
+          echo "${results}" | jq -r '.result'
+          exit 1
         fi
     - name: create-trusted-artifact
       computeResources:
