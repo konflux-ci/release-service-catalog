@@ -231,8 +231,6 @@ spec:
             PACKAGE_RELEASE="1.$(echo "${KERNEL_VERSION_NO_ARCH}" | tr '.-' '_')"
             SPEC_FILE="${RPM_BUILD_ROOT}/SPECS/${PACKAGE_NAME}.spec"
 
-            echo "Creating RPM spec file for $arch_name: ${SPEC_FILE}"
-
             # Determine target architecture based on arch_name or kernel version
             local target_arch
             if [ "$arch_count" -gt 1 ]; then
@@ -259,52 +257,63 @@ spec:
 
             echo "Using RPM BuildArch: $rpm_arch for architecture: $arch_name (kernel modules are pre-built)"
 
-            # Create RPM spec file
-            {
-              echo "Name:           ${PACKAGE_NAME}"
-              echo "Version:        ${PACKAGE_VERSION}"
-              echo "Release:        ${PACKAGE_RELEASE}"
-              echo "Summary:        ${DRIVER_VENDOR} out-of-tree kernel modules for kernel ${KERNEL_VERSION}"
-              echo "License:        Proprietary"
-              echo "Group:          System Environment/Kernel"
-              echo "BuildArch:      ${rpm_arch}"
-              echo "Requires:       kernel = ${KERNEL_VERSION}"
-              # Prevent rpmbuild from stripping or modifying already-signed .ko files
-              echo "%undefine _debugsource_packages"
-              echo "%undefine _debuginfo_subpackages"
-              echo "%undefine debug_package"
-              echo "%global __brp_strip /bin/true"
-              echo "%global __brp_strip_comment_note /bin/true"
-              echo "%global __brp_strip_static_archive /bin/true"
-              echo "%global __os_install_post %{nil}"
-              echo ""
-              echo "%description"
-              echo "This package contains signed out-of-tree kernel modules for ${DRIVER_VENDOR}"
-              echo "driver version ${PACKAGE_VERSION}, built for kernel ${KERNEL_VERSION}."
-              echo ""
-              echo "%prep"
-              echo "# No prep needed"
-              echo ""
-              echo "%build"
-              echo "# No build needed"
-              echo ""
-              echo "%install"
-              echo "mkdir -p %{buildroot}/lib/modules/${KERNEL_VERSION}/extra/${DRIVER_VENDOR}"
-              echo "cp %{_sourcedir}/*.ko %{buildroot}/lib/modules/${KERNEL_VERSION}/extra/${DRIVER_VENDOR}/"
-              echo ""
-              echo "%files"
-              echo "/lib/modules/${KERNEL_VERSION}/extra/${DRIVER_VENDOR}/*.ko"
-              echo ""
-              echo "%post"
-              echo "/sbin/depmod -a ${KERNEL_VERSION} || :"
-              echo ""
-              echo "%postun"
-              echo "/sbin/depmod -a ${KERNEL_VERSION} || :"
-              echo ""
-              echo "%changelog"
-              echo "* $(date '+%a %b %d %Y') Konflux CI <konflux-ci@redhat.com> - ${PACKAGE_VERSION}-${PACKAGE_RELEASE}"
-              echo "- Automated build of signed ${DRIVER_VENDOR} kernel modules for ${KERNEL_VERSION}"
-            } > "${SPEC_FILE}"
+            # Check for custom spec file at repository root
+            CUSTOM_SPEC_FILE="$(params.dataDir)/${PACKAGE_NAME}.spec"
+            if [ -f "${CUSTOM_SPEC_FILE}" ]; then
+                echo "Using custom spec file for $arch_name: ${CUSTOM_SPEC_FILE}"
+                cp "${CUSTOM_SPEC_FILE}" "${SPEC_FILE}"
+            else
+                echo "Creating RPM spec file for $arch_name: ${SPEC_FILE}"
+
+                # Create RPM spec file using RPM macros
+                {
+                  echo "Name:           %{package_name}"
+                  echo "Version:        %{package_version}"
+                  echo "Release:        %{package_release}"
+                  echo "Summary:        %{driver_vendor} out-of-tree kernel modules for kernel %{kernel_version}"
+                  echo "License:        Proprietary"
+                  echo "Group:          System Environment/Kernel"
+                  echo "BuildArch:      %{rpm_arch}"
+                  echo "Requires:       kernel = %{kernel_version}"
+                  # Prevent rpmbuild from stripping or modifying already-signed .ko files
+                  echo "%undefine _debugsource_packages"
+                  echo "%undefine _debuginfo_subpackages"
+                  echo "%undefine debug_package"
+                  echo "%global __brp_strip /bin/true"
+                  echo "%global __brp_strip_comment_note /bin/true"
+                  echo "%global __brp_strip_static_archive /bin/true"
+                  echo "%global __os_install_post %{nil}"
+                  echo ""
+                  echo "%description"
+                  echo "This package contains signed out-of-tree kernel modules for %{driver_vendor}"
+                  echo "driver version %{package_version}, built for kernel %{kernel_version}."
+                  echo ""
+                  echo "%prep"
+                  echo "# No prep needed"
+                  echo ""
+                  echo "%build"
+                  echo "# No build needed"
+                  echo ""
+                  echo "%install"
+                  echo "mkdir -p %{buildroot}/lib/modules/%{kernel_version}/extra/%{driver_vendor}"
+                  echo "cp %{_sourcedir}/*.ko %{buildroot}/lib/modules/%{kernel_version}/extra/%{driver_vendor}/"
+                  echo ""
+                  echo "%files"
+                  echo "/lib/modules/%{kernel_version}/extra/%{driver_vendor}/*.ko"
+                  echo ""
+                  echo "%post"
+                  echo "/sbin/depmod -a %{kernel_version} || :"
+                  echo ""
+                  echo "%postun"
+                  echo "/sbin/depmod -a %{kernel_version} || :"
+                  echo ""
+                  echo "%changelog"
+                  echo "* $(date '+%a %b %d %Y') Konflux CI <konflux-ci@redhat.com> -" \
+                       "%{package_version}-%{package_release}"
+                  echo "- Automated build of signed %{driver_vendor} kernel modules for" \
+                       "%{kernel_version}"
+                } > "${SPEC_FILE}"
+            fi
 
             # Copy signed .ko files to SOURCES directory
             echo "Copying signed .ko files to RPM SOURCES for $arch_name..."
@@ -329,6 +338,12 @@ spec:
             rpmbuild --target "${target_arch}" \
                      --define "_topdir ${RPM_BUILD_ROOT}" \
                      --define "_sourcedir ${RPM_BUILD_ROOT}/SOURCES" \
+                     --define "package_name ${PACKAGE_NAME}" \
+                     --define "package_version ${PACKAGE_VERSION}" \
+                     --define "package_release ${PACKAGE_RELEASE}" \
+                     --define "kernel_version ${KERNEL_VERSION}" \
+                     --define "driver_vendor ${DRIVER_VENDOR}" \
+                     --define "rpm_arch ${rpm_arch}" \
                      -bb "${SPEC_FILE}"
 
             # Move built RPMs to architecture-specific output directory
