@@ -476,49 +476,90 @@ spec:
           [ -f "$COMPONENT_DIR/has_windows" ] && mkdir -p "$WINDOWS_CONTENT"
           [ -f "$COMPONENT_DIR/has_linux" ] && mkdir -p "$LINUX_CONTENT"
 
-          # First unpack all archives in place (removing the archives)
-          # Note: The || true prevents the while loop's exit code (1 from read at EOF) from triggering set -e
-          find "$COMPONENT_DIR" -maxdepth 1 -type f -iregex ".*\.zip\|.*\.gz" 2>/dev/null | while read -r file; do
-            dir=$(dirname "$file")
-            case "$file" in
-              (*.tar.gz)
-                tar -xzf "$file" -C "$dir" && rm "$file"
+          # Organize binaries into os/arch/ structure based on FILE entries
+          # This ensures each binary is placed in the correct location regardless of its name
+          # Process files[] array - unpack each archive and organize by os/arch
+          NUM_FILES=$(jq '.files | length // 0' <<< "$COMPONENT")
+          for ((i = 0; i < NUM_FILES; i++)); do
+            FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT")
+            SOURCE=$(jq -er '.source' <<< "$FILE")
+            OS=$(jq -er '.os' <<< "$FILE")
+            ARCH=$(jq -er '.arch' <<< "$FILE")
+            
+            # Determine OS directory name and target location
+            case "$OS" in
+              (darwin) 
+                OS_DIR="macos"
+                TARGET_DIR="$UNSIGNED_DIR/$OS_DIR/$ARCH"
                 ;;
-              (*.gz)
-                gzip -d "$file"
+              (linux) 
+                OS_DIR="linux"
+                TARGET_DIR="$COMPONENT_DIR/$OS_DIR/$ARCH"
                 ;;
-              (*.zip)
-                unzip "$file" -d "$dir" && rm "$file"
-                ;;
-            esac
-          done || true
-
-          # Then move unpacked files to appropriate directories based on OS
-          # Note: Skip has_* flag files - they must stay in the component root directory
-          # Only move files if the target directory exists (i.e., that OS type is configured in RPA)
-          # Note: The || true at the end prevents the while loop's exit code from triggering set -e
-          find "$COMPONENT_DIR" -maxdepth 1 -type f 2>/dev/null | while read -r file; do
-            case "$file" in
-              (*/has_mac)
-                # Skip flag files - they need to stay in the component root directory
-                ;;
-              (*/has_windows)
-                # Skip flag files - they need to stay in the component root directory
-                ;;
-              (*/has_linux)
-                # Skip flag files - they need to stay in the component root directory
-                ;;
-              (*darwin*)
-                [ -d "$MAC_CONTENT" ] && mv "$file" "$MAC_CONTENT/"
-                ;;
-              (*windows*)
-                [ -d "$WINDOWS_CONTENT" ] && mv "$file" "$WINDOWS_CONTENT/"
-                ;;
-              (*linux*)
-                [ -d "$LINUX_CONTENT" ] && mv "$file" "$LINUX_CONTENT/"
+              (windows) 
+                OS_DIR="windows"
+                TARGET_DIR="$UNSIGNED_DIR/$OS_DIR/$ARCH"
                 ;;
             esac
-          done || true
+            
+            # Extract archive filename from source path
+            ARCHIVE_NAME=$(basename "$SOURCE")
+            ARCHIVE_PATH="$COMPONENT_DIR/$ARCHIVE_NAME"
+            
+            if [ ! -f "$ARCHIVE_PATH" ]; then
+              echo "  Warning: Archive not found: $ARCHIVE_PATH" >&2
+              continue
+            fi
+            
+            # Create target directory
+            mkdir -p "$TARGET_DIR"
+            
+            # Unpack archive to target directory (only .tar.gz supported)
+            # Preserve nested directory structure from original archive
+            tar -xzf "$ARCHIVE_PATH" -C "$TARGET_DIR"
+            
+            # Remove the archive after successful extraction
+            rm -f "$ARCHIVE_PATH"
+          done
+          
+          # Process staged.files[] array (same logic)
+          NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "$COMPONENT")
+          for ((i = 0; i < NUM_STAGED_FILES; i++)); do
+            FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
+            SOURCE=$(jq -er '.source' <<< "$FILE")
+            OS=$(jq -er '.os' <<< "$FILE")
+            ARCH=$(jq -er '.arch' <<< "$FILE")
+            
+            case "$OS" in
+              (darwin) 
+                OS_DIR="macos"
+                TARGET_DIR="$UNSIGNED_DIR/$OS_DIR/$ARCH"
+                ;;
+              (linux) 
+                OS_DIR="linux"
+                TARGET_DIR="$COMPONENT_DIR/$OS_DIR/$ARCH"
+                ;;
+              (windows) 
+                OS_DIR="windows"
+                TARGET_DIR="$UNSIGNED_DIR/$OS_DIR/$ARCH"
+                ;;
+            esac
+            
+            ARCHIVE_NAME=$(basename "$SOURCE")
+            ARCHIVE_PATH="$COMPONENT_DIR/$ARCHIVE_NAME"
+            
+            if [ ! -f "$ARCHIVE_PATH" ]; then
+              continue
+            fi
+            
+            mkdir -p "$TARGET_DIR"
+            
+            # Unpack archive to target directory (only .tar.gz supported)
+            # Preserve nested directory structure from original archive
+            tar -xzf "$ARCHIVE_PATH" -C "$TARGET_DIR"
+            
+            rm -f "$ARCHIVE_PATH"
+          done
 
           # Push unsigned Mac content
           if [ -f "$COMPONENT_DIR/has_mac" ]; then
@@ -645,7 +686,7 @@ spec:
           mac_signing_script="/tmp/mac_signing_script_$(context.taskRun.uid)_${COMPONENT_NAME}.sh"
 
           TEMP_DIR="/tmp/$(context.taskRun.uid)_${COMPONENT_NAME}"
-          BINARY_PATH="$TEMP_DIR/unsigned/macos"
+          BINARY_PATH="$TEMP_DIR/unsigned"
           ZIP_PATH="$TEMP_DIR/signed_content.zip"
           DIGEST_FILE="$TEMP_DIR/push_digest.txt"
 
@@ -661,8 +702,8 @@ spec:
           /usr/local/bin/oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
           set -x
           /usr/local/bin/oras pull $(params.quayURL)/${COMPONENT_NAME}/unsigned@$unsigned_digest -o "$BINARY_PATH"
-          # This is the directory where the content was extracted
-          CONTENT_DIR_MAC=\$(find "$BINARY_PATH" -maxdepth 1 -type d | tail -n 1)
+          # The content is extracted to BINARY_PATH/macos (no nesting since we pull to unsigned, not unsigned/macos)
+          CONTENT_DIR_MAC="$BINARY_PATH/macos"
 
           set +x
           security unlock-keychain -p $KEYCHAIN_PASSWORD login.keychain
@@ -678,8 +719,7 @@ spec:
           done
 
           cd "$BINARY_PATH"
-          NEW_CONTENT_DIR=\$(basename "\$CONTENT_DIR_MAC")
-          zip -r "$ZIP_PATH" "\$NEW_CONTENT_DIR"
+          zip -r "$ZIP_PATH" macos
 
           echo "Submitting ZIP file to Apple notary service..."
           set +x
@@ -692,7 +732,7 @@ spec:
 
           SIGNED_TAG="$(context.taskRun.uid)-mac"
           PUSH_OUTPUT=\$(/usr/local/bin/oras push \
-            "$QUAY_URL/${COMPONENT_NAME}/signed:\$SIGNED_TAG" "\$NEW_CONTENT_DIR")
+            "$QUAY_URL/${COMPONENT_NAME}/signed:\$SIGNED_TAG" macos)
           SIGNED_DIGEST=\$(echo "\$PUSH_OUTPUT" | grep 'Digest:' | awk '{print \$2}')
           echo -n "\$SIGNED_DIGEST" >> "$DIGEST_FILE"
           echo "Process completed successfully."
@@ -816,17 +856,26 @@ spec:
           @echo off
           oras login quay.io -u ${QUAY_USER} -p ${QUAY_PASS}
           @echo on
-          oras pull $(params.quayURL)/${COMPONENT_NAME}/unsigned@${unsigned_digest}
+          oras pull $(params.quayURL)/${COMPONENT_NAME}/unsigned@${unsigned_digest} -o unsigned
+          REM The content is extracted to unsigned\windows with os/arch/ subdirectories (e.g., unsigned\windows\amd64\)
 
-          signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 ^
-          %TEMP%\\${WINDOWS_TEMP_DIR}\\windows\\*
-
-          if errorlevel 1 (
-            echo Signing of binaries failed
-            exit /B %ERRORLEVEL%
+          REM Recursively sign all files in unsigned\windows directory tree
+          for /r unsigned\windows %%f in (*) do (
+            signtool sign /v /n "Red Hat" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "%%f"
+            if errorlevel 1 (
+              echo Signing of %%f failed
+              exit /B %ERRORLEVEL%
+            )
           )
 
-          signtool verify /v /pa %TEMP%\\${WINDOWS_TEMP_DIR}\\windows\\*
+          REM Recursively verify all signed files
+          for /r unsigned\windows %%f in (*) do (
+            signtool verify /v /pa "%%f"
+            if errorlevel 1 (
+              echo Verification of %%f failed
+              exit /B %ERRORLEVEL%
+            )
+          )
 
           if errorlevel 1 (
             echo Verification of binaries failed
@@ -835,6 +884,7 @@ spec:
 
           echo [%DATE% %TIME%] Signing of Windows binaries for ${COMPONENT_NAME} completed successfully
 
+          cd unsigned
           oras push $(params.quayURL)/${COMPONENT_NAME}/signed:$(context.taskRun.uid)-windows windows \
           > oras_push_output.txt 2>&1
 
@@ -852,7 +902,7 @@ spec:
 
           # Copy signed digest back to shared volume for this component
           # shellcheck disable=SC2029,SC2086
-          WINDOWS_DIGEST_PATH="C:/Users/${WINDOWS_USER}/AppData/Local/Temp/${WINDOWS_TEMP_DIR}/digest.txt"
+          WINDOWS_DIGEST_PATH="C:/Users/${WINDOWS_USER}/AppData/Local/Temp/${WINDOWS_TEMP_DIR}/unsigned/digest.txt"
           scp "${SCP_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_DIGEST_PATH}" \
           "$COMPONENT_DIR/signed_windows_digest.txt"
 
@@ -996,46 +1046,57 @@ spec:
           SIGNED_DIR="$COMPONENT_DIR/signed"
           mkdir -p "$SIGNED_DIR"
 
-          # Copy linux files to signed directory (if linux content exists)
-          if [ -f "$COMPONENT_DIR/has_linux" ]; then
-            mkdir -p "$SIGNED_DIR/linux"
-            cp -r "$COMPONENT_DIR/linux/"* "$SIGNED_DIR/linux/" 2>/dev/null || true
-          fi
-
           cd "$SIGNED_DIR"
 
           # Pull signed Mac binaries for this component (if mac content exists)
+          # oras will create macos/ directory with amd64/ and arm64/ subdirectories
           if [ -f "$COMPONENT_DIR/has_mac" ]; then
-            mkdir -p "$SIGNED_DIR/macos"
             signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
             # shellcheck disable=SC2086
-            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}" -o macos
+            # Pull directly to current directory ($SIGNED_DIR) - oras will create macos/ directory
+            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_mac_digest}"
           fi
 
           # Pull signed Windows binaries for this component (if windows content exists)
+          # oras will create windows/ directory with amd64/ and arm64/ subdirectories
           if [ -f "$COMPONENT_DIR/has_windows" ]; then
-            mkdir -p "$SIGNED_DIR/windows"
             signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
             signed_windows_digest=${signed_windows_digest//[[:space:]]/}
             # shellcheck disable=SC2086
-            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}" -o windows
+            # Pull directly to current directory ($SIGNED_DIR) - oras will create windows/ directory
+            oras pull "$(params.quayURL)/${COMPONENT_NAME}/signed@${signed_windows_digest}"
           fi
 
-          # Generate checksums for all binaries in this component's signed directory
+          # Generate checksums for all binaries
+          # Linux files remain in $COMPONENT_DIR/linux/ (not signed), while Mac/Windows are in $SIGNED_DIR/
+          # The structure is os/arch/ so we recursively find all files
           SHA_SUM_PATH="$SIGNED_DIR/sha256sum.txt"
           touch "$SHA_SUM_PATH"
-          # Build a list of platform directories (macos, windows, linux) that exist
-          # conditional on the os directories being present (-d "macos")
+          
+          # Generate checksums for signed binaries (macos, windows) from SIGNED_DIR
           CHECKSUM_DIRS=""
           [ -d "macos" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS macos"
           [ -d "windows" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS windows"
-          [ -d "linux" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS linux"
           
           if [ -n "$CHECKSUM_DIRS" ]; then
             # shellcheck disable=SC2086
+            # Recursively find all files in os/arch/ structure
             find $CHECKSUM_DIRS -type f 2>/dev/null | while read -r file; do
                 checksum=$(sha256sum "$file" | awk '{ print $1 }')
                 echo "$checksum  $file" >> "$SHA_SUM_PATH"
+            done
+          fi
+          
+          # Generate checksums for Linux files from COMPONENT_DIR/linux/ (not signed)
+          if [ -f "$COMPONENT_DIR/has_linux" ] && [ -d "$COMPONENT_DIR/linux" ]; then
+            # shellcheck disable=SC2086
+            # Recursively find all files in linux/os/arch/ structure
+            find "$COMPONENT_DIR/linux" -type f 2>/dev/null | while read -r file; do
+                checksum=$(sha256sum "$file" | awk '{ print $1 }')
+                # Use relative path from COMPONENT_DIR for consistency
+                prefix_len=$((${#COMPONENT_DIR} + 1))
+                rel_path="${file:$prefix_len}"
+                echo "$checksum  $rel_path" >> "$SHA_SUM_PATH"
             done
           fi
 
@@ -1124,72 +1185,80 @@ spec:
           mkdir -p "$READY_FOR_DIST_DIR"
           echo "Compressing artifacts for component: $COMPONENT_NAME"
 
-          # Helper function to compress a single file entry
+          # Helper function to process a single file entry
           # Args: $1 = FILE JSON, $2 = "files" or "staged" (for logging)
-          compress_file_entry() {
+          process_file_entry() {
             local FILE="$1"
             local ARRAY_NAME="$2"
             local SOURCE
             if ! SOURCE=$(jq -er '.source' <<< "$FILE" 2>/dev/null); then
-              echo "Missing ${ARRAY_NAME}[].source for component." >&2
+              echo "Error: Missing ${ARRAY_NAME}[].source for component." >&2
               return 1
             fi
-            # Extract just the filename from the source path (remove /releases/ prefix)
             local SOURCE_FILENAME
             SOURCE_FILENAME=$(basename "$SOURCE")
+            local OS
+            OS=$(jq -er '.os' <<< "$FILE")
+            local ARCH
+            ARCH=$(jq -er '.arch' <<< "$FILE")
             local DELIVERY_FORMAT
             DELIVERY_FORMAT=$(jq -r '.delivery_format // ["compressed"] | sort | .[]' <<< "$FILE")
 
+            # Determine the binary file path and OS directory name based on OS and arch
+            # New structure: os/arch/{binary_file}
+            # Linux files remain in COMPONENT_DIR/linux/ (not signed), while Mac/Windows are in SIGNED_DIR/
+            local OS_DIR=""
+            local ARCH_DIR=""
+            case "$OS" in
+              (darwin)
+                OS_DIR="macos"
+                ARCH_DIR="${SIGNED_DIR}/${OS_DIR}/${ARCH}"
+                ;;
+              (linux)
+                OS_DIR="linux"
+                ARCH_DIR="${COMPONENT_DIR}/${OS_DIR}/${ARCH}"
+                ;;
+              (windows)
+                OS_DIR="windows"
+                ARCH_DIR="${SIGNED_DIR}/${OS_DIR}/${ARCH}"
+                ;;
+            esac
+
+            if [ -z "$ARCH_DIR" ] || [ ! -d "$ARCH_DIR" ]; then
+              echo "  Warning: Architecture directory not found for ${ARRAY_NAME} entry (os: ${OS}, arch: ${ARCH})" >&2
+              return 1
+            fi
+
+            # Check that the arch directory exists and has content
+            if [ ! -d "$ARCH_DIR" ] || [ -z "$(ls -A "$ARCH_DIR" 2>/dev/null)" ]; then
+              echo "  Warning: Architecture directory is empty or not found: ${ARCH_DIR}" >&2
+              return 1
+            fi
+
             for FORMAT in $DELIVERY_FORMAT; do
               if [ "$FORMAT" = "compressed" ]; then
-                case "${SOURCE}" in
-                  (*darwin*)
-                    if [ -d "${SIGNED_DIR}/macos" ]; then
-                      # Skip if already created
-                      if [ ! -f "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" ]; then
-                        tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" macos
-                        echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
-                      fi
-                    fi
+                case "$OS" in
+                  (darwin|linux)
+                    # Archive everything in os/arch/, preserving nested directory structure
+                    # Archive from within os/arch/ so the final archive doesn't include os/arch/ prefix
+                    tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${ARCH_DIR}" .
+                    echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
                     ;;
-                  (*linux*)
-                    if [ -d "${SIGNED_DIR}/linux" ]; then
-                      if [ ! -f "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" ]; then
-                        tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${SIGNED_DIR}" linux
-                        echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
-                      fi
-                    fi
-                    ;;
-                  (*windows*)
-                    if [ -d "${SIGNED_DIR}/windows" ]; then
-                      local WINDOWS_FILENAME="${SOURCE_FILENAME%.tar.gz}.zip"
-                      if [ ! -f "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" ]; then
-                        (cd "${SIGNED_DIR}" && zip -r "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" windows)
-                        echo "  Created (${ARRAY_NAME}): ${WINDOWS_FILENAME}"
-                      fi
-                    fi
+                  (windows)
+                    # Replace .tar.gz extension with .zip for Windows archives
+                    local WINDOWS_FILENAME="${SOURCE_FILENAME}"
+                    WINDOWS_FILENAME="${WINDOWS_FILENAME%.tar.gz}.zip"
+                    # Create zip preserving nested directory structure from os/arch/
+                    (cd "${ARCH_DIR}" && zip -r "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" .)
+                    echo "  Created (${ARRAY_NAME}): ${WINDOWS_FILENAME}"
                     ;;
                 esac
               fi
 
               if [ "$FORMAT" = "raw" ]; then
-                case "${SOURCE}" in
-                  (*darwin*)
-                    if [ -d "${SIGNED_DIR}/macos" ]; then
-                      find "${SIGNED_DIR}/macos" -type f -exec cp -n "{}" "${READY_FOR_DIST_DIR}/" \;
-                    fi
-                    ;;
-                  (*linux*)
-                    if [ -d "${SIGNED_DIR}/linux" ]; then
-                      find "${SIGNED_DIR}/linux" -type f -exec cp -n "{}" "${READY_FOR_DIST_DIR}/" \;
-                    fi
-                    ;;
-                  (*windows*)
-                    if [ -d "${SIGNED_DIR}/windows" ]; then
-                      find "${SIGNED_DIR}/windows" -type f -exec cp -n "{}" "${READY_FOR_DIST_DIR}/" \;
-                    fi
-                    ;;
-                esac
+                # Copy all files from os/arch/, preserving nested structure
+                cp -r "${ARCH_DIR}"/* "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
+                echo "  Copied (${ARRAY_NAME}): contents from ${ARCH_DIR}"
               fi
             done
           }
@@ -1202,12 +1271,13 @@ spec:
             echo "  Processing ${NUM_MAPPED_FILES} files from files[] (Developer Portal):"
             for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
               FILE=$(jq -c --arg i "$i" '.files[$i|tonumber]' <<< "$COMPONENT_JSON")
-              compress_file_entry "$FILE" "files"
+              process_file_entry "$FILE" "files"
               
               # Track files for SNAPSHOT_JSON update
               SOURCE=$(jq -er '.source' <<< "$FILE" 2>/dev/null) || continue
               SOURCE_FILENAME=$(basename "$SOURCE")
-              if [[ "$SOURCE" == *"windows"* ]]; then
+              OS=$(jq -r '.os // empty' <<< "$FILE")
+              if [ "$OS" = "windows" ]; then
                 WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
                 UPDATED_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
                   '. + [($file | .source = $src)]' <<< "$UPDATED_FILES")
@@ -1218,14 +1288,14 @@ spec:
           fi
 
           # Process staged.files[] array (Customer Portal files)
-          # These may be different files than files[], need separate compression
+          # These may be different files than files[], need separate processing
           NUM_STAGED_FILES=$(jq '.staged.files | length // 0' <<< "${COMPONENT_JSON}")
           
           if [ "$NUM_STAGED_FILES" -gt 0 ]; then
             echo "  Processing ${NUM_STAGED_FILES} files from staged.files[] (Customer Portal):"
             for ((i = 0; i < NUM_STAGED_FILES; i++)) ; do
               FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT_JSON")
-              compress_file_entry "$FILE" "staged.files"
+              process_file_entry "$FILE" "staged.files"
             done
           fi
 

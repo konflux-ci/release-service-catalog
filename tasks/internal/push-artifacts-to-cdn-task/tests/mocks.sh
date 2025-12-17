@@ -144,6 +144,7 @@ function oras() {
         touch testproduct-binary-linux-amd64.tar.gz
     elif [[ "$*" =~ pull.*-o.* ]]; then
         # Handle oras pull with -o output directory (used for signed binaries)
+        # oras pull extracts the directory structure that was pushed (e.g., macos/, windows/)
         echo Simulating oras pull with output directory
         local output_dir=""
         local args=($*)
@@ -156,32 +157,37 @@ function oras() {
         if [[ -n "$output_dir" ]]; then
             mkdir -p "$output_dir"
             # Determine component from the pull URL
+            # Files should be in os/arch/ structure within the output directory
             if [[ "$*" =~ testproduct2/signed ]]; then
-                touch "$output_dir/testproduct2-binary-darwin-amd64"
-                touch "$output_dir/testproduct2-binary-windows-amd64.exe"
+                mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
+                touch "$output_dir/macos/amd64/testproduct2-binary-darwin-amd64"
+                touch "$output_dir/windows/amd64/testproduct2-binary-windows-amd64.exe"
             elif [[ "$*" =~ testproduct3/signed ]]; then
-                touch "$output_dir/testproduct3-binary-darwin-amd64"
-                touch "$output_dir/testproduct3-binary-windows-amd64.exe"
+                mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
+                touch "$output_dir/macos/amd64/testproduct3-binary-darwin-amd64"
+                touch "$output_dir/windows/amd64/testproduct3-binary-windows-amd64.exe"
             else
-                touch "$output_dir/testproduct-binary-darwin-amd64"
-                touch "$output_dir/testproduct-binary-windows-amd64.exe"
+                mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
+                touch "$output_dir/macos/amd64/testproduct-binary-darwin-amd64"
+                touch "$output_dir/windows/amd64/testproduct-binary-windows-amd64.exe"
             fi
         fi
     elif [[ "$*" =~ pull.* ]]; then
         echo Simulating oras pull
         # Determine component from the pull URL and create appropriate files
+        # Files should be in os/arch/ structure (e.g., windows/amd64/, macos/amd64/)
         if [[ "$*" =~ testproduct2/signed ]] || [[ "$*" =~ testproduct2/unsigned ]]; then
-            mkdir -p windows macos
-            touch windows/testproduct2-binary-windows-amd64.exe
-            touch macos/testproduct2-binary-darwin-amd64
+            mkdir -p windows/amd64 macos/amd64
+            touch windows/amd64/testproduct2-binary-windows-amd64.exe
+            touch macos/amd64/testproduct2-binary-darwin-amd64
         elif [[ "$*" =~ testproduct3/signed ]] || [[ "$*" =~ testproduct3/unsigned ]]; then
-            mkdir -p windows macos
-            touch windows/testproduct3-binary-windows-amd64.exe
-            touch macos/testproduct3-binary-darwin-amd64
+            mkdir -p windows/amd64 macos/amd64
+            touch windows/amd64/testproduct3-binary-windows-amd64.exe
+            touch macos/amd64/testproduct3-binary-darwin-amd64
         else
-            mkdir -p windows macos
-            touch windows/testproduct-binary-windows-amd64.exe
-            touch macos/testproduct-binary-darwin-amd64
+            mkdir -p windows/amd64 macos/amd64
+            touch windows/amd64/testproduct-binary-windows-amd64.exe
+            touch macos/amd64/testproduct-binary-darwin-amd64
         fi
     fi
 }
