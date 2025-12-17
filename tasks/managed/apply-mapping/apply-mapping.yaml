@@ -29,9 +29,8 @@ spec:
     * "{{ digest_sha }}" -> The image digest of the respective component
     * "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the
       repository and generates the next sequential tag (e.g., if the highest tag is v1.0.0-2, it will generate v1.0.0-3)
-    * "{{ oci_version }}" -> The version from OCI image annotations for Helm charts as media type, and from OCI image
-      labels for the other supported media types (extracts org.opencontainers.image.version and converts + to _ for
-      tag compliance)
+    * "{{ oci_version }}" -> The version from OCI image annotations (org.opencontainers.image.version), with fallback
+      to OCI image labels if not present in annotations (converts + to _ for tag compliance)
 
     You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
   params:
@@ -394,30 +393,28 @@ spec:
             arch="$(jq -rs 'map(.platform.architecture) | .[0]' <<< "$arch_json")"
             os="$(jq -rs 'map(.platform.os) | .[0]' <<< "$arch_json")"
 
-            # Get configMediaType from architecture info to determine artifact type
-            config_media_type="$(jq -rs '.[0].configMediaType' <<< "$arch_json")"
+            # Get first digest from architecture info to construct image reference
+            first_digest="$(jq -rs '.[0].digest' <<< "$arch_json")"
 
-            # Check if this is a Helm chart - handle Helm artifacts specifically
-            if [[ "$config_media_type" == "application/vnd.cncf.helm.config.v1+json" ]]; then
-                # This is a Helm chart - use raw manifest approach
-                echo "Detected Helm chart artifact for ${NAME}, using raw manifest"
-                raw_manifest="$(skopeo inspect --retry-times 3 --no-tags --raw docker://"${IMAGE_REF}" | jq -c)"
-                oci_version_raw="$(jq -r '.annotations."org.opencontainers.image.version" // ""' <<< "$raw_manifest")"
-                build_date="$(jq -r '.annotations."org.opencontainers.image.created" // ""' <<< "$raw_manifest")"
-                env_variables="[]"
-                labels="{}"
-            else
-                # This is a regular container image - use standard skopeo inspect
-                image_metadata="$(skopeo inspect --retry-times 3 --no-tags \
-                  --override-os "${os}" --override-arch "${arch}" docker://"${IMAGE_REF}" | jq -c)"
-                # For timestamp, use Labels.build-date and fallback to Created
-                build_date="$(jq -r '.Labels."build-date" // .Created // ""' <<< "$image_metadata")"
-                # Get org.opencontainers.image.version from annotations, and fallback to Labels if not.
-                oci_version_raw="$(jq -r \
-                  '.Labels."org.opencontainers.image.version" // ""'\
-                  <<< "$image_metadata")"
-                env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
-                labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+            # Construct image reference with the first architecture's digest for annotations
+            image_with_digest="${IMAGE_REF%@*}@${first_digest}"
+
+            # Get raw manifest to extract annotations
+            raw_manifest="$(skopeo inspect --retry-times 3 --no-tags --raw docker://"${image_with_digest}" | jq -c)"
+            annotations="$(jq -c '.annotations // {}' <<< "$raw_manifest")"
+
+            # Get image metadata for labels, env, build_date (standard inspect)
+            image_metadata="$(skopeo inspect --retry-times 3 --no-tags \
+              --override-os "${os}" --override-arch "${arch}" docker://"${IMAGE_REF}" | jq -c)"
+            # For timestamp, use Labels.build-date and fallback to Created
+            build_date="$(jq -r '.Labels."build-date" // .Created // ""' <<< "$image_metadata")"
+            env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
+            labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+
+            # Get oci_version_raw from annotations, fallback to labels
+            oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$annotations")"
+            if [ -z "$oci_version_raw" ]; then
+              oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$labels")"
             fi
 
             # Add image env_variables metadata to component
@@ -426,6 +423,17 @@ spec:
               echo "$env_variables" > "$env_file"
               jq --argjson i "$i" --slurpfile env "$env_file" \
                 '.components[$i].metadata = (.components[$i].metadata // {}) * {env_variables: $env[0]}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # Add image annotations metadata to component
+            if [ "$(jq 'length' <<< "$annotations")" -ne 0 ] ; then
+              annotations_file=$(mktemp)
+              # Convert annotations from {key: value} to [{name: key, value: value}]
+              jq -c 'if . then to_entries | map({name: .key, value: .value}) else [] end' \
+               <<< "$annotations" > "$annotations_file"
+              jq --argjson i "$i" --slurpfile annotations "$annotations_file" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {annotations: $annotations[0]}' \
                 "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             fi
 
