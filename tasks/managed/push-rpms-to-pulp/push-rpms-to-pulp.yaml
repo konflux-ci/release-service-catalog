@@ -179,14 +179,14 @@ spec:
         TOKEN_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
 
         # Function to get OAuth2 access token
-        
+
         get_access_token() {
           local token
           token=$(curl --retry 3 -s -X POST "$TOKEN_URL" \
             -u "${CLIENT_ID}:${CLIENT_SECRET}" \
             -d "grant_type=client_credentials" \
             -d "scope=api.console" | jq -r '.access_token')
-          
+
           if [[ -z "$token" || "$token" == "null" ]]; then
             echo "Error: Failed to get OAuth2 access token" >&2
             return 1
@@ -199,28 +199,28 @@ spec:
           local repo_name="$1"
           local hrefs_json="$2"
           local domain="${PULP_DOMAIN}"
-          
+
           # Disable command echoing for sensitive operations
           set +x
           local access_token
           access_token=$(get_access_token) || return 1
-          
+
           # Get repository href
           local repo_href
           repo_href=$(curl --retry 3 -s -H "Authorization: Bearer $access_token" \
             "${PULP_BASE_URL}/api/pulp/${domain}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
             | jq -r '.results[0].pulp_href')
           set -x
-          
+
           if [[ -z "$repo_href" || "$repo_href" == "null" ]]; then
             echo "Error: Could not find repository href for ${repo_name}"
             return 1
           fi
-          
+
           # Convert hrefs format: [{"pulp_href": "..."}] -> ["..."]
           local add_content_units
           add_content_units=$(echo "$hrefs_json" | jq '[.[].pulp_href]')
-          
+
           # Add content to repository
           echo "Calling API: POST ${PULP_BASE_URL}${repo_href}modify/"
           set +x
@@ -229,6 +229,54 @@ spec:
             -H "Content-Type: application/json" \
             -d "{\"add_content_units\": $add_content_units}"
           set -x
+        }
+
+        # Function to upload an RPM to Pulp with retries
+        pulp_upload_with_retry() {
+          local file_path="$1"
+          local attempts=5
+          local delay_seconds=2
+          local response=""
+          local rc=1
+          local href=""
+          local relpath
+          relpath="$(basename "${file_path}")"
+          # Build a printable command string for logging (no secrets included)
+          local printable_cmd
+          printable_cmd="pulp --config \"${PULP_CONFIG_FILE}\" --domain \"${PULP_DOMAIN}\" rpm content upload"
+          printable_cmd+=" --file \"${file_path}\" --relative-path \"${relpath}\""
+
+          for ((i=1; i<=attempts; i++)); do
+            # For retries (i > 1) make it explicit which command is being retried
+            if (( i > 1 )); then
+              echo "Retrying command (attempt ${i}/${attempts}):" >&2
+              echo "  ${printable_cmd}" >&2
+            fi
+            set +e
+            response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
+              --file "${file_path}" --relative-path "${relpath}")
+            rc=$?
+            set -e
+
+            # Consider success only when command succeeds and pulp_href is present
+            href=$(jq -r '.pulp_href // empty' <<< "$response")
+            if [[ $rc -eq 0 && -n "$href" ]]; then
+              echo "$response"
+              return 0
+            fi
+
+            echo "Upload attempt ${i}/${attempts} failed for ${file_path} (rc=${rc}, href='${href:-}')." >&2
+            echo "Command: ${printable_cmd}" >&2
+            if (( i < attempts )); then
+              sleep "${delay_seconds}"
+              # Exponential backoff
+              delay_seconds=$((delay_seconds * 2))
+            fi
+          done
+
+          # Return the last response for diagnostics on failure
+          echo "$response"
+          return 1
         }
 
         set -x
@@ -366,15 +414,12 @@ spec:
           for pkg in "${FILES_TO_UPLOAD[@]}"; do
             if [[ "$pkg" == *."$arch".rpm ]]; then
               echo "Uploading $pkg to $arch repository..."
-              set +e
-              upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
-                --file "${pkg}" --relative-path "$(basename "${pkg}")")
-              set -e
-              href=$(jq -r '.pulp_href' <<< "$upload_response")
-              if [[ -z "$href" || "$href" == "null" ]]; then
-                echo "Error: Failed to get pulp_href for $pkg. Upload response: $upload_response"
+              upload_response=$(pulp_upload_with_retry "${pkg}") || {
+                echo "Error: Failed to upload ${pkg} after retries."
+                echo "Last response: ${upload_response}"
                 exit 1
-              fi
+              }
+              href=$(jq -r '.pulp_href' <<< "$upload_response")
               echo "Uploaded $pkg -> $href"
 
               # Add href to collection
@@ -387,15 +432,12 @@ spec:
             # Upload .noarch.rpm files to this arch repository
             if [[ "$pkg" == *.noarch.rpm ]]; then
               echo "Uploading noarch $pkg to $arch repository..."
-              set +e
-              upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
-                --file "${pkg}" --relative-path "$(basename "${pkg}")")
-              set -e
-              href=$(jq -r '.pulp_href' <<< "$upload_response")
-              if [[ -z "$href" || "$href" == "null" ]]; then
-                echo "Error: Failed to get pulp_href for $pkg. Upload response: $upload_response"
+              upload_response=$(pulp_upload_with_retry "${pkg}") || {
+                echo "Error: Failed to upload ${pkg} after retries."
+                echo "Last response: ${upload_response}"
                 exit 1
-              fi
+              }
+              href=$(jq -r '.pulp_href' <<< "$upload_response")
               echo "Uploaded $pkg -> $href"
 
               # Add href to collection
@@ -419,15 +461,12 @@ spec:
         for pkg in "${FILES_TO_UPLOAD[@]}"; do
           if [[ "$pkg" == *.src.rpm ]]; then
             echo "Uploading $pkg (arch: source)..."
-            set +e
-            upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm content upload \
-              --file "${pkg}" --relative-path "$(basename "${pkg}")")
-            set -e
-            href=$(jq -r '.pulp_href' <<< "$upload_response")
-            if [[ -z "$href" || "$href" == "null" ]]; then
-              echo "Error: Failed to get pulp_href for $pkg. Upload response: $upload_response"
+            upload_response=$(pulp_upload_with_retry "${pkg}") || {
+              echo "Error: Failed to upload ${pkg} after retries."
+              echo "Last response: ${upload_response}"
               exit 1
-            fi
+            }
+            href=$(jq -r '.pulp_href' <<< "$upload_response")
             echo "Uploaded $pkg -> $href"
 
             # Add href to collection

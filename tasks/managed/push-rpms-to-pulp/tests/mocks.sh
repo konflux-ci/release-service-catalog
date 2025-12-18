@@ -5,11 +5,16 @@ set -ex
 
 # Counter for generating unique hrefs
 UPLOAD_COUNTER=0
+# One-time failure switch for rpm content upload (controlled by image-based behavior)
+UPLOAD_FAIL_ONCE_ENABLED=0
+# Persisted state across subshells (command substitutions) for "fail once" behavior
+UPLOAD_FAIL_ONCE_ENABLED_FILE="/tmp/mock_upload_failonce_enabled"
+UPLOAD_FAIL_ONCE_DONE_FILE="/tmp/mock_upload_failonce_done"
 
 function curl() {
     # Mock curl for OAuth2 and API calls
     local args="$*"
-    
+
     if [[ "$args" == *"sso.redhat.com"* ]]; then
         # OAuth2 token request
         echo '{"access_token": "mock-access-token", "expires_in": 3600}'
@@ -44,7 +49,17 @@ function pulp() {
     elif [[ "$*" == *"rpm repository list"* ]]; then
         echo "[ {\"name\": \"x86_64\"}, {\"name\": \"ppc64le\"}, {\"name\": \"s390x\"}, {\"name\": \"aarch64\"}, {\"name\": \"source\"} ]"
     elif [[ "$*" == *"rpm content upload"* ]]; then
-        # Return JSON with pulp_href for each upload
+        # Optionally fail the very first upload attempt once to exercise retry logic.
+        # Always prioritize the persisted "done" file to avoid re-failing across subshells.
+        if [[ -f "${UPLOAD_FAIL_ONCE_DONE_FILE}" ]]; then
+            :
+        elif [[ -f "${UPLOAD_FAIL_ONCE_ENABLED_FILE}" || "${UPLOAD_FAIL_ONCE_ENABLED}" -eq 1 ]]; then
+            echo "Error: ('Connection aborted.', ConnectionResetError(104, 'Connection reset by peer'))" >&2
+            # Mark as done so subsequent attempts succeed
+            touch "${UPLOAD_FAIL_ONCE_DONE_FILE}"
+            return 1
+        fi
+        # Return JSON with pulp_href for each (successful) upload
         UPLOAD_COUNTER=$((UPLOAD_COUNTER + 1))
         echo "{\"pulp_href\": \"/api/pulp/mock/api/v3/content/rpm/packages/mock-uuid-${UPLOAD_COUNTER}/\"}"
     elif [[ "$*" == *"rpm repository content modify"* ]]; then
@@ -95,7 +110,35 @@ function oras() {
             echo "The captured output file dir is: $output_file_dir"
         fi
 
-        if [[ "$args" == *"quay.io/test/happypath"* ]]; then
+        if [[ "$args" == *"quay.io/test/happypath-failonce"* ]]; then
+            # Enable one-time failure for rpm content upload
+            UPLOAD_FAIL_ONCE_ENABLED=1
+            # Persist enablement and reset done flag for this container
+            echo "1" > "${UPLOAD_FAIL_ONCE_ENABLED_FILE}"
+            rm -f "${UPLOAD_FAIL_ONCE_DONE_FILE}"
+            touch $output_file_dir/hello-2.12.1-6.fc44.aarch64.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.ppc64le.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.s390x.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.src.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.x86_64.rpm
+            touch $output_file_dir/hello-docs-2.12.1-6.fc44.noarch.rpm
+            touch $output_file_dir/hello-debuginfo-2.12.1-6.fc44.aarch64.rpm
+            touch $output_file_dir/hello-debuginfo-2.12.1-6.fc44.ppc64le.rpm
+            touch $output_file_dir/hello-debuginfo-2.12.1-6.fc44.s390x.rpm
+            touch $output_file_dir/hello-debuginfo-2.12.1-6.fc44.x86_64.rpm
+            touch $output_file_dir/hello-debugsource-2.12.1-6.fc44.aarch64.rpm
+            touch $output_file_dir/hello-debugsource-2.12.1-6.fc44.ppc64le.rpm
+            touch $output_file_dir/hello-debugsource-2.12.1-6.fc44.s390x.rpm
+            touch $output_file_dir/hello-debugsource-2.12.1-6.fc44.x86_64.rpm
+            # mimic having logs from each rpm build
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.aarch64.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.ppc64le.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.s390x.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
+            touch $output_file_dir/logs/hello-debuginfo-2.12.1-6.fc44.aarch64.rpm.log
+        elif [[ "$args" == *"quay.io/test/happypath"* ]]; then
             touch $output_file_dir/hello-2.12.1-6.fc44.aarch64.rpm
             touch $output_file_dir/hello-2.12.1-6.fc44.ppc64le.rpm
             touch $output_file_dir/hello-2.12.1-6.fc44.s390x.rpm
