@@ -171,6 +171,61 @@ spec:
         set +x
         echo "${CONFIG_FILE_CONTENT:?}" > "/tmp/cli.toml"
         export PULP_CONFIG_FILE="/tmp/cli.toml"
+
+        # Extract OAuth2 credentials from cli.toml
+        PULP_BASE_URL=$(grep -E "^base_url\s*=" "$PULP_CONFIG_FILE" | sed 's/.*=\s*"\(.*\)"/\1/' | sed 's:/*$::')
+        CLIENT_ID=$(grep -E "^client_id\s*=" "$PULP_CONFIG_FILE" | sed 's/.*=\s*"\(.*\)"/\1/')
+        CLIENT_SECRET=$(grep -E "^client_secret\s*=" "$PULP_CONFIG_FILE" | sed 's/.*=\s*"\(.*\)"/\1/')
+        TOKEN_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
+
+        # Function to get OAuth2 access token
+        
+        get_access_token() {
+          local token
+          token=$(curl --retry 3 -s -X POST "$TOKEN_URL" \
+            -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+            -d "grant_type=client_credentials" \
+            -d "scope=api.console" | jq -r '.access_token')
+          
+          if [[ -z "$token" || "$token" == "null" ]]; then
+            echo "Error: Failed to get OAuth2 access token" >&2
+            return 1
+          fi
+          echo "$token"
+        }
+
+        # Function to add content to a repository via API
+        add_content_to_repo() {
+          local repo_name="$1"
+          local hrefs_json="$2"
+          local domain="${PULP_DOMAIN}"
+          
+          local access_token
+          access_token=$(get_access_token) || return 1
+          
+          # Get repository href
+          local repo_href
+          repo_href=$(curl --retry 3 -s -H "Authorization: Bearer $access_token" \
+            "${PULP_BASE_URL}/api/pulp/${domain}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
+            | jq -r '.results[0].pulp_href')
+          
+          if [[ -z "$repo_href" || "$repo_href" == "null" ]]; then
+            echo "Error: Could not find repository href for ${repo_name}"
+            return 1
+          fi
+          
+          # Convert hrefs format: [{"pulp_href": "..."}] -> ["..."]
+          local add_content_units
+          add_content_units=$(echo "$hrefs_json" | jq '[.[].pulp_href]')
+          
+          # Add content to repository
+          echo "Calling API: POST ${PULP_BASE_URL}${repo_href}modify/"
+          curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
+            -H "Authorization: Bearer $access_token" \
+            -H "Content-Type: application/json" \
+            -d "{\"add_content_units\": $add_content_units}"
+        }
+
         set -x
 
         DOMAIN_EXISTS=$(pulp --config "$PULP_CONFIG_FILE" domain show --name "${PULP_DOMAIN}" \
@@ -347,14 +402,10 @@ spec:
             fi
           done
 
-          # Bulk add all collected hrefs to repository
+          # Bulk add all collected hrefs to repository via API
           if [[ $(jq 'length' <<< "$HREFS_JSON") -gt 0 ]]; then
             echo "Adding $(jq 'length' <<< "$HREFS_JSON") packages to $arch repository..."
-            set +e
-            pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm repository content modify \
-              --repository "$arch" \
-              --add-content "$HREFS_JSON"
-            set -e
+            add_content_to_repo "$arch" "$HREFS_JSON"
           fi
         done
 
@@ -383,14 +434,10 @@ spec:
           fi
         done
 
-        # Bulk add all source rpms to source repository
+        # Bulk add all source rpms to source repository via API
         if [[ $(jq 'length' <<< "$SRC_HREFS_JSON") -gt 0 ]]; then
           echo "Adding $(jq 'length' <<< "$SRC_HREFS_JSON") source packages to source repository..."
-          set +e
-          pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" rpm repository content modify \
-            --repository "source" \
-            --add-content "$SRC_HREFS_JSON"
-          set -e
+          add_content_to_repo "source" "$SRC_HREFS_JSON"
         fi
 
         echo "Results written to: $RESULTS_FILE"

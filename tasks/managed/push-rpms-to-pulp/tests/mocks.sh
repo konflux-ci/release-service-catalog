@@ -6,6 +6,37 @@ set -ex
 # Counter for generating unique hrefs
 UPLOAD_COUNTER=0
 
+function curl() {
+    # Mock curl for OAuth2 and API calls
+    local args="$*"
+    
+    if [[ "$args" == *"sso.redhat.com"* ]]; then
+        # OAuth2 token request
+        echo '{"access_token": "mock-access-token", "expires_in": 3600}'
+    elif [[ "$args" == *"repositories/rpm/rpm"* ]]; then
+        # Repository list API call - extract repo name from URL
+        if [[ "$args" == *"name=source"* ]]; then
+            echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/source-uuid/"}]}'
+        elif [[ "$args" == *"name=x86_64"* ]]; then
+            echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/x86_64-uuid/"}]}'
+        elif [[ "$args" == *"name=aarch64"* ]]; then
+            echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/aarch64-uuid/"}]}'
+        elif [[ "$args" == *"name=ppc64le"* ]]; then
+            echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/ppc64le-uuid/"}]}'
+        elif [[ "$args" == *"name=s390x"* ]]; then
+            echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/s390x-uuid/"}]}'
+        else
+            echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/default-uuid/"}]}'
+        fi
+    elif [[ "$args" == *"modify"* ]]; then
+        # Repository content modify API call
+        echo '{"task": "/api/pulp/mock/api/v3/tasks/mock-task-id/"}'
+    else
+        # Fall back to real curl for other calls
+        command curl "$@"
+    fi
+}
+
 function pulp() {
     echo $* >> $(params.dataDir)/mock_pulp.txt
     if [[ "$*" == *"domain show"* ]]; then
