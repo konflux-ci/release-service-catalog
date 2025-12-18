@@ -108,11 +108,12 @@ function skopeo() {
 
 function get-image-architectures() {
     if [[ "$1" == *"helm-chart"* ]]; then
-        # Return Helm chart format (single arch)
+        # Return Helm chart format (single arch) with configMediaType
         jq -nc '{
             "platform": {"architecture": "amd64", "os": "linux"},
             "digest": "sha256:789abcdef123456",
-            "multiarch": false
+            "multiarch": false,
+            "configMediaType": "application/vnd.cncf.helm.config.v1+json"
         }'
     else
         # Return regular container image format (multi-arch)
