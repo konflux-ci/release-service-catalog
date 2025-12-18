@@ -399,17 +399,28 @@ spec:
             # Construct image reference with the first architecture's digest for annotations
             image_with_digest="${IMAGE_REF%@*}@${first_digest}"
 
-            # Get raw manifest to extract annotations
+            # Get raw manifest to extract annotations (works for all image types)
             raw_manifest="$(skopeo inspect --retry-times 3 --no-tags --raw docker://"${image_with_digest}" | jq -c)"
             annotations="$(jq -c '.annotations // {}' <<< "$raw_manifest")"
 
-            # Get image metadata for labels, env, build_date (standard inspect)
-            image_metadata="$(skopeo inspect --retry-times 3 --no-tags \
-              --override-os "${os}" --override-arch "${arch}" docker://"${IMAGE_REF}" | jq -c)"
-            # For timestamp, use Labels.build-date and fallback to Created
-            build_date="$(jq -r '.Labels."build-date" // .Created // ""' <<< "$image_metadata")"
-            env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
-            labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+            # Get configMediaType from architecture info to determine if this is a Helm chart
+            config_media_type="$(jq -rs '.[0].configMediaType' <<< "$arch_json")"
+
+            # Get image metadata for labels, env, build_date
+            if [[ "$config_media_type" == "application/vnd.cncf.helm.config.v1+json" ]]; then
+                # Helm charts don't support standard skopeo inspect - get build_date from annotations
+                build_date="$(jq -r '.["org.opencontainers.image.created"] // ""' <<< "$annotations")"
+                env_variables="[]"
+                labels="{}"
+            else
+                # Standard container images - use standard skopeo inspect
+                image_metadata="$(skopeo inspect --retry-times 3 --no-tags \
+                  --override-os "${os}" --override-arch "${arch}" docker://"${IMAGE_REF}" | jq -c)"
+                # For timestamp, use Labels.build-date and fallback to Created
+                build_date="$(jq -r '.Labels."build-date" // .Created // ""' <<< "$image_metadata")"
+                env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
+                labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+            fi
 
             # Get oci_version_raw from annotations, fallback to labels
             oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$annotations")"
