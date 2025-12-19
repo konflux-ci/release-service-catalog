@@ -172,7 +172,7 @@ spec:
         pyxisKey="$(cat /etc/secrets/key)"
 
         set -x
-        
+
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         CONCURRENT_LIMIT=$(params.concurrentLimit)
         REQUEST_COUNT=0
@@ -251,10 +251,12 @@ spec:
         declare -a to_sign_digests=()
 
         # Arrays to store information for parallel processing
-        declare -a find_signatures_jobs=()
+        declare -a find_signatures_files=()
         declare -a component_data=()
+        FIND_SIGNATURES_SUCCESS=true
+        FIND_SIGNATURES_JOB_COUNT=0
 
-        # First pass: collect all find_signatures calls and start them in parallel
+        # First pass: collect all find_signatures calls and start them with concurrency limit
         for (( i = 0; i < COMPONENTS_LENGTH; i++ )); do
             component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_PATH}")
             referenceContainerImage=$(jq -r '.containerImage' <<< "$component")
@@ -289,12 +291,12 @@ spec:
               select-oci-auth "${sourceContainer}" > "$AUTH_FILE"
               sourceContainerDigest=$(oras resolve --registry-config "$AUTH_FILE" "${sourceContainer}")
             fi
-            
-            NUM_REPOS=$(jq -c '.repositories | length' <<< "$component")           
-            for ((j = 0; j < NUM_REPOS; j++)); do 
+
+            NUM_REPOS=$(jq -c '.repositories | length' <<< "$component")
+            for ((j = 0; j < NUM_REPOS; j++)); do
               repo=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
               TAGS=$(jq -r '.tags | join(" ")' <<< "$repo")
-              
+
               rh_registry_repo=$(jq -er '."rh-registry-repo"' <<< "$repo" )
               registry_access_repo=$(jq -er '."registry-access-repo"' <<< "$repo" )
               repository="${rh_registry_repo#*/}"
@@ -309,35 +311,69 @@ spec:
               # Store component data for later processing
               component_data+=("${i}|${repository}|${TAGS}|${manifest_digests}|${sourceContainerDigest}|${rh_registry_repo}|${registry_access_repo}")
 
-              # Start find_signatures jobs in parallel for manifest digests
+              # Start find_signatures jobs with concurrency limit for manifest digests
               for manifest_digest in $manifest_digests; do
-                echo "Starting find_signatures job for manifest digest: ${manifest_digest}"
+                while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+                  wait -n || FIND_SIGNATURES_SUCCESS=false
+                done
+                ((++FIND_SIGNATURES_JOB_COUNT))
+                # Use hex digest without sha256: prefix for filename consistency
+                digest_filename="${manifest_digest#sha256:}"
+                find_signatures_files+=("${digest_filename}")
                 find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                --manifest_digest "${manifest_digest}" \
-                --repository "${repository}" \
-                --output_file "/tmp/${manifest_digest}" &
-                find_signatures_jobs+=($!)
+                  --manifest_digest "${manifest_digest}" \
+                  --repository "${repository}" \
+                  --output_file "/tmp/${manifest_digest}" \
+                  > "/tmp/find_sig_${digest_filename}.out" \
+                  2> "/tmp/find_sig_${digest_filename}.err" &
               done
 
               # Start find_signatures job for source container digest if it exists
               if [ "${sourceContainerDigest}" != "" ] ; then
-                echo "Starting find_signatures job for source container digest: ${sourceContainerDigest}"
+                while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+                  wait -n || FIND_SIGNATURES_SUCCESS=false
+                done
+                ((++FIND_SIGNATURES_JOB_COUNT))
+                # Use hex digest without sha256: prefix for filename consistency
+                digest_filename="${sourceContainerDigest#sha256:}"
+                find_signatures_files+=("${digest_filename}")
                 find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
-                --manifest_digest "${sourceContainerDigest}" \
-                --repository "${repository}" \
-                --output_file "/tmp/${sourceContainerDigest}" &
-                find_signatures_jobs+=($!)
+                  --manifest_digest "${sourceContainerDigest}" \
+                  --repository "${repository}" \
+                  --output_file "/tmp/${sourceContainerDigest}" \
+                  > "/tmp/find_sig_${digest_filename}.out" \
+                  2> "/tmp/find_sig_${digest_filename}.err" &
               fi
 
             done
         done
 
         # Wait for all find_signatures jobs to complete
-        echo "Waiting for ${#find_signatures_jobs[@]} find_signatures jobs to complete..."
-        for job in "${find_signatures_jobs[@]}"; do
-          wait "$job"
+        echo "Waiting for ${FIND_SIGNATURES_JOB_COUNT} find_signatures jobs to complete..."
+        while (( ${RUNNING_JOBS@P} > 0 )); do
+          wait -n || FIND_SIGNATURES_SUCCESS=false
         done
         echo "All find_signatures jobs completed"
+
+        # Print outputs and errors for each find_signatures job
+        for digest_filename in "${find_signatures_files[@]}"; do
+            if [ -f "/tmp/find_sig_${digest_filename}.out" ]; then
+                echo "=== find_signatures Output (${digest_filename}) ==="
+                cat "/tmp/find_sig_${digest_filename}.out"
+                echo
+            fi
+            if [ -f "/tmp/find_sig_${digest_filename}.err" ] && \
+               [ -s "/tmp/find_sig_${digest_filename}.err" ]; then
+                echo "=== find_signatures Errors (${digest_filename}) ==="
+                cat "/tmp/find_sig_${digest_filename}.err"
+                echo
+            fi
+        done
+
+        if [ "$FIND_SIGNATURES_SUCCESS" != true ]; then
+            echo "One or more find_signatures jobs failed. Please check the logs above for details."
+            exit 1
+        fi
 
         # Second pass: process the results now that all find_signatures calls are complete
         for component_info in "${component_data[@]}"; do
