@@ -282,7 +282,7 @@ spec:
             fi
         fi
 
-        # Commit and push all changes
+        # Commit and push all changes with retry logic to handle race conditions
         if git status --porcelain | grep -q '^[ AM]'; then
             commit_message="Automated push from Build and Sign pipeline"
             if [ "$arch_count" -gt 1 ]; then
@@ -290,8 +290,42 @@ spec:
             fi
 
             git commit -m "$commit_message"
-            git push -u origin "$(params.gitBranch)"
-            echo "Successfully pushed artifacts for $arch_count architecture(s) to Git"
+
+            # Get batch size from envfile for retry attempts (default to 1 if not set)
+            max_attempts="${BATCH_SIZE:-1}"
+            echo "Using BATCH_SIZE=${max_attempts} for push retry attempts"
+
+            attempt=1
+            push_success=false
+
+            while [ $attempt -le "$max_attempts" ]; do
+                echo "Push attempt $attempt of $max_attempts"
+
+                if git push -u origin "$(params.gitBranch)"; then
+                    echo "Successfully pushed artifacts for $arch_count architecture(s) to Git on attempt $attempt"
+                    push_success=true
+                    break
+                else
+                    echo "Push failed on attempt $attempt"
+
+                    if [ $attempt -lt "$max_attempts" ]; then
+                        echo "Pulling latest changes and retrying..."
+                        # Pull with rebase to incorporate remote changes
+                        git pull --rebase origin "$(params.gitBranch)"
+                        attempt=$((attempt + 1))
+                        # Add small delay to reduce contention
+                        sleep 2
+                    else
+                        echo "ERROR: Failed to push after $max_attempts attempts"
+                        exit 1
+                    fi
+                fi
+            done
+
+            if [ "$push_success" = false ]; then
+                echo "ERROR: Failed to push artifacts to Git"
+                exit 1
+            fi
         else
-            echo "No changes to commit"
+            echo "No changes to commit."
         fi
