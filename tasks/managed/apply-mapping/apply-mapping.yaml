@@ -403,16 +403,18 @@ spec:
             raw_manifest="$(skopeo inspect --retry-times 3 --no-tags --raw docker://"${image_with_digest}" | jq -c)"
             annotations="$(jq -c '.annotations // {}' <<< "$raw_manifest")"
 
-            # Get configMediaType from architecture info to determine if this is a Helm chart
-            config_media_type="$(jq -rs '.[0].configMediaType' <<< "$arch_json")"
+            # Get config.mediaType from raw manifest to determine if this is a standard container image
+            config_media_type="$(jq -r '.config.mediaType // ""' <<< "$raw_manifest")"
 
             # Get image metadata for labels, env, build_date
-            if [[ "$config_media_type" == "application/vnd.cncf.helm.config.v1+json" ]]; then
-                # Helm charts don't support standard skopeo inspect - get build_date from annotations
-                build_date="$(jq -r '.["org.opencontainers.image.created"] // ""' <<< "$annotations")"
-                env_variables="[]"
-                labels="{}"
-            else
+            # Only standard container images support skopeo inspect without --raw
+            # Standard config types are:
+            #   - application/vnd.oci.image.config.v1+json (OCI images)
+            #   - application/vnd.docker.container.image.v1+json (Docker images)
+            # All other artifacts (Helm charts, ML models, empty configs, etc.) don't have
+            # labels/env and would fail with skopeo inspect
+            if [[ "$config_media_type" == "application/vnd.oci.image.config.v1+json" ]] || \
+               [[ "$config_media_type" == "application/vnd.docker.container.image.v1+json" ]]; then
                 # Standard container images - use standard skopeo inspect
                 image_metadata="$(skopeo inspect --retry-times 3 --no-tags \
                   --override-os "${os}" --override-arch "${arch}" docker://"${IMAGE_REF}" | jq -c)"
@@ -420,6 +422,12 @@ spec:
                 build_date="$(jq -r '.Labels."build-date" // .Created // ""' <<< "$image_metadata")"
                 env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
                 labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+            else
+                # Non-standard artifacts (Helm charts, ML models, etc.) don't support
+                # standard skopeo inspect - get build_date from annotations if available
+                build_date="$(jq -r '.["org.opencontainers.image.created"] // ""' <<< "$annotations")"
+                env_variables="[]"
+                labels="{}"
             fi
 
             # Get oci_version_raw from annotations, fallback to labels
