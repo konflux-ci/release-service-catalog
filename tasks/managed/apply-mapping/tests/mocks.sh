@@ -46,6 +46,28 @@ function skopeo() {
       return
   fi
 
+  # Raw manifest inspections (for annotations and config.mediaType) - these use the digest from get-image-architectures
+  if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/helm-chart"* ]]
+  then
+    # Helm chart - has helm config mediaType, not a standard container image
+    echo '{"config": {"mediaType": "application/vnd.cncf.helm.config.v1+json"}, "annotations": {"org.opencontainers.image.version": "2.0.1+alpha", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/web-app"* ]]
+  then
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {"org.opencontainers.image.version": "1.2.3-beta", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/metadata"* ]]
+  then
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {"org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://"* ]]
+  then
+    # Default: standard OCI container image config
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {}}'
+    return
+  fi
+
+  # Standard inspections (for labels, env, etc.)
   if [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/badimage"* ]]
   then
     echo '{"Labels": {"not-a-build-date": "2024-07-29T02:17:29"}}'
@@ -60,11 +82,11 @@ function skopeo() {
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/web-app"* ]]
   then
-    echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}, "annotations": {"org.opencontainers.image.version": "1.2.3-beta"}}'
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29"}}'
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://registry.io/metadata"* ]]
   then
-    echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "com.redhat.component": "app01", "description": "it is some app"}, 
+    echo '{"Labels": {"build-date": "2024-07-29T02:17:29", "com.redhat.component": "app01", "description": "it is some app"},
       "Env": ["container=oci", "PATH=usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]}'
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/api-service"* ]]
@@ -73,11 +95,7 @@ function skopeo() {
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://quay.io/myorg/helm-chart"* ]]
   then
-    # Helm chart should fail normal inspect and fall back to raw manifest
-    return 1
-  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/helm-chart"* ]]
-  then
-    echo '{"annotations": {"org.opencontainers.image.version": "2.0.1+alpha", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    echo '{"Labels": {}}'
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --override-os linux --override-arch amd64 docker://"* ]]
   then
@@ -91,7 +109,7 @@ function skopeo() {
 
 function get-image-architectures() {
     if [[ "$1" == *"helm-chart"* ]]; then
-        # Return Helm chart format with configMediaType (only for Helm charts)
+        # Return Helm chart format (single arch) with configMediaType
         jq -nc '{
             "platform": {"architecture": "amd64", "os": "linux"},
             "digest": "sha256:789abcdef123456",
@@ -99,7 +117,7 @@ function get-image-architectures() {
             "configMediaType": "application/vnd.cncf.helm.config.v1+json"
         }'
     else
-        # Return regular container image format without configMediaType
+        # Return regular container image format (multi-arch)
         jq -nc '{
             "platform": {"architecture": "amd64", "os": "linux"},
             "digest": "abcdefg",
