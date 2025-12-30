@@ -46,23 +46,24 @@ function skopeo() {
       return
   fi
 
-  # Raw manifest inspections (for annotations) - these use the digest from get-image-architectures
+  # Raw manifest inspections (for annotations and config.mediaType) - these use the digest from get-image-architectures
   if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/helm-chart"* ]]
   then
-    echo '{"annotations": {"org.opencontainers.image.version": "2.0.1+alpha", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    # Helm chart - has helm config mediaType, not a standard container image
+    echo '{"config": {"mediaType": "application/vnd.cncf.helm.config.v1+json"}, "annotations": {"org.opencontainers.image.version": "2.0.1+alpha", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/web-app"* ]]
   then
-    echo '{"annotations": {"org.opencontainers.image.version": "1.2.3-beta", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {"org.opencontainers.image.version": "1.2.3-beta", "org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/metadata"* ]]
   then
-    echo '{"annotations": {"org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {"org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
     return
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://"* ]]
   then
-    # Default: return empty annotations for images that don't have specific ones
-    echo '{"annotations": {}}'
+    # Default: standard OCI container image config
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {}}'
     return
   fi
 
