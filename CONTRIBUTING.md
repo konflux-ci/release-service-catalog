@@ -105,10 +105,8 @@ When referencing this image, the image URL must be in digest form, for example: 
 
 This repo uses [MintMaker](https://konflux-ci.dev/docs/mintmaker/user/) to automatically update images referenced in tasks, stepactions, and pipelines. The MintMaker configuration is defined in [renovate.json](renovate.json).
 
-All other images should be referenced the same way as the release-service-utils image, by digest. For example:
-`registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded` This allows MintMaker to 
-automatically manage and update image versions. When adding a new image, you must also add it to the MintMaker configuration
-in `renovate.json` so it can be updated automatically.
+All other images should be referenced the same way as the release-service-utils image, by digest. For example: `registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded`.
+This allows MintMaker to automatically manage and update image digests.
 
 ### Compute Resources
 
