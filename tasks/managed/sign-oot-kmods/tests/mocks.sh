@@ -71,8 +71,11 @@ function rm() {
 
   case "$*" in
     "-f "*"/*.ko")
+      # Actually remove the files for the mock to work correctly
+      /bin/rm "$@"
       ;;
     "-f "*signed-kmods*)
+      /bin/rm "$@"
       ;;
     *)
       echo "Error: Unexpected rm parameters: $*"

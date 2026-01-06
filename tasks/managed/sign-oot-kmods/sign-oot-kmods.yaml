@@ -362,30 +362,50 @@ spec:
                 ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "rm -rf ~/$task_uid"
 
             else
-                echo "Single architecture, using existing signing logic"
-                cd "$SIGNED_KMODS_PATH"
+                echo "Single architecture, processing with subdirectory structure"
+
+                # Find the architecture subdirectory (extract task always creates one)
+                arch_subdir_name=""
+                for potential_arch_dir in "$SIGNED_KMODS_PATH"/*/; do
+                    if [ -d "$potential_arch_dir" ]; then
+                        arch_subdir_name=$(basename "$potential_arch_dir")
+                        echo "Found architecture subdirectory: $arch_subdir_name"
+                        break
+                    fi
+                done
+
+                if [ -z "$arch_subdir_name" ]; then
+                    echo "ERROR: No architecture subdirectory found for single-arch build"
+                    echo "Expected structure: $SIGNED_KMODS_PATH/<arch>/"
+                    ls -la "$SIGNED_KMODS_PATH" || true
+                    exit 1
+                fi
+
+                arch_dir="$SIGNED_KMODS_PATH/$arch_subdir_name"
 
                 # Create unique remote directory for this TaskRun to ensure isolation
                 task_uid="$(context.taskRun.uid)"
                 echo "Using unique remote directory: ~/$task_uid"
 
-                # Backup envfile before signing process
-                if [ -f "envfile" ]; then
-                    cp envfile /tmp/envfile.backup
+                # Backup envfile if present
+                if [ -f "$arch_dir/envfile" ]; then
+                    cp "$arch_dir/envfile" "/tmp/envfile.backup.$arch_subdir_name"
                 fi
 
                 # Copy unsigned kmods to signing server
                 # Intentional client-side expansion: task_uid expands locally for unique remote directories
                 # shellcheck disable=SC2029
                 ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "mkdir -p ~/${task_uid}/kmods"
-                scp "${SSH_OPTS[@]}" "${SIGNED_KMODS_PATH}"/*.ko "${signUser}@${signHost}:~/${task_uid}/kmods/"
+
+                echo "Copying unsigned .ko files from $arch_subdir_name to signing server..."
+                scp "${SSH_OPTS[@]}" "$arch_dir"/*.ko "${signUser}@${signHost}:~/${task_uid}/kmods/"
 
                 # Sign kmods
                 sign_kmods_for_arch "single"
 
                 # Copy back signed kmods to workspace
-                echo "Copying back signed .ko files for single architecture..."
-                rm -f "${SIGNED_KMODS_PATH}"/*.ko
+                echo "Copying back signed .ko files for $arch_subdir_name..."
+                rm -f "$arch_dir"/*.ko
                 # Get list of .ko files from remote server and copy them individually
                 # Intentional client-side expansion: task_uid expands locally for unique remote directories
                 # shellcheck disable=SC2029
@@ -396,31 +416,33 @@ spec:
                         if [ -n "$kmod_file" ]; then
                             echo "Copying back signed file: $kmod_file"
                             scp "${SSH_OPTS[@]}" \
-                                "${signUser}@${signHost}:~/${task_uid}/kmods/$kmod_file" "${SIGNED_KMODS_PATH}"/
+                                "${signUser}@${signHost}:~/${task_uid}/kmods/$kmod_file" \
+                                "$arch_dir/"
                         fi
                     done
                 else
-                    echo "WARNING: No .ko files found on remote server for single architecture"
+                    echo "ERROR: No .ko files found on remote server"
+                    exit 1
                 fi
 
-                # Restore envfile after signing process
-                if [ -f "/tmp/envfile.backup" ]; then
-                    cp /tmp/envfile.backup envfile
+                # Restore envfile
+                if [ -f "/tmp/envfile.backup.$arch_subdir_name" ]; then
+                    cp "/tmp/envfile.backup.$arch_subdir_name" "$arch_dir/envfile"
                 fi
 
-                # Generate checksums for signed .ko files
-                echo "Generating checksums for signed .ko files..."
-                if ls "${SIGNED_KMODS_PATH}"/*.ko >/dev/null 2>&1; then
-                    cd "${SIGNED_KMODS_PATH}"
-                    sha256sum ./*.ko > signed_kmods_checksums.txt
-                    echo "Generated checksums:"
-                    cat signed_kmods_checksums.txt
+                # Generate checksums
+                echo "Generating checksums for $arch_subdir_name .ko files..."
+                cd "$arch_dir"
+                if ls ./*.ko >/dev/null 2>&1; then
+                    sha256sum ./*.ko > "signed_kmods_checksums_${arch_subdir_name}.txt"
+                    echo "Generated checksums for $arch_subdir_name:"
+                    cat "signed_kmods_checksums_${arch_subdir_name}.txt"
                 else
                     echo "ERROR: No .ko files found after signing process"
                     exit 1
                 fi
 
-                # Clean up unique remote directory for supply chain integrity
+                # Clean up unique remote directory
                 echo "Cleaning up remote directory ~/$task_uid"
                 # Intentional client-side expansion: task_uid expands locally for unique remote directories
                 # shellcheck disable=SC2029
