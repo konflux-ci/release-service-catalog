@@ -45,7 +45,7 @@ EOF
 function koji() {
     echo "koji $@" >> "$(params.dataDir)/koji_calls.txt"
     if [[ "$*" == *listBuilds*source=git+https://gitlab.example.com/rpms/test-foo* ]]; then
-        echo '[{"build_id": 1001, "creation_time": "2025-01-01 00:00:00.000000"}, {"build_id": 1002, "creation_time": "2025-01-01 01:00:00.000000"}]'
+        echo '[{"build_id": 1002, "creation_time": "2025-01-01 01:00:00.000000"}, {"build_id": 1001, "creation_time": "2025-01-01 00:00:00.000000"}]'
     elif [[ "$*" == *listBuilds*source=git+https://gitlab.example.com/rpms/test-bar* ]]; then
         echo '[{"build_id": 2001, "creation_time": "2025-01-01 00:00:00.000000"}]'
     fi
