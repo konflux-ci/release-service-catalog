@@ -5,7 +5,8 @@ metadata:
   name: test-push-snapshot-copy-artifacts
 spec:
   description: |
-    Run the push-snapshot task with copyAttachedArtifacts enabled to test artifact copying functionality.
+    Run the push-snapshot task with copyBundleMigrations enabled to test artifact copying functionality
+    and migration artifact copying via annotations.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -61,6 +62,18 @@ spec:
                   {
                     "name": "comp1",
                     "containerImage": "reg.io/test@sha256:abcdefg",
+                    "metadata": {
+                      "annotations": [
+                        {
+                          "name": "dev.konflux-ci.task.migration.digest",
+                          "value": "sha256:migration123"
+                        },
+                        {
+                          "name": "dev.konflux-ci.task.migration.tag",
+                          "value": "v1.0.0-migrations"
+                        }
+                      ]
+                    },
                     "repositories": [
                       {
                         "url": "registry.com/repository",
@@ -145,7 +158,7 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-        - name: copyAttachedArtifacts
+        - name: copyBundleMigrations
           value: "true"
       runAfter:
         - setup
@@ -218,5 +231,28 @@ spec:
                 cat "$(params.dataDir)/mock_cosign.txt"
                 exit 1
               }
+
+              # Verify migration artifact copy was called for comp1 (has migration annotations)
+              # The source should be the same repo as containerImage with the migration digest
+              # The destination should be the repository with the migration tag
+              echo "Checking for migration artifact copy..."
+              grep -E 'cp --from-registry-config [^ ]+ --to-registry-config [^ ]+' \
+                "$(params.dataDir)/mock_oras.txt" | \
+              grep -E 'reg.io/test@sha256:migration123 registry.com/repository:v1.0.0-migrations' || {
+                echo "ERROR: Migration artifact copy not found in oras calls"
+                echo "Expected: oras cp ... reg.io/test@sha256:migration123"
+                echo "  registry.com/repository:v1.0.0-migrations"
+                echo "Actual oras calls:"
+                cat "$(params.dataDir)/mock_oras.txt"
+                exit 1
+              }
+              echo "Migration artifact copy verified successfully"
+
+              # Verify comp2 (no migration annotations) did NOT trigger migration artifact copy
+              if grep -E 'sha256:hijklmn.*migrations' "$(params.dataDir)/mock_oras.txt"; then
+                echo "ERROR: Unexpected migration artifact copy for comp2 (should have no migration annotations)"
+                exit 1
+              fi
+              echo "Verified comp2 did not trigger migration artifact copy (as expected)"
       runAfter:
         - run-task

@@ -94,6 +94,11 @@ function oras() {
     # Simulate success
     return 0
   fi
+  # Accept oras cp calls without -r (used for migration artifact copying)
+  if [[ "$1" == "cp" && "$2" == "--from-registry-config" ]]; then
+    # Simulate success
+    return 0
+  fi
   if [[ "$*" == "resolve --registry-config "*" "* ]]; then
     if [[ "$*" =~ "--platform" && "$4" =~ ".src" ]]; then
       echo "Error: .src images should not use --platform" >&2

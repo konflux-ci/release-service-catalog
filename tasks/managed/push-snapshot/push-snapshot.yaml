@@ -66,7 +66,7 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-    - name: copyAttachedArtifacts
+    - name: copyBundleMigrations
       type: string
       description: Enable copying of attached artifacts
       default: "false"
@@ -165,7 +165,7 @@ spec:
               "$SOURCE_AUTH_FILE" "$DEST_AUTH_FILE" > "$DOCKER_CONFIG"/config.json
 
             # Check if we should copy attached artifacts
-            if [[ "$COPY_ATTACHED_ARTIFACTS" == "true" ]]; then
+            if [[ "$COPY_BUNDLE_MIGRATIONS" == "true" ]]; then
               # Check for any attached artifacts using oras discover, with retries on failure
               printf '* Checking for attached artifacts on %s\n' "$3"
               artifact_count="0"
@@ -195,7 +195,7 @@ spec:
 
             attempt=0
             until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
-              if [[ "$COPY_ATTACHED_ARTIFACTS" == "true" && "${artifact_count}" -gt 0 ]]; then
+              if [[ "$COPY_BUNDLE_MIGRATIONS" == "true" && "${artifact_count}" -gt 0 ]]; then
                 # Copy the image and all attached artifacts
                 oras cp -r \
                   --from-registry-config "$SOURCE_AUTH_FILE" \
@@ -222,6 +222,62 @@ spec:
               "$2" "$3"
           fi
           jq -n --arg name "$2" --arg url "$4:$5" '{name: $name, url: $url}' > "$TMP_RESULTS_DIR/$2-$5.json"
+        }
+
+        # Push migration artifact using oras cp
+        # Expected arguments are [source_repo, migration_digest, name, repository, migration_tag, source_auth_file]
+        push_migration_artifact () {
+          local source_repo="$1"
+          local migration_digest="$2"
+          local name="$3"
+          local repository="$4"
+          local migration_tag="$5"
+          local source_auth_file="$6"
+
+          local migration_source="${source_repo}@${migration_digest}"
+
+          # Create destination auth file
+          local dest_auth_file
+          dest_auth_file=$(mktemp)
+          local dest_registry
+          dest_registry=$(echo "$repository" | cut -d '/' -f 1)
+          if [ "$dest_registry" = "docker.io" ]; then
+            select-oci-auth "$repository" > "$dest_auth_file"
+          else
+            select-oci-auth "$repository" | jq -c \
+              '.auths."'"$repository"'" = .auths."'"$dest_registry"'" | del(.auths."'"$dest_registry"'")' \
+              > "$dest_auth_file"
+          fi
+
+          # Check if migration artifact already exists at destination
+          local destination_digest
+          destination_digest=$(oras resolve --registry-config "$dest_auth_file" \
+            "${repository}:${migration_tag}" || true)
+
+          if [[ "$destination_digest" != "$migration_digest" || -z "$destination_digest" ]]; then
+            printf '* Pushing migration artifact for component: %s to %s:%s\n' "$name" "$repository" "$migration_tag"
+
+            local attempt=0
+            until [ "$attempt" -gt "$(params.retries)" ] ; do
+              if oras cp \
+                --from-registry-config "$source_auth_file" \
+                --to-registry-config "$dest_auth_file" \
+                "$migration_source" \
+                "${repository}:${migration_tag}"
+              then
+                break
+              fi
+              attempt=$((attempt+1))
+              echo "Migration artifact copy failed (attempt $attempt)"
+            done
+            if [ "$attempt" -gt "$(params.retries)" ] ; then
+              echo "Max retries exceeded for migration artifact copy."
+              exit 1
+            fi
+          else
+            printf '* Migration artifact push skipped (already exists at destination): %s (%s)\n' \
+              "$name" "$migration_source"
+          fi
         }
 
         SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
@@ -265,7 +321,7 @@ spec:
 
         defaultPushSourceContainer=$(jq -r \
           '.mapping.defaults.pushSourceContainer | if . == null then true else . end' "$DATA_FILE")
-        COPY_ATTACHED_ARTIFACTS="$(params.copyAttachedArtifacts)"
+        COPY_BUNDLE_MIGRATIONS="$(params.copyBundleMigrations)"
 
         application=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
@@ -330,6 +386,23 @@ spec:
             fi
           fi
 
+          # Extract migration annotations if COPY_BUNDLE_MIGRATIONS is enabled
+          migration_digest=""
+          migration_tag=""
+          if [[ "$COPY_BUNDLE_MIGRATIONS" == "true" ]]; then
+            # Annotations are stored as [{name: key, value: value}, ...] in component.metadata.annotations
+            migration_digest=$(jq -r '.metadata.annotations // [] |
+              map(select(.name == "dev.konflux-ci.task.migration.digest")) |
+              .[0].value // ""' <<< "$component")
+            migration_tag=$(jq -r '.metadata.annotations // [] |
+              map(select(.name == "dev.konflux-ci.task.migration.tag")) |
+              .[0].value // ""' <<< "$component")
+            if [ -n "$migration_digest" ] && [ -n "$migration_tag" ]; then
+              printf '* Found migration annotations for component %s: digest=%s, tag=%s\n' \
+                "$name" "$migration_digest" "$migration_tag"
+            fi
+          fi
+
           NUM_REPOS=$(jq -c '.repositories | length' <<< "$component")
           for ((j = 0; j < NUM_REPOS; j++)); do
             repository=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
@@ -364,6 +437,16 @@ spec:
                 echo "Request Count: $REQUEST_COUNT"
               fi
             done
+
+            # Push migration artifact if annotations are present
+            if [[ "$COPY_BUNDLE_MIGRATIONS" == "true" ]] && [ -n "$migration_digest" ] && [ -n "$migration_tag" ]; then
+              wait_for_slot
+              push_migration_artifact "${source_repo}" "${migration_digest}" "${name}" \
+                "${repository_url}" "${migration_tag}" "$SOURCE_AUTH_FILE" \
+                > "$TMP_RESULTS_DIR/${name}-migration-${migration_tag}.out" 2>&1 &
+              ((++REQUEST_COUNT))
+              echo "Request Count: $REQUEST_COUNT (migration artifact)"
+            fi
           done
         done
 
