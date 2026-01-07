@@ -34,10 +34,11 @@ aws() {
     fi
 
     # Single-arch validation - handle both directory and individual file uploads
+    # Now expects arch-specific paths (x86_64)
     case "$3" in
-        "/var/workdir/release/signed-kmods")
+        "/var/workdir/release/signed-kmods/x86_64")
             # Directory upload with recursive flags
-            EXPECTED_TARGET="s3://mock-bucket/mocked-vendor-s3/1.2.3-s3/6.5.0-s3/"
+            EXPECTED_TARGET="s3://mock-bucket/mocked-vendor-s3/1.2.3-s3/6.5.0-s3/x86_64/"
             if [ "$4" != "$EXPECTED_TARGET" ]; then
                 echo "ERROR: Wrong target S3 path: $4"
                 echo "Expected: $EXPECTED_TARGET"
@@ -54,9 +55,23 @@ aws() {
                  exit 1
             fi
             ;;
-        "/var/workdir/release/signed-kmods/envfile")
+        "/var/workdir/release/signed-kmods/x86_64/signed_kmods_checksums_x86_64.txt")
+            # Checksum file upload
+            EXPECTED_TARGET="s3://mock-bucket/mocked-vendor-s3/1.2.3-s3/6.5.0-s3/x86_64/signed_kmods_checksums_x86_64.txt"
+            if [ "$4" != "$EXPECTED_TARGET" ]; then
+                echo "ERROR: Wrong target S3 path for checksum file: $4"
+                echo "Expected: $EXPECTED_TARGET"
+                exit 1
+            fi
+
+            if [ "$5" != "--endpoint-url" ] || [ "$6" != "https://s3.mock.endpoint.com" ]; then
+                echo "ERROR: Wrong endpoint-url for checksum file: $5 $6"
+                exit 1
+            fi
+            ;;
+        "/var/workdir/release/signed-kmods/x86_64/envfile")
             # Individual envfile upload
-            EXPECTED_TARGET="s3://mock-bucket/mocked-vendor-s3/1.2.3-s3/6.5.0-s3/envfile"
+            EXPECTED_TARGET="s3://mock-bucket/mocked-vendor-s3/1.2.3-s3/6.5.0-s3/x86_64/envfile"
             if [ "$4" != "$EXPECTED_TARGET" ]; then
                 echo "ERROR: Wrong target S3 path for envfile: $4"
                 echo "Expected: $EXPECTED_TARGET"
