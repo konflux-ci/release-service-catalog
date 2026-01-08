@@ -64,15 +64,24 @@ function az() {
                             echo "WARNING: Unexpected multiarch upload pattern, but allowing: $*"
                         fi
                     else
-                        # Single arch mode - original validation logic
+                        # Single arch mode - now expects arch suffix (x86_64)
                         if [ "$COUNT" -eq 0 ]; then
-                            if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/mod1.ko"* ]]; then
+                            if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod1.ko"* ]]; then
                                 echo "ERROR: First az blob upload call has wrong name param for mod1.ko"
+                                echo "Expected: --name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod1.ko"
                                 return 1
                             fi
                         elif [ "$COUNT" -eq 1 ]; then
-                             if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/mod2.ko"* ]]; then
+                             if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod2.ko"* ]]; then
                                 echo "ERROR: Second az blob upload call has wrong name param for mod2.ko"
+                                echo "Expected: --name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod2.ko"
+                                return 1
+                            fi
+                        elif [ "$COUNT" -eq 2 ]; then
+                            # Checksum file with arch-specific name
+                            if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/signed_kmods_checksums_x86_64.txt"* ]]; then
+                                echo "ERROR: Third az blob upload call has wrong name param for checksum file"
+                                echo "Expected: --name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/signed_kmods_checksums_x86_64.txt"
                                 return 1
                             fi
                         elif [ "$COUNT" -gt 10 ]; then
@@ -114,13 +123,13 @@ check_upload_count() {
     echo "Total upload count: $COUNT"
 
     # For multiarch, expect at least 4 uploads (2 .ko files + 2 envfiles minimum)
-    # For single arch, expect exactly 3 uploads (2 .ko files + 1 envfile)
-    if [ "$COUNT" -ge 4 ]; then
+    # For single arch, expect exactly 4 uploads (2 .ko files + 1 checksum file + 1 envfile)
+    if [ "$COUNT" -ge 5 ]; then
         echo "SUCCESS: az blob upload was called $COUNT times (multiarch scenario detected)"
-    elif [ "$COUNT" -eq 3 ]; then
-        echo "SUCCESS: az blob upload was called exactly 3 times (single arch scenario: 2 .ko files + envfile)"
+    elif [ "$COUNT" -eq 4 ]; then
+        echo "SUCCESS: az blob upload was called exactly 4 times (single arch scenario: 2 .ko files + checksum + envfile)"
     else
-        echo "ERROR: az blob upload was called $COUNT times, expected 3 (single arch) or 4+ (multiarch)"
+        echo "ERROR: az blob upload was called $COUNT times, expected 4 (single arch) or 5+ (multiarch)"
         return 1
     fi
 }

@@ -37,6 +37,12 @@ spec:
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
       default: "empty"
+    - name: IMAGE
+      description: >-
+        Reference to the OCI-Artifact that merge step will generate from multiple snapshots,
+        serving as an intermediate artifact for RADAS signing
+      type: string
+      default: "quay.io/charon-release/merge"
     - name: ociArtifactExpiresAfter
       description: Expiration date for the trusted artifacts created in the
         OCI repository. An empty string means the artifacts do not expire
@@ -71,6 +77,10 @@ spec:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
+    - name: IMAGE_TAG
+      description: Tag of the OCI-Artifact that merge step will build
+    - name: IMAGE_DIGEST
+      description: Digest of the OCI-Artifact that merge step will build
   volumes:
     - name: "charon-aws-vol"
       secret:
@@ -94,6 +104,8 @@ spec:
       - mountPath: /var/workdir
         name: workdir
     env:
+      - name: IMAGE
+        value: $(params.IMAGE)
       - name: IMAGE_EXPIRES_AFTER
         value: $(params.ociArtifactExpiresAfter)
       - name: "ORAS_OPTIONS"
@@ -130,7 +142,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: prepare-repo
-      image: quay.io/konflux-ci/release-service-utils@sha256:454e457cdadd5892b31fe2b7d4911b3d3a761f5705bb0cd30f864be0a597594b
+      image: quay.io/konflux-ci/release-service-utils@sha256:f10b4ad888634a7633f76ede29003ce1471aec2b76a7d9e01ad282a3011eb78f
       computeResources:
         limits:
           memory: 256Mi
@@ -163,8 +175,8 @@ spec:
       volumeMounts:
         - name: mrrc-workdir
           mountPath: "/workdir"
-    - name: upload-maven-repo
-      image: quay.io/konflux-ci/charon@sha256:0d0e4a02e8c54fcc54bc359e960e0610c184f452d74b85bd8b2e95064ba1a119
+    - name: upload-single-maven-repo
+      image: quay.io/konflux-ci/charon@sha256:86609090fdaa57469e7849e92b20d4f88ff5448b7586e674b14979388fba12ed
       computeResources:
         limits:
           memory: 512Mi
@@ -183,13 +195,14 @@ spec:
         # shellcheck source=/dev/null
         . "$MRRC_FILE"
 
-        target=$MRRC_TARGET
-        productName=$MRRC_PRODUCT_NAME
-        productVersion=$MRRC_PRODUCT_VERSION
-
         IFS='%' read -ra ADDR <<< "$MRRC_ZIP_REGISTRY"
-        for registry in "${ADDR[@]}"
-        do
+        if [ ${#ADDR[@]} -eq 1 ]; then
+          echo "Only single archive found, no need to merge"
+
+          target=$MRRC_TARGET
+          productName=$MRRC_PRODUCT_NAME
+          productVersion=$MRRC_PRODUCT_VERSION
+          registry="${ADDR[0]}"
           echo "Release $registry with $productName-$productVersion into $target"
           hash=${registry##*@sha256:}
           short_hash=${hash:0:6}
@@ -202,19 +215,170 @@ spec:
           repo_zip=${repo_zips[0]}
           if [[ "$repo_zip" == "$repodir/*.zip" ]]
           then
-            echo "No maven repository zip file found, will not publish."
+            echo "No maven repository zip file found, will not publish"
             exit 1
           fi
           sign_files=("$repodir"/*.json)
           sign_file=${sign_files[0]}
           if [[ "$sign_file" == "$repodir/*.json" ]]
           then
-            echo "No signature result received from radas, will not publish."
+            echo "No signature result received from radas, will not publish"
             exit 1
           fi
           echo "Release $repo_zip with $productName-$productVersion into $target"
           charon upload -p "$productName" -v "$productVersion" -t "$target" -l "$sign_file" "$repo_zip"
-        done
+        fi
+      volumeMounts:
+        - name: "charon-aws-vol"
+          mountPath: "/home/charon/.aws"
+        - name: mrrc-workdir
+          mountPath: "/workdir"
+        - name: "charon-signca-vol"
+          mountPath: "/home/charon/radasca"
+        - name: trusted-ca
+          mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+          subPath: ca-bundle.crt
+          readOnly: true
+    - name: merge-multiple-maven-repos
+      image: quay.io/konflux-ci/charon@sha256:86609090fdaa57469e7849e92b20d4f88ff5448b7586e674b14979388fba12ed
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        CHARON_CFG_FILE="$(params.dataDir)/$(params.charonConfigFilePath)"
+        mkdir -p "/home/charon/.charon"
+        cp "$CHARON_CFG_FILE" /home/charon/.charon/charon.yaml
+
+        MRRC_FILE="$(params.dataDir)/$(params.mrrcParamFilePath)"
+        # shellcheck source=/dev/null
+        . "$MRRC_FILE"
+
+        IFS='%' read -ra ADDR <<< "$MRRC_ZIP_REGISTRY"
+        # Check if have more than one archive to merge
+        if [ ${#ADDR[@]} -gt 1 ]; then
+          echo "More than one archives found, will merge"
+
+          productName=$MRRC_PRODUCT_NAME
+          productVersion=$MRRC_PRODUCT_VERSION
+          mergedir="/workdir/mrrc/merged"
+          mkdir -p "$mergedir"
+
+          for registry in "${ADDR[@]}"
+          do
+            hash=${registry##*@sha256:}
+            short_hash=${hash:0:6}
+            repodir="/workdir/mrrc/$short_hash"
+            repo_zips=("$repodir"/*.zip)
+            repo_zip=${repo_zips[0]}
+            if [[ "$repo_zip" == "$repodir/*.zip" ]]
+            then
+              echo "No maven repository zip file found, will not merge"
+              exit 1
+            fi
+            repodir_arr+=("$repo_zip")
+          done
+          charon merge -p "$productName" -v "$productVersion" -m "${mergedir}/merged.zip" "${repodir_arr[@]}"
+        fi
+      volumeMounts:
+        - name: "charon-aws-vol"
+          mountPath: "/home/charon/.aws"
+        - name: mrrc-workdir
+          mountPath: "/workdir"
+    - name: push-merged-maven-repo-to-registry
+      image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        mergedir="/workdir/mrrc/merged"
+        # Check if the merged zip is available, if so push it to the registry, or skip pushing
+        if [ -f "${mergedir}/merged.zip" ]; then
+          cp "${mergedir}/merged.zip" "./merged.zip"
+          select-oci-auth "$IMAGE" >auth.json
+          [ -n "$IMAGE_EXPIRES_AFTER" ] && EXPIRE_LABEL=("--annotation" "quay.expires-after=$IMAGE_EXPIRES_AFTER")
+          echo "Pushing image ${IMAGE} to registry"
+
+          RESULTING_TAG=$(date +%Y%m%d-%H%M%S)-$(uuidgen)
+          if ! oras push "$IMAGE:$RESULTING_TAG" \
+            --registry-config auth.json \
+            "${EXPIRE_LABEL[@]}" \
+            --artifact-type application/vnd.maven+zip "merged.zip"; then
+            echo "Failed to push image ${IMAGE}:${RESULTING_TAG} to registry"
+            exit 1
+          fi
+          if ! RESULTING_DIGEST=$(oras resolve --registry-config auth.json "${IMAGE}:${RESULTING_TAG}"); then
+            echo "Failed to get digest for ${IMAGE}:${RESULTING_TAG} from registry"
+            exit 1
+          fi
+          echo -n "$RESULTING_DIGEST" | tee "$(results.IMAGE_DIGEST.path)"
+          echo -n "$RESULTING_TAG" | tee "$(results.IMAGE_TAG.path)"
+          echo -n "Push merged zip ${IMAGE}:${RESULTING_TAG}@${RESULTING_DIGEST} successfully"
+        else
+          echo "The merged maven zip file is not found!"
+        fi
+      volumeMounts:
+        - name: mrrc-workdir
+          mountPath: "/workdir"
+    - name: upload-merged-maven-repo
+      image: quay.io/konflux-ci/charon@sha256:86609090fdaa57469e7849e92b20d4f88ff5448b7586e674b14979388fba12ed
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          memory: 1Gi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        # Check if the digest is available, if so use the merged result to sign and upload
+        if [ -f "$(results.IMAGE_DIGEST.path)" ]; then
+          CHARON_CFG_FILE="$(params.dataDir)/$(params.charonConfigFilePath)"
+          mkdir -p "/home/charon/.charon"
+          cp "$CHARON_CFG_FILE" /home/charon/.charon/charon.yaml
+
+          MRRC_FILE="$(params.dataDir)/$(params.mrrcParamFilePath)"
+          # shellcheck source=/dev/null
+          . "$MRRC_FILE"
+
+          target=$MRRC_TARGET
+          productName=$MRRC_PRODUCT_NAME
+          productVersion=$MRRC_PRODUCT_VERSION
+          mergedir="/workdir/mrrc/merged"
+
+          IMAGE_DIGEST="$(cat "$(results.IMAGE_DIGEST.path)")"
+          IMAGE_TAG="$(cat "$(results.IMAGE_TAG.path)")"
+          merged_registry="${IMAGE}:${IMAGE_TAG}@${IMAGE_DIGEST}"
+          echo "Release merged $merged_registry with $productName-$productVersion into $target"
+
+          charon sign -r "$MRRC_AUTHOR" -p "${mergedir}" -k "$MRRC_SIGN_KEY" "$merged_registry"
+
+          if [ ! -f "${mergedir}/merged.zip" ]; then
+            echo "No merged.zip file found in ${mergedir}, will not publish"
+            exit 1
+          fi
+          sign_files=("$mergedir"/*.json)
+          sign_file=${sign_files[0]}
+          if [[ "$sign_file" == "$mergedir/*.json" ]]; then
+            echo "No signature result received from radas, will not publish"
+            exit 1
+          fi
+          echo "Release ${mergedir}/merged.zip with $productName-$productVersion into $target"
+          charon upload -p "$productName" -v "$productVersion" -t "$target" -l "$sign_file" "${mergedir}/merged.zip"
+          exit 0
+        fi
       volumeMounts:
         - name: "charon-aws-vol"
           mountPath: "/home/charon/.aws"
