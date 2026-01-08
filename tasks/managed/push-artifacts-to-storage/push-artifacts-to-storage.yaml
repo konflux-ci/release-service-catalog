@@ -22,6 +22,12 @@ spec:
       type: string
       description: |
         Build Id that tha snapshot originated from
+    - name: pipelineImage
+      type: string
+      description: |
+        The image url with koji (1.34 or higher), jq and kinit installed for
+        running the push-rpm-to-koji task, please make sure you have such image
+        or you build this image first
     - name: sourceDataArtifact
       type: string
       description: Location of trusted artifacts to be used to populate data directory
@@ -122,9 +128,42 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: push-build-to-artifact-storage
+    - name: pull-files-oras
       # The pipelineImage will be fetching from get-secrets task with koji installed there
-      image: quay.io/redhat-user-workloads/rpm-build-pipeline-tenant/environment:latest@sha256:3636e8a70a8c78688f6752bb27c15b7f742b7307bfc8ee4be9e932b9971823e2
+      image: "$(params.pipelineImage)"
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 250m
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        mkdir -p /var/workdir/results/ && cd /var/workdir/results/
+
+        for ((i = 0; i < NUM_COMPONENTS; i++))
+        do
+          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+          containerImage=$(jq -r '.containerImage' <<< "$component")
+
+          # The login serviceaccount should have the dockerconfig to pull the images.
+          # oras has very limited support for selecting the right auth entry,
+          # so create a custom auth file with just one entry
+          authFile=$(mktemp)
+          select-oci-auth "${containerImage}" > "$authFile"
+          oras pull --registry-config "$authFile" "$containerImage"
+        done
+    - name: push-build-to-artifact-storage
+      image: quay.io/redhat-user-workloads/artifact-storage-tenant/tooling/pulp-tool-container:latest
       computeResources:
         limits:
           memory: 256Mi
@@ -155,7 +194,7 @@ spec:
             echo "No rok-access provided."
             exit 0
         fi
-
+        
         KOJI_IMPORT_DRAFT=$(jq -r '.pushOptions.koji_import_draft' "${DATA_FILE}")
 
         if [[ "$KOJI_IMPORT_DRAFT" == "false" ]]; then
@@ -165,12 +204,10 @@ spec:
 
         COMPONENT_GROUP=$(jq -r '.componentGroup' "${SNAPSHOT_SPEC_FILE}")
 
-        pulp_transfer.py \
-        --config /etc/rok-access/cli.toml \
-        --build_id "$(params.snapshotNamespace)" \
-        --namespace "$(params.snapshotBuildId)" \
-        --cert_path /etc/rok-access/tls.crt \
-        --key_path /etc/rok-access/tls.key
+        pulp-tool --config /etc/rok-access/cli.toml \
+          --build-id "$(params.snapshotBuildId)" \
+          --namespace "$(params.snapshotNamespace)" \
+          upload --rpm-path "/var/workdir/results"
 
         printf 'Completed "%s" for "%s"\n\n' "$(context.task.name)" "$COMPONENT_GROUP"
       volumeMounts:
