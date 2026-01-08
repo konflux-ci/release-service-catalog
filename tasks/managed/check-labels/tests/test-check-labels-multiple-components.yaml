@@ -1,0 +1,147 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-check-labels-multiple-components
+spec:
+  description: |
+    Run the check-labels task with multiple components and repositories.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:1d0f44656336b012945d5f4af5e289b0dfe176ba
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "releaseNotes": {
+                  "cpe": "cpe:/a:example:openstack:el8"
+                }
+              }
+              EOF
+              
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "canonicalName": "openshift-gitops-1/gitops-rhel8-operator",
+                    "metadata": {
+                      "labels": [
+                        {
+                          "name": "name",
+                          "value": "openshift-gitops-1/gitops-rhel8-operator"
+                        }
+                      ]
+                    },
+                    "repositories": [
+                      {
+                        "url": "registry.redhat.io/openshift-gitops-1/foo:one"
+                      },
+                      {
+                        "url": "registry.redhat.io/openshift-gitops-1/bar:two"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "comp2",
+                    "canonicalName": "openshift-gitops-2/gitops-rhel8-operator",
+                    "metadata": {
+                      "labels": [
+                        {
+                          "name": "name",
+                          "value": "openshift-gitops-2/gitops-rhel8-operator"
+                        }
+                      ]
+                    },
+                    "repositories": [
+                      {
+                        "url": "registry.redhat.io/openshift-gitops-1/foo:one"
+                      },
+                      {
+                        "url": "registry.redhat.io/openshift-gitops-1/bar:two"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: check-labels
+      params:
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
+        - name: enforce
+          value: "true"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
