@@ -16,3 +16,5 @@ results.
 | collectorsRepositoryRevision | Git repository revision                                                                                           | Yes      | development                                                  |
 | taskGitUrl                   | The url to the git repo where the release-service-catalog tasks to be used are stored                             | Yes      | https://github.com/konflux-ci/release-service-catalog.git    |
 | taskGitRevision              | The revision in the taskGitUrl repo to be used                                                                    | No       | -                                                            |
+| roxCentralEndpoint           | The url for RHACS Central                                                                                         | Yes      | https://acs-d4dgfbkto15c73biblcg.acs.rhcloud.com             |
+| roxInsecureSkipTlsVerify     | Do not verify TLS certificates for ACS connection                                                                 | Yes      | false                                                        |
