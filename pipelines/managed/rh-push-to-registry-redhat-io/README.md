@@ -2,6 +2,14 @@
 
 Tekton pipeline to release content to registry.redhat.io registry.
 
+This pipeline is idempotent: components that have already been fully released are
+automatically filtered out by verifying:
+- Pyxis metadata (container image entries with tags and RPM data)
+- fileUpdates completion (merged GitLab merge requests), checked via InternalRequest
+
+When all components are filtered, downstream release tasks are skipped (skip_release=true).
+This prevents redundant processing and allows safe re-runs of the same snapshot.
+
 ## Parameters
 
 | Name                            | Description                                                                                                                        | Optional | Default value                                             |
