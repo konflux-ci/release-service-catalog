@@ -1,0 +1,659 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-already-released-by-pyxis-and-file-updates
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to filter out images from a snapshot that have already been released.
+    This task verifies:
+    - Pyxis metadata (always required)
+    - fileUpdates completion (only when `.fileUpdates` is configured in the merged data file)
+
+    The fileUpdates completion check is performed via an InternalRequest (internal GitLab access),
+    not by calling GitLab directly from this managed task.
+
+    The task overwrites the original snapshot file in place with a filtered version
+    containing only components that still need release work.
+
+    This task expects a mapped snapshot (repositories/tags already resolved) from
+    trusted artifacts.
+
+    Fail-safe behavior: The task fails only if Pyxis credentials are missing or
+    pyxisServer is invalid. For all other issues (API errors, missing data, internal
+    check errors), components are kept and the pipeline proceeds.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+      type: string
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data in the data workspace
+      default: ""
+    - name: request
+      type: string
+      description: Name of the internal pipeline used to check fileUpdates completion
+      default: "check-file-updates"
+    - name: requestTimeout
+      type: string
+      default: "300"
+      description: InternalRequest timeout (seconds) for the fileUpdates completion check
+    - name: synchronously
+      type: string
+      description: Whether to run internal requests synchronously or not
+      default: "true"
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current PipelineRun. Used as a label value when creating internal requests
+    - name: pyxisSecret
+      type: string
+      description: |-
+        The kubernetes secret for Pyxis authentication (needs keys: cert, key)
+      default: "pyxis-secret"
+    - name: pyxisServer
+      type: string
+      description: |-
+        The Pyxis server: production, production-internal, stage-internal, or stage
+      default: "production"
+    - name: apiRetryCount
+      type: string
+      description: Number of retries for API calls to Pyxis
+      default: "3"
+    - name: apiConnectTimeout
+      type: string
+      description: Connection timeout in seconds for API calls to Pyxis
+      default: "10"
+    - name: apiMaxTime
+      type: string
+      description: Maximum time in seconds for API calls to Pyxis
+      default: "30"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+    - name: ociStorage
+      description: |-
+        The OCI repository where the Trusted Artifacts are stored.
+        Must be provided by the pipeline (e.g., quay.io/redhat-user-workloads/workspace/application/component)
+      type: string
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: |-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: skip_release
+      description: Whether to skip release tasks (true if all components are already released)
+    - name: sourceDataArtifact
+      description: The location of the source data artifact in the OCI repository
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: pyxis-secret-vol
+      secret:
+        secretName: $(params.pyxisSecret)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: ORAS_OPTIONS
+        value: $(params.orasOptions)
+      - name: TRUSTED_ARTIFACTS_DEBUG
+        value: $(params.trustedArtifactsDebug)
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          cpu: 30m
+          memory: 64Mi
+        requests:
+          cpu: 30m
+          memory: 64Mi
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+        - name: orasOptions
+          value: $(params.orasOptions)
+    - name: filter-already-released-by-metadata
+      image: quay.io/konflux-ci/release-service-utils@sha256:653b4782f0693c031a5d1327c026e6895d90b8126d51d8a3d07ffe940f6721fd
+      computeResources:
+        limits:
+          cpu: 250m
+          memory: 1Gi
+        requests:
+          cpu: 250m
+          memory: 1Gi
+      volumeMounts:
+        - name: pyxis-secret-vol
+          mountPath: /etc/pyxis-secrets
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        
+        echo "╔═══════════════════════════════════════════════════════════════════╗"
+        echo "║ Filter Already Released Components (Pyxis Check)                ║"
+        echo "╚═══════════════════════════════════════════════════════════════════╝"
+        # API call retry/timeout configuration (from task parameters)
+        API_RETRY_COUNT="$(params.apiRetryCount)"
+        API_CONNECT_TIMEOUT="$(params.apiConnectTimeout)"
+        API_MAX_TIME="$(params.apiMaxTime)"
+
+        # CA bundle configuration (use array to avoid word-splitting)
+        CA_BUNDLE_PATH="/mnt/trusted-ca/ca-bundle.crt"
+        if [ -f "${CA_BUNDLE_PATH}" ]; then
+          CA_BUNDLE_ARGS=(--cacert "${CA_BUNDLE_PATH}")
+        else
+          CA_BUNDLE_ARGS=()
+        fi
+
+        # Helper function for Pyxis API calls (certificate-based auth)
+        # Usage: http_get_pyxis <url> <output_file> <cert_path> <key_path>
+        # Returns: HTTP status code (always numeric, "000" on complete failure)
+        # SECURITY: Stderr redirected to /dev/null to prevent cert path leakage in error messages
+        http_get_pyxis() {
+          local url="$1"
+          local output_file="$2"
+          local cert_path="$3"
+          local key_path="$4"
+          local http_code
+          http_code=$(curl-with-retry --retry "${API_RETRY_COUNT}" --retry-all-errors \
+            --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" -sS \
+            "${CA_BUNDLE_ARGS[@]}" \
+            --cert "${cert_path}" --key "${key_path}" \
+            -o "${output_file}" -w "%{http_code}" "${url}" 2>/dev/null || echo "000")
+          # Ensure we always return a numeric code
+          if [[ "${http_code}" =~ ^[0-9]{3}$ ]]; then
+            echo "${http_code}"
+          else
+            echo "000"
+          fi
+        }
+
+        # Helper function to keep a component in the filtered list
+        # Usage: keep_component <component_json> <reason_message>
+        keep_component() {
+          local component_json="$1"
+          local reason="$2"
+          echo "${reason}"
+          FILTERED_COMPONENTS=$(jq --argjson comp "${component_json}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+          echo ""
+        }
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+
+        # Initialize results with defaults to prevent task failure on early exits
+        if [ -n "$(params.sourceDataArtifact)" ]; then
+          echo -n "$(params.sourceDataArtifact)" > "$(results.sourceDataArtifact.path)"
+        else
+          echo -n "" > "$(results.sourceDataArtifact.path)"
+        fi
+        echo -n "false" > "$(results.skip_release.path)"
+
+        if [ ! -f "${SNAPSHOT_FILE}" ]; then
+            echo "Error: Snapshot file not found: ${SNAPSHOT_FILE}"
+            exit 1
+        fi
+
+        # Check Pyxis credentials (required)
+        if [ ! -f /etc/pyxis-secrets/cert ] || [ ! -f /etc/pyxis-secrets/key ]; then
+          echo "Error: Pyxis credentials not available"
+          exit 1
+        fi
+
+        if [[ "$(params.pyxisServer)" == "production" ]]; then
+          PYXIS_URL="https://pyxis.api.redhat.com/"
+        elif [[ "$(params.pyxisServer)" == "stage" ]]; then
+          PYXIS_URL="https://pyxis.preprod.api.redhat.com/"
+        elif [[ "$(params.pyxisServer)" == "production-internal" ]]; then
+          PYXIS_URL="https://pyxis.engineering.redhat.com/"
+        elif [[ "$(params.pyxisServer)" == "stage-internal" ]]; then
+          PYXIS_URL="https://pyxis.stage.engineering.redhat.com/"
+        else
+          echo "Invalid pyxisServer parameter. Allowed values: production, production-internal, stage-internal, stage"
+          exit 1
+        fi
+
+        # Validate snapshot JSON structure (work directly on file for better performance)
+        if ! jq -e '.' "${SNAPSHOT_FILE}" >/dev/null 2>&1; then
+          echo "Error: Invalid JSON in snapshot file"
+          exit 1
+        fi
+        
+        if ! jq -e '.components | type == "array"' "${SNAPSHOT_FILE}" >/dev/null 2>&1; then
+          echo "Error: Snapshot missing required 'components' array or it is not an array"
+          exit 1
+        fi
+        
+        COMPONENT_COUNT=$(jq '.components | length' "${SNAPSHOT_FILE}")
+
+        # Skip release if snapshot is empty
+        if [ "${COMPONENT_COUNT}" -eq 0 ]; then
+          echo "Snapshot has no components - skipping release"
+          echo -n "true" > "$(results.skip_release.path)"
+          # sourceDataArtifact already initialized at start
+          exit 0
+        fi
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Starting filter check for ${COMPONENT_COUNT} component(s)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        FILTERED_COMPONENTS='[]'
+        FILTERED_COUNT=0
+
+        # Check fileUpdates completion (if configured in data.json). This is required
+        # to consider a component "fully released" for idempotency.
+        FILE_UPDATES_COMPLETE="true"
+        FILE_UPDATES_REQUIRED="false"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        COMPONENT_GROUP=$(jq -r '.componentGroup // .application // ""' "${SNAPSHOT_FILE}")
+
+        if [ -n "$(params.dataPath)" ]; then
+          if [ ! -f "${DATA_FILE}" ]; then
+            echo "WARNING: dataPath provided but data file missing: ${DATA_FILE}"
+            FILE_UPDATES_REQUIRED="true"
+            FILE_UPDATES_COMPLETE="false"
+          elif ! jq -e '.' "${DATA_FILE}" >/dev/null 2>&1; then
+            echo "WARNING: Data file contains invalid JSON - preventing filtering"
+            FILE_UPDATES_REQUIRED="true"
+            FILE_UPDATES_COMPLETE="false"
+          else
+            FILE_UPDATES_LENGTH=$(jq '.fileUpdates // [] | length' "${DATA_FILE}" 2>/dev/null || echo "0")
+            if [ "${FILE_UPDATES_LENGTH}" -gt 0 ] 2>/dev/null; then
+              FILE_UPDATES_REQUIRED="true"
+
+              if [ -z "${COMPONENT_GROUP}" ] || [ "${COMPONENT_GROUP}" = "null" ]; then
+                echo "WARNING: Snapshot componentGroup is empty - cannot verify fileUpdates"
+                FILE_UPDATES_COMPLETE="false"
+              else
+                echo "Checking fileUpdates completion for ${FILE_UPDATES_LENGTH} repo(s)..."
+
+                TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
+                REQUEST_LABEL="internal-services.appstudio.openshift.io/request-id"
+                TASK_ID=$(context.taskRun.uid)
+                PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+                for ((fu=0; fu<FILE_UPDATES_LENGTH; fu++)); do
+                  item=$(jq -cr ".fileUpdates[$fu]" "${DATA_FILE}")
+                  upstream_repo=$(jq -r '.upstream_repo // .repo // ""' <<< "${item}")
+                  file_updates_secret=$(jq -r '.file_updates_secret // "file-updates-secret"' <<< "${item}")
+
+                  if [ -z "${upstream_repo}" ] || [ "${upstream_repo}" = "null" ]; then
+                    echo "WARNING: fileUpdates entry missing repo/upstream_repo (index ${fu})"
+                    FILE_UPDATES_COMPLETE="false"
+                    break
+                  fi
+
+                  requestId="$(openssl rand -hex 12)"
+                  if ! internal-request --pipeline "$(params.request)" \
+                      -p upstream_repo="${upstream_repo}" \
+                      -p componentGroup="${COMPONENT_GROUP}" \
+                      -p file_updates_secret="${file_updates_secret}" \
+                      -p taskGitUrl="$(params.taskGitUrl)" \
+                      -p taskGitRevision="$(params.taskGitRevision)" \
+                      -s "$(params.synchronously)" \
+                      -t "$(params.requestTimeout)" \
+                      -l "${TASK_LABEL}=${TASK_ID}" \
+                      -l "${REQUEST_LABEL}=${requestId}" \
+                      -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)"; then
+                    echo "WARNING: Failed to create InternalRequest for fileUpdates check (index ${fu})"
+                    FILE_UPDATES_COMPLETE="false"
+                    break
+                  fi
+
+                  ir_selector="${PIPELINERUN_LABEL}=$(params.pipelineRunUid)"
+                  ir_selector="${ir_selector},${TASK_LABEL}=${TASK_ID}"
+                  ir_selector="${ir_selector},${REQUEST_LABEL}=${requestId}"
+                  IRjson=$(kubectl get internalrequest \
+                    -l "${ir_selector}" \
+                    -o jsonpath='{.items[0]}' \
+                    --sort-by=.metadata.creationTimestamp 2>/dev/null || true)
+
+                  if [ -z "${IRjson}" ]; then
+                    echo "WARNING: No InternalRequest found for fileUpdates check (index ${fu})"
+                    FILE_UPDATES_COMPLETE="false"
+                    break
+                  fi
+
+                  results=$(jq -c '.status.results // empty' <<< "${IRjson}" 2>/dev/null || echo "")
+                  if [ -z "${results}" ]; then
+                    echo "WARNING: InternalRequest has no status.results for fileUpdates check (index ${fu})"
+                    FILE_UPDATES_COMPLETE="false"
+                    break
+                  fi
+
+                  if [ "$(jq -r '.result // ""' <<< "${results}" 2>/dev/null || echo "")" != "Success" ]; then
+                    echo "WARNING: fileUpdates check did not succeed for ${upstream_repo}"
+                    FILE_UPDATES_COMPLETE="false"
+                    break
+                  fi
+
+                  file_updates_complete="$(
+                    jq -r '.file_updates_complete // "false"' <<< "${results}" 2>/dev/null || echo "false"
+                  )"
+                  if [ "${file_updates_complete}" != "true" ]; then
+                    echo "fileUpdates not complete for ${upstream_repo}"
+                    FILE_UPDATES_COMPLETE="false"
+                    break
+                  fi
+                done
+              fi
+            fi
+          fi
+        fi
+
+        if [ "${FILE_UPDATES_REQUIRED}" = "true" ]; then
+          echo "fileUpdates required: ${FILE_UPDATES_REQUIRED}, complete: ${FILE_UPDATES_COMPLETE}"
+        fi
+
+        # If fileUpdates are configured but not complete, we cannot consider any component
+        # "fully released" yet. Fail-safe: keep the snapshot unchanged and proceed.
+        if [ "${FILE_UPDATES_REQUIRED}" = "true" ] && [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
+          echo "fileUpdates are not complete - skipping filtering and passing snapshot unchanged."
+          exit 0
+        fi
+
+        # Create temp files once for component processing (reused in loop)
+        COMPONENT_AUTH_FILE=$(mktemp)
+        PYXIS_RESPONSE=$(mktemp)
+
+        for ((i=0; i<COMPONENT_COUNT; i++)); do
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "Processing component $((i+1))/${COMPONENT_COUNT}"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            COMPONENT=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
+            COMPONENT_NAME=$(jq -r '.name' <<< "${COMPONENT}")
+            CONTAINER_IMAGE=$(jq -r '.containerImage' <<< "${COMPONENT}")
+            echo "Component: ${COMPONENT_NAME}"
+            echo "Image: ${CONTAINER_IMAGE}"
+
+            # Validate component has required fields
+            if [ -z "${COMPONENT_NAME}" ] || [ "${COMPONENT_NAME}" = "null" ]; then
+              keep_component "${COMPONENT}" "Component at index $i: KEPT (missing or null name field)"
+              continue
+            fi
+
+            if [ -z "${CONTAINER_IMAGE}" ] || [ "${CONTAINER_IMAGE}" = "null" ]; then
+              keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (missing or null containerImage field)"
+              continue
+            fi
+
+            PYXIS_COMPLETE="false"
+            DIGEST=""
+            if [[ "${CONTAINER_IMAGE}" == *@sha256:* ]]; then
+              # Extract digest from image reference (after @)
+              RAW_DIGEST="${CONTAINER_IMAGE##*@}"
+              # Remove sha256: prefix if present, then validate and re-add
+              RAW_DIGEST="${RAW_DIGEST#sha256:}"
+              if [[ "${RAW_DIGEST}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+                DIGEST="sha256:${RAW_DIGEST}"
+              else
+                echo "WARNING: Invalid digest in containerImage: ${CONTAINER_IMAGE}"
+                DIGEST=""
+              fi
+            else
+              # Resolve digest using oras (reuse temp file for auth config)
+              # Add timeout to prevent hanging on slow/broken registries
+              if ! timeout 30 select-oci-auth "${CONTAINER_IMAGE}" > "${COMPONENT_AUTH_FILE}" 2>/dev/null || \
+                 [ ! -s "${COMPONENT_AUTH_FILE}" ]; then
+                  echo '{}' > "${COMPONENT_AUTH_FILE}"
+              fi
+              
+              # Add timeout to prevent hanging on slow/broken registries
+              if ! RAW_DIGEST=$(timeout 60 oras resolve --registry-config "${COMPONENT_AUTH_FILE}" \
+                  "${CONTAINER_IMAGE}" 2>/dev/null); then
+                # oras resolve failed or timed out - cannot verify this component, keep it
+                keep_component "${COMPONENT}" \
+                  "Component ${COMPONENT_NAME}: KEPT (oras resolve failed or timed out for ${CONTAINER_IMAGE})"
+                continue
+              fi
+              
+              # Normalize digest: strip whitespace, remove any prefix, ensure sha256: format
+              RAW_DIGEST=$(echo "${RAW_DIGEST}" | tr -d '[:space:]')
+              # If it contains @, extract the part after @
+              if [[ "${RAW_DIGEST}" == *@* ]]; then
+                RAW_DIGEST="${RAW_DIGEST##*@}"
+              fi
+              # Remove sha256: prefix if present
+              RAW_DIGEST="${RAW_DIGEST#sha256:}"
+              
+              # Validate it looks like a sha256 hash (64 hex chars)
+              if ! [[ "${RAW_DIGEST}" =~ ^[a-fA-F0-9]{64}$ ]]; then
+                # Invalid digest format - cannot verify this component, keep it
+                keep_component "${COMPONENT}" \
+                  "Component ${COMPONENT_NAME}: KEPT (invalid digest format from oras: ${RAW_DIGEST})"
+                continue
+              fi
+              
+              DIGEST="sha256:${RAW_DIGEST}"
+            fi
+
+            # At this point, DIGEST is guaranteed to be valid (either from containerImage or oras)
+            if [ -z "${DIGEST}" ]; then
+              # This should never happen now, but keep as safety check
+              keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (empty digest - internal error)"
+              continue
+            fi
+            
+            # Encode the entire filter parameter value (including == operator)
+            FILTER_VALUE="docker_image_digest==${DIGEST}"
+            FILTER_ENCODED=$(jq -sRr @uri <<< "${FILTER_VALUE}")
+            PYXIS_QUERY_URL="${PYXIS_URL}v1/images?filter=${FILTER_ENCODED}"
+            echo "Querying Pyxis for ${COMPONENT_NAME}..."
+            # Reuse temp file for this API call (overwrites previous content)
+            PYXIS_HTTP_CODE=$(http_get_pyxis "${PYXIS_QUERY_URL}" "${PYXIS_RESPONSE}" \
+              /etc/pyxis-secrets/cert /etc/pyxis-secrets/key)
+            echo "Pyxis query returned HTTP ${PYXIS_HTTP_CODE}"
+
+            if [ "${PYXIS_HTTP_CODE}" != "200" ]; then
+              # SECURITY: Only log component name and HTTP code - NOT the digest, URL, or cert paths
+              echo "Pyxis query failed for ${COMPONENT_NAME} (HTTP ${PYXIS_HTTP_CODE})"
+              PYXIS_COMPLETE="false"
+            else
+              IMAGE_COUNT=$(jq -r '.data | length' "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
+              if [ "${IMAGE_COUNT}" -eq 0 ] 2>/dev/null; then
+                echo "No Pyxis entries found for ${COMPONENT_NAME}"
+                PYXIS_COMPLETE="false"
+              elif [ -z "${IMAGE_COUNT}" ]; then
+                echo "WARNING: Invalid Pyxis response for ${COMPONENT_NAME}"
+                PYXIS_COMPLETE="false"
+              else
+                # Extract expected tags as JSON array (normalize objects to strings)
+                EXPECTED_TAGS_JSON=$(jq -c \
+                  '[.repositories[]?.tags[]? | if type == "object" then .name else . end] | 
+                   sort | unique' \
+                  <<< "${COMPONENT}" 2>/dev/null || echo "[]")
+                EXPECTED_TAG_COUNT=$(jq 'length' <<< "${EXPECTED_TAGS_JSON}")
+                
+                if [ "${EXPECTED_TAG_COUNT}" -eq 0 ] 2>/dev/null; then
+                  echo "WARNING: No expected tags found for ${COMPONENT_NAME}"
+                  PYXIS_COMPLETE="false"
+                else
+                  # Extract Pyxis tags as JSON array (normalize objects to strings)
+                  PYXIS_TAGS_JSON=$(jq -c \
+                    '[.data[]?.repositories[]?.tags[]? | if type == "object" then .name else . end] | 
+                     sort | unique' \
+                    "${PYXIS_RESPONSE}" 2>/dev/null || echo "[]")
+                  
+                  # Compute missing tags: expected - pyxis (set difference)
+                  MISSING_TAGS_JSON=$(jq -c --argjson expected "${EXPECTED_TAGS_JSON}" \
+                    --argjson pyxis "${PYXIS_TAGS_JSON}" \
+                    -n '$expected - $pyxis' 2>/dev/null || echo "[]")
+                  MISSING_TAG_COUNT=$(jq 'length' <<< "${MISSING_TAGS_JSON}" 2>/dev/null || echo "1")
+                  
+                  if [ "${MISSING_TAG_COUNT}" -gt 0 ] 2>/dev/null; then
+                    echo "Pyxis missing tags for ${COMPONENT_NAME}: $(jq -r 'join(", ")' <<< "${MISSING_TAGS_JSON}")"
+                    PYXIS_COMPLETE="false"
+                  else
+                    # All tags present, check for RPM data
+                    HAS_RPM_DATA=$(jq -r '[.data[]?.repositories[]?.content_sets // [] | length] | max // 0' \
+                      "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
+                    if [ "${HAS_RPM_DATA}" -gt 0 ] 2>/dev/null; then
+                      PYXIS_COMPLETE="true"
+                    else
+                      PYXIS_COMPLETE="false"
+                    fi
+                  fi
+                fi
+              fi
+            fi
+
+            ALL_CHECKS_PASSED="true"
+            if [ "${PYXIS_COMPLETE}" != "true" ]; then
+              ALL_CHECKS_PASSED="false"
+            fi
+            if [ "${FILE_UPDATES_REQUIRED}" = "true" ] && [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
+              ALL_CHECKS_PASSED="false"
+            fi
+
+            if [ "${ALL_CHECKS_PASSED}" == "true" ]; then
+                echo "Component ${COMPONENT_NAME}: FILTERED (Pyxis + fileUpdates complete)"
+                FILTERED_COUNT=$((FILTERED_COUNT + 1))
+                echo ""
+            else
+                if [ "${FILE_UPDATES_REQUIRED}" = "true" ] && [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
+                  keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (fileUpdates incomplete)"
+                else
+                  keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (Pyxis metadata incomplete)"
+                fi
+            fi
+        done
+
+        # Write filtered snapshot atomically using temp file
+        # Create temp file in same directory as snapshot to ensure atomic mv (same filesystem)
+        SNAPSHOT_DIR=$(dirname "${SNAPSHOT_FILE}")
+        
+        # Validate target directory before creating temp file
+        if [ ! -d "${SNAPSHOT_DIR}" ]; then
+          echo "Error: Snapshot directory does not exist: ${SNAPSHOT_DIR}"
+          exit 1
+        fi
+        if [ ! -w "${SNAPSHOT_DIR}" ]; then
+          echo "Error: Snapshot directory is not writable: ${SNAPSHOT_DIR}"
+          exit 1
+        fi
+        
+        TEMP_SNAPSHOT=$(mktemp "${SNAPSHOT_DIR}/.snapshot.XXXXXX")
+        
+        # Create filtered snapshot with error handling (work directly on file)
+        if ! jq --argjson comps "${FILTERED_COMPONENTS}" '.components = $comps' \
+          "${SNAPSHOT_FILE}" > "${TEMP_SNAPSHOT}"; then
+          echo "Error: Failed to create filtered snapshot with jq"
+          exit 1
+        fi
+        
+        # Validate temp file before moving
+        if [ ! -s "${TEMP_SNAPSHOT}" ]; then
+          echo "Error: Filtered snapshot file is empty"
+          exit 1
+        fi
+        
+        # Validate it's valid JSON
+        if ! jq -e '.' "${TEMP_SNAPSHOT}" >/dev/null 2>&1; then
+          echo "Error: Filtered snapshot is not valid JSON"
+          exit 1
+        fi
+        
+        # All checks passed, atomically replace the original
+        mv "${TEMP_SNAPSHOT}" "${SNAPSHOT_FILE}"
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "SUMMARY:"
+        echo "  Total components: ${COMPONENT_COUNT}"
+        echo "  Filtered (already released): ${FILTERED_COUNT}"
+        echo "  To be released: $((COMPONENT_COUNT - FILTERED_COUNT))"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+        # Skip release if all components were filtered
+        if [ "${FILTERED_COUNT}" -eq "${COMPONENT_COUNT}" ]; then
+            echo -n "true" > "$(results.skip_release.path)"
+        else
+            echo -n "false" > "$(results.skip_release.path)"
+        fi
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          cpu: 250m
+          memory: 128Mi
+        requests:
+          cpu: 250m
+          memory: 128Mi
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
+        - name: orasOptions
+          value: $(params.orasOptions)
+          

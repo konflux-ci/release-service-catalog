@@ -1,0 +1,221 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-file-updates-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Internal task to check whether Konflux `fileUpdates` changes are already complete for a
+    given componentGroup and GitLab repository.
+
+    This task is intentionally "best effort": on errors (missing credentials, API errors, invalid data),
+    it returns file_updates_complete=false and result=Failure instead of failing the TaskRun. This enables
+    managed pipelines to treat the check as incomplete and continue safely.
+  params:
+    - name: upstream_repo
+      type: string
+      description: Git repository (GitLab) where fileUpdates merge requests are created
+    - name: componentGroup
+      type: string
+      description: Component group being released (used to identify Konflux fileUpdates MRs)
+    - name: file_updates_secret
+      type: string
+      description: Secret containing GitLab host/access token used by internal services
+      default: file-updates-secret
+    - name: apiRetryCount
+      type: string
+      description: Number of retries for GitLab API calls
+      default: "3"
+    - name: apiConnectTimeout
+      type: string
+      description: Connection timeout in seconds for GitLab API calls
+      default: "10"
+    - name: apiMaxTime
+      type: string
+      description: Maximum time in seconds for GitLab API calls
+      default: "30"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+    - name: internalRequestPipelineRunName
+      type: string
+      description: Name of the PipelineRun that called this task
+  results:
+    - name: result
+      type: string
+      description: Success if the check executed, Failure otherwise
+    - name: file_updates_complete
+      type: string
+      description: '"true" if latest matching fileUpdates MR is merged, otherwise "false"'
+    - name: merge_request_url
+      type: string
+      description: Web URL of the latest matching fileUpdates MR (may be empty)
+    - name: internalRequestPipelineRunName
+      type: string
+      description: Name of the PipelineRun that ran this task
+    - name: internalRequestTaskRunName
+      type: string
+      description: Name of the TaskRun that ran this task
+  volumes:
+    - name: file-updates-secret-vol
+      secret:
+        secretName: $(params.file_updates_secret)
+        defaultMode: 0444
+        optional: true
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - name: file-updates-secret-vol
+        mountPath: /mnt/file-updates-secret
+        readOnly: true
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+  steps:
+    - name: check
+      image: quay.io/konflux-ci/release-service-utils@sha256:e852a62497c4537059bb1f4c3ddf5c1a813b2b22bd9f4bb826cffb36af7d5f65
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 250m
+        requests:
+          memory: 256Mi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        # Default results (best-effort: do not fail the TaskRun)
+        echo -n "Failure" > "$(results.result.path)"
+        echo -n "false" > "$(results.file_updates_complete.path)"
+        echo -n "" > "$(results.merge_request_url.path)"
+        echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
+        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
+
+        fail() {
+          local msg="${1:-unknown error}"
+          echo "ERROR: ${msg}"
+          exit 0
+        }
+
+        upstream_repo="$(params.upstream_repo)"
+        component_group="$(params.componentGroup)"
+
+        if [ -z "${upstream_repo}" ]; then
+          fail "upstream_repo param is required"
+        fi
+        if [ -z "${component_group}" ]; then
+          fail "componentGroup param is required"
+        fi
+
+        if [ ! -f /mnt/file-updates-secret/gitlab_host ] || [ ! -f /mnt/file-updates-secret/gitlab_access_token ]; then
+          fail "file updates secret missing required keys (gitlab_host, gitlab_access_token)"
+        fi
+
+        gitlab_host="$(tr -d '\n\r' < /mnt/file-updates-secret/gitlab_host)"
+        access_token="$(tr -d '\n\r' < /mnt/file-updates-secret/gitlab_access_token)"
+
+        if [ -z "${gitlab_host}" ] || [ -z "${access_token}" ]; then
+          fail "file updates secret contains empty gitlab_host or gitlab_access_token"
+        fi
+
+        # Use CA bundle if present (optional)
+        ca_bundle_path="/mnt/trusted-ca/ca-bundle.crt"
+        ca_bundle_args=()
+        if [ -f "${ca_bundle_path}" ]; then
+          ca_bundle_args=(--cacert "${ca_bundle_path}")
+        fi
+
+        # Parse <group>/<project> path from upstream_repo
+        project_path=""
+        if [[ "${upstream_repo}" =~ ^https?://[^/]+/(.+)$ ]]; then
+          project_path="${BASH_REMATCH[1]}"
+        elif [[ "${upstream_repo}" =~ ^git@[^:]+:(.+)$ ]]; then
+          project_path="${BASH_REMATCH[1]}"
+        else
+          fail "could not parse upstream_repo: ${upstream_repo}"
+        fi
+
+        project_path="${project_path%/}"
+        project_path="${project_path%.git}"
+        if [ -z "${project_path}" ]; then
+          fail "parsed project path is empty from upstream_repo: ${upstream_repo}"
+        fi
+
+        base_url="${gitlab_host}"
+        if ! [[ "${base_url}" =~ ^https?:// ]]; then
+          base_url="https://${base_url}"
+        fi
+        base_url="${base_url%/}"
+        gitlab_api_url="${base_url}/api/v4"
+
+        project_path_encoded="$(jq -sRr @uri <<< "${project_path}")"
+        search_encoded="$(jq -sRr @uri <<< "Konflux release")"
+
+        curl_config="$(mktemp)"
+        chmod "600" "${curl_config}"
+        printf '%s\n' "header = \"PRIVATE-TOKEN: ${access_token}\"" > "${curl_config}"
+
+        response_file="$(mktemp)"
+        mr_search_url="${gitlab_api_url}/projects/${project_path_encoded}/merge_requests"
+        mr_search_url="${mr_search_url}?state=all&search=${search_encoded}"
+        mr_search_url="${mr_search_url}&order_by=created_at&sort=desc&per_page=50"
+        http_code="$(
+          curl --retry "$(params.apiRetryCount)" --retry-all-errors \
+            --connect-timeout "$(params.apiConnectTimeout)" --max-time "$(params.apiMaxTime)" \
+            -sS "${ca_bundle_args[@]}" --config "${curl_config}" \
+            -o "${response_file}" -w "%{http_code}" \
+            "${mr_search_url}" \
+            2>/dev/null || echo "000"
+        )"
+
+        if [ "${http_code}" != "200" ]; then
+          fail "GitLab API query failed for ${project_path} (HTTP ${http_code})"
+        fi
+
+        # Find the latest MR matching this componentGroup and fileUpdates title pattern.
+        # process-file-updates-task creates titles like:
+        #   [Konflux release] <componentGroup>: fileUpdates changes <branch>
+        latest_mr="$(
+          jq -c --arg cg "${component_group}" '
+            map(
+              select((.title // "") | contains($cg))
+              | select((.title // "") | contains("fileUpdates changes"))
+            )
+            | .[0] // empty
+          ' "${response_file}" 2>/dev/null || true
+        )"
+
+        if [ -z "${latest_mr}" ]; then
+          echo "No matching fileUpdates MR found for componentGroup=${component_group}"
+          echo -n "Success" > "$(results.result.path)"
+          exit 0
+        fi
+
+        mr_state="$(jq -r '.state // ""' <<< "${latest_mr}" 2>/dev/null || echo "")"
+        mr_url="$(jq -r '.web_url // ""' <<< "${latest_mr}" 2>/dev/null || echo "")"
+        echo -n "${mr_url}" > "$(results.merge_request_url.path)"
+
+        if [ "${mr_state}" = "merged" ]; then
+          echo -n "true" > "$(results.file_updates_complete.path)"
+        else
+          echo -n "false" > "$(results.file_updates_complete.path)"
+        fi
+
+        echo -n "Success" > "$(results.result.path)"
