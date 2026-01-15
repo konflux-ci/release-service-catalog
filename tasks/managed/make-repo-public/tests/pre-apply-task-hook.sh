@@ -8,4 +8,4 @@ yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[
 
 # Create a dummy registry secret (and delete it first if it exists)
 kubectl delete secret test-registry-secret --ignore-not-found
-kubectl create secret generic test-registry-secret --from-literal=token=myquaytoken
+kubectl create secret generic test-registry-secret --from-literal=token=THIS_SHOULD_NOT_BE_EXPOSED

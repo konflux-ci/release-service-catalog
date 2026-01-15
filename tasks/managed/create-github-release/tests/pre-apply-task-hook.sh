@@ -8,4 +8,4 @@ yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[
 
 # Create a dummy github secret (and delete it first if it exists)
 kubectl delete secret test-create-github-release-token --ignore-not-found
-kubectl create secret generic test-create-github-release-token --from-literal=token=mytoken
+kubectl create secret generic test-create-github-release-token --from-literal=token=THIS_SHOULD_NOT_BE_EXPOSED

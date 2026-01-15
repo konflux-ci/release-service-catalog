@@ -8,4 +8,4 @@ yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[
 
 # Create a dummy access token secret (and delete it first if it exists)
 kubectl delete secret konflux-advisory-jira-secret --ignore-not-found
-kubectl create secret generic konflux-advisory-jira-secret --from-literal=token=abcdefg
+kubectl create secret generic konflux-advisory-jira-secret --from-literal=token=THIS_SHOULD_NOT_BE_EXPOSED

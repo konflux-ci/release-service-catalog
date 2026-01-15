@@ -18,4 +18,4 @@ yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[
 yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mock_generic_type_advisories.sh") + .spec.steps[1].script' "$TASK_PATH"
 # Create a dummy publish-to-cgw secret (and delete it first if it exists)
 kubectl delete secret publish-to-cgw-secret --ignore-not-found
-kubectl create secret generic publish-to-cgw-secret --from-literal=username=myusername --from-literal=token=mytoken
+kubectl create secret generic publish-to-cgw-secret --from-literal=username=myusername --from-literal=token=THIS_SHOULD_NOT_BE_EXPOSED

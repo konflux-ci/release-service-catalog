@@ -12,6 +12,6 @@ yq -i '.spec.steps[2].script = load_str("'"$SCRIPT_DIR"'/mocks.sh") + .spec.step
 
 # Create mock Pyxis credentials secret for testing (not used in tests, but kept for reference)
 kubectl create secret generic pyxis \
-  --from-literal=cert="mock-cert" \
-  --from-literal=key="mock-key" \
+  --from-literal=cert="THIS_SHOULD_NOT_BE_EXPOSED" \
+  --from-literal=key="THIS_SHOULD_NOT_BE_EXPOSED" \
   --dry-run=client -o yaml | kubectl apply -f - || true
