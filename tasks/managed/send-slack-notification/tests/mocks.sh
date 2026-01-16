@@ -7,7 +7,7 @@ function curl() {
   echo Mock curl called with: $*
   echo $* >> "$(params.dataDir)/mock_curl.txt"
 
-  if [[ "$*" != "-H Content-type: application/json --data-binary @/tmp/release.json ABCDEF"* ]]
+  if [[ "$*" != "-H Content-type: application/json --data-binary @/tmp/release.json SENSITIVE_DATA_ABCDEF"* ]]
   then
     echo Error: Unexpected call
     exit 1

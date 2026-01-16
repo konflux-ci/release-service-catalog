@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -x
 
 echo "CLAUDE_DEBUGGING: mocks.sh file loaded successfully with fix attempt $(date)" >&2
 
@@ -15,7 +14,7 @@ items:
   index_image_resolved: "registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:0000"
   index_image: "quay.io/scoheb/fbc-index-testing:latest"
   logs:
-    url: "https://fakeiib.host/api/v1/builds/1/logs"
+    url: "https://SENSITIVE_DATA_fakeiib.host/api/v1/builds/1/logs"
   request_type: "fbc-operations"
   state: "in_progress"
   state_reason: "The request was initiated"
@@ -81,7 +80,7 @@ function curl() {
     tempfile="$5"
     echo -e '{ "fbc_opt_in": true }' > "$tempfile"
 
-  elif [[ "$params" == *"-s https://fakeiib.host/builds"* ]] && [[ "$params" == *"from_index="* ]] && [[ "$params" == *"state="* ]] && [[ "$params" != *"/builds/1"* ]] && [[ "$params" != *"/api/v1/builds"* ]]; then
+  elif [[ "$params" == *"-s https://SENSITIVE_DATA_fakeiib.host/builds"* ]] && [[ "$params" == *"from_index="* ]] && [[ "$params" == *"state="* ]] && [[ "$params" != *"/builds/1"* ]] && [[ "$params" != *"/api/v1/builds"* ]]; then
     # Check params directly for registry-proxy pattern (most reliable)
     is_registry_proxy_test=false
     if [[ "$params" =~ registry-proxy.engineering.redhat.com/rh-osbs/iib-pub ]]; then
@@ -212,7 +211,7 @@ function curl() {
     fi
     echo -en "${build}"
 
-  elif [[ "$params" == "-s https://fakeiib.host/builds/1" ]] || [[ "$params" == "-s https://fakeiib.host/builds/2" ]]; then
+  elif [[ "$params" == "-s https://SENSITIVE_DATA_fakeiib.host/builds/1" ]] || [[ "$params" == "-s https://SENSITIVE_DATA_fakeiib.host/builds/2" ]]; then
     set -x
     echo "$*" >> mock_build_progress_calls
     if [[ "$(context.taskRun.name)" =~ "test-update-fbc-catalog-error"* ]]; then
@@ -230,10 +229,10 @@ function curl() {
     buildJson=$(cat build_json)
     export buildJson
 
-  elif [[ "$params" == "-s https://fakeiib.host/api/v1/builds/1/logs" ]] || [[ "$params" == "-s https://fakeiib.host/api/v1/builds/2/logs" ]]; then
+  elif [[ "$params" == "-s https://SENSITIVE_DATA_fakeiib.host/api/v1/builds/1/logs" ]] || [[ "$params" == "-s https://SENSITIVE_DATA_fakeiib.host/api/v1/builds/2/logs" ]]; then
     echo "Logs are for weaks"
 
-  elif [[ "$params" =~ "-u : --negotiate -s -X POST -H Content-Type: application/json -d@".*" --insecure https://fakeiib.host/builds/fbc-operations" ]]; then
+  elif [[ "$params" =~ "-u : --negotiate -s -X POST -H Content-Type: application/json -d@".*" --insecure https://SENSITIVE_DATA_fakeiib.host/builds/fbc-operations" ]]; then
     # For POST requests, use the buildSeed template as the base
     buildJson=$(jq -cr '.items[0]' <<< "${buildSeed}")
     
@@ -249,7 +248,7 @@ function curl() {
     # Check if this is auth-failure test by taskrun name
     if [[ "$(context.taskRun.name)" == *"auth-failure"* ]]; then
       # For auth-failure test, set correct from_index and assign a NEW id (2) since old build (1) was rejected
-      buildJson=$(jq -c '.id = 2 | .from_index = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .index_image = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .logs.url = "https://fakeiib.host/api/v1/builds/2/logs"' <<< "${buildJson}")
+      buildJson=$(jq -c '.id = 2 | .from_index = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .index_image = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .logs.url = "https://SENSITIVE_DATA_fakeiib.host/api/v1/builds/2/logs"' <<< "${buildJson}")
     fi
     
     # For multiple fragments tests, update the buildJson to include the appropriate fbc_fragments array
@@ -288,7 +287,7 @@ function curl() {
     echo "${buildJson}"
   else
     # Catch-all: if no pattern matched, check if it looks like a check_previous_build call
-    if [[ "$params" == *"-s https://fakeiib.host/builds"* ]] && [[ "$params" == *"from_index="* ]] && [[ "$params" == *"state="* ]] && [[ "$params" != *"/builds/1"* ]] && [[ "$params" != *"/api/v1/builds"* ]]; then
+    if [[ "$params" == *"-s https://SENSITIVE_DATA_fakeiib.host/builds"* ]] && [[ "$params" == *"from_index="* ]] && [[ "$params" == *"state="* ]] && [[ "$params" != *"/builds/1"* ]] && [[ "$params" != *"/api/v1/builds"* ]]; then
       # This should have been caught by the earlier pattern, but if not, handle it here
       build="${buildSeed}"
       if [[ "$params" == *"registry-proxy.engineering.redhat.com/rh-osbs/iib-pub"* ]]; then

@@ -1,4 +1,4 @@
-set -eux
+set -eu
 
 # Check if this is a multiarch test by looking for arch_count.txt
 aws() {

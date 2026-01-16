@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -exo pipefail
+set -eo pipefail
 
 # mocks to be injected into task step scripts
 
@@ -10,7 +10,7 @@ function kinit() {
 function curl() {
   echo Mock curl called with: $* >&2
 
-  if [[ "$*" == "--retry 3 --negotiate -u : myurl/auth/token" ]]
+  if [[ "$*" == "--retry 3 --negotiate -u : SENSITIVE_DATA_myurl/auth/token" ]]
   then
     sleep 0.1  # Small delay to simulate network
     echo '{"access": "batch-token-'${RANDOM}'"}'

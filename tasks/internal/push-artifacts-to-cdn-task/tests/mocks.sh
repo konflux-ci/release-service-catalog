@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -ex
+set -e
 
 # mocks to be injected into task step scripts
 
@@ -16,7 +16,7 @@ function select-oci-auth() {
 }
 
 function skopeo() {
-    echo Mock skopeo called with: $*
+    # echo Mock skopeo called with: $*
     if [[ "$*" =~ copy.*--retry-times.* ]]; then
         # Extract destination directory from skopeo copy command
         # Format: skopeo copy --retry-times 3 --authfile FILE docker://IMAGE dir:DEST
@@ -196,9 +196,9 @@ function oras() {
 # The skopeo mock above creates real tar files that these utilities can work with
 
 function pulp_push_wrapper() {
-    echo Mock pulp_push_wrapper called with: $*
+    # echo Mock pulp_push_wrapper called with: $*
 
-    if [[ "$*" != *"--pulp-url https://pulp.com"* ]]; then
+    if [[ "$*" != *"--pulp-url https://SENSITIVE_DATA_pulp.com"* ]]; then
         printf "Mocked failure of pulp_push_wrapper" > /nonexistent/location
     fi
 
@@ -227,7 +227,7 @@ function pulp_push_wrapper() {
 }
 
 function rsync() {
-    echo Mock rsync called with: $*
+    # echo Mock rsync called with: $*
 
     if [[ "$3" = "testproduct3-binary-linux-amd64.tar.gz" ]]; then
         printf "Mocked failure of exodus-rsync"
@@ -236,7 +236,7 @@ function rsync() {
 }
 
 function publish_to_cgw_wrapper() {
-  echo "Mock publish_to_cgw_wrapper called with: $*"
+  # echo "Mock publish_to_cgw_wrapper called with: $*"
 
   /home/publish-to-cgw-wrapper/publish_to_cgw_wrapper "$@" --dry_run
 
@@ -247,11 +247,11 @@ function publish_to_cgw_wrapper() {
 }
 
 function ssh() {
-    echo Mocking ssh call with: $*
+    # echo Mocking ssh call with: $*
 }
 
 function scp() {
-    echo Mocking scp call with: $*
+    # echo Mocking scp call with: $*
     # Handle digest file copies - write mock digest to destination
     if [[ "$*" =~ .*digest.txt.* ]] || [[ "$*" =~ .*_digest.txt ]]; then
         args=($@)
@@ -262,7 +262,7 @@ function scp() {
 }
 
 function kinit() {
-    echo Mocking kinit call with: $*
+    # echo Mocking kinit call with: $*
     # Accept any kinit call with -kt flag as the user and host are now dynamic
     if [[ "$*" == *"-kt"* ]] ; then
         echo initialized

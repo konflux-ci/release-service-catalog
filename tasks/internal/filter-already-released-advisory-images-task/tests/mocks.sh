@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # Mock git
 function git() {
-  echo "Mock git called with: $*"
+  # echo "Mock git called with: $*"
 
   if [[ "$1" == "clone" ]]; then
     mkdir -p "$6"

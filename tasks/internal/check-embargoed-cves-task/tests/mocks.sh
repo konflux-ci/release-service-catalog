@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 
@@ -10,7 +10,7 @@ function kinit() {
 function curl() {
   echo Mock curl called with: $* >&2
 
-  if [[ "$*" == "--retry 3 --negotiate -u : myurl/auth/token" ]]
+  if [[ "$*" == "--retry 3 --negotiate -u : SENSITIVE_DATA_myurl/auth/token" ]]
   then
     echo '{"access": "dummy-token"}'
   elif [[ "$*" == *"myurl/osidb/api/v2/flaws?cve_id=CVE-embargo"* ]]

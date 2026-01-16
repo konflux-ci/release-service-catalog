@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 
 function kinit() {
-  echo "Mock kinit called with: $*"
+  # echo "Mock kinit called with: $*"
   
   echo "$*" >> "$(params.dataDir)/mock_kinit.txt"
 
@@ -19,7 +19,7 @@ function kinit() {
 }
 
 function ssh() {
-  echo "Mock ssh called with: $*"
+  # echo "Mock ssh called with: $*"
 
   echo "$*" >> "$(params.dataDir)/mock_ssh.txt"
 
@@ -62,7 +62,7 @@ function ssh() {
 }
 
 function rm() {
-  echo "Mock rm called with: $*"
+  # echo "Mock rm called with: $*"
 
   echo "$*" >> "$(params.dataDir)/mock_rm.txt"
 
@@ -92,7 +92,7 @@ function rm() {
 }
 
 function scp() {
-  echo "Mock scp called with: $*"
+  # echo "Mock scp called with: $*"
 
   echo "$*" >> "$(params.dataDir)/mock_scp.txt"
 
