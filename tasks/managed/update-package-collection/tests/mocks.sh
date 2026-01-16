@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 function kinit() {
@@ -103,7 +103,7 @@ function git() {
 }
 
 function glab() {
-  echo "Mock glab called with: $*"
+  echo "Mock glab"
 
   if [[ "$*" != "auth login"* ]]; then
     echo Error: Unexpected call

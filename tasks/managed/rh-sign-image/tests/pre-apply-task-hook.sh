@@ -11,7 +11,7 @@ kubectl delete internalrequests --all -A
 
 # Create a dummy pyxis secret (and delete it first if it exists)
 kubectl delete secret test-create-pyxis-image-cert --ignore-not-found
-kubectl create secret generic test-create-pyxis-image-cert --from-literal=cert=mycert --from-literal=key=mykey
+kubectl create secret generic test-create-pyxis-image-cert --from-literal=cert=SENSITIVE_DATA_mycert --from-literal=key=SENSITIVE_DATA_mykey
 
 # Delete pipeline for signing
 kubectl delete pipeline/simple-signing-pipeline --ignore-not-found
@@ -101,4 +101,4 @@ kubectl create -f /tmp/configMap2.json
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[1].script' "$TASK_PATH"

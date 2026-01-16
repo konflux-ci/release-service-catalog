@@ -9,8 +9,8 @@ done
 
 # Create a dummy secret for ssl cert for pyxis interactions (and delete it first if it exists)
 kubectl delete secret pyxis-ssl-cert --ignore-not-found
-kubectl create secret generic pyxis-ssl-cert --from-literal=cert=mypyxiscert --from-literal=key=mypyxiskey
+kubectl create secret generic pyxis-ssl-cert --from-literal=cert=sensitive-data-mypyxiscert --from-literal=key=sensitive-data-mypyxiskey
 
 # Create a dummy secret for ssl cert for UMB interactions (and delete it first if it exists)
 kubectl delete secret umb-ssl-cert --ignore-not-found
-kubectl create secret generic umb-ssl-cert --from-literal=cert=myumbcert --from-literal=key=myumbkey
+kubectl create secret generic umb-ssl-cert --from-literal=cert=sensitive-data-myumbcert --from-literal=key=sensitive-data-myumbkey

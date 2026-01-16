@@ -8,7 +8,7 @@ aws_creds=$(cat <<- EOF
 [test]
 aws_user = test-user
 aws_access_key_id = justadummykey
-aws_secret_access_key = justadummyaccesskey
+aws_secret_access_key = sensitive-data-justadummyaccesskey
 region = us-east-1
 EOF
 )
@@ -17,10 +17,10 @@ kubectl create secret generic test-charon-aws-credentials --from-literal=credent
 
 kubectl delete secret test-ca --ignore-not-found
 kubectl create secret generic test-ca \
-  --from-literal=client-key.pem="testkey" \
-  --from-literal=client-key.password="testpass" \
+  --from-literal=client-key.pem="sensitive-data-testkey" \
+  --from-literal=client-key.password="sensitive-data-testpass" \
   --from-literal=mrrc-signing.crt="testca"
 
 # Add mocks to the beginning of scripts
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[1].script' "$TASK_PATH"
+yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[2].script' "$TASK_PATH"

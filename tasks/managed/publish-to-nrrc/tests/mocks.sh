@@ -29,7 +29,7 @@ function oras(){
 }
 
 function charon(){
-  echo Mock charon called with: "$*"
+  echo Mock charon
   echo "$*" >> "$(params.dataDir)/mock_charon.txt"
 
   if [ ! -f "$HOME/.charon/charon.yaml" ]

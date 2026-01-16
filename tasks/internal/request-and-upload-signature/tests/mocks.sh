@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 function check_cert_expiration() {
   local cert_file="$1"
@@ -23,18 +23,18 @@ function ssh() {
 }
 
 function pubtools-sign-msg-container-sign() {
-  >&2 echo "Mock pubtools-sign-msg-container-sign called with: $*"
+  >&2 echo "Mock pubtools-sign-msg-container-sign"
   echo "$*" >> "$(workspaces.data.path)/mock_pubtools-sign.txt"
   cat "$(workspaces.data.path)/mocked_signing_response"
 }
 
 function pubtools-pyxis-upload-signatures() {
-  >&2 echo "Mock pubtools-pyxis-upload-signatures called with: $*"
+  >&2 echo "Mock pubtools-pyxis-upload-signatures"
   echo "$*" >> "$(workspaces.data.path)/mock_pubtools-pyxis-upload-signatures.txt"
 }
 
 function openssl() {
-  >&2 echo "Mock openssl called with: $*"
+  >&2 echo "Mock openssl"
   echo "$*" >> "$(workspaces.data.path)/mock_openssl.txt"
   if [[ "$*" =~ "x509 -noout -subject" ]]; then
     echo "UID=test-mock"

@@ -3,7 +3,7 @@ set -x
 
 # mocks to be injected into task step scripts
 function curl-with-retry() {
-  echo Mock curl called with: $* >&2
+  echo Mock curl >&2
   mkdir -p "$(params.dataDir)"
   echo $* >> "$(params.dataDir)/mock_curl.txt"
 

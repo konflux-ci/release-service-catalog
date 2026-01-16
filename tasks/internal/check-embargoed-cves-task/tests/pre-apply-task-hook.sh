@@ -9,7 +9,7 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 # Create a wrapper script that includes mocks and calls the original command
 cat > /tmp/wrapped-script.sh <<'EOF'
 #!/usr/bin/env bash
-set -eux
+set -eu
 EOF
 
 # Append the mocks
@@ -22,11 +22,11 @@ cat >> /tmp/wrapped-script.sh <<'EOF'
 EOF
 
 # Replace command/args with script in the task
-yq -i '.spec.steps[0].script = load_str("/tmp/wrapped-script.sh")' "$TASK_PATH"
+yq -i '.spec.steps[0].script = load_str("/tmp/wrapped-script.sh")+ "set +x\n"' "$TASK_PATH"
 yq -i 'del(.spec.steps[0].command)' "$TASK_PATH"
 yq -i 'del(.spec.steps[0].args)' "$TASK_PATH"
 
 # Create a dummy osidb secret (and delete it first if it exists)
 # The secret name is hardcoded in the task so the mock secret name can't have the task name in it
 kubectl delete secret osidb-service-account --ignore-not-found
-kubectl create secret generic osidb-service-account --from-literal=name=myname --from-literal=base64_keytab=OWEyMmJmYzgtYzJkZi00Y2VhLWJkNWItYjMxNzYxZjFkM2M0Cg== --from-literal=osidb_url=myurl
+kubectl create secret generic osidb-service-account --from-literal=name=myname --from-literal=base64_keytab=U0VOU0lUSVZFX0RBVEFfOWEyMmJmYzgtYzJkZi00Y2VhLWJkNWItYjMxNzYxZjFkM2M0IC1uCg== --from-literal=osidb_url=myurl    # base64_keytab has SENSITIVE_DATA_

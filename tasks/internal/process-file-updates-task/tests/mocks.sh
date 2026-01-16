@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 function git() {
@@ -10,7 +10,6 @@ function git() {
     /usr/bin/git "$@"
     exit 0
   fi
-  echo "git $*"
   if [[ "$*" == *"clone"* ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
     mkdir -p "$gitRepo"

@@ -4,7 +4,7 @@ set -xeo pipefail
 # mocks to be injected into task step scripts
 
 function git() {
-  echo Mock git called with: $*
+  echo Mock git
   echo $* >> $(workspaces.data.path)/mock_git.txt
 
   if [[ "$*" == "clone "* ]]

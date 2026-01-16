@@ -9,17 +9,17 @@ kubectl apply -f .github/resources/crd_rbac.yaml
 # create required secrets
 kubectl create secret generic iib-service-account-secret \
     --from-literal=principal="iib@kerberos" \
-    --from-literal=keytab="something"
+    --from-literal=keytab="SENSITIVE_DATA_something"
 kubectl create secret generic iib-services-config \
-    --from-literal=krb5.conf="" \
+    --from-literal=krb5.conf="SENSITIVE_DATA_empty" \
     --from-literal=url="https://fakeiib.host"
 
 kubectl create secret generic iib-overwrite-fromimage-credentials \
-    --from-literal=username="bot+user" \
-    --from-literal=token="token"
+    --from-literal=username="SENSITIVE_DATA_bot+user" \
+    --from-literal=token="SENSITIVE_DATA_token"
 
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
-yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' "$TASK_PATH"
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
+yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[0].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[1].script' "$TASK_PATH"

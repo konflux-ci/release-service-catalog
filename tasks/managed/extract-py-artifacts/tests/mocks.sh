@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 
@@ -10,7 +10,7 @@ function select-oci-auth() {
 }
 
 function retry() {
-  echo "Mock retry called with: $*"
+  echo "Mock retry"
   # Just run the command without retry logic
   "$@"
 }

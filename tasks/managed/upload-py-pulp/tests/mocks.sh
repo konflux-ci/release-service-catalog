@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # Mock pulp-upload script
 echo "Mock pulp-upload called"

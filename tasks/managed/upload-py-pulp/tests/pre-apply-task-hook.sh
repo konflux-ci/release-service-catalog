@@ -4,7 +4,7 @@
 kubectl delete secret rhtl-pulp-credentials-secret --ignore-not-found
 kubectl create secret generic rhtl-pulp-credentials-secret \
   --from-literal=username=test-user \
-  --from-literal=password=test-password
+  --from-literal=password=sensitive-data-test-password
 
 # Add mocks to the upload step script
 # Steps layout:
@@ -18,5 +18,5 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 # We need to replace the command with a script that includes mocks
 yq -i '
   del(.spec.steps[2].command) |
-  .spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh")
+  .spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n"
 ' "$TASK_PATH"

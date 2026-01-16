@@ -256,10 +256,10 @@ For reference implementation, check [create-pyxis-image/tests/](tasks/managed/cr
 
     ```sh
     #!/usr/bin/env sh
-    set -eux
+    set -eu
 
     function cosign() {
-      echo Mock cosign called with: $*
+      echo Mock cosign
       echo $* >> $(workspaces.data.path)/mock_cosign.txt
 
       if [[ "$*" != "download sbom --output-file myImageID"[12]".json imageurl"[12] ]]
@@ -272,7 +272,7 @@ For reference implementation, check [create-pyxis-image/tests/](tasks/managed/cr
     }
     ```
 
-    In the example above, you can notice two things:
+    In the example above, you can notice several things:
     - Each time the mock function is called, the full argument list is saved in a file in the
       workspace. This is optional and depends on your task's workspace name. It allows us to
       check mock calls after task execution in our test pipeline.
@@ -285,6 +285,15 @@ For reference implementation, check [create-pyxis-image/tests/](tasks/managed/cr
       `#!/bin/bash` or `#!/usr/bin/env bash` in place of `#!/usr/bin/env sh` at the top of the file. Keep in mind
       that the same shell declaration should be used in both the mock and the tekton task step script you are
       mocking to ensure the behavior during test is the same as during runtime.
+    - **Shell tracing and secret leak prevention**: The `-x` flag is intentionally omitted from `set -eu` to
+      prevent verbose shell tracing output in logs. Our CI/CD pipeline includes automated secret leak detection that
+      scans the logs of `run-task` tasks in unit test pipelineRuns for the presence of `SENSITIVE_DATA_` or
+      `sensitive-data-` prefixes using pattern matching. 
+
+      Please note that some debug statements in the previous mocks.sh script, such as
+      `echo Mock cosign called with: $*`, have been refactored. These statements previously echoed raw function
+      arguments which may contain sensitive test data. This change was implemented to prevent accidental data
+      exposure in CI logs and to avoid triggering automated leak detection alerts.
 
 1. In your `pre-apply-task-hook.sh` file (see the Test Setup section above for explanation), include
     `yq` commands to inject the `mocks.sh` file to the top of your task step scripts, e.g.:
@@ -295,12 +304,39 @@ For reference implementation, check [create-pyxis-image/tests/](tasks/managed/cr
     TASK_PATH=$1
     SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' $TASK_PATH
-    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' $TASK_PATH
+    yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[0].script' $TASK_PATH
+    yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps[1].script' $TASK_PATH
     ```
 
     In this case we inject the file to both steps in the task under test. This will depend on
     the given task. You only need to inject mocks for the steps where something needs to be mocked.
+    The inclusion of "set +x\n" ensures that the execution environment is reset, preventing the shell tracing settings
+    within mocks.sh from inadvertently propagating to the original task scripts.
+    
+    In this file, we may define some secrets for the test cases as below:
+    
+    ```
+    kubectl create secret generic mac-signing-credentials \
+    --from-literal=keychain_password="SENSITIVE_DATA_testkeychainpass" \
+    --from-literal=signing_identity="testidentity" --from-literal=apple_id="testid" \
+    --from-literal=team_id="testteamid" \
+    --from-literal=app_specific_password="SENSITIVE_DATA_testapppassword"
+    ```
+    **Secret leak prevention requirement**: All mock sensitive data values must be prefixed with either
+    `SENSITIVE_DATA_` (uppercase with underscore) or `sensitive-data-` (lowercase with hyphen). This naming
+    convention serves two critical purposes:
+
+    1. **Automated validation**: The CI/CD secret scanning step (`Secret Scan` in tekton_task_tests.yaml) searches
+       PipelineRun logs for these prefixes. If detected, it confirms that secret leak prevention mechanisms are
+       working correctly by catching mock credentials before they could expose real secrets.
+
+    2. **Static analysis enforcement**: The `check_secret_sensitive_data.sh` validation script ensures every
+       `kubectl create secret` command in test setup files contains at least one prefixed value, preventing
+       developers from accidentally using unprefixed (and therefore undetectable) mock data.
+
+    Please note that each Kubernetes secret resource must contain at least one value with a sensitive data prefix
+    to pass validation.
+  
 
 1. (Optional) In your test pipeline, you can have a task after the main task under test that will
     check that the mock functions had the expected calls. This only applies if you saved your mock

@@ -43,7 +43,8 @@ yq -i '.spec.steps[0] = load("/tmp/mock-step.yaml")' "$TASK_PATH"
 rm /tmp/mock-step.yaml
 
 echo "Injecting mock/check scripts into spec.steps[2]..."
-MOCK_SCRIPT=$(cat "$SCRIPT_DIR/mocks.sh")
+MOCK_SCRIPT="$(cat "$SCRIPT_DIR/mocks.sh")
+set +x"
 ORIG_SCRIPT=$(yq '.spec.steps[2].script' "$TASK_PATH" | sed '1s|^#!/.*||')
 
 CHECK_SCRIPT="
@@ -72,5 +73,5 @@ echo "Injection complete. Creating S3 mock secret..."
 
 kubectl delete secret s3-mock-secret --ignore-not-found
 kubectl create secret generic s3-mock-secret \
-  --from-literal=aws_access_key_id=MOCK_AWS_KEY_ID \
-  --from-literal=aws_secret_access_key=MOCK_AWS_SECRET_KEY
+  --from-literal=aws_access_key_id=SENSITIVE_DATA_MOCK_AWS_KEY_ID \
+  --from-literal=aws_secret_access_key=SENSITIVE_DATA_MOCK_AWS_SECRET_KEY

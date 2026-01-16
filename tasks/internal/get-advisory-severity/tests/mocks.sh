@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
-set -exo pipefail
+set -eo pipefail
 
 # mocks to be injected into task step scripts
 
 function kinit() {
-  echo "kinit $*"
+  echo "Mock kinit"
 }
 
 function curl() {
-  echo Mock curl called with: $* >&2
+  echo Mock curl >&2
 
   if [[ "$*" == "--retry 3 --negotiate -u : myurl/auth/token" ]]
   then

@@ -1,8 +1,8 @@
-set -eux
+set -eu
 
 # Ensure our mock az function takes precedence over any real az binary
 function az() {
-    echo "Mock 'az' called with: $*"
+    echo "Mock 'az'"
 
     case "$1" in
         login)
