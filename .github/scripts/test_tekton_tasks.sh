@@ -269,7 +269,13 @@ do
       echo "  PipelineRun $PIPELINERUN in progress (status Unknown). Waiting for update..."
       sleep 5
     done
-    tkn pr logs $PIPELINERUN
+
+    RESOURCES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    LOG_DIR="$RESOURCES_DIR/logs"
+    mkdir -p "$LOG_DIR"
+    echo "$LOG_DIR"
+
+    tkn pr logs "$PIPELINERUN" 2>&1 | tee "$LOG_DIR/$PIPELINERUN.log"
 
     PR_STATUS=$(kubectl get pr $PIPELINERUN -o=jsonpath='{.status.conditions[0].status}')
 

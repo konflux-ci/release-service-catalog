@@ -3,15 +3,18 @@ set -eux
 
 # mocks to be injected into task step scripts
 function select-oci-auth() {
-    echo >&2 "Mock select-oci-auth called with: $*"
+#    echo >&2 "Mock select-oci-auth called with: $*"
+    echo >&2 "Mock select-oci-auth"
 }
 
 function oras() {
-    echo "Mock oras called with: $*"
+#    echo "Mock oras called with: $*"
+    echo "Mock oras"
 }
 
 function mktemp() {
-  echo >&2 "Mock mktemp called with: $*"
+#  echo >&2 "Mock mktemp called with: $*"
+  echo >&2 "Mock mktemp"
   if [[ "${1:-}" == "-d" ]]; then
     dir=$(/usr/bin/mktemp -d)
     echo -e "---\n" > "${dir}/advisory.yaml"
