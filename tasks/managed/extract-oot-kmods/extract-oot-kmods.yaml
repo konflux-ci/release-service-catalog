@@ -228,34 +228,84 @@ spec:
             fi
         }
 
+        # Function to get final architecture name from envfile
+        get_final_arch_name() {
+            (
+                local temp_dir="$1"
+                local platform_arch="$2"
+
+                if [ -f "$temp_dir/envfile" ]; then
+                    # shellcheck source=/dev/null
+                    . "$temp_dir/envfile"
+                    if [ -n "${ARCH:-}" ]; then
+                        echo "Using ARCH=$ARCH from envfile (platform: $platform_arch)" >&2
+                        echo "$ARCH"
+                        return
+                    fi
+                fi
+
+                echo "No ARCH variable in envfile, using platform architecture: $platform_arch" >&2
+                echo "$platform_arch"
+            )
+        }
+
         if [ "$arch_count" -eq 1 ]; then
             echo "Single architecture image, using standard extraction"
             # Extract the actual architecture name
-            actual_arch=$(jq -r '.platform.architecture' "$(params.dataDir)/architectures.json")
-            echo "Architecture: $actual_arch"
-            extract_single_arch "$source_image" "$(params.dataDir)/$SIGNED_KMODS_PATH/$actual_arch" "$actual_arch"
+            platform_arch=$(jq -r '.platform.architecture' "$(params.dataDir)/architectures.json")
+            echo "Platform architecture: $platform_arch"
+
+            # Extract to temporary directory first
+            temp_dir="$(params.dataDir)/$SIGNED_KMODS_PATH/${platform_arch}"
+            extract_single_arch "$source_image" "$temp_dir" "$platform_arch"
+
+            # Get final architecture name from envfile
+            final_arch=$(get_final_arch_name "$temp_dir" "$platform_arch")
+
+            # Rename directory if ARCH differs from platform architecture
+            if [ "$final_arch" != "$platform_arch" ]; then
+                final_dir="$(params.dataDir)/$SIGNED_KMODS_PATH/${final_arch}"
+                echo "Renaming directory from $platform_arch to $final_arch"
+                mv "$temp_dir" "$final_dir"
+            fi
+
+            echo "Final architecture: $final_arch"
         else
             echo "Multi-architecture image detected, processing each architecture separately"
 
             # Read architecture data and process each one
             arch_data=$(cat "$(params.dataDir)/architectures.json")
 
-            echo "$arch_data" | jq -c '.' | while IFS= read -r arch_info; do
+            # Process architectures using a while loop with process substitution
+            # to avoid subshell issues with pipes
+            while IFS= read -r arch_info; do
                 platform_arch=$(echo "$arch_info" | jq -r '.platform.architecture')
                 arch_digest=$(echo "$arch_info" | jq -r '.digest')
 
-                echo "Processing architecture: $platform_arch (digest: $arch_digest)"
+                echo "Processing platform architecture: $platform_arch (digest: $arch_digest)"
 
-                # Create architecture-specific directory
-                arch_dir="$(params.dataDir)/$SIGNED_KMODS_PATH/$platform_arch"
+                # Extract to temporary directory first
+                temp_dir="$(params.dataDir)/$SIGNED_KMODS_PATH/${platform_arch}"
 
                 # Extract for this specific architecture using manifest digest
                 # Extract the registry and repository from source_image (remove existing digest)
                 source_base=$(echo "$source_image" | cut -d'@' -f1)
                 arch_specific_image="$source_base@$arch_digest"
                 echo "Using architecture-specific image: $arch_specific_image"
-                extract_single_arch "$arch_specific_image" "$arch_dir" "$platform_arch"
-            done
+                extract_single_arch "$arch_specific_image" "$temp_dir" "$platform_arch"
+
+                # Get final architecture name from envfile
+                final_arch=$(get_final_arch_name "$temp_dir" "$platform_arch")
+
+                # Rename directory if ARCH differs from platform architecture
+                if [ "$final_arch" != "$platform_arch" ]; then
+                    final_dir="$(params.dataDir)/$SIGNED_KMODS_PATH/${final_arch}"
+                    echo "Renaming directory from $platform_arch to $final_arch"
+                    mv "$temp_dir" "$final_dir"
+                fi
+
+                echo "Final architecture: $final_arch"
+            done < <(echo "$arch_data" | jq -c '.')
 
             # Create a summary of what was extracted
             summary_file="$(params.dataDir)/$SIGNED_KMODS_PATH/extraction_summary.txt"

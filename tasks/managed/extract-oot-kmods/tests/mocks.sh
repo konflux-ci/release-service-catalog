@@ -137,6 +137,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=x86_64" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -159,6 +160,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=aarch64-64k" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -187,6 +189,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=x86_64" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -209,6 +212,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=aarch64-64k" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -231,6 +235,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=x86_64" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -253,6 +258,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=aarch64-64k" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -319,6 +325,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=x86_64" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
@@ -341,6 +348,7 @@ EOF
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
+      echo "ARCH=aarch64-64k" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"
