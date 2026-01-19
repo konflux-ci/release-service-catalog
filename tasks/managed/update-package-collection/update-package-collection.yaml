@@ -383,6 +383,51 @@ spec:
                 jq -r '.extra.sidetag'
         }
 
+        verify_package_collection_is_koji_tag() {
+            local collection="$1"
+            local tag_info inheritance_data
+
+            echo "INFO: Verifying if '$collection' is a koji tag" >&2
+
+            # Check if the collection exists as a koji tag
+            if ! tag_info=$(koji-cmd --noauth call --json-output getTag "$collection" 2>/dev/null); then
+                echo "INFO: '$collection' is not a valid koji tag" >&2
+                return 1
+            fi
+
+            # Verify tag_info is not null or empty
+            if [[ -z "$tag_info" || "$tag_info" == "null" ]]; then
+                echo "INFO: '$collection' is not a valid koji tag" >&2
+                return 1
+            fi
+
+            echo "INFO: '$collection' is a valid koji tag, fetching inheritance" >&2
+
+            # Get inheritance data for the tag
+            if ! inheritance_data=$(koji-cmd --noauth call --json-output \
+                getInheritanceData "$collection" 2>/dev/null); then
+                echo "WARNING: Failed to fetch inheritance data for '$collection'" >&2
+                return 0
+            fi
+
+            # Extract parent tag names from inheritance data
+            # getInheritanceData returns an array of inheritance entries with 'name' field
+            local inheritance_tags
+            inheritance_tags=$(echo "$inheritance_data" | jq -r '.[].name' 2>/dev/null | tr '\n' ',')
+
+            # Remove trailing comma if present
+            inheritance_tags="${inheritance_tags%,}"
+
+            if [[ -n "$inheritance_tags" ]]; then
+                echo "INFO: Found inheritance for '$collection': $inheritance_tags" >&2
+                echo "$inheritance_tags"
+            else
+                echo "INFO: No inheritance found for '$collection'" >&2
+            fi
+
+            return 0
+        }
+
         # Setup environment variables
         setup_environment() {
           set +x
@@ -524,7 +569,15 @@ spec:
 
           # Process each package collection
           for collection in "${pkg_collections[@]}"; do
-            process_package_collection "$collection" "$package_nvr" "$download_url"
+            # Verify if collection is a koji tag and get inheritance
+            local inheritance_tags=""
+            inheritance_tags=$(verify_package_collection_is_koji_tag "$collection") || true
+
+            if [[ -n "$inheritance_tags" ]]; then
+              echo "INFO: Processing collection '$collection' with inheritance: $inheritance_tags"
+            fi
+
+            process_package_collection "$collection" "$package_nvr" "$download_url" "$inheritance_tags"
           done
         }
 
@@ -542,27 +595,43 @@ spec:
 
         # Process a single package collection
         process_package_collection() {
-          local collection package_nvr container_image build_name retry_count success
+          local collection package_nvr container_image build_name retry_count success inheritance_tags
 
           collection=$1
           package_nvr=$2
           container_image=$3
+          inheritance_tags="${4:-}"  # Optional 4th parameter for inheritance
           build_name=$(jq -r '.build.name' cg_import.json 2>/dev/null || echo "$package_nvr")
 
           echo "Processing: collection=$collection, package=$build_name, nvr=$package_nvr"
+          if [[ -n "$inheritance_tags" ]]; then
+            echo "  with inheritance: $inheritance_tags"
+          fi
 
           retry_count=0
           success=false
 
           while [ $retry_count -lt "$MAX_RETRIES" ]; do
-            if timeout "$COMMAND_TIMEOUT" uv run pc-manager package-collection "add-builds" \
-              --env "$ENV" \
-              --product "$PRODUCT" \
-              --collection-name "$collection" \
-              --package-name "$build_name" \
-              --item "nvr=$package_nvr" \
-              --item "download_url=$container_image" \
-              --auto-push; then
+            # Build the pc-manager command with optional inheritance parameter
+            local cmd=(timeout "$COMMAND_TIMEOUT" uv run pc-manager package-collection "add-builds"
+              --env "$ENV"
+              --product "$PRODUCT"
+              --collection-name "$collection"
+              --package-name "$build_name"
+              --item "nvr=$package_nvr"
+              --item "download_url=$container_image")
+
+            # Add inheritance as separate item parameters if present
+            if [[ -n "$inheritance_tags" ]]; then
+              IFS=',' read -ra INHERITANCE_ARRAY <<< "$inheritance_tags"
+              for tag in "${INHERITANCE_ARRAY[@]}"; do
+                cmd+=(--item "inheritance=$tag")
+              done
+            fi
+
+            cmd+=(--create-pc-if-not-exist --auto-push)
+
+            if "${cmd[@]}"; then
               success=true
               break
             else
