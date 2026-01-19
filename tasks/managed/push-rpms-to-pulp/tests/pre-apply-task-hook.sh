@@ -15,6 +15,13 @@ client_id = "mock-client-id"
 client_secret = "mock-client-secret"
 '
 
+# Create a dummy pulp secret for basic auth (and delete it first if it exists)
+kubectl delete secret pulp-task-pulp-secret-basic --ignore-not-found
+kubectl create secret generic pulp-task-pulp-secret-basic --from-literal=cli.toml='base_url = "https://console.redhat.com"
+username = "mock-user"
+password = "mock-password"
+'
+
 # Create a dummy pulp secret (and delete it first if it exists)
 kubectl delete secret pulp-task-pulp-secret-missing --ignore-not-found
 kubectl create secret generic pulp-task-pulp-secret-missing --from-literal=dummy=abcdef123

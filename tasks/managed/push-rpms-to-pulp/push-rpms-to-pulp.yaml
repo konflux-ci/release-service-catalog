@@ -172,15 +172,91 @@ spec:
         echo "${CONFIG_FILE_CONTENT:?}" > "/tmp/cli.toml"
         export PULP_CONFIG_FILE="/tmp/cli.toml"
 
-        # Extract OAuth2 credentials from cli.toml
-        PULP_BASE_URL=$(grep -E "^base_url\s*=" "$PULP_CONFIG_FILE" | sed 's/.*=\s*"\(.*\)"/\1/' | sed 's:/*$::')
-        CLIENT_ID=$(grep -E "^client_id\s*=" "$PULP_CONFIG_FILE" | sed 's/.*=\s*"\(.*\)"/\1/')
-        CLIENT_SECRET=$(grep -E "^client_secret\s*=" "$PULP_CONFIG_FILE" | sed 's/.*=\s*"\(.*\)"/\1/')
+        # Helpers to read cli.toml values (return empty string when not found)
+        toml_get_optional() {
+          local key="$1"
+          if [[ ! "${key}" =~ ^[A-Za-z0-9_]+$ ]]; then
+            echo "Error: Invalid cli.toml key '${key}'" >&2
+            return 1
+          fi
+
+          # Simple quoted-string extractor.
+          # Accepts:
+          # - top-level: key = "value"  (before any [table] header)
+          # - [cli] table: [cli] ... key = "value"
+          # Handles leading whitespace and ignores blank/comment lines.
+          local line current_table=""
+          while IFS= read -r line || [[ -n "${line}" ]]; do
+            # Table header: [cli]
+            if [[ "${line}" =~ ^[[:space:]]*\\[([^]]+)\\][[:space:]]*$ ]]; then
+              current_table="${BASH_REMATCH[1]}"
+              continue
+            fi
+
+            # Skip comments/blank lines
+            if [[ "${line}" =~ ^[[:space:]]*# ]] || [[ "${line}" =~ ^[[:space:]]*$ ]]; then
+              continue
+            fi
+
+            # Only parse top-level or [cli]
+            if [[ -n "${current_table}" && "${current_table}" != "cli" ]]; then
+              continue
+            fi
+
+            if [[ "${line}" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
+              # Extract the first quoted string value. (Bash regex does not interpret \r/\n escapes here.)
+              if [[ "${line}" =~ \"([^\"]*)\" ]]; then
+                echo "${BASH_REMATCH[1]}"
+                return 0
+              fi
+              if [[ "${line}" =~ \'([^\']*)\' ]]; then
+                echo "${BASH_REMATCH[1]}"
+                return 0
+              fi
+              echo ""
+              return 0
+            fi
+          done < "${PULP_CONFIG_FILE}"
+
+          echo ""
+          return 0
+        }
+
+        toml_get_required() {
+          local key="$1"
+          local value
+          value="$(toml_get_optional "${key}")"
+          if [[ -z "${value}" ]]; then
+            echo "Error: Missing required '${key}' in cli.toml" >&2
+            return 1
+          fi
+          echo "${value}"
+        }
+
+        # Extract credentials from cli.toml
+        PULP_BASE_URL="$(toml_get_required "base_url" | sed 's:/*$::')" || exit 1
+        CLIENT_ID="$(toml_get_optional "client_id")"
+        CLIENT_SECRET="$(toml_get_optional "client_secret")"
+        PULP_USERNAME="$(toml_get_optional "username")"
+        PULP_PASSWORD="$(toml_get_optional "password")"
         TOKEN_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
+
+        # Detect auth method (do not log secrets)
+        AUTH_METHOD="unknown"
+        if [[ -n "${PULP_USERNAME}" && -n "${PULP_PASSWORD}" ]]; then
+          AUTH_METHOD="basic"
+        elif [[ -n "${CLIENT_ID}" && -n "${CLIENT_SECRET}" ]]; then
+          AUTH_METHOD="oauth2-bearer"
+        fi
+        echo "Auth method detected for Pulp API calls: ${AUTH_METHOD}"
 
         # Function to get OAuth2 access token
 
         get_access_token() {
+          if [[ -z "${CLIENT_ID}" || -z "${CLIENT_SECRET}" ]]; then
+            echo "Error: client_id/client_secret not present in cli.toml; cannot use OAuth2 Bearer token flow" >&2
+            return 1
+          fi
           local token
           token=$(curl --retry 3 -s -X POST "$TOKEN_URL" \
             -u "${CLIENT_ID}:${CLIENT_SECRET}" \
@@ -194,6 +270,30 @@ spec:
           echo "$token"
         }
 
+        # Get Authorization header for curl based on available credentials.
+        # Uses AUTH_METHOD computed above (basic preferred when username/password present).
+        get_auth_header() {
+          case "${AUTH_METHOD}" in
+            basic)
+              local basic
+              basic="$(printf '%s' "${PULP_USERNAME}:${PULP_PASSWORD}" | base64 -w0)"
+              echo "Authorization: Basic ${basic}"
+              return 0
+              ;;
+            oauth2-bearer)
+              local access_token
+              access_token="$(get_access_token)" || return 1
+              echo "Authorization: Bearer ${access_token}"
+              return 0
+              ;;
+            *)
+              echo "Error: No supported credentials found in cli.toml." >&2
+              echo "Provide either username/password or client_id/client_secret." >&2
+              return 1
+              ;;
+          esac
+        }
+
         # Function to add content to a repository via API
         add_content_to_repo() {
           local repo_name="$1"
@@ -202,14 +302,17 @@ spec:
 
           # Disable command echoing for sensitive operations
           set +x
-          local access_token
-          access_token=$(get_access_token) || return 1
+          local auth_header
+          auth_header="$(get_auth_header)" || return 1
 
           # Get repository href
           local repo_href
-          repo_href=$(curl --retry 3 -s -H "Authorization: Bearer $access_token" \
-            "${PULP_BASE_URL}/api/pulp/${domain}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
-            | jq -r '.results[0].pulp_href')
+          repo_href=$(
+            set +x
+            curl --retry 3 -s -H "${auth_header}" \
+              "${PULP_BASE_URL}/api/pulp/${domain}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
+              | jq -r '.results[0].pulp_href'
+          )
           set -x
 
           if [[ -z "$repo_href" || "$repo_href" == "null" ]]; then
@@ -223,12 +326,14 @@ spec:
 
           # Add content to repository
           echo "Calling API: POST ${PULP_BASE_URL}${repo_href}modify/"
-          set +x
-          curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
-            -H "Authorization: Bearer $access_token" \
-            -H "Content-Type: application/json" \
-            -d "{\"add_content_units\": $add_content_units}"
-          set -x
+          {
+            set +x
+            curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
+              -H "${auth_header}" \
+              -H "Content-Type: application/json" \
+              -d "{\"add_content_units\": $add_content_units}"
+            set -x
+          }
         }
 
         # Function to upload an RPM to Pulp with retries
@@ -279,6 +384,189 @@ spec:
           return 1
         }
 
+        # Parse NEVRA fields from an RPM file.
+        #
+        # Prefer querying the RPM header (robust for names containing multiple dashes).
+        # Fall back to filename parsing only when the RPM header cannot be read (e.g. empty mock files in tests).
+        parse_nevra() {
+          local file_path="$1"
+          local name epoch version release arch
+
+          local q rc
+          set +e
+          q="$(rpm -qp --qf '%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n' \
+            "${file_path}" 2>/dev/null)"
+          rc=$?
+          set -e
+
+          if [[ ${rc} -eq 0 && -n "${q}" ]]; then
+            IFS='|' read -r name epoch version release arch <<< "${q}"
+            if [[ -z "${epoch}" || "${epoch}" == "(none)" ]]; then
+              epoch="0"
+            fi
+            if [[ -n "${name}" && -n "${version}" && -n "${release}" && -n "${arch}" ]]; then
+              echo "${name}|${epoch}|${version}|${release}|${arch}"
+              return 0
+            fi
+          fi
+
+          # Fallback: infer from filename (name-version-release.arch.rpm). This may be wrong for some edge cases.
+          local filename base nvra namever version_with_epoch
+          filename="$(basename "${file_path}")"
+          base="${filename%.rpm}"
+          arch="${base##*.}"
+          nvra="${base%.*}"
+          release="${nvra##*-}"
+          namever="${nvra%-*}"
+          version_with_epoch="${namever##*-}"
+          name="${namever%-*}"
+
+          if [[ -z "${name}" || -z "${version_with_epoch}" || -z "${release}" || -z "${arch}" ]]; then
+            echo "Error: Failed to parse NEVRA from '${filename}'" >&2
+            return 1
+          fi
+
+          epoch="0"
+          if [[ "${version_with_epoch}" == *:* ]]; then
+            epoch="${version_with_epoch%%:*}"
+            version="${version_with_epoch#*:}"
+          else
+            version="${version_with_epoch}"
+          fi
+
+          if [[ -z "${version}" ]]; then
+            echo "Error: Failed to parse NEVRA version from '${filename}'" >&2
+            return 1
+          fi
+
+          echo "${name}|${epoch}|${version}|${release}|${arch}"
+        }
+
+        # Resolve repository latest version href
+        get_repo_latest_version_href() {
+          local repo_name="$1"
+          local auth_header repo_href
+          set +x
+          auth_header="$(get_auth_header)" || return 1
+          set -x
+          repo_href=$(
+            set +x
+            curl --retry 3 -s \
+              -H "${auth_header}" \
+              "${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
+              | jq -r '.results[0].pulp_href'
+          )
+          if [[ -z "$repo_href" || "$repo_href" == "null" ]]; then
+            echo "Error: Could not find repository href for ${repo_name}"
+            return 1
+          fi
+          {
+            set +x
+            curl --retry 3 -s -H "${auth_header}" \
+              "${PULP_BASE_URL}${repo_href}" | jq -r '.latest_version_href'
+            set -x
+          }
+        }
+
+        # Check if rpm exists in repo and compare digest with local file
+        # Returns:
+        #   0 -> exists and digest matches
+        #   2 -> does not exist
+        #   3 -> exists but digest differs
+        check_rpm_exists_with_digest() {
+          local repo_name="$1"
+          local file_path="$2"
+
+          local nevra name epoch version release arch endpoint
+          if ! nevra="$(parse_nevra "${file_path}")"; then
+            echo "Error: Failed to parse NEVRA for '${file_path}'" >&2
+            return 1
+          fi
+          IFS='|' read -r name epoch version release arch <<< "${nevra}"
+          if [[ -z "${name}" || -z "${epoch}" || -z "${version}" || -z "${release}" ]]; then
+            echo "Error: Parsed NEVRA is incomplete for '${file_path}': '${nevra}'" >&2
+            return 1
+          fi
+
+          # Select endpoint: srpms for .src.rpm, packages otherwise
+          if [[ "${file_path}" == *.src.rpm ]]; then
+            endpoint="srpms"
+          else
+            endpoint="packages"
+          fi
+
+          # Compute local sha256
+          local local_sha
+          local_sha="$(sha256sum "${file_path}" | awk '{print $1}')"
+
+          # Resolve latest repository version href
+          local repo_version_href
+          repo_version_href="$(get_repo_latest_version_href "${repo_name}")" || return 1
+
+          # Build query URL using NEVRA
+          local enc_repo_version enc_name enc_epoch enc_version enc_release enc_arch query_url
+          enc_repo_version="$(jq -rn --arg x "${repo_version_href}" '$x|@uri')"
+          enc_name="$(jq -rn --arg x "${name}" '$x|@uri')"
+          enc_epoch="$(jq -rn --arg x "${epoch}" '$x|@uri')"
+          enc_version="$(jq -rn --arg x "${version}" '$x|@uri')"
+          enc_release="$(jq -rn --arg x "${release}" '$x|@uri')"
+          if [[ "${endpoint}" == "packages" ]]; then
+            enc_arch="$(jq -rn --arg x "${arch}" '$x|@uri')"
+          else
+            enc_arch=""
+          fi
+          query_url="${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/content/rpm/${endpoint}/"
+          query_url+="?repository_version=${enc_repo_version}"
+          query_url+="&name=${enc_name}&epoch=${enc_epoch}"
+          query_url+="&version=${enc_version}&release=${enc_release}"
+          if [[ -n "${enc_arch}" ]]; then
+            query_url+="&arch=${enc_arch}"
+          fi
+
+          # Perform query
+          local auth_header response count
+          {
+            set +x
+            auth_header="$(get_auth_header)" || return 1
+            response="$(curl --retry 3 -s -H "${auth_header}" \
+              "${query_url}")"
+            set -x
+          }
+          count="$(jq -r '.count // 0' <<< "${response}")"
+          if [[ "${count}" -eq 0 ]]; then
+            return 2
+          fi
+
+          # Compare digest with artifacts of matched content units
+          local content_hrefs server_sha artifact_href content_json artifact_json
+          mapfile -t content_hrefs < <(jq -r '.results[].pulp_href' <<< "${response}" \
+            | sed '/^null$/d')
+          for chref in "${content_hrefs[@]}"; do
+            content_json="$(
+              set +x
+              curl --retry 3 -s -H "${auth_header}" \
+                "${PULP_BASE_URL}${chref}"
+            )"
+            artifact_href="$(jq -r '.artifact // empty' <<< "${content_json}")"
+            if [[ -z "${artifact_href}" || "${artifact_href}" == "null" ]]; then
+              artifact_href="$(jq -r '.artifacts[0] // empty' <<< "${content_json}")"
+            fi
+            if [[ -z "${artifact_href}" || "${artifact_href}" == "null" ]]; then
+              continue
+            fi
+            artifact_json="$(
+              set +x
+              curl --retry 3 -s -H "${auth_header}" \
+                "${PULP_BASE_URL}${artifact_href}"
+            )"
+            server_sha="$(jq -r '.sha256 // empty' <<< "${artifact_json}")"
+            if [[ -n "${server_sha}" && "${server_sha}" == "${local_sha}" ]]; then
+              return 0
+            fi
+          done
+          return 3
+        }
+
         set -x
 
         DOMAIN_EXISTS=$(pulp --config "$PULP_CONFIG_FILE" domain show --name "${PULP_DOMAIN}" \
@@ -295,6 +583,22 @@ spec:
 
         # Initialize results file with empty rpmfiles array
         echo '{"rpmfiles": []}' > "$RESULTS_FILE"
+
+        # jq filter used to append RPM metadata entries to the results file.
+        # Keep this as a multi-line bash string (not a heredoc) so it stays valid YAML inside script: |
+        # shellcheck disable=SC2016
+        JQ_APPEND_RPMFILE='
+        .rpmfiles += [{
+          rpm: $pkg,
+          rpmname: $rpmname,
+          arch: $arch,
+          pulprepo: $pulprepo,
+          epoch: $epoch,
+          version: $version,
+          release: $release,
+          sha256: $sha256
+        }]
+        '
 
         jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | tee "${IMAGES_TXT}"
 
@@ -413,6 +717,22 @@ spec:
           # Process arch-specific RPMs
           for pkg in "${FILES_TO_UPLOAD[@]}"; do
             if [[ "$pkg" == *."$arch".rpm ]]; then
+              # Existence and digest check
+              set +e
+              check_rpm_exists_with_digest "${arch}" "${pkg}"
+              status=$?
+              set -e
+              if [[ $status -eq 0 ]]; then
+                echo "Already exists with matching digest: $pkg in ${arch}. Skipping."
+                continue
+              elif [[ $status -eq 3 ]]; then
+                echo "Error: Package exists in ${arch} with different digest: $pkg"
+                exit 1
+              elif [[ $status -ne 2 ]]; then
+                echo "Error: Failed to check existence/digest for ${pkg} in ${arch} (rc=${status})"
+                exit 1
+              fi
+
               echo "Uploading $pkg to $arch repository..."
               upload_response=$(pulp_upload_with_retry "${pkg}") || {
                 echo "Error: Failed to upload ${pkg} after retries."
@@ -425,12 +745,41 @@ spec:
               # Add href to collection
               HREFS_JSON=$(jq --arg href "$href" '. += [{"pulp_href": $href}]' <<< "$HREFS_JSON")
 
-              jq --arg pkg "${pkg}" --arg arch "${arch}" --arg pulprepo "${PULP_DOMAIN}/${arch}" \
-                '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
+              # Parse NEVRA to capture epoch, version, release for results
+              nevra="$(parse_nevra "${pkg}")"
+              IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+              # Compute local sha256 for results
+              local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+
+              jq --arg pkg "${pkg}" \
+                 --arg rpmname "${_name}" \
+                 --arg arch "${arch}" \
+                 --arg pulprepo "${PULP_DOMAIN}/${arch}" \
+                 --arg epoch "${epoch}" \
+                 --arg version "${version}" \
+                 --arg release "${release}" \
+                 --arg sha256 "${local_sha}" \
+                "${JQ_APPEND_RPMFILE}" \
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
             fi
             # Upload .noarch.rpm files to this arch repository
             if [[ "$pkg" == *.noarch.rpm ]]; then
+              # Existence and digest check against this arch repo
+              set +e
+              check_rpm_exists_with_digest "${arch}" "${pkg}"
+              status=$?
+              set -e
+              if [[ $status -eq 0 ]]; then
+                echo "Already exists with matching digest: $pkg in ${arch}. Skipping."
+                continue
+              elif [[ $status -eq 3 ]]; then
+                echo "Error: Package exists in ${arch} with different digest: $pkg"
+                exit 1
+              elif [[ $status -ne 2 ]]; then
+                echo "Error: Failed to check existence/digest for ${pkg} in ${arch} (rc=${status})"
+                exit 1
+              fi
+
               echo "Uploading noarch $pkg to $arch repository..."
               upload_response=$(pulp_upload_with_retry "${pkg}") || {
                 echo "Error: Failed to upload ${pkg} after retries."
@@ -443,8 +792,21 @@ spec:
               # Add href to collection
               HREFS_JSON=$(jq --arg href "$href" '. += [{"pulp_href": $href}]' <<< "$HREFS_JSON")
 
-              jq --arg pkg "${pkg}" --arg arch "noarch" --arg pulprepo "${PULP_DOMAIN}/${arch}" \
-                '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
+              # Parse NEVRA to capture epoch, version, release for results
+              nevra="$(parse_nevra "${pkg}")"
+              IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+              # Compute local sha256 for results
+              local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+
+              jq --arg pkg "${pkg}" \
+                 --arg rpmname "${_name}" \
+                 --arg arch "noarch" \
+                 --arg pulprepo "${PULP_DOMAIN}/${arch}" \
+                 --arg epoch "${epoch}" \
+                 --arg version "${version}" \
+                 --arg release "${release}" \
+                 --arg sha256 "${local_sha}" \
+                "${JQ_APPEND_RPMFILE}" \
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
             fi
           done
@@ -460,6 +822,21 @@ spec:
         SRC_HREFS_JSON="[]"
         for pkg in "${FILES_TO_UPLOAD[@]}"; do
           if [[ "$pkg" == *.src.rpm ]]; then
+            # Existence and digest check against 'source' repo
+            set +e
+            check_rpm_exists_with_digest "source" "${pkg}"
+            status=$?
+            set -e
+            if [[ $status -eq 0 ]]; then
+              echo "Already exists with matching digest: $pkg in source. Skipping."
+              continue
+            elif [[ $status -eq 3 ]]; then
+              echo "Error: Package exists in source with different digest: $pkg"
+              exit 1
+            elif [[ $status -ne 2 ]]; then
+              echo "Error: Failed to check existence/digest for ${pkg} in source (rc=${status})"
+              exit 1
+            fi
             echo "Uploading $pkg (arch: source)..."
             upload_response=$(pulp_upload_with_retry "${pkg}") || {
               echo "Error: Failed to upload ${pkg} after retries."
@@ -472,8 +849,21 @@ spec:
             # Add href to collection
             SRC_HREFS_JSON=$(jq --arg href "$href" '. += [{"pulp_href": $href}]' <<< "$SRC_HREFS_JSON")
 
-            jq --arg pkg "${pkg}" --arg arch "source" --arg pulprepo "${PULP_DOMAIN}/source" \
-              '.rpmfiles += [{rpm: $pkg, arch: $arch, pulprepo: $pulprepo}]' \
+            # Parse NEVRA to capture epoch, version, release for results
+            nevra="$(parse_nevra "${pkg}")"
+            IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+            # Compute local sha256 for results
+            local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+
+            jq --arg pkg "${pkg}" \
+               --arg rpmname "${_name}" \
+               --arg arch "source" \
+               --arg pulprepo "${PULP_DOMAIN}/source" \
+               --arg epoch "${epoch}" \
+               --arg version "${version}" \
+               --arg release "${release}" \
+               --arg sha256 "${local_sha}" \
+              "${JQ_APPEND_RPMFILE}" \
               "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
           fi
         done
