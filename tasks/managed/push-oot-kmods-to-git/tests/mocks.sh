@@ -18,9 +18,14 @@ git() {
         checkout)
             echo "Skipping git checkout: $*"
             ;;
-        
+
         add)
             echo "Mock git add: $*"
+
+            # Log the TARGET_DIR for verification
+            if [ -n "${KERNEL_VERSION:-}" ]; then
+                echo "KERNEL_VERSION=${KERNEL_VERSION}" >> /var/workdir/git_paths.log
+            fi
 
             # Check if this is a multi-arch build based on directory structure
             if [ -f "$(params.dataDir)/arch_count.txt" ]; then
@@ -87,4 +92,25 @@ git() {
             echo "Unknown subcommand: $1"
             ;;
     esac
+}
+
+check_git_paths() {
+    # Verify kernel version cleaning: the test uses KERNEL_VERSION="6.5.0.x86_64"
+    # The task should strip the .x86_64 suffix, so git paths should use "6.5.0" not "6.5.0.x86_64"
+    PATHS_LOG="/var/workdir/git_paths.log"
+    if [ -f "$PATHS_LOG" ]; then
+        echo ""
+        echo "Verifying KERNEL_VERSION architecture suffix was stripped..."
+        # Use grep -F for literal/fixed string matching (dots are literal, not regex)
+        if grep -F -q "6.5.0.x86_64" "$PATHS_LOG"; then
+            echo "ERROR: Found dirty kernel version (6.5.0.x86_64) in git paths!"
+            echo "The .x86_64 suffix should have been stripped."
+            echo "Paths log:"
+            cat "$PATHS_LOG"
+            exit 1
+        else
+            echo "SUCCESS: Kernel version architecture suffix was properly stripped"
+            echo "All git operations used cleaned KERNEL_VERSION: 6.5.0 (not 6.5.0.x86_64)"
+        fi
+    fi
 }

@@ -8,10 +8,14 @@ mkdir -p "$(params.dataDir)/$(params.signedKmodsPath)/x86_64"
 echo "S3_MODULE1" > "$(params.dataDir)/$(params.signedKmodsPath)/x86_64/mod1.ko"
 echo "S3_MODULE2" > "$(params.dataDir)/$(params.signedKmodsPath)/x86_64/mod2.ko"
 
+# IMPORTANT: KERNEL_VERSION includes .x86_64 architecture suffix
+# This tests that the task properly strips the suffix when constructing upload paths
+# Expected: task strips .x86_64 to produce path mocked-vendor-s3/1.2.3-s3/6.5.0-s3/x86_64/
+# NOT: mocked-vendor-s3/1.2.3-s3/6.5.0-s3.x86_64/x86_64/
 cat > "$(params.dataDir)/$(params.signedKmodsPath)/x86_64/envfile" << EOF
 DRIVER_VENDOR="mocked-vendor-s3"
 DRIVER_VERSION="1.2.3-s3"
-KERNEL_VERSION="6.5.0-s3"
+KERNEL_VERSION="6.5.0-s3.x86_64"
 EOF
 
 # Create architecture-specific checksum file

@@ -45,12 +45,16 @@ function az() {
                     fi
 
                     COUNT_FILE="/var/workdir/upload_count.txt"
+                    UPLOAD_LOG="/var/workdir/upload_paths.log"
                     if [ ! -f "$COUNT_FILE" ]; then
                         echo 0 > "$COUNT_FILE"
                     fi
                     COUNT=$(cat "$COUNT_FILE")
 
                     echo "Mock az storage blob upload called (count=$COUNT) with: $*"
+
+                    # Log the upload path for verification
+                    echo "$*" >> "$UPLOAD_LOG"
 
                     # For multiarch, expect different upload patterns
                     # Check if this looks like a multiarch upload by looking for arch paths
@@ -131,5 +135,24 @@ check_upload_count() {
     else
         echo "ERROR: az blob upload was called $COUNT times, expected 4 (single arch) or 5+ (multiarch)"
         return 1
+    fi
+
+    # Verify kernel version cleaning: the test uses KERNEL_VERSION="6.5.0-az.x86_64"
+    # The task should strip the .x86_64 suffix, so upload paths should contain "6.5.0-az/" not "6.5.0-az.x86_64/"
+    UPLOAD_LOG="/var/workdir/upload_paths.log"
+    if [ -f "$UPLOAD_LOG" ]; then
+        echo ""
+        echo "Verifying KERNEL_VERSION architecture suffix was stripped..."
+        # Use grep -F for literal/fixed string matching (dots are literal, not regex)
+        if grep -F -q "6.5.0-az.x86_64" "$UPLOAD_LOG"; then
+            echo "ERROR: Found dirty kernel version (6.5.0-az.x86_64) in upload paths!"
+            echo "The .x86_64 suffix should have been stripped."
+            echo "Upload log:"
+            cat "$UPLOAD_LOG"
+            return 1
+        else
+            echo "SUCCESS: Kernel version architecture suffix was properly stripped"
+            echo "All uploads used cleaned path: 6.5.0-az (not 6.5.0-az.x86_64)"
+        fi
     fi
 }
