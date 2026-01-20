@@ -43,18 +43,68 @@ All tests require these environment variables:
 
 - **`KUBECONFIG`** - The KUBECONFIG file used to login to the target cluster (provided when testing PRs)
 
+## Architecture
+
+The integration test framework uses a **shared resources** architecture to reduce code duplication where possible:
+
+```
+integration-tests/
+├── shared/                  # Shared resources
+│   ├── base-test.env       # Common environment variables
+│   └── resources/          # Shared Kubernetes resources
+│       ├── tenant/         # Application, Component, ReleasePlan
+│       └── managed/        # EC Policy only
+├── lib/
+│   └── test-functions.sh   # Core test framework functions
+├── <test-suite>/           # Test-specific configuration
+│   ├── test.env           # Test configuration with essential variables
+│   ├── test.sh            # Verification function
+│   ├── resources/         # Kustomize overlays + SA + custom resources
+│   └── vault/             # Encrypted secrets
+└── run-test.sh            # Main test orchestrator
+```
+
+### Shared vs Custom Resources
+
+All tests use shared resources for Application, Component (most), ReleasePlan, and EC Policy. Each test maintains its own ServiceAccount files due to test-specific secrets.
+
+| Test Suite | Shared Resources | Custom Requirements |
+|------------|-----------------|---------------------|
+| push-to-external-registry | application, component, rp, ec-policy | None |
+| push-to-addons-registry | application, component, rp, ec-policy | None |
+| push-rpms-to-pulp | application, rp, ec-policy | Custom component (multi-platform) |
+| rhtap-service-push | application, component, rp, ec-policy | None |
+| e2e | application, component, rp, ec-policy | None |
+| rh-push-to-registry-redhat-io | application, component, rp, ec-policy | None |
+| release-to-github | application, component, rp, ec-policy | None |
+| rh-push-to-external-registry | application, component, rp, ec-policy | None |
+| fbc-release | application, ec-policy | Custom component, rp (multiple) |
+| collectors | application only | Fully custom (naming, Jira templates) |
+
 ## Test Structure
 
 Each test suite follows a consistent structure:
 
 ### Configuration Files
 
-- **`test.env`** - Contains resource names and configuration values specific to the test
-- **`test.sh`** - Contains test-specific variables and functions (may vary by test)
+- **`test.env`** - Test configuration including:
+  - UUID generation (for cleanup compatibility)
+  - `originating_tool` - Unique test identifier
+  - `component_type` - Component type
+  - `component_base_branch` - Base branch in e2e-base repository
+  - Essential computed variables (`component_name`, `component_repo_name`)
+
+- **`test.sh`** - Test-specific verification function
 
 ### Shared Libraries
 
-- **`lib/test-functions.sh`** - Contains reusable functions shared across all tests
+- **`shared/base-test.env`** - Common environment variables and `finalize_test_env()` function
+- **`lib/test-functions.sh`** - Core framework functions (setup, cleanup, waiting)
+
+### Shared Resources
+
+- **`shared/resources/tenant/`** - Application, Component, ReleasePlan
+- **`shared/resources/managed/`** - EnterpriseContractPolicy
 
 ### Secrets Management
 
@@ -187,8 +237,21 @@ For issues with integration tests:
 When adding new integration tests:
 
 1. Follow the established directory structure
-2. Create test-specific `test.env` and `test.sh` files
-3. Use the common libraries in `lib/test-functions.sh`
-4. Store secrets in ansible vault files
-5. Update this README with test-specific information
-6. Add test-specific documentation to the individual test README
+2. Create `test.env` with UUID generation and required variables:
+   ```bash
+   uuid=${uuid:-"$(openssl rand -hex 4)"}
+   uuid="${uuid:0:8}"
+   export originating_tool="my-test-e2e-test"
+   export component_type="my-test"
+   export component_base_branch="my-test-base"
+   export component_github_org=hacbs-release-tests
+   export component_name="${component_type}-${uuid}"
+   export component_repo_name="${component_github_org}/${component_name}"
+   ```
+3. Create `test.sh` with verification function
+4. Reference shared resources in Kustomize overlays where applicable
+5. Add test-specific resources (ReleasePlanAdmission, secrets) to the test directory
+6. Store secrets in ansible vault files under `vault/` directory
+7. Update this README with test suite description
+
+For detailed examples, see `shared/README.md` and existing test suites.

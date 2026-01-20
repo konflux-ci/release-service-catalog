@@ -171,12 +171,16 @@ cleanup_resources() {
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
 
-    # Clean up component repository
-    echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
-    "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
+    # Clean up component repository (only if variable is set)
+    if [ -n "${component_repo_name:-}" ]; then
+      echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
+      "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
+    else
+      echo "component_repo_name not set, skipping repository cleanup" >> "${cleanup_log_file}"
+    fi
     
     # Clean up component2 repository if it exists and is different from component repo
-    if [ -n "${component2_repo_name}" ] && [ "${component2_repo_name}" != "${component_repo_name}" ]; then
+    if [ -n "${component2_repo_name:-}" ] && [ "${component2_repo_name}" != "${component_repo_name:-}" ]; then
       echo "Deleting Github repository ${component2_repo_name} ..." >> "${cleanup_log_file}"
       "${SUITE_DIR}/../scripts/delete-repository.sh" "${component2_repo_name}"
     fi
@@ -283,11 +287,11 @@ create_kubernetes_resources() {
     fi
 
     echo "Building and applying tenant resources..."
-    kustomize build "${SUITE_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
+    kustomize build --load-restrictor=LoadRestrictionsNone "${SUITE_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
     kubectl create -f "$tmpDir/tenant-resources.yaml"
 
     echo "Building and applying managed resources..."
-    kustomize build "${SUITE_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
+    kustomize build --load-restrictor=LoadRestrictionsNone "${SUITE_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
     kubectl apply -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."
