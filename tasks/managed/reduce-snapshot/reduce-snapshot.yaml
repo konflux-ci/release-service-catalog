@@ -122,6 +122,50 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: ensure-required-labels-present
+      env:
+        - name: SINGLE_COMPONENT
+          value: $(params.SINGLE_COMPONENT)
+        - name: CUSTOM_RESOURCE
+          value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE)
+        - name: CUSTOM_RESOURCE_NAMESPACE
+          value: $(params.SINGLE_COMPONENT_CUSTOM_RESOURCE_NS)
+      image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 10m
+      script: |
+        #!/usr/bin/env bash
+        set -eu
+
+        if [ "${SINGLE_COMPONENT}" != "true" ]; then
+          echo "Single component mode is not enabled, skipping label check"
+          exit 0
+        fi
+
+        CR_NAMESPACE_ARG=
+        if [ "${CUSTOM_RESOURCE_NAMESPACE}" != "" ]; then
+          CR_NAMESPACE_ARG="-n ${CUSTOM_RESOURCE_NAMESPACE}"
+        fi
+
+        LABELS=$(kubectl get "$CUSTOM_RESOURCE" ${CR_NAMESPACE_ARG:+$CR_NAMESPACE_ARG} -ojson \
+            | jq -r '.metadata.labels')
+        SNAPSHOT_CREATION_TYPE=$(jq -r '."test.appstudio.openshift.io/type" // ""' <<< "${LABELS}")
+        SNAPSHOT_CREATION_COMPONENT=$(jq -r '."appstudio.openshift.io/component" // ""' <<< "${LABELS}")
+
+        echo "SNAPSHOT_CREATION_TYPE: ${SNAPSHOT_CREATION_TYPE}"
+        echo "SNAPSHOT_CREATION_COMPONENT: ${SNAPSHOT_CREATION_COMPONENT}"
+        if [ "${SNAPSHOT_CREATION_TYPE}" != "component" ] || [ "${SNAPSHOT_CREATION_COMPONENT}" == "" ]; then
+            echo "Single component mode is enabled, but the snapshot is missing the required labels to use it."
+            echo "This is likely due to a manually created snapshot"
+            echo "The test.appstudio.openshift.io/type label must exist with value component"
+            echo "The appstudio.openshift.io/component label must also exist saying which component to use"
+            echo "Failing the pipelineRun to prevent unexpected behavior in future tasks"
+            exit 1
+        fi
     - name: reduce
       env:
         - name: SNAPSHOT
