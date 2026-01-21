@@ -153,7 +153,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: create-pyxis-image
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 3Gi
@@ -440,28 +440,56 @@ spec:
             fi
         done
 
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
+
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         SUCCESS=true
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
+        jobs_spawned=0
+        jobs_collected=0
 
-        # Process each digest group in parallel, but components within each group in series
-        for digest in "${!digest_groups[@]}"; do
-            echo "Starting parallel processing for components with digest: $digest"
-            # Limit batch size to concurrent limit
+        # Collect digest keys into indexed array for processing
+        digest_keys=("${!digest_groups[@]}")
+        total_digests=${#digest_keys[@]}
+
+        echo "Processing $total_digests digest groups in parallel..."
+
+        for digest in "${digest_keys[@]}"; do
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit before spawning
+            wait_for_memory 80
             while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
                 wait -n || SUCCESS=false
+                jobs_collected=$((jobs_collected + 1))
             done
+
+            echo "Starting parallel processing for components with digest: $digest"
             # Use hex digest without sha256: prefix for filename consistency
             digest_filename="${digest#sha256:}"
             process_digest_group "$digest" "${digest_groups[$digest]}" \
               > "/tmp/component_group_${digest_filename}.out" \
               2> "/tmp/component_group_${digest_filename}.err" &
+            jobs_spawned=$((jobs_spawned + 1))
+
+            # Allow memory usage to stabilize every BURST_SIZE spawns.
+            if (( jobs_spawned % BURST_SIZE == 0 )); then
+                sleep $STABILIZATION_DELAY
+            fi
         done
 
-        # Wait for remaining processes to finish
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Wait for all remaining jobs - use counter to collect all exit codes
+        # in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
             wait -n || SUCCESS=false
+            jobs_collected=$((jobs_collected + 1))
         done
-        echo "All component processing jobs completed"
+        echo "All component processing jobs completed (spawned: $jobs_spawned, collected: $jobs_collected)"
 
         # Print outputs and errors for each component processing job
         for digest in "${!digest_groups[@]}"; do

@@ -152,7 +152,7 @@ spec:
           value: $(params.sourceDataArtifact)
 
     - name: sign-image
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 4Gi
@@ -174,9 +174,20 @@ spec:
 
         set -x
 
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
+
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         CONCURRENT_LIMIT=$(params.concurrentLimit)
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
         REQUEST_COUNT=0
+        jobs_spawned=0
+        jobs_collected=0
 
         SNAPSHOT_PATH=$(params.dataDir)/$(params.snapshotPath)
         TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
@@ -316,8 +327,12 @@ spec:
 
               # Start find_signatures jobs in parallel for manifest digests
               for manifest_digest in $manifest_digests; do
+                # This function is stored in the utils/memory-throttle.sh file
+                # Wait for memory and concurrent limit
+                wait_for_memory 80
                 while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
                   wait -n || FIND_SIGNATURES_SUCCESS=false
+                  jobs_collected=$((jobs_collected + 1))
                 done
 
                 echo "Starting find_signatures job for manifest digest: ${manifest_digest}"
@@ -331,12 +346,22 @@ spec:
                 > "/tmp/find_sig_${digest_filename}.out" \
                 2> "/tmp/find_sig_${digest_filename}.err" &
                 find_signatures_jobs+=($!)
+                jobs_spawned=$((jobs_spawned + 1))
+
+                # Allow memory usage to stabilize every BURST_SIZE spawns.
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
               done
 
               # Start find_signatures job for source container digest if it exists
               if [ "${sourceContainerDigest}" != "" ] ; then
+                # This function is stored in the utils/memory-throttle.sh file
+                # Wait for memory and concurrent limit
+                wait_for_memory 80
                 while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
                   wait -n || FIND_SIGNATURES_SUCCESS=false
+                  jobs_collected=$((jobs_collected + 1))
                 done
 
                 echo "Starting find_signatures job for source container digest: ${sourceContainerDigest}"
@@ -350,17 +375,25 @@ spec:
                 > "/tmp/find_sig_${digest_filename}.out" \
                 2> "/tmp/find_sig_${digest_filename}.err" &
                 find_signatures_jobs+=($!)
+                jobs_spawned=$((jobs_spawned + 1))
+
+                # Allow memory usage to stabilize every BURST_SIZE spawns
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
               fi
 
             done
         done
 
-        # Wait for all find_signatures jobs to complete
+        # Wait for all find_signatures jobs to complete - use counter to collect all exit codes
+        # in case processes finished during a burst sleep
         echo "Waiting for ${FIND_SIGNATURES_JOB_COUNT} find_signatures jobs to complete..."
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        while (( jobs_collected < jobs_spawned )); do
           wait -n || FIND_SIGNATURES_SUCCESS=false
+          jobs_collected=$((jobs_collected + 1))
         done
-        echo "All find_signatures jobs completed"
+        echo "All find_signatures jobs completed (spawned: $jobs_spawned, collected: $jobs_collected)"
 
         # Print outputs and errors for each find_signatures job
         for digest_filename in "${find_signatures_files[@]}"; do
@@ -489,6 +522,10 @@ spec:
           fi
         done
 
+        # Reset counters for signing phase
+        jobs_spawned=0
+        jobs_collected=0
+
         for keyset in "${!keys_to_ref_dig_map[@]}"; do
 
           references_batch=""
@@ -503,8 +540,12 @@ spec:
             new_references_batch="${references_batch}${reference} "
             new_digests_batch="${digests_batch}${digest} "
 
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit
+            wait_for_memory 80
             while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
               wait -n
+              jobs_collected=$((jobs_collected + 1))
             done
 
             if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
@@ -528,6 +569,13 @@ spec:
                 "${EXTRA_ARGS[@]}" -s true &
                 ((++REQUEST_COUNT))
                 echo "Request Count: $REQUEST_COUNT"
+                jobs_spawned=$((jobs_spawned + 1))
+
+                # Allow memory usage to stabilize every BURST_SIZE spawns
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
+
                 references_batch="${reference} "
                 digests_batch="${digest} "
             else
@@ -538,8 +586,12 @@ spec:
 
           done
           if [[ ${#references_batch} -gt 0 ]]; then
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit
+            wait_for_memory 80
             while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
               wait -n
+              jobs_collected=$((jobs_collected + 1))
             done
 
             echo "🟢 Creating ${requestType} to sign images: ${references_batch}"
@@ -562,6 +614,12 @@ spec:
               "${EXTRA_ARGS[@]}" -s true &
               ((++REQUEST_COUNT))
               echo "Request Count: $REQUEST_COUNT"
+              jobs_spawned=$((jobs_spawned + 1))
+
+            # Allow memory usage to stabilize every BURST_SIZE spawns
+            if (( jobs_spawned % BURST_SIZE == 0 )); then
+              sleep $STABILIZATION_DELAY
+            fi
 
             # next batches consist of values which didn't fit in the previous batches
             references_batch="${to_sign_references[$i]} "
@@ -585,12 +643,15 @@ spec:
             -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
             -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
             "${EXTRA_ARGS[@]}" -s true &
+          jobs_spawned=$((jobs_spawned + 1))
           fi
         done
 
         echo "Waiting for remaining processes to finish..."
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Use counter to collect all exit codes in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
           wait -n
+          jobs_collected=$((jobs_collected + 1))
         done
         echo "done"
 

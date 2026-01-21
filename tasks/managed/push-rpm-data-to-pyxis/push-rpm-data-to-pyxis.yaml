@@ -126,8 +126,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: download-sbom-files
-      image:
-        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 1Gi
@@ -143,6 +142,12 @@ spec:
             echo "No valid pyxis file was provided."
             exit 1
         fi
+
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
 
         # Create a mapping of unique imageIds to their SBOM files for efficient download
         echo "Creating unique imageId mapping for efficient SBOM download..."
@@ -247,33 +252,48 @@ spec:
           task_urls+=("$CONTAINER_IMAGE")
         done
 
-        # Process downloads with continuous job management
-        N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
-        RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
+        # Process downloads with memory-aware job management
+        N=$(params.concurrentLimit)
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
+        RUNNING_JOBS="\j"
         success=true
+        jobs_spawned=0
+        jobs_collected=0
         total=${#download_tasks[@]}
         echo "Starting SBOM download for $total unique images in total. " \
           "Up to $N images will be downloaded at once..."
 
         for (( idx=0; idx < total; idx++ )); do
+          # This function is stored in the utils/memory-throttle.sh file
+          # Wait for memory and concurrent limit before spawning
+          wait_for_memory 80
+          while (( ${RUNNING_JOBS@P} >= N )); do
+            wait -n || success=false
+            jobs_collected=$((jobs_collected + 1))
+          done
+
           PYXIS_IMAGE="${download_tasks[idx]}"
           IMAGEID="${task_images[idx]}"
           IMAGEURL="${task_urls[idx]}"
 
-          # Limit concurrent jobs to N
-          while (( ${RUNNING_JOBS@P} >= N )); do
-            wait -n || success=false
-          done
-
           echo "Starting download for IMAGE: $IMAGEID from URL: $IMAGEURL"
           download_sbom_for_image "$PYXIS_IMAGE" "$IMAGEURL" > "${IMAGEID}.download.out" 2>&1 &
+          jobs_spawned=$((jobs_spawned + 1))
+
+          # Allow memory usage to stabilize every BURST_SIZE spawns.
+          if (( jobs_spawned % BURST_SIZE == 0 )); then
+            sleep $STABILIZATION_DELAY
+          fi
         done
 
-        # Wait for remaining processes to finish
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Wait for all remaining jobs - use counter to collect all exit codes
+        # in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
           wait -n || success=false
+          jobs_collected=$((jobs_collected + 1))
         done
-        echo "All SBOM download jobs completed"
+        echo "All SBOM download jobs completed (spawned: $jobs_spawned, collected: $jobs_collected)"
 
         # Print outputs for all download jobs
         echo
@@ -298,8 +318,7 @@ spec:
           exit 1
         fi
     - name: push-rpm-data-to-pyxis
-      image:
-        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 1Gi
@@ -369,14 +388,33 @@ spec:
         TOTAL_IMAGES_TO_PUSH=$(jq '. | length' "${ALL_IMAGES_FILE}")
         echo "Will push RPM data for $TOTAL_IMAGES_TO_PUSH total images"
 
-        N=$(params.concurrentLimit)  # The maximum number of images to be processed at once
-        RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
+
+        N=$(params.concurrentLimit)
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
+        RUNNING_JOBS="\j"
         success=true
+        jobs_spawned=0
+        jobs_collected=0
         echo "Starting RPM data upload for $TOTAL_IMAGES_TO_PUSH images in total. " \
           "Up to $N images will be uploaded at once..."
 
-        for (( i=0; i < TOTAL_IMAGES_TO_PUSH; i++ )); do
-          IMAGE_DATA=$(jq -c --argjson i "$i" '.[$i]' "${ALL_IMAGES_FILE}")
+        for (( idx=0; idx < TOTAL_IMAGES_TO_PUSH; idx++ )); do
+          # This function is stored in the utils/memory-throttle.sh file
+          # Wait for memory and concurrent limit before spawning
+          wait_for_memory 80
+          while (( ${RUNNING_JOBS@P} >= N )); do
+            wait -n || success=false
+            jobs_collected=$((jobs_collected + 1))
+          done
+
+          IMAGE_DATA=$(jq -c --argjson i "$idx" '.[$i]' "${ALL_IMAGES_FILE}")
           IMAGEID=$(jq -r '.imageId' <<< "$IMAGE_DATA")
 
           # Find the corresponding SBOM file
@@ -393,20 +431,23 @@ spec:
             exit 1
           fi
 
-          # Limit concurrent jobs to N
-          while (( ${RUNNING_JOBS@P} >= N )); do
-            wait -n || success=false
-          done
-
           echo "Uploading RPM data to Pyxis for IMAGE: $IMAGEID with SBOM: $SBOM_FILE using script: upload_rpm_data"
           upload_rpm_data --retry --image-id "$IMAGEID" --sbom-path "$SBOM_FILE" --verbose > "${IMAGEID}.out" 2>&1 &
+          jobs_spawned=$((jobs_spawned + 1))
+
+          # Allow memory usage to stabilize every BURST_SIZE spawns.
+          if (( jobs_spawned % BURST_SIZE == 0 )); then
+            sleep $STABILIZATION_DELAY
+          fi
         done
 
-        # Wait for remaining processes to finish
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Wait for all remaining jobs - use counter to collect all exit codes
+        # in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
           wait -n || success=false
+          jobs_collected=$((jobs_collected + 1))
         done
-        echo "All RPM data upload jobs completed"
+        echo "All RPM data upload jobs completed (spawned: $jobs_spawned, collected: $jobs_collected)"
 
         # Print outputs for all upload jobs
         echo

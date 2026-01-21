@@ -130,7 +130,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: pull-and-push-images-to-marketplaces
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 1Gi
@@ -163,6 +163,13 @@ spec:
         BASE_DIR="$(mktemp -d)"
         DISK_IMGS_DIR="${BASE_DIR}/starmap/CLOUD_IMAGES"
         mkdir -p "${DISK_IMGS_DIR}"
+
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
 
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
@@ -232,19 +239,32 @@ spec:
             echo "$RESOURCES_JSON" | yq -P -I 4 > "$DESTINATION/resources.yaml"
         }
 
-        # Process each component in parallel
-        for ((i = 0; i < NUM_COMPONENTS; i++)); do
-            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            # Limit batch size to concurrent limit
+        # Process each component in parallel with memory-aware job management
+        STABILIZATION_DELAY=2
+        jobs_spawned=0
+        jobs_collected=0
+        for (( i = 0; i < NUM_COMPONENTS; i++ )); do
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit before spawning
+            wait_for_memory 80
             while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
                 wait -n
+                jobs_collected=$((jobs_collected + 1))
             done
+
+            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
             prepare_component "$COMPONENT" &
+            jobs_spawned=$((jobs_spawned + 1))
+
+            # Allow memory usage to stabilize before next spawn.
+            sleep $STABILIZATION_DELAY
         done
 
-        # Wait for remaining processes to finish
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Wait for all remaining jobs - use counter to collect all exit codes
+        # in case processes finished during a stabilization sleep
+        while (( jobs_collected < jobs_spawned )); do
             wait -n
+            jobs_collected=$((jobs_collected + 1))
         done
 
         # Change to the base directory

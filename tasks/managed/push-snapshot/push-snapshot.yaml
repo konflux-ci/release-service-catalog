@@ -120,7 +120,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: push-snapshot
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
       computeResources:
         limits:
           memory: 1Gi
@@ -304,15 +304,31 @@ spec:
         RESULTS_JSON_FILE=$(mktemp)
         echo '{"images":[]}' > "$RESULTS_JSON_FILE"
 
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
+
         RUNNING_JOBS="\j" # A Bash param for number of jobs running
         CONCURRENT_LIMIT=$(params.concurrentLimit)
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
         REQUEST_COUNT=0
         SUCCESS=true
+        jobs_spawned=0
+        jobs_collected=0
 
-        # Wait for a slot to open up in the concurrent limit
+        # Wait for a slot to open up in the concurrent limit and for memory to be available
         wait_for_slot () {
+          # This function is stored in the utils/memory-throttle.sh file
+          # First wait for memory to be available
+          wait_for_memory 80
+          # Then wait for concurrent limit
           while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
             wait -n || SUCCESS=false
+            jobs_collected=$((jobs_collected + 1))
           done
         }
 
@@ -417,6 +433,11 @@ spec:
                 "${repository_url}" "${source_tag}" "" > "$TMP_RESULTS_DIR/${name}-${source_tag}.out" 2>&1 &
               ((++REQUEST_COUNT))
               echo "Request Count: $REQUEST_COUNT"
+              jobs_spawned=$((jobs_spawned + 1))
+              # Allow memory usage to stabilize every BURST_SIZE spawns.
+              if (( jobs_spawned % BURST_SIZE == 0 )); then
+                sleep $STABILIZATION_DELAY
+              fi
             fi
 
             for tag in $(jq -r '.[]' <<< "$imageTags") ; do
@@ -426,6 +447,10 @@ spec:
               "$platform" > "$TMP_RESULTS_DIR/${name}-${tag}.out" 2>&1 &
               ((++REQUEST_COUNT))
               echo "Request Count: $REQUEST_COUNT"
+              jobs_spawned=$((jobs_spawned + 1))
+              if (( jobs_spawned % BURST_SIZE == 0 )); then
+                sleep $STABILIZATION_DELAY
+              fi
 
               # This variable will only exist if the above logic determined the source container should
               # be pushed for this component
@@ -435,6 +460,10 @@ spec:
                   "${repository_url}" "${tag}-source" "" > "$TMP_RESULTS_DIR/${name}-${tag}-source.out" 2>&1 &
                 ((++REQUEST_COUNT))
                 echo "Request Count: $REQUEST_COUNT"
+                jobs_spawned=$((jobs_spawned + 1))
+                if (( jobs_spawned % BURST_SIZE == 0 )); then
+                  sleep $STABILIZATION_DELAY
+                fi
               fi
             done
 
@@ -446,13 +475,19 @@ spec:
                 > "$TMP_RESULTS_DIR/${name}-migration-${migration_tag}.out" 2>&1 &
               ((++REQUEST_COUNT))
               echo "Request Count: $REQUEST_COUNT (migration artifact)"
+              jobs_spawned=$((jobs_spawned + 1))
+              if (( jobs_spawned % BURST_SIZE == 0 )); then
+                sleep $STABILIZATION_DELAY
+              fi
             fi
           done
         done
 
         echo "Waiting for all jobs to complete...."
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Use counter to collect all exit codes in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
           wait -n || SUCCESS=false
+          jobs_collected=$((jobs_collected + 1))
         done
 
         echo "Printing outputs for each push image"
