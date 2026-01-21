@@ -10,6 +10,10 @@ spec:
   description: |-
     Tekton task to run the collectors defined in a resource passed as parameter. The results are saved in the
     resultsDir, one file per collector.
+
+    Template variables in collector params are interpolated using Release CR data before execution.
+    Syntax: {{ path.to.value }} e.g. {{ spec.data.releaseNotes.product_version }}
+    This enables dynamic JQL queries without modifying ReleasePlan for each release (KONFLUX-11658).
   params:
     - name: collectorsPath
       type: string
@@ -88,6 +92,46 @@ spec:
           echo "ROX_CONFIG_DIR set to: ${ROX_CONFIG_DIR}"
         fi
 
+        # Interpolate template variables in a string using Release CR data
+        # Syntax: {{ path.to.value }} e.g. {{ spec.data.releaseNotes.product_version }}
+        # Fails if a referenced path does not exist in the Release CR
+        interpolate_value() {
+            local value="$1"
+            local release_file="$2"
+
+            # If no template syntax found, return original value
+            if ! grep -qE '\{\{.*\}\}' <<< "$value"; then
+                echo "$value"
+                return 0
+            fi
+
+            local result="$value"
+            # Extract all {{ path }} patterns and replace them
+            while [[ "$result" =~ \{\{[[:space:]]*([^}]+)[[:space:]]*\}\} ]]; do
+                local full_match="${BASH_REMATCH[0]}"
+                local path="${BASH_REMATCH[1]}"
+                # Trim whitespace from path
+                path="$(echo "$path" | xargs)"
+                # Convert dot notation to jq path: spec.data.version -> .spec.data.version
+                local jq_path=".${path}"
+
+                # Get value from Release CR
+                local replacement
+                replacement="$(jq -r "${jq_path} // empty" "$release_file")"
+
+                if [ -z "$replacement" ]; then
+                    echo "Error: Template variable '${path}' not found in Release CR" >&2
+                    echo "Ensure the Release CR contains the required data at: ${path}" >&2
+                    return 1
+                fi
+
+                # Replace the template with the value
+                result="${result//$full_match/$replacement}"
+            done
+
+            echo "$result"
+        }
+
         execute_collector() { # Expected arguments are [collector json, type of collector]
             collector="$1"
             collector_type="$2"
@@ -100,6 +144,8 @@ spec:
                 param="$(jq -c --argjson j "$j" '.params[$j]' <<< "$collector")"
                 arg_name="$(jq -r '.name' <<< "$param")"
                 arg_value="$(jq -r '.value' <<< "$param")"
+                # Interpolate template variables from Release CR (KONFLUX-11658)
+                arg_value="$(interpolate_value "$arg_value" "$RELEASE_FILE")" || exit 1
                 ARGS=("${ARGS[@]}" --"${arg_name}" "${arg_value}")
             done
             # add the current release json path as an arg

@@ -47,6 +47,16 @@ function timeout() {
     exit 124 # timeout exits 124 if it times out
   fi
 
+  # KONFLUX-11658: Test for template interpolation
+  # Use pattern matching to handle bash quoting of arguments with spaces
+  if [[ "$*" == *'lib/interpolation-collector.py'* ]] && \
+     [[ "$*" == *'--query'*'project = TEST AND fixVersion = "2.1.1"'* ]] && \
+     [[ "$*" == *'--static-arg'*'no-template-here'* ]]
+  then
+    echo '{"name": "interpolation-test", "interpolated_query": "project = TEST AND fixVersion = \"2.1.1\""}'
+    return
+  fi
+
   echo Error: Unexpected call
   exit 1
 }

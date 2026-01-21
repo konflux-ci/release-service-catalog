@@ -1,0 +1,151 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-run-collectors-interpolation
+spec:
+  description: |
+    Run the collectors task with template variables in params (KONFLUX-11658)
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: create-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir "$(workspaces.data.path)"/results
+
+              # ReleasePlan with template variable in collector params
+              cat > "$(workspaces.data.path)"/test_release_plan.json << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlan",
+                "metadata": {
+                  "name": "test-rp",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "application": "app",
+                  "collectors": {
+                    "items": [
+                      {
+                        "name": "test-collector",
+                        "type": "interpolation-collector",
+                        "timeout": 600,
+                        "params": [
+                          {
+                            "name": "query",
+                            "value": "project = TEST AND fixVersion = \"{{ spec.data.releaseNotes.product_version }}\""
+                          },
+                          {
+                            "name": "static-arg",
+                            "value": "no-template-here"
+                          }
+                        ]
+                      }
+                    ],
+                    "target": "managed"
+                  }
+                }
+              }
+              EOF
+
+              # Release CR with data for interpolation
+              cat > "$(workspaces.data.path)"/release.json << EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "Release",
+                "metadata": {
+                  "name": "test-release",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "snapshot": "test-snapshot",
+                  "releasePlan": "test-rp",
+                  "data": {
+                    "releaseNotes": {
+                      "product_version": "2.1.1"
+                    }
+                  }
+                }
+              }
+              EOF
+
+              cat > "$(workspaces.data.path)"/previous_release.json << EOF
+              {}
+              EOF
+    - name: run-task
+      taskRef:
+        name: run-collectors
+      params:
+        - name: collectorsPath
+          value: test_release_plan.json
+        - name: collectorsRepository
+          value: test_repo
+        - name: collectorsResourceType
+          value: releaseplan
+        - name: resultsDir
+          value: results
+        - name: releasePath
+          value: release.json
+        - name: previousReleasePath
+          value: previous_release.json
+      runAfter:
+        - setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - run-task
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ "$(find "$(workspaces.data.path)/results" -type f | wc -l)" -ne 1 ] ; then
+                  echo "A single collector file should exist, but that is not the case. Collector files:"
+                  ls "$(workspaces.data.path)/results"
+                  exit 1
+              fi
+
+              # Verify the interpolated value was passed to the collector
+              if ! grep 'project = TEST AND fixVersion = "2.1.1"' "$(workspaces.data.path)/mock_timeout.txt" ; then
+                echo "ERROR: Template variable was not interpolated correctly"
+                echo "Expected: project = TEST AND fixVersion = \"2.1.1\""
+                echo "Mock calls were:"
+                cat "$(workspaces.data.path)/mock_timeout.txt"
+                exit 1
+              fi
+
+              # Verify static args are passed unchanged
+              if ! grep 'no-template-here' "$(workspaces.data.path)/mock_timeout.txt" ; then
+                echo "ERROR: Static arg was not passed correctly"
+                exit 1
+              fi
+
+              if [ "$(jq -r '.interpolated_query' \
+                "$(workspaces.data.path)/results/tenant-test-collector.json")" \
+                != 'project = TEST AND fixVersion = "2.1.1"' ]; then
+                echo "ERROR: collector output shows interpolation failed. Output was:"
+                cat "$(workspaces.data.path)/results/tenant-test-collector.json"
+                exit 1
+              fi

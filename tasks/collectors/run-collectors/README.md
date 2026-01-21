@@ -3,6 +3,10 @@
 Tekton task to run the collectors defined in a resource passed as parameter. The results are saved in the
 resultsDir, one file per collector.
 
+Template variables in collector params are interpolated using Release CR data before execution.
+Syntax: {{ path.to.value }} e.g. {{ spec.data.releaseNotes.product_version }}
+This enables dynamic JQL queries without modifying ReleasePlan for each release (KONFLUX-11658).
+
 ## Parameters
 
 | Name                         | Description                                                                             | Optional | Default value |
