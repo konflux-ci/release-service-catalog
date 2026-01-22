@@ -42,6 +42,10 @@ spec:
     - name: verify_ec_task_git_revision
       type: string
       description: The git revision to be used when consuming the verify-conforma task
+    - name: mobster_tasks_git_revision
+      type: string
+      description: The git revision to be used when consuming Mobster tasks for SBOM processing
+      default: b63b8eb4c8645806bb7280d8c9e10b7164743e63
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
@@ -67,7 +71,17 @@ spec:
       # to avoid tar extraction errors, we need to specify a subdirectory
       # inside the volume.
       default: "/var/workdir/release"
-      # TODO: Some of these should probably come from the RP or RPA.
+    - name: conformaPubKey
+      type: string
+      description: Path to the key used by Conforma to verify attestations signed by it
+      default: "k8s://openshift-pipelines/public-key"
+  results:
+    - name: advisory_url
+      type: string
+      value: $(tasks.create-advisory.results.advisory_url)
+    - name: advisory_internal_url
+      type: string
+      value: $(tasks.create-advisory.results.advisory_internal_url)
   tasks:
     - name: verify-access-to-resources
       taskRef:
@@ -127,6 +141,44 @@ spec:
           value: "$(params.taskGitRevision)"
       runAfter:
         - verify-access-to-resources
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      params:
+        - name: dataDir
+          value: "$(params.dataDir)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".pulp.domain"},
+              {"resultIndex": 1, "key": ".pulp.secretName"},
+              {"resultIndex": 2, "key": ".conforma.workerCount", "default": "4"},
+              {"resultIndex": 3, "key": ".conforma.timeout", "default": "8h0m0s"},
+              {"resultIndex": 4, "key": ".jira.jiraAdvisorySecret", "default": "konflux-advisory-jira-secret"},
+              {"resultIndex": 5, "key": ".cgw.cgwSecret", "default": "publish-to-cgw-secret"},
+              {"resultIndex": 6, "key": ".sign.cosignSecretName", "default": ""}
+            ]
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+      runAfter:
+        - collect-data
     - name: reduce-snapshot
       taskRef:
         resolver: "git"
@@ -161,8 +213,8 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - collect-task-params
-    - name: collect-task-params
+        - collect-data
+    - name: extract-requester-from-release
       taskRef:
         resolver: "git"
         params:
@@ -171,34 +223,62 @@ spec:
           - name: revision
             value: $(params.taskGitRevision)
           - name: pathInRepo
-            value: tasks/managed/collect-task-params/collect-task-params.yaml
+            value: hub/kubernetes-actions/kubernetes-actions.yaml
       params:
-        - name: dataDir
-          value: "$(params.dataDir)"
-        - name: dataPath
-          value: "$(tasks.collect-data.results.data)"
-        - name: keysToExtract
+        - name: image
+          value: "quay.io/hacbs-release/cloud-builders-kubectl\
+            @sha256:8ab94be8b2b4f3d117f02d868b39540fddd225447abf4014f7ba4765cb39f753"
+        - name: script
           value: |
-            [
-              {"resultIndex": 0, "key": ".pulp.domain"},
-              {"resultIndex": 1, "key": ".pulp.secretName"},
-              {"resultIndex": 2, "key": ".conforma.workerCount", "default": "4"},
-              {"resultIndex": 3, "key": ".conforma.timeout", "default": "8h0m0s"}
-            ]
+            set -x
+
+            NAMESPACE=$(echo $(params.release) | cut -d '/' -f 1)
+            NAME=$(echo $(params.release) | cut -d '/' -f 2)
+
+            AUTHOR=$(kubectl get release ${NAME} -n ${NAMESPACE} \
+            -o=jsonpath='{.status.attribution.author}' | tee $(results.output-result.path))
+
+            if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
+      runAfter:
+        - verify-access-to-resources
+    - name: filter-already-released-advisory-rpms
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/filter-already-released-advisory-rpms/filter-already-released-advisory-rpms.yaml
+      params:
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: PULP_DOMAIN
+          value: "$(tasks.collect-task-params.results.extractedValues[0])"
+        - name: PULP_SECRET_NAME
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
-        - name: ociStorage
-          value: $(params.ociStorage)
-        - name: sourceDataArtifact
-          value: "$(tasks.collect-data.results.sourceDataArtifact)"
-        - name: trustedArtifactsDebug
-          value: "$(params.trustedArtifactsDebug)"
       runAfter:
-        - collect-data
+        - reduce-snapshot
+        - collect-task-params
     - name: verify-conforma
       timeout: "4h00m0s"
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -227,12 +307,123 @@ spec:
         - name: WORKERS
           value: "$(tasks.collect-task-params.results.extractedValues[2])"
         - name: SOURCE_DATA_ARTIFACT
-          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)"
         - name: TRUSTED_ARTIFACTS_DEBUG
           value: "$(params.trustedArtifactsDebug)"
       runAfter:
-        - reduce-snapshot
+        - filter-already-released-advisory-rpms
+        - collect-task-params
+    - name: populate-release-notes
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: jiraSecretName
+          value: "$(tasks.collect-task-params.results.extractedValues[4])"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/populate-release-notes/populate-release-notes.yaml
+        resolver: git
+      runAfter:
+        - filter-already-released-advisory-rpms
+        - verify-conforma
+    - name: embargo-check
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/embargo-check/embargo-check.yaml
+        resolver: git
+      runAfter:
+        - check-data-keys
+        - populate-release-notes
+    - name: set-advisory-severity
+      timeout: "2h0m0s"
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.embargo-check.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/set-advisory-severity/set-advisory-severity.yaml
+        resolver: git
+      runAfter:
+        - populate-release-notes
+        - embargo-check
+        - push-rpms-to-pulp
     - name: push-rpms-to-pulp
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -252,7 +443,7 @@ spec:
         - name: resultsDirPath
           value: $(tasks.collect-data.results.resultsDir)
         - name: sourceDataArtifact
-          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)=$(params.dataDir)"
+          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)=$(params.dataDir)"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: dataDir
@@ -264,8 +455,274 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - verify-conforma
+        - embargo-check
+    - name: process-component-sbom
+      when:
+        - input: "$(tasks.collect-atlas-params.results.secretName)"
+          operator: notin
+          values: [""]
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/mobster.git
+          - name: revision
+            value: $(params.mobster_tasks_git_revision)
+          - name: pathInRepo
+            value: tasks/augment-component-sboms-ta/0.2/augment-component-sboms-ta.yaml
+        resolver: git
+      params:
+        - name: resultsDirPath
+          value: $(tasks.collect-data.results.resultsDir)
+        - name: snapshotSpec
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: retryAWSSecretName
+          value: "$(tasks.collect-atlas-params.results.retryAWSSecretName)"
+        - name: retryS3Bucket
+          value: "$(tasks.collect-atlas-params.results.retryS3Bucket)"
+        - name: atlasSecretName
+          value: "$(tasks.collect-atlas-params.results.secretName)"
+        - name: ssoTokenUrl
+          value: "$(tasks.collect-atlas-params.results.ssoTokenUrl)"
+        - name: atlasApiUrl
+          value: "$(tasks.collect-atlas-params.results.atlasApiUrl)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: cosignSecretName
+          value: "$(tasks.collect-task-params.results.extractedValues[6])"
+        - name: attestationPubKey
+          value: "$(params.conformaPubKey)"
+      runAfter:
+        - collect-data
+        - collect-atlas-params
+        - push-rpms-to-pulp
+    - name: process-product-sbom
+      when:
+        - input: "$(tasks.collect-atlas-params.results.secretName)"
+          operator: notin
+          values: [""]
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/mobster.git
+          - name: revision
+            value: $(params.mobster_tasks_git_revision)
+          - name: pathInRepo
+            value: tasks/create-product-sbom-ta/0.2/create-product-sbom-ta.yaml
+        resolver: git
+      params:
+        - name: resultsDirPath
+          value: $(tasks.collect-data.results.resultsDir)
+        - name: snapshotSpec
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: releaseData
+          value: "$(tasks.collect-data.results.data)"
+        - name: retryAWSSecretName
+          value: "$(tasks.collect-atlas-params.results.retryAWSSecretName)"
+        - name: retryS3Bucket
+          value: "$(tasks.collect-atlas-params.results.retryS3Bucket)"
+        - name: atlasSecretName
+          value: "$(tasks.collect-atlas-params.results.secretName)"
+        - name: ssoTokenUrl
+          value: "$(tasks.collect-atlas-params.results.ssoTokenUrl)"
+        - name: atlasApiUrl
+          value: "$(tasks.collect-atlas-params.results.atlasApiUrl)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-data
+        - collect-atlas-params
+        - push-rpms-to-pulp
+    - name: check-data-keys
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: schema
+          value:  $(params.taskGitUrl)/raw/$(params.taskGitRevision)/schema/dataKeys.json
+        - name: systems
+          value: |
+            [
+              {"systemName": "releaseNotes", "dynamic": false},
+              {"systemName": "pyxis", "dynamic": false},
+              {"systemName": "mapping", "dynamic": false},
+              {"systemName": "sign", "dynamic": false}
+            ]
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/check-data-keys/check-data-keys.yaml
+        resolver: git
+      runAfter:
+        - populate-release-notes
+    - name: collect-atlas-params
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-atlas-params/collect-atlas-params.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-data
+        - push-rpms-to-pulp
+    - name: create-advisory
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      retries: 5
+      params:
+        - name: releasePlanAdmissionPath
+          value: "$(tasks.collect-data.results.releasePlanAdmission)"
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: environment
+          value: "stage"
+          # value: "$(tasks.set-advisory-severity.results.environment)"
+        - name: resultsDirPath
+          value: "$(tasks.collect-data.results.resultsDir)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.set-advisory-severity.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: cgwSecret
+          value: "$(tasks.collect-task-params.results.extractedValues[5])"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/create-advisory/create-advisory.yaml
+        resolver: git
+      runAfter:
+        - check-data-keys
+        - embargo-check
+        - set-advisory-severity
+        - push-rpms-to-pulp
+        - process-component-sbom
+        - process-product-sbom
+    - name: close-advisory-issues
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+          # - input: "$(tasks.filter-already-released-advisory-rpms.results.environment)"
+        - input: "staging-changeme"
+          operator: in
+          values: ["production-changeme"]
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: advisoryUrl
+          value: "$(tasks.create-advisory.results.advisory_url)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/close-advisory-issues/close-advisory-issues.yaml
+        resolver: git
+      runAfter:
+        - create-advisory
     - name: update-cr-status
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: resource
           value: $(params.release)
@@ -276,6 +733,9 @@ spec:
         - name: resultArtifacts
           value:
             - "$(tasks.push-rpms-to-pulp.results.sourceDataArtifact)=$(params.dataDir)"
+            - "$(tasks.create-advisory.results.sourceDataArtifact)=$(params.dataDir)"
+            - "$(tasks.process-product-sbom.results.sourceDataArtifact)=$(params.dataDir)"
+            - "$(tasks.process-component-sbom.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -294,4 +754,18 @@ spec:
           - name: pathInRepo
             value: tasks/managed/update-cr-status/update-cr-status.yaml
       runAfter:
-        - push-rpms-to-pulp
+        - create-advisory
+  finally:
+    - name: cleanup-internal-requests
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/cleanup-internal-requests/cleanup-internal-requests.yaml
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
