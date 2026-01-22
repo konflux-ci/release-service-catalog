@@ -265,6 +265,21 @@ setup_namespaces() {
     echo "Namespaces setup complete. Current namespace set to ${tenant_namespace}."
 }
 
+# Function to resolve symlinks in a directory for kustomize compatibility
+# Kustomize has security restrictions that prevent loading symlinked files
+# from outside the kustomization root. This function creates a temporary
+# copy with symlinks resolved.
+# Arguments:
+#   $1: source directory containing potential symlinks
+#   $2: destination directory to copy resolved files to
+resolve_symlinks_for_kustomize() {
+    local src_dir="$1"
+    local dest_dir="$2"
+
+    # cp -rL follows symlinks and copies the actual files
+    cp -rL "$src_dir" "$dest_dir"
+}
+
 # Function to create Kubernetes resources
 # Modifies global variable: tmpDir
 # Relies on global variables: SUITE_DIR
@@ -274,8 +289,15 @@ create_kubernetes_resources() {
     tmpDir=$(mktemp -d)
     echo "Temporary directory for resources: ${tmpDir}"
 
+    # Resolve symlinks in resources directories for kustomize compatibility
+    # This allows tests to use symlinks to share resources while maintaining
+    # compatibility with kustomize's security restrictions
+    echo "Resolving symlinks in resources directories..."
+    resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/tenant" "$tmpDir/tenant"
+    resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/managed" "$tmpDir/managed"
+
     # Apply infrastructure secrets first (if they exist) - these persist across test runs
-    local managed_infra_secrets_file="${SUITE_DIR}/resources/managed/secrets/managed-infra-secrets.yaml"
+    local managed_infra_secrets_file="$tmpDir/managed/secrets/managed-infra-secrets.yaml"
     if [ -f "${managed_infra_secrets_file}" ]; then
         echo "Applying infrastructure secrets (these persist across test runs)..."
         envsubst < "${managed_infra_secrets_file}" > "$tmpDir/managed-infra-resources.yaml"
@@ -283,11 +305,11 @@ create_kubernetes_resources() {
     fi
 
     echo "Building and applying tenant resources..."
-    kustomize build "${SUITE_DIR}/resources/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
+    kustomize build "$tmpDir/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
     kubectl create -f "$tmpDir/tenant-resources.yaml"
 
     echo "Building and applying managed resources..."
-    kustomize build "${SUITE_DIR}/resources/managed" | envsubst > "$tmpDir/managed-resources.yaml"
+    kustomize build "$tmpDir/managed" | envsubst > "$tmpDir/managed-resources.yaml"
     kubectl apply -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."

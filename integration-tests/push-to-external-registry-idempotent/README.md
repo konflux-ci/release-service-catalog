@@ -1,4 +1,4 @@
-# push-to-external-registry test
+# push-to-external-registry-idempotent test
 ## Setup
 ### Dependencies
 * GitHub repo: https://github.com/hacbs-release-tests/e2e-base
@@ -32,13 +32,16 @@
 - This file contains re-usable functions for tests
 ### Secrets
 - Secrets needed for testing are stored in ansible vault files.
-  - [vault/collector-managed-secrets.yaml](vault/collector-managed-secrets.yaml)
-  - [vault/collector-tenant-secrets.yaml](vault/collector-tenant-secrets.yaml)
+  - [vault/managed-secrets.yaml](vault/managed-secrets.yaml)
+  - [vault/tenant-secrets.yaml](vault/tenant-secrets.yaml)
 - Most secrets required are contained in the files above.
 ### Running the test
 
+This test validates idempotent release behavior by creating two releases with the same snapshot
+and verifying that the second release correctly filters already-released components.
+
 ```shell
-integration-tests/run-test.sh push-to-external-registry
+integration-tests/run-test.sh push-to-external-registry-idempotent
 ```
 
 ### Debugging
