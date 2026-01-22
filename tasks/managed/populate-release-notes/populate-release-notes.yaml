@@ -385,8 +385,8 @@ spec:
         content_type=$(jq -r '.mapping.components[]? |
           (.contentGateway?.contentType // .contentType) // empty' "$DATA_FILE" | head -n1)
 
-        if [ "$content_type" != "binary" ] && [ "$content_type" != "disk-image" ]; then
-            echo "Not binary or disk-image content. Skipping artifact-specific logic."
+        if [ "$content_type" != "binary" ] && [ "$content_type" != "disk-image" ] && [ "$content_type" != "rpm" ]; then
+            echo "Not binary or disk-image or rpm content. Skipping artifact-specific logic."
             exit 0
         fi
 
@@ -395,6 +395,26 @@ spec:
             echo "No valid snapshot file was provided."
             exit 1
         fi
+
+        # generate_purl_rpm name version release arch sha256 repository_id [vendor]
+        # Example:
+        #   generate_purl_rpm "zlib-devel" "1.2.11" "40.el9" "x86_64" \
+        #     "9775022716a2b6dd51d151a40aa4a6bcb466edeb01b747f48072703e509be097" \
+        #     "ubi-9-for-x86_64-appstream-rpms" "redhat"
+        generate_purl_rpm() {
+          local name="$1"
+          local version="$2"
+          local release="$3"
+          local arch="$4"
+          local sha256="$5"
+          local repository_id="$6"
+          local vendor="${7:-redhat}"
+
+          # Assemble purl:
+          # pkg:rpm/<vendor>/<name>@<version>-<release>?arch=<arch>&checksum=sha256:<sha256>&repository_id=<repo>
+          printf 'pkg:rpm/%s/%s@%s-%s?arch=%s&checksum=sha256:%s&repository_id=%s\n' \
+            "$vendor" "$name" "$version" "$release" "$arch" "$sha256" "$repository_id"
+        }
 
         append_artifact_entry() {
           local component="$1" arch="$2" os="$3" purl="$4"
@@ -465,7 +485,7 @@ spec:
 
                     append_artifact_entry "$name" "$arch" "$os" "$purl"
                 done
-            else
+            elif [ "$content_type" = "disk-image" ]; then
                 # Get the number of staged files for this component (disk-images use staged.files structure)
                 FILES_LENGTH=$(jq --arg name "$name" \
                   '[.mapping.components[]
@@ -505,8 +525,63 @@ spec:
 
                     append_artifact_entry "$name" "$arch" "$os" "$purl"
                 done
+            elif [ "$content_type" = "rpm" ]; then
+              os="linux"
+
+              SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+              if [ ! -f "${SNAPSHOT_FILE}" ] ; then
+                echo "No valid snapshot file was provided."
+                exit 1
+              fi
+
+              # Input: rpmsToPublish entries in the (filtered) snapshot.
+              # This allows release notes to describe what will be published, not what was already published.
+              if ! jq -e '.components[]? | has("rpmsToPublish")' "${SNAPSHOT_FILE}" >/dev/null 2>&1; then
+                echo "No rpmsToPublish found in snapshot; cannot generate RPM release notes." >&2
+                exit 1
+              fi
+
+              pulp_domain="$(jq -r '.pulp.domain // ""' "${DATA_FILE}")"
+
+              RPM_FILES_LENGTH=$(jq --arg name "$name" \
+                '[.components[]? | select(.name == $name) | .rpmsToPublish[]?] | length' "${SNAPSHOT_FILE}")
+              for ((k = 0; k < RPM_FILES_LENGTH; k++)); do
+                rpmfile=$(jq -c --arg name "$name" --argjson k "$k" \
+                  '[.components[]? | select(.name == $name) | .rpmsToPublish[]?][$k]' "${SNAPSHOT_FILE}")
+                rpm_name=$(jq -r '.rpmname' <<< "$rpmfile")
+                arch=$(jq -r '.arch' <<< "$rpmfile")
+                version=$(jq -r '.version' <<< "$rpmfile")
+                release=$(jq -r '.release' <<< "$rpmfile")
+                sha256=$(jq -r '.sha256' <<< "$rpmfile")
+
+                # Expand per-target repo to keep repository_id accurate (noarch may target multiple repos).
+                TARGET_REPOS_LEN=$(jq '.targetRepos | length' <<< "$rpmfile")
+                if [ "${TARGET_REPOS_LEN}" -eq 0 ]; then
+                  # If no targetRepos is present, fall back to a best-effort purl without repository_id.
+                  purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$sha256" "")
+                  echo "purl: $purl"
+                  append_artifact_entry "$name" "$arch" "$os" "$purl"
+                else
+                  for ((r = 0; r < TARGET_REPOS_LEN; r++)); do
+                    repo=$(jq -r --argjson r "$r" '.targetRepos[$r]' <<< "$rpmfile")
+                    pulprepo="${repo}"
+                    if [ -n "${pulp_domain}" ]; then
+                      pulprepo="${pulp_domain}/${repo}"
+                    fi
+                    arch_for_entry="${arch}"
+                    if [ "${repo}" = "source" ]; then
+                      arch_for_entry="source"
+                    fi
+                    purl=$(generate_purl_rpm \
+                      "$rpm_name" "$version" "$release" "$arch_for_entry" "$sha256" "$pulprepo")
+                    echo "purl: $purl"
+                    append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
+                  done
+                fi
+              done
             fi
         done
+        cat "${DATA_FILE}"
     - name: populate-release-notes-github
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
