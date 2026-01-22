@@ -1,0 +1,169 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-python-wheels
+spec:
+  description: Test creating and signing attestations for Python wheels
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/files"
+
+              # Create mock wheel and sdist files
+              echo "mock wheel content" > "$(params.dataDir)/files/my_package-1.0.0-py3-none-any.whl"
+              echo "mock sdist content" > "$(params.dataDir)/files/my_package-1.0.0.tar.gz"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: rh-sign-python-wheels
+      params:
+        - name: secretName
+          value: test-aws-kms-secret
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: filesDir
+          value: files
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: attestationCount
+          value: "$(tasks.run-task.results.attestationCount)"
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: attestationCount
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              FILES_DIR="$(params.dataDir)/files"
+
+              # Check attestation count
+              if [ "$(params.attestationCount)" != "2" ]; then
+                echo "ERROR: Expected 2 attestations, got $(params.attestationCount)"
+                exit 1
+              fi
+
+              # Check that attestation files were created
+              if [ ! -f "${FILES_DIR}/my_package-1.0.0-py3-none-any.whl.attestation" ]; then
+                echo "ERROR: Wheel attestation file not found"
+                exit 1
+              fi
+
+              if [ ! -f "${FILES_DIR}/my_package-1.0.0.tar.gz.attestation" ]; then
+                echo "ERROR: Sdist attestation file not found"
+                exit 1
+              fi
+
+              # Check that attestation files are valid JSON with PEP 740 structure
+              for att_file in "${FILES_DIR}"/*.attestation; do
+                echo "Checking attestation file: ${att_file}"
+                if ! jq -e '.version == 1' "${att_file}" > /dev/null; then
+                  echo "ERROR: Attestation file ${att_file} does not have version: 1"
+                  exit 1
+                fi
+                if ! jq -e 'has("envelope")' "${att_file}" > /dev/null; then
+                  echo "ERROR: Attestation file ${att_file} does not have envelope field"
+                  exit 1
+                fi
+              done
+
+              echo "All checks passed!"
+      runAfter:
+        - run-task
