@@ -28,13 +28,11 @@ function curl() {
     elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
         # Content GET (package) by href -> return artifact link
         echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
-    elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/srpms/mock-existing-uuid/"* ]]; then
-        # Content GET (srpm) by href -> return artifact link
-        echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/srpms/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
+    # SRPMs are queried via the packages endpoint with arch=src; no separate srpms endpoint.
     elif [[ "$args" == *"/api/pulp/mock/api/v3/artifacts/"* ]]; then
         # Artifact GET -> return sha256 of empty file
         echo '{"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
-    elif [[ "$args" == *"/content/rpm/packages/"* ]] || [[ "$args" == *"/content/rpm/srpms/"* ]]; then
+    elif [[ "$args" == *"/content/rpm/packages/"* ]]; then
         # Content query by NEVRA -> decide existence based on CONTENT_EXISTS_MODE_FILE
         mode="none"
         if [[ -f "${CONTENT_EXISTS_MODE_FILE}" ]]; then
@@ -43,11 +41,7 @@ function curl() {
         # record the content query for debugging the tests
         echo "content_query mode=${mode} url=${args}" >> $(params.dataDir)/mock_content_queries.txt
         if [[ "${mode}" == "all" ]]; then
-            if [[ "$args" == *"/content/rpm/srpms/"* ]]; then
-                echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/srpms/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}]}'
-            else
-                echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}]}'
-            fi
+            echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}]}'
         else
             echo '{"count": 0, "results": []}'
         fi

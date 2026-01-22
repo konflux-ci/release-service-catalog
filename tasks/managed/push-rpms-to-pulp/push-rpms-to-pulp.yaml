@@ -90,6 +90,9 @@ spec:
 
   stepTemplate:
     env:
+      # Ensure Tekton creds-init can copy registry creds to a writable $HOME (avoid /tekton/home permission warnings).
+      - name: HOME
+        value: /tmp
       - name: SNAPSHOT_PATH
         value: $(params.dataDir)/$(params.SNAPSHOT_PATH)
       - name: DEFAULT_EXCLUDES
@@ -488,11 +491,12 @@ spec:
             return 1
           fi
 
-          # Select endpoint: srpms for .src.rpm, packages otherwise
+          # Pulp's RPM content API supports querying SRPMs via the "packages" endpoint with arch=src.
+          # Some deployments do not expose a separate "srpms" endpoint (404).
+          endpoint="packages"
           if [[ "${file_path}" == *.src.rpm ]]; then
-            endpoint="srpms"
-          else
-            endpoint="packages"
+            # Some SRPMs report a non-src arch in the header; the Pulp API uses arch=src for SRPM queries.
+            arch="src"
           fi
 
           # Compute local sha256
@@ -599,6 +603,23 @@ spec:
           sha256: $sha256
         }]
         '
+
+        # If the snapshot was pre-processed by filter-already-released-advisory-rpms, it will include
+        # `.components[].rpmsToPublish[]` entries that specify exactly which RPMs should
+        # be published to which repos. When present, we only attempt uploads for those.
+        RPM_REPO_MAP="$(
+          jq -c '
+            [ .components[].rpmsToPublish[]? | {rpm, targetRepos} ]
+            | reduce .[] as $i ({}; .[$i.rpm] =
+                ((.[$i.rpm] // []) + ($i.targetRepos // []) | unique)
+              )
+          ' "${SNAPSHOT_PATH}" 2>/dev/null || echo "{}"
+        )"
+        RPM_FILTER_ENABLED="false"
+        if [[ "${RPM_REPO_MAP}" != "{}" ]]; then
+          RPM_FILTER_ENABLED="true"
+        fi
+        echo "RPM pre-filter detected in snapshot: ${RPM_FILTER_ENABLED}"
 
         jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | tee "${IMAGES_TXT}"
 
@@ -717,6 +738,13 @@ spec:
           # Process arch-specific RPMs
           for pkg in "${FILES_TO_UPLOAD[@]}"; do
             if [[ "$pkg" == *."$arch".rpm ]]; then
+              if [[ "${RPM_FILTER_ENABLED}" == "true" ]]; then
+                if ! jq -e --arg rpm "${pkg}" --arg repo "${arch}" \
+                  '.[$rpm] // [] | index($repo) != null' <<< "${RPM_REPO_MAP}" >/dev/null; then
+                  continue
+                fi
+              fi
+
               # Existence and digest check
               set +e
               check_rpm_exists_with_digest "${arch}" "${pkg}"
@@ -764,6 +792,13 @@ spec:
             fi
             # Upload .noarch.rpm files to this arch repository
             if [[ "$pkg" == *.noarch.rpm ]]; then
+              if [[ "${RPM_FILTER_ENABLED}" == "true" ]]; then
+                if ! jq -e --arg rpm "${pkg}" --arg repo "${arch}" \
+                  '.[$rpm] // [] | index($repo) != null' <<< "${RPM_REPO_MAP}" >/dev/null; then
+                  continue
+                fi
+              fi
+
               # Existence and digest check against this arch repo
               set +e
               check_rpm_exists_with_digest "${arch}" "${pkg}"
@@ -822,6 +857,13 @@ spec:
         SRC_HREFS_JSON="[]"
         for pkg in "${FILES_TO_UPLOAD[@]}"; do
           if [[ "$pkg" == *.src.rpm ]]; then
+            if [[ "${RPM_FILTER_ENABLED}" == "true" ]]; then
+              if ! jq -e --arg rpm "${pkg}" --arg repo "source" \
+                '.[$rpm] // [] | index($repo) != null' <<< "${RPM_REPO_MAP}" >/dev/null; then
+                continue
+              fi
+            fi
+
             # Existence and digest check against 'source' repo
             set +e
             check_rpm_exists_with_digest "source" "${pkg}"
