@@ -1,0 +1,609 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-already-released-advisory-rpms
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Filters RPMs already present in Pulp and reduces the snapshot to only components
+    that still have RPMs to publish.
+
+    The task:
+    - pulls RPM files from each component's OCI artifact
+    - queries Pulp to determine which RPMs already exist (by NEVRA + sha256)
+    - writes the RPMs that still need publishing under `.components[].rpmsToPublish`
+    - removes components with an empty `.rpmsToPublish` list
+    - overwrites the snapshot file in-place
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON Snapshot spec in the data workspace
+    - name: PULP_DOMAIN
+      type: string
+      description: The domain to use for Pulp operations
+    - name: PULP_SECRET_NAME
+      type: string
+      description: >-
+        The name of the secret containing the Pulp cli.toml file. It must have the cli.toml key
+    - name: DEFAULT_EXCLUDES
+      type: string
+      description: comma-delimited list of file patterns to exclude from consideration
+      default: "-debuginfo-, -debugsource-"
+    - name: DEFAULT_ARCHITECTURES
+      type: string
+      description: >-
+        Comma-delimited list of default architectures to use for noarch RPMs when
+        no arch-specific RPMs are found
+      default: "x86_64,aarch64,s390x,ppc64le"
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: skip_release
+      type: string
+      description: "true when all components had no RPMs to publish; otherwise false"
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: pulp-secret-name-vol
+      secret:
+        secretName: $(params.PULP_SECRET_NAME)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      # Ensure Tekton creds-init can copy registry creds to a writable $HOME (avoid /tekton/home permission warnings).
+      - name: HOME
+        value: /tmp
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: ORAS_OPTIONS
+        value: "$(params.orasOptions)"
+      - name: DEBUG
+        value: "$(params.trustedArtifactsDebug)"
+      - name: PULP_DOMAIN
+        value: "$(params.PULP_DOMAIN)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: filter
+      image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 350m
+      volumeMounts:
+        - name: pulp-secret-name-vol
+          mountPath: "/etc/secrets"
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        # Avoid leaking secrets from cli.toml via bash xtrace in task logs.
+        set +x
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [[ ! -f "${SNAPSHOT_FILE}" ]]; then
+          echo "Error: No valid snapshot file was provided at ${SNAPSHOT_FILE}" >&2
+          exit 1
+        fi
+
+        CONFIG_FILE_CONTENT="$(cat /etc/secrets/cli.toml || true)"
+        if [[ -z "${CONFIG_FILE_CONTENT}" ]]; then
+          echo "Error: Missing cli.toml in secret $(params.PULP_SECRET_NAME)" >&2
+          exit 1
+        fi
+        echo "${CONFIG_FILE_CONTENT:?}" > "/tmp/cli.toml"
+        export PULP_CONFIG_FILE="/tmp/cli.toml"
+
+        # Helpers to read cli.toml values (return empty string when not found)
+        toml_get_optional() {
+          local key="$1"
+          if [[ ! "${key}" =~ ^[A-Za-z0-9_]+$ ]]; then
+            echo "Error: Invalid cli.toml key '${key}'" >&2
+            return 1
+          fi
+          # Prevent leaking secret values from cli.toml in logs when xtrace is enabled.
+          local restore_xtrace=0
+          if [[ $- == *x* ]]; then
+            restore_xtrace=1
+            set +x
+          fi
+
+          local line current_table="" value=""
+          while IFS= read -r line || [[ -n "${line}" ]]; do
+            if [[ "${line}" =~ ^[[:space:]]*\\[([^]]+)\\][[:space:]]*$ ]]; then
+              current_table="${BASH_REMATCH[1]}"
+              continue
+            fi
+            if [[ "${line}" =~ ^[[:space:]]*# ]] || [[ "${line}" =~ ^[[:space:]]*$ ]]; then
+              continue
+            fi
+            if [[ -n "${current_table}" && "${current_table}" != "cli" ]]; then
+              continue
+            fi
+            if [[ "${line}" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
+              if [[ "${line}" =~ \"([^\"]*)\" ]]; then
+                value="${BASH_REMATCH[1]}"
+                break
+              fi
+              if [[ "${line}" =~ \'([^\']*)\' ]]; then
+                value="${BASH_REMATCH[1]}"
+                break
+              fi
+              value=""
+              break
+            fi
+          done < "${PULP_CONFIG_FILE}"
+
+          if (( restore_xtrace )); then
+            set -x
+          fi
+
+          echo "${value}"
+          return 0
+        }
+
+        toml_get_required() {
+          local key="$1"
+          local value
+          value="$(toml_get_optional "${key}")"
+          if [[ -z "${value}" ]]; then
+            echo "Error: Missing required '${key}' in cli.toml" >&2
+            return 1
+          fi
+          echo "${value}"
+        }
+
+        # Extract credentials from cli.toml (support both top-level and [cli] table via toml_get_optional logic)
+        PULP_BASE_URL="$(toml_get_required "base_url" | sed 's:/*$::')" || exit 1
+        CLIENT_ID="$(toml_get_optional "client_id")"
+        CLIENT_SECRET="$(toml_get_optional "client_secret")"
+        PULP_USERNAME="$(toml_get_optional "username")"
+        PULP_PASSWORD="$(toml_get_optional "password")"
+        TOKEN_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
+
+        AUTH_METHOD="unknown"
+        if [[ -n "${PULP_USERNAME}" && -n "${PULP_PASSWORD}" ]]; then
+          AUTH_METHOD="basic"
+        elif [[ -n "${CLIENT_ID}" && -n "${CLIENT_SECRET}" ]]; then
+          AUTH_METHOD="oauth2-bearer"
+        fi
+        echo "Auth method detected for Pulp API calls: ${AUTH_METHOD}"
+
+        # Re-enable xtrace for the non-secret portions of the task.
+        set -x
+
+        get_access_token() {
+          if [[ -z "${CLIENT_ID}" || -z "${CLIENT_SECRET}" ]]; then
+            echo "Error: client_id/client_secret not present in cli.toml; cannot use OAuth2 Bearer token flow" >&2
+            return 1
+          fi
+          local token
+          token=$(
+            set +x
+            curl --retry 3 -s -X POST "$TOKEN_URL" \
+              -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+              -d "grant_type=client_credentials" \
+              -d "scope=api.console" | jq -r '.access_token'
+          )
+          if [[ -z "$token" || "$token" == "null" ]]; then
+            echo "Error: Failed to get OAuth2 access token" >&2
+            return 1
+          fi
+          echo "$token"
+        }
+
+        get_auth_header() {
+          if [[ -n "${PULP_USERNAME}" && -n "${PULP_PASSWORD}" ]]; then
+            local basic
+            basic="$(printf '%s' "${PULP_USERNAME}:${PULP_PASSWORD}" | base64 -w0)"
+            echo "Authorization: Basic ${basic}"
+            return 0
+          fi
+          if [[ -n "${CLIENT_ID}" && -n "${CLIENT_SECRET}" ]]; then
+            local access_token
+            access_token="$(get_access_token)" || return 1
+            echo "Authorization: Bearer ${access_token}"
+            return 0
+          fi
+          echo "Error: No supported credentials found in cli.toml." >&2
+          echo "Provide either username/password or client_id/client_secret." >&2
+          return 1
+        }
+
+        # Parse NEVRA fields from an RPM file (RPM header is authoritative)
+        parse_nevra() {
+          local file_path="$1"
+          local q rc name epoch version release arch
+          set +e
+          q="$(rpm -qp --qf '%{NAME}|%{EPOCH}|%{VERSION}|%{RELEASE}|%{ARCH}\n' "${file_path}" 2>/dev/null)"
+          rc=$?
+          set -e
+          if [[ ${rc} -eq 0 && -n "${q}" ]]; then
+            IFS='|' read -r name epoch version release arch <<< "${q}"
+            if [[ -z "${epoch}" || "${epoch}" == "(none)" ]]; then
+              epoch="0"
+            fi
+            if [[ -n "${name}" && -n "${version}" && -n "${release}" && -n "${arch}" ]]; then
+              echo "${name}|${epoch}|${version}|${release}|${arch}"
+              return 0
+            fi
+          fi
+          echo "Error: Failed to parse NEVRA from RPM header for '${file_path}'" >&2
+          return 1
+        }
+
+        get_repo_latest_version_href() {
+          local repo_name="$1"
+          local auth_header repo_href
+          set +x
+          auth_header="$(get_auth_header)" || return 1
+          set -x
+          repo_href=$(
+            set +x
+            curl --retry 3 -s -H "${auth_header}" \
+              "${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
+              | jq -r '.results[0].pulp_href'
+          )
+          if [[ -z "$repo_href" || "$repo_href" == "null" ]]; then
+            echo "Error: Could not find repository href for ${repo_name}" >&2
+            return 1
+          fi
+          {
+            set +x
+            curl --retry 3 -s -H "${auth_header}" \
+              "${PULP_BASE_URL}${repo_href}" | jq -r '.latest_version_href'
+            set -x
+          }
+        }
+
+        # Returns: 0 exists+matches, 2 not found, 3 digest mismatch
+        check_rpm_exists_with_digest() {
+          local repo_name="$1"
+          local file_path="$2"
+
+          local nevra name epoch version release arch endpoint
+          if ! nevra="$(parse_nevra "${file_path}")"; then
+            echo "Error: Failed to parse NEVRA for '${file_path}'" >&2
+            return 1
+          fi
+          IFS='|' read -r name epoch version release arch <<< "${nevra}"
+
+          # Pulp's RPM content API supports querying SRPMs via the "packages" endpoint with arch=src.
+          # Some deployments do not expose a separate "srpms" endpoint (404).
+          endpoint="packages"
+          if [[ "${file_path}" == *.src.rpm ]]; then
+            # Some SRPMs report a non-src arch in the header; the Pulp API uses arch=src for SRPM queries.
+            arch="src"
+          fi
+
+          local local_sha
+          local_sha="$(sha256sum "${file_path}" | awk '{print $1}')"
+
+          local repo_version_href
+          repo_version_href="$(get_repo_latest_version_href "${repo_name}")" || return 1
+
+          local enc_repo_version enc_name enc_epoch enc_version enc_release enc_arch query_url
+          enc_repo_version="$(jq -rn --arg x "${repo_version_href}" '$x|@uri')"
+          enc_name="$(jq -rn --arg x "${name}" '$x|@uri')"
+          enc_epoch="$(jq -rn --arg x "${epoch}" '$x|@uri')"
+          enc_version="$(jq -rn --arg x "${version}" '$x|@uri')"
+          enc_release="$(jq -rn --arg x "${release}" '$x|@uri')"
+          if [[ "${endpoint}" == "packages" ]]; then
+            enc_arch="$(jq -rn --arg x "${arch}" '$x|@uri')"
+          else
+            enc_arch=""
+          fi
+          query_url="${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/content/rpm/${endpoint}/"
+          query_url+="?repository_version=${enc_repo_version}"
+          query_url+="&name=${enc_name}&epoch=${enc_epoch}"
+          query_url+="&version=${enc_version}&release=${enc_release}"
+          if [[ -n "${enc_arch}" ]]; then
+            query_url+="&arch=${enc_arch}"
+          fi
+
+          local auth_header response count
+          {
+            set +x
+            auth_header="$(get_auth_header)" || return 1
+            response="$(curl --retry 3 -sS --fail -H "${auth_header}" "${query_url}")" || {
+              local rc=$?
+              echo "Error: Pulp content query failed (curl rc=${rc})" >&2
+              echo "Query URL: ${query_url}" >&2
+              return 1
+            }
+            set -x
+          }
+          if ! count="$(jq -er '.count // 0' <<< "${response}" 2>/dev/null)"; then
+            echo "Error: Pulp content query returned non-JSON response" >&2
+            echo "Query URL: ${query_url}" >&2
+            echo "Response (first 200 bytes): $(printf '%s' "${response}" | head -c 200)" >&2
+            return 1
+          fi
+          if [[ "${count}" -eq 0 ]]; then
+            return 2
+          fi
+
+          local content_hrefs server_sha artifact_href content_json artifact_json
+          mapfile -t content_hrefs < <(jq -r '.results[].pulp_href' <<< "${response}" | sed '/^null$/d')
+          for chref in "${content_hrefs[@]}"; do
+            content_json="$(
+              set +x
+              curl --retry 3 -s -H "${auth_header}" "${PULP_BASE_URL}${chref}"
+            )"
+            artifact_href="$(jq -r '.artifact // empty' <<< "${content_json}")"
+            if [[ -z "${artifact_href}" || "${artifact_href}" == "null" ]]; then
+              artifact_href="$(jq -r '.artifacts[0] // empty' <<< "${content_json}")"
+            fi
+            if [[ -z "${artifact_href}" || "${artifact_href}" == "null" ]]; then
+              continue
+            fi
+            artifact_json="$(
+              set +x
+              curl --retry 3 -s -H "${auth_header}" "${PULP_BASE_URL}${artifact_href}"
+            )"
+            server_sha="$(jq -r '.sha256 // empty' <<< "${artifact_json}")"
+            if [[ -n "${server_sha}" && "${server_sha}" == "${local_sha}" ]]; then
+              return 0
+            fi
+          done
+          return 3
+        }
+
+        should_exclude_file() {
+          local filename="$1"
+          local patterns_csv="$2"
+          local should_exclude=false
+          local pattern
+          IFS=',' read -ra EXCLUDE_PATTERNS <<< "${patterns_csv}"
+          for pattern in "${EXCLUDE_PATTERNS[@]}"; do
+            pattern="$(echo "${pattern}" | xargs)"
+            [[ -z "${pattern}" ]] && continue
+            if [[ "${filename}" == *"${pattern}"* ]]; then
+              should_exclude=true
+              break
+            fi
+          done
+          [[ "${should_exclude}" == "true" ]]
+        }
+
+        extract_arches_from_files() {
+          local -n files_ref=$1
+          local arches=()
+          local file arch
+          for file in "${files_ref[@]}"; do
+            if [[ "${file}" == *.src.rpm ]] || [[ "${file}" == *.noarch.rpm ]]; then
+              continue
+            fi
+            if [[ "${file}" =~ \\.([^.]+)\\.rpm$ ]]; then
+              arch="${BASH_REMATCH[1]}"
+              if [[ " ${arches[*]} " != *" ${arch} "* ]]; then
+                arches+=("${arch}")
+              fi
+            fi
+          done
+          printf '%s\n' "${arches[@]}"
+        }
+
+        echo "Filtering snapshot RPMs against Pulp..." >&2
+        tmp_out="$(mktemp)"
+        snapshot_json="$(jq '.' "${SNAPSHOT_FILE}")"
+
+        # Build new components array (avoid pipe-to-while subshell so failures abort the task).
+        while IFS= read -r component; do
+          image="$(jq -r '.containerImage' <<< "${component}")"
+          name="$(jq -r '.name' <<< "${component}")"
+          echo "Processing component '${name}' (${image})" >&2
+
+          workdir="$(mktemp -d)"
+          mkdir -p "${workdir}/files"
+          AUTHFILE="${workdir}/auth.json"
+
+          export AUTHFILE
+          # Keep stdout clean (it is consumed as JSON later). Auth/config output isn't needed on stdout here.
+          select-oci-auth "${image}" > "${AUTHFILE}"
+          # Ensure any oras output does not contaminate the JSON stream.
+          oras pull --registry-config "${AUTHFILE}" "${image}" -o "${workdir}/files" 1>&2
+
+          mapfile -t files < <(
+            set -euo pipefail
+            shopt -s nullglob
+            cd "${workdir}/files"
+            for f in *; do
+              [[ -f "${f}" ]] || continue
+              [[ "${f}" == *.rpm ]] || continue
+              if should_exclude_file "${f}" "$(params.DEFAULT_EXCLUDES)"; then
+                continue
+              fi
+              printf '%s\n' "${f}"
+            done
+          )
+
+          # Determine arches used for noarch targeting
+          mapfile -t ARCHES < <(extract_arches_from_files files)
+          if [[ ${#ARCHES[@]} -eq 0 ]]; then
+            IFS=',' read -ra ARCHES <<< "$(params.DEFAULT_ARCHITECTURES)"
+            for i in "${!ARCHES[@]}"; do
+              ARCHES[i]=$(echo "${ARCHES[i]}" | xargs)
+            done
+          fi
+
+          rpms_to_publish="[]"
+          for f in "${files[@]}"; do
+            file_abs="${workdir}/files/${f}"
+            local_sha="$(sha256sum "${file_abs}" | awk '{print $1}')"
+            nevra="$(parse_nevra "${file_abs}")"
+            IFS='|' read -r rpmname epoch version release arch <<< "${nevra}"
+
+            # Determine target repos
+            target_repos=()
+            if [[ "${f}" == *.src.rpm ]]; then
+              target_repos=("source")
+            elif [[ "${f}" == *.noarch.rpm ]]; then
+              target_repos=("${ARCHES[@]}")
+            else
+              target_repos=("${arch}")
+            fi
+
+            missing_repos=()
+            for repo in "${target_repos[@]}"; do
+              set +e
+              check_rpm_exists_with_digest "${repo}" "${file_abs}"
+              status=$?
+              set -e
+              if [[ ${status} -eq 0 ]]; then
+                continue
+              elif [[ ${status} -eq 2 ]]; then
+                missing_repos+=("${repo}")
+              elif [[ ${status} -eq 3 ]]; then
+                echo "Error: RPM exists with different digest in repo '${repo}': ${f}" >&2
+                exit 1
+              else
+                echo "Error: Failed to check existence/digest for ${f} in repo '${repo}' (rc=${status})" >&2
+                exit 1
+              fi
+            done
+
+            if [[ ${#missing_repos[@]} -eq 0 ]]; then
+              continue
+            fi
+
+            missing_repos_json="$(printf '%s\n' "${missing_repos[@]}" | jq -R . | jq -s .)"
+            rpms_to_publish="$(jq \
+              --arg rpm "${f}" \
+              --arg rpmname "${rpmname}" \
+              --arg arch "${arch}" \
+              --arg epoch "${epoch}" \
+              --arg version "${version}" \
+              --arg release "${release}" \
+              --arg sha256 "${local_sha}" \
+              --argjson targetRepos "${missing_repos_json}" \
+              '. + [{
+                rpm: $rpm,
+                rpmname: $rpmname,
+                arch: $arch,
+                epoch: $epoch,
+                version: $version,
+                release: $release,
+                sha256: $sha256,
+                targetRepos: $targetRepos
+              }]' <<< "${rpms_to_publish}")"
+          done
+
+          # Emit component only if there is something to publish
+          if [[ "$(jq 'length' <<< "${rpms_to_publish}")" -gt 0 ]]; then
+            jq --argjson rpmsToPublish "${rpms_to_publish}" '. + {rpmsToPublish: $rpmsToPublish}' <<< "${component}"
+          fi
+
+          rm -rf "${workdir}"
+        done < <(jq -c '.components[]' <<< "${snapshot_json}") | jq -s '{components: .}' > "${tmp_out}"
+
+        # Merge back into snapshot (preserve top-level fields, replace components)
+        jq --slurpfile new "${tmp_out}" '.components = $new[0].components' "${SNAPSHOT_FILE}" > "${SNAPSHOT_FILE}.tmp"
+        mv "${SNAPSHOT_FILE}.tmp" "${SNAPSHOT_FILE}"
+
+        if [[ "$(jq '.components | length' "${SNAPSHOT_FILE}")" -eq 0 ]]; then
+          echo -n "true" > "$(results.skip_release.path)"
+        else
+          echo -n "false" > "$(results.skip_release.path)"
+        fi
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
