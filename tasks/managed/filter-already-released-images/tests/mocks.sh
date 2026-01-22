@@ -9,6 +9,71 @@ function select-oci-auth() {
   return 0
 }
 
+function curl() {
+  local output_file=""
+  local write_out=""
+  local url=""
+  local http_code="200"
+  local body=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o)
+        output_file="$2"
+        shift 2
+        ;;
+      -w)
+        write_out="$2"
+        shift 2
+        ;;
+      -X|--cert|--key|--max-time|--connect-timeout|--header|-H)
+        shift 2
+        ;;
+      -s)
+        shift
+        ;;
+      *)
+        if [[ "$1" == http* ]]; then
+          url="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$url" == *"/v1/images"* ]]; then
+    if [[ "$url" == *"repositories.repository==pyxis-pass"* ]] || \
+       [[ "$url" == *"repositories.repository%3D%3Dpyxis-pass"* ]]; then
+      body='{"data":[{"repositories":[{"repository":"pyxis-pass","tags":["v1"]}],"content_sets":["cs1"]}]}'
+    elif [[ "$url" == *"repositories.repository==pyxis-no-rpm"* ]] || \
+         [[ "$url" == *"repositories.repository%3D%3Dpyxis-no-rpm"* ]]; then
+      body='{"data":[{"repositories":[{"repository":"pyxis-no-rpm","tags":["v1"]}],"content_sets":[]}]}'
+    else
+      body='{"data":[]}'
+    fi
+  elif [[ "$url" == *"gitlab.com/api/v4/projects"*"/merge_requests"* ]]; then
+    if [[ "$url" == *"updates-pass"* ]]; then
+      body='[{"title":"myapp update","web_url":"https://gitlab.com/group/updates-pass/-/merge_requests/1","state":"opened"}]'
+    elif [[ "$url" == *"updates-closed"* ]]; then
+      body='[{"title":"myapp update","web_url":"https://gitlab.com/group/updates-closed/-/merge_requests/2","state":"closed"}]'
+    else
+      body='[]'
+    fi
+  fi
+
+  if [[ -n "$output_file" ]]; then
+    printf "%s" "$body" > "$output_file"
+  else
+    printf "%s" "$body"
+  fi
+
+  if [[ -n "$write_out" ]]; then
+    printf "%s" "$http_code"
+  fi
+
+  return 0
+}
+
 function oras() {
   if [[ "$1" != "resolve" ]]; then
     echo "Error: only 'oras resolve' is mocked" >&2
@@ -76,6 +141,42 @@ function oras() {
       ;;
     *"all-tags-complete:"*)
       echo "sha256:alltags1"
+      return 0
+      ;;
+    
+    # Pyxis tests
+    *"@sha256:pyxispass1")
+      echo "sha256:pyxispass1"
+      return 0
+      ;;
+    *"@sha256:pyxisfail1")
+      echo "sha256:pyxisfail1"
+      return 0
+      ;;
+    *"pyxis-pass:v1")
+      echo "sha256:pyxispass1"
+      return 0
+      ;;
+    *"pyxis-no-rpm:v1")
+      echo "sha256:pyxisfail1"
+      return 0
+      ;;
+    
+    # File updates tests
+    *"@sha256:gitlabpass1")
+      echo "sha256:gitlabpass1"
+      return 0
+      ;;
+    *"@sha256:gitlabclosed1")
+      echo "sha256:gitlabclosed1"
+      return 0
+      ;;
+    *"gitlab-pass:v1")
+      echo "sha256:gitlabpass1"
+      return 0
+      ;;
+    *"gitlab-closed:v1")
+      echo "sha256:gitlabclosed1"
       return 0
       ;;
     

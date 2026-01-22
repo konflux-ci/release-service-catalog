@@ -9,17 +9,20 @@ metadata:
 spec:
   description: |-
     Tekton task to filter out images from a snapshot that have already been released.
-    This task checks target registries to determine if push-snapshot has completed successfully
-    for each component by validating that ALL required tags exist with the correct digest.
-    Components that are fully released (all tags present) are filtered out before conforma validation.
-
-    Tag-level validation ensures complete releases and prevents filtering components with
-    partial tag pushes. A component is only filtered if ALL repositories have ALL
-    required tags pointing to the correct digest.
-
-    The task overwrites the original snapshot file in place with a filtered version
-    containing only unpublished or partially published images.
-
+    
+    This task can check one or more release activities before filtering:
+    1. Registry State (always): Validates ALL required tags exist with correct digest in target registries
+    2. Pyxis Metadata (optional): Validates ContainerImage entries exist with all tags and RPM Manifest data
+    3. File Updates (optional): Validates GitLab MRs exist (if spec.data.fileUpdates specified)
+    
+    Components are only filtered if ALL enabled checks pass. This ensures:
+    - Mixed snapshots (old + new components) work correctly
+    - Partial failures can recover on retry
+    - Complete metadata is verified before filtering
+    
+    The task overwrites the original snapshot file with a filtered version containing only
+    components that need to be released.
+    
     This task must run AFTER apply-mapping since it needs the mapped target repositories
     and their required tags from the enriched snapshot stored in trusted artifacts
   params:
@@ -59,6 +62,50 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: dataPath
+      type: string
+      description: |-
+        Path to the JSON string of the merged data in the data workspace
+        Required if checkPyxis=true or checkFileUpdates=true
+      default: ""
+    - name: checkPyxis
+      type: string
+      description: |-
+        Whether to check Pyxis metadata completion. Set to 'true' to verify ContainerImage
+        entries exist with all tags and RPM Manifest data. Requires pyxisSecret parameter
+      default: "false"
+    - name: pyxisSecret
+      type: string
+      description: |-
+        The kubernetes secret for Pyxis authentication (needs keys: cert, key)
+        Required if checkPyxis=true
+      default: "pyxis-secret"
+    - name: pyxisServer
+      type: string
+      description: |-
+        The Pyxis server: production, production-internal, stage-internal, or stage
+        Only used if checkPyxis=true
+      default: "production"
+    - name: checkFileUpdates
+      type: string
+      description: |-
+        Whether to check file updates completion. Set to 'true' to verify GitLab MRs exist
+        Only applies if spec.data.fileUpdates is specified. Requires gitlabSecret parameter
+      default: "false"
+    - name: gitlabSecret
+      type: string
+      description: |-
+        The kubernetes secret for GitLab API access (needs key: token)
+        Required if checkFileUpdates=true
+      default: "gitlab-secret"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
   results:
     - name: skip_release
       description: Whether to skip release tasks (true if all components are already released)
@@ -67,10 +114,30 @@ spec:
   volumes:
     - name: workdir
       emptyDir: {}
+    - name: pyxis-secret-vol
+      secret:
+        secretName: $(params.pyxisSecret)
+        defaultMode: 0444
+        optional: true
+    - name: gitlab-secret-vol
+      secret:
+        secretName: $(params.gitlabSecret)
+        defaultMode: 0444
+        optional: true
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
   stepTemplate:
     volumeMounts:
       - mountPath: /var/workdir
         name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
     env:
       - name: IMAGE_EXPIRES_AFTER
         value: $(params.ociArtifactExpiresAfter)
@@ -102,14 +169,65 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: setup-credentials
+      image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      volumeMounts:
+        - name: pyxis-secret-vol
+          mountPath: /etc/pyxis-secrets
+        - name: gitlab-secret-vol
+          mountPath: /etc/gitlab-secrets
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+        
+        echo "Setting up optional credentials for comprehensive checking"
+        
+        # Setup Pyxis credentials if checkPyxis is enabled
+        if [ "$(params.checkPyxis)" = "true" ]; then
+          if [ -f /etc/pyxis-secrets/cert ] && [ -f /etc/pyxis-secrets/key ]; then
+            echo "Setting up Pyxis credentials"
+            cat /etc/pyxis-secrets/cert > /var/workdir/pyxis.crt
+            cat /etc/pyxis-secrets/key > /var/workdir/pyxis.key
+            echo "Pyxis credentials configured"
+          else
+            echo "ERROR: checkPyxis=true but Pyxis secret not found"
+            exit 1
+          fi
+        else
+          echo "Pyxis checking disabled (checkPyxis=false)"
+          touch /var/workdir/pyxis.crt
+          touch /var/workdir/pyxis.key
+        fi
+        
+        # Setup GitLab credentials if checkFileUpdates is enabled
+        if [ "$(params.checkFileUpdates)" = "true" ]; then
+          if [ -f /etc/gitlab-secrets/token ]; then
+            echo "Setting up GitLab credentials"
+            cat /etc/gitlab-secrets/token > /var/workdir/gitlab.token
+            echo "GitLab credentials configured"
+          else
+            echo "WARNING: checkFileUpdates=true but GitLab secret not found"
+            echo "File updates checking will be skipped"
+            touch /var/workdir/gitlab.token
+          fi
+        else
+          echo "File updates checking disabled (checkFileUpdates=false)"
+          touch /var/workdir/gitlab.token
+        fi
     - name: filter-already-released-images
       image: quay.io/konflux-ci/release-service-utils@sha256:653b4782f0693c031a5d1327c026e6895d90b8126d51d8a3d07ffe940f6721fd
       computeResources:
         limits:
-          memory: 1Gi
+          memory: 2Gi
         requests:
-          memory: 1Gi
-          cpu: 250m
+          memory: 2Gi
+          cpu: 500m
       script: |
         #!/usr/bin/env bash
         set -eux
@@ -121,11 +239,61 @@ spec:
             exit 1
         fi
 
+        # Setup Pyxis URL if Pyxis checking is enabled
+        CHECK_PYXIS="$(params.checkPyxis)"
+        PYXIS_URL=""
+        if [ "$CHECK_PYXIS" = "true" ]; then
+          if [[ "$(params.pyxisServer)" == "production" ]]; then
+            PYXIS_URL="https://pyxis.api.redhat.com/"
+          elif [[ "$(params.pyxisServer)" == "stage" ]]; then
+            PYXIS_URL="https://pyxis.preprod.api.redhat.com/"
+          elif [[ "$(params.pyxisServer)" == "production-internal" ]]; then
+            PYXIS_URL="https://pyxis.engineering.redhat.com/"
+          elif [[ "$(params.pyxisServer)" == "stage-internal" ]]; then
+            PYXIS_URL="https://pyxis.stage.engineering.redhat.com/"
+          else
+            echo "ERROR: Invalid pyxisServer parameter"
+            exit 1
+          fi
+          echo "Pyxis checking ENABLED (server: $(params.pyxisServer))"
+        else
+          echo "Pyxis checking DISABLED"
+        fi
+
+        # Check if file updates are specified
+        CHECK_FILE_UPDATES="$(params.checkFileUpdates)"
+        FILE_UPDATES_SPECIFIED="false"
+        if [ "$CHECK_FILE_UPDATES" = "true" ]; then
+          DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+          if [ -f "${DATA_FILE}" ]; then
+            FILE_UPDATES_DATA=$(jq -r '.fileUpdates // null' "${DATA_FILE}")
+            if [ "$FILE_UPDATES_DATA" != "null" ] && [ -n "$FILE_UPDATES_DATA" ]; then
+              FILE_UPDATES_SPECIFIED="true"
+              echo "File updates checking ENABLED"
+            else
+              echo "File updates checking SKIPPED (no fileUpdates in data)"
+            fi
+          else
+            echo "File updates checking SKIPPED (no data file)"
+          fi
+        else
+          echo "File updates checking DISABLED"
+        fi
+
         SNAPSHOT_JSON=$(cat "${SNAPSHOT_FILE}")
         COMPONENT_COUNT=$(jq '.components | length' <<< "${SNAPSHOT_JSON}")
 
         FILTERED_COMPONENTS='[]'
         FILTERED_COUNT=0
+
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Release Activity Filtering"
+        echo "Total components: ${COMPONENT_COUNT}"
+        echo "Registry check: ALWAYS ENABLED"
+        echo "Pyxis check: ${CHECK_PYXIS}"
+        echo "File updates check: ${CHECK_FILE_UPDATES}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
 
         for ((i=0; i<COMPONENT_COUNT; i++)); do
             COMPONENT=$(jq -c ".components[$i]" <<< "${SNAPSHOT_JSON}")
@@ -248,13 +416,287 @@ spec:
                 fi
             done
 
-            if [ "${ALL_TAGS_COMPLETE}" == "true" ]; then
-                echo "✅ Component ${COMPONENT_NAME}: FILTERED (already released)"
-                FILTERED_COUNT=$((FILTERED_COUNT + 1))
-            else
-                echo "⏭️  Component ${COMPONENT_NAME}: KEPT (needs to be released)"
+            # === COMPREHENSIVE FILTERING DECISION ===
+            # Component is filtered ONLY if ALL enabled checks pass
+
+            echo ""
+            echo "  [1/3] Registry check: ${ALL_TAGS_COMPLETE}"
+
+            # If registry check failed, keep component (skip other checks)
+            if [ "${ALL_TAGS_COMPLETE}" != "true" ]; then
+                echo "Registry check FAILED - keeping component"
                 FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                echo ""
+                continue
             fi
+
+            # Check Pyxis if enabled
+            PYXIS_COMPLETE="true"  # Default (not applicable)
+            if [ "$CHECK_PYXIS" = "true" ]; then
+                echo "  [2/3] Checking Pyxis metadata..."
+                PYXIS_COMPLETE="false"
+
+                for ((j=0; j<NUM_REPOS; j++)); do
+                    REPO_OBJ=$(jq -c ".[$j]" <<< "${REPOSITORIES}")
+                    REPO_URL=$(jq -r '.url // ""' <<< "${REPO_OBJ}")
+                    REPO_TAGS=$(jq -r '.tags // [] | join(" ")' <<< "${REPO_OBJ}")
+
+                    if [ -z "${REPO_URL}" ]; then
+                        continue
+                    fi
+
+                    # Extract Pyxis repository path
+                    PYXIS_REPOSITORY="${REPO_URL##*/}"
+                    PYXIS_REPOSITORY="${PYXIS_REPOSITORY//----//}"
+
+                    echo "    Querying Pyxis for ${PYXIS_REPOSITORY}..."
+
+                    # Query Pyxis
+                    FILTER_VALUE="docker_image_digest==${DIGEST};repositories.repository==${PYXIS_REPOSITORY}"
+                    ENCODED_FILTER=$(printf '%s' "${FILTER_VALUE}" | jq -sRr @uri)
+                    PYXIS_QUERY_URL="${PYXIS_URL}v1/images?filter=${ENCODED_FILTER}&page_size=100"
+
+                    MAX_RETRIES=3
+                    RETRY_COUNT=0
+                    PYXIS_RESPONSE=""
+                    HTTP_CODE=""
+
+                    while [ $RETRY_COUNT -le $MAX_RETRIES ]; do
+                        if [ $RETRY_COUNT -gt 0 ]; then
+                            sleep $((RETRY_COUNT * 2))
+                        fi
+
+                        RESPONSE_FILE=$(mktemp)
+                        HTTP_CODE_FILE=$(mktemp)
+
+                        set +e
+                        curl -s \
+                          --cert /var/workdir/pyxis.crt \
+                          --key /var/workdir/pyxis.key \
+                          --max-time 60 \
+                          --connect-timeout 10 \
+                          -X GET \
+                          "$PYXIS_QUERY_URL" \
+                          -H "Content-Type: application/json" \
+                          -w "%{http_code}" \
+                          -o "$RESPONSE_FILE" \
+                          > "$HTTP_CODE_FILE"
+                        CURL_EXIT=$?
+                        set -e
+
+                        HTTP_CODE=$(cat "$HTTP_CODE_FILE")
+                        PYXIS_RESPONSE=$(cat "$RESPONSE_FILE")
+                        rm -f "$RESPONSE_FILE" "$HTTP_CODE_FILE"
+
+                        if [ $CURL_EXIT -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+                            break
+                        fi
+
+                        RETRY_COUNT=$((RETRY_COUNT + 1))
+                    done
+
+                    if [ "$HTTP_CODE" != "200" ]; then
+                        echo "Pyxis query failed"
+                        break
+                    fi
+
+                    IMAGE_COUNT=$(jq '.data | length' <<< "${PYXIS_RESPONSE}")
+                    if [ "$IMAGE_COUNT" -eq 0 ]; then
+                        echo "No ContainerImage found"
+                        break
+                    fi
+
+                    # Check if any image has all required tags AND RPM data
+                    REPO_PYXIS_COMPLETE="false"
+                    for ((k=0; k<IMAGE_COUNT; k++)); do
+                        IMAGE_ENTRY=$(jq -c ".data[$k]" <<< "${PYXIS_RESPONSE}")
+                        
+                        # Check repository
+                        HAS_REPO=$(jq --arg repo "$PYXIS_REPOSITORY" \
+                          '[.repositories[]? | select(.repository == $repo)] | length > 0' <<< "${IMAGE_ENTRY}")
+                        
+                        if [ "$HAS_REPO" != "true" ]; then
+                            continue
+                        fi
+
+                        # Check tags
+                        IMAGE_TAGS=$(jq -r \
+                          '[.repositories[]?.tags[]? | select(. != null)] | unique | join(" ")' \
+                          <<< "${IMAGE_ENTRY}")
+                        
+                        ALL_TAGS_PRESENT="true"
+                        for TAG in ${REPO_TAGS}; do
+                            if ! echo "${IMAGE_TAGS}" | grep -qw "${TAG}"; then
+                                ALL_TAGS_PRESENT="false"
+                                break
+                            fi
+                        done
+
+                        if [ "$ALL_TAGS_PRESENT" != "true" ]; then
+                            continue
+                        fi
+
+                        # Check RPM Manifest data
+                        HAS_RPM_DATA=$(jq -r '.content_sets // [] | length > 0' <<< "${IMAGE_ENTRY}")
+                        if [ "$HAS_RPM_DATA" != "true" ]; then
+                            continue
+                        fi
+
+                        echo "    ✅ Pyxis complete (all tags + RPM data)"
+                        REPO_PYXIS_COMPLETE="true"
+                        break
+                    done
+
+                    if [ "$REPO_PYXIS_COMPLETE" = "true" ]; then
+                        PYXIS_COMPLETE="true"
+                        break
+                    fi
+                done
+
+                echo "  [2/3] Pyxis check: ${PYXIS_COMPLETE}"
+
+                if [ "${PYXIS_COMPLETE}" != "true" ]; then
+                    echo "  ❌ Pyxis check FAILED - keeping component"
+                    FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                    echo ""
+                    continue
+                fi
+            else
+                echo "  [2/3] Pyxis check: SKIPPED (disabled)"
+            fi
+
+            # Check File Updates if enabled
+            FILE_UPDATES_COMPLETE="true"  # Default (not applicable)
+            if [ "$CHECK_FILE_UPDATES" = "true" ] && [ "$FILE_UPDATES_SPECIFIED" = "true" ]; then
+                echo "  [3/3] Checking file updates..."
+                
+                # Check if GitLab token is available
+                if [ ! -s /var/workdir/gitlab.token ]; then
+                    echo "No GitLab token available - skipping file updates check"
+                    echo "    → Assuming complete (cannot verify)"
+                    FILE_UPDATES_COMPLETE="true"
+                else
+                    GITLAB_TOKEN=$(cat /var/workdir/gitlab.token)
+                    
+                    # Extract fileUpdates from data
+                    FILE_UPDATES_CONFIG=$(jq -c '.fileUpdates // []' "${DATA_FILE}")
+                    FILE_UPDATES_COUNT=$(jq 'length' <<< "${FILE_UPDATES_CONFIG}")
+                    
+                    if [ "${FILE_UPDATES_COUNT}" -eq 0 ]; then
+                        echo "No file updates configured"
+                        FILE_UPDATES_COMPLETE="true"
+                    else
+                        echo "    Checking ${FILE_UPDATES_COUNT} file update target(s)..."
+                        ALL_MRS_COMPLETE="true"
+                        
+                        for ((fu=0; fu<FILE_UPDATES_COUNT; fu++)); do
+                            FILE_UPDATE=$(jq -c ".[$fu]" <<< "${FILE_UPDATES_CONFIG}")
+                            TARGET_REPO=$(jq -r '.repo' <<< "${FILE_UPDATE}")
+                            
+                            echo "      Checking repo: ${TARGET_REPO}"
+                            
+                            # Extract GitLab project info from repo URL
+                            # Format: https://gitlab.com/group/project.git or git@gitlab.com:group/project.git
+                            if [[ "${TARGET_REPO}" =~ gitlab\.com[:/]([^/]+)/([^/.]+) ]]; then
+                                GITLAB_GROUP="${BASH_REMATCH[1]}"
+                                GITLAB_PROJECT="${BASH_REMATCH[2]}"
+                                GITLAB_API_URL="https://gitlab.com/api/v4"
+                                PROJECT_PATH="${GITLAB_GROUP}/${GITLAB_PROJECT}"
+                                PROJECT_PATH_ENCODED=$(printf '%s' "${PROJECT_PATH}" | jq -sRr @uri)
+                            else
+                                echo "Cannot parse GitLab URL from: ${TARGET_REPO}"
+                                echo " Assuming complete (unknown repo format)"
+                                continue
+                            fi
+                            
+                            # Search for MRs related to this release/snapshot
+                            # run-file-updates creates MRs with application name in title
+                            SNAPSHOT_JSON_DATA=$(cat "${SNAPSHOT_FILE}")
+                            APPLICATION=$(jq -r '.application' <<< "${SNAPSHOT_JSON_DATA}")
+                            
+                            # Query GitLab API for MRs
+                            MR_SEARCH_URL="${GITLAB_API_URL}/projects/${PROJECT_PATH_ENCODED}/merge_requests?state=all&search=${APPLICATION}&per_page=100"
+                            
+                            MR_RESPONSE_FILE=$(mktemp)
+                            MR_HTTP_CODE_FILE=$(mktemp)
+                            
+                            set +e
+                            curl -s \
+                              --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+                              --max-time 30 \
+                              --connect-timeout 10 \
+                              -X GET \
+                              "$MR_SEARCH_URL" \
+                              -w "%{http_code}" \
+                              -o "$MR_RESPONSE_FILE" \
+                              > "$MR_HTTP_CODE_FILE"
+                            MR_CURL_EXIT=$?
+                            set -e
+                            
+                            MR_HTTP_CODE=$(cat "$MR_HTTP_CODE_FILE")
+                            MR_RESPONSE=$(cat "$MR_RESPONSE_FILE")
+                            rm -f "$MR_RESPONSE_FILE" "$MR_HTTP_CODE_FILE"
+                            
+                            if [ $MR_CURL_EXIT -ne 0 ] || [ "$MR_HTTP_CODE" != "200" ]; then
+                                echo "GitLab API query failed (HTTP $MR_HTTP_CODE)"
+                                echo "Keeping component (cannot verify MR state)"
+                                ALL_MRS_COMPLETE="false"
+                                break
+                            fi
+                            
+                            # Check if any MRs exist
+                            MR_COUNT=$(jq '. | length' <<< "${MR_RESPONSE}")
+                            
+                            if [ "$MR_COUNT" -eq 0 ]; then
+                                echo "No MRs found for application: ${APPLICATION}"
+                                ALL_MRS_COMPLETE="false"
+                                break
+                            fi
+                            
+                            # Check the state of the most recent MR
+                            LATEST_MR=$(jq '.[0]' <<< "${MR_RESPONSE}")
+                            MR_STATE=$(jq -r '.state' <<< "${LATEST_MR}")
+                            MR_URL=$(jq -r '.web_url' <<< "${LATEST_MR}")
+                            MR_TITLE=$(jq -r '.title' <<< "${LATEST_MR}")
+                            
+                            echo "      Found MR: ${MR_TITLE}"
+                            echo "      URL: ${MR_URL}"
+                            echo "      State: ${MR_STATE}"
+                            
+                            # Consider MR complete if:
+                            # - merged (definitely complete)
+                            # - opened (file update created, waiting for review/merge - this is OK for idempotency)
+                            if [ "$MR_STATE" = "merged" ]; then
+                                echo "MR is merged"
+                            elif [ "$MR_STATE" = "opened" ]; then
+                                echo "MR is open (file update exists)"
+                            else
+                                echo "MR state is ${MR_STATE} (not merged or open)"
+                                ALL_MRS_COMPLETE="false"
+                                break
+                            fi
+                        done
+                        
+                        FILE_UPDATES_COMPLETE="$ALL_MRS_COMPLETE"
+                    fi
+                fi
+                
+                echo "  [3/3] File updates check: ${FILE_UPDATES_COMPLETE}"
+            else
+                echo "  [3/3] File updates check: SKIPPED (disabled or not specified)"
+            fi
+
+            if [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
+                echo "  ❌ File updates check FAILED - keeping component"
+                FILTERED_COMPONENTS=$(jq --argjson comp "${COMPONENT}" '. += [$comp]' <<< "${FILTERED_COMPONENTS}")
+                echo ""
+                continue
+            fi
+
+            # All enabled checks passed - filter this component
+            echo "All checks PASSED - filtering component"
+            echo "Component ${COMPONENT_NAME}: FILTERED (all activities complete)"
+            FILTERED_COUNT=$((FILTERED_COUNT + 1))
             echo ""
         done
 
