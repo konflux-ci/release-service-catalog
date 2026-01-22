@@ -1,0 +1,261 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: publish-to-nrrc
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task that publishes the npm archives to NRRC(npm.registry.redhat.com)
+    service. NRRC is used to host npm artifacts of Red Hat products.
+    This task will work with [collect-charon-task](../collect-charon-params/README.md)
+    together to do the NRRC publishment work.
+    It accepts the `charon.env` file from the
+    [collect-charon-task](../collect-charon-params/README.md)
+    and use the variables in it as parameters for the NRRC publishing task.
+  params:
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+    - name: charonParamFilePath
+      description: path of the env file for nrrc parameters to use
+      type: string
+    - name: charonConfigFilePath
+      description: path of the charon config file for charon to consume
+      type: string
+    - name: charonAWSSecret
+      description: the secret name for charon aws credential file
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: "charon-aws-vol"
+      secret:
+        secretName: "$(params.charonAWSSecret)"
+    - name: nrrc-workdir
+      emptyDir: {}
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    # This is a workaround for a problem observed on Konflux clusters where the
+    # a step runs with root user causing a file or folder to not be readable
+    # in later steps. There might be solution coming related to the
+    # security context constraints on the cluster, but setting this explicitly here
+    # should probably be harmless either way.
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: prepare-repo
+      image: quay.io/konflux-ci/release-service-utils@sha256:454e457cdadd5892b31fe2b7d4911b3d3a761f5705bb0cd30f864be0a597594b
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 150m
+        requests:
+          memory: 256Mi
+          cpu: 150m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        CHARON_FILE="$(params.dataDir)/$(params.charonParamFilePath)"
+        # shellcheck source=/dev/null
+        . "$CHARON_FILE"
+        repodir="/workdir/nrrc"
+        mkdir -p "$repodir"
+        shared_repo="$repodir"/shared
+        mkdir -p "$shared_repo"
+
+        IFS='%' read -ra ADDR <<< "$CHARON_OCI_REGISTRY"
+        for registry in "${ADDR[@]}"
+        do
+          echo "Downloading the npm archive from $registry"
+
+          # Extract the sha256 hash and get first 6 characters
+          hash_part="${registry#*@sha256:}"
+          short_hash="${hash_part:0:6}"
+
+          # Create subdirectory with short hash
+          subdir="$repodir/$short_hash"
+          mkdir -p "$subdir"
+
+          SOURCE_REPO=${registry%%@sha256:*}
+          AUTH_FILE=$(mktemp)
+          select-oci-auth "${SOURCE_REPO}" > "$AUTH_FILE"
+          oras pull --registry-config "$AUTH_FILE" "$registry" -o "$subdir"
+
+          while IFS= read -r -d '' "fi"
+          do
+            file_type=$(file -b "$fi")
+            if [[ "$file_type" =~ (gzip compressed data|POSIX tar archive) ]]
+            then
+              file_name=$(basename "$fi")
+              move_to="$shared_repo"/"$short_hash"_"$file_name"
+              if [[ -f "$move_to" ]]
+              then
+                echo "Warning: $move_to already exists, skipped"
+              else
+                mv "$fi" "$move_to"
+              fi
+            fi
+          done <   <(find "$subdir" -type f -print0)
+        done
+      volumeMounts:
+        - name: nrrc-workdir
+          mountPath: "/workdir"
+    - name: upload-npm-archive
+      image: quay.io/konflux-ci/charon@sha256:5b19341da3b441172a290831908c8783ea82225771030a6fdca16697f83f3143
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 250m
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        CHARON_CFG_FILE="$(params.dataDir)/$(params.charonConfigFilePath)"
+        mkdir -p "/home/charon/.charon"
+        cp "$CHARON_CFG_FILE" /home/charon/.charon/charon.yaml
+
+        CHARON_FILE="$(params.dataDir)/$(params.charonParamFilePath)"
+        # shellcheck source=/dev/null
+        . "$CHARON_FILE"
+
+        target="$CHARON_TARGET"
+        productName="$CHARON_PRODUCT_NAME"
+        productVersion="$CHARON_PRODUCT_VERSION"
+
+        shared_repo="/workdir/nrrc/shared"
+
+        shopt -s nullglob
+        found_files=false
+        for archive in "$shared_repo"/*
+        do
+          if [[ -f "$archive" ]]
+          then
+            found_files=true
+            echo "Release $archive with $productName-$productVersion into $target"
+            charon upload -p "$productName" -v "$productVersion" -t "$target" "$archive"
+          fi
+        done
+
+        if [[ "$found_files" == "false" ]]
+        then
+          echo "No npm archive file found, will not publish."
+          exit 1
+        fi
+      volumeMounts:
+        - name: "charon-aws-vol"
+          mountPath: "/home/charon/.aws"
+        - name: nrrc-workdir
+          mountPath: "/workdir"
+        - name: trusted-ca
+          mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+          subPath: ca-bundle.crt
+          readOnly: true
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 250m
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
