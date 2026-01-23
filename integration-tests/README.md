@@ -172,6 +172,13 @@ These integration tests are automatically executed in CI/CD pipelines:
 2. **Cluster Access** - Ensure KUBECONFIG is properly configured
 3. **Secret Errors** - Check vault password file exists and is correct
 4. **Resource Conflicts** - Use cleanup scripts to remove stale resources
+5. **PaC token unrecognizable error** - The following error:
+   ```bash
+   Initialization check attempt 6/60...
+   ⚠️ Warning: Could not get component PR from annotations: {"pac":{"state":"error","error-id":74,"error-message":"74: Access token is unrecognizable by GitHub"},"message":"done"}
+   ```
+   This is due to using a new GITHUB_TOKEN env variable but the old one being present in your tenant secrets file. Simply `rm resources/tenant/secrets/tenant-secrets.yaml`
+   in whatever test you are running so that a new secrets file will be generated for you with the proper secret
 
 ### Getting Help
 
