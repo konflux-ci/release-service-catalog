@@ -1,4 +1,4 @@
-FROM quay.io/konflux-ci/release-service-utils@sha256:653b4782f0693c031a5d1327c026e6895d90b8126d51d8a3d07ffe940f6721fd
+FROM quay.io/konflux-ci/release-service-utils@sha256:288a903105481b1ea11e558b179cf4010d66a3fa4f4ff22765a256668471554b
 
 ARG TKN_VERSION=0.40.0
 ARG KUSTOMIZE_VERSION=5.6.0
