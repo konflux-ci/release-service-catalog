@@ -97,9 +97,15 @@ spec:
       type: string
       description: Number of days before expiration to warn about certificate expiration
       default: "7"
+    - name: trustedArtifactsDockerConfigSecret
+      type: string
+      description: The name of the secret that contains dockerconfig json for trusted artifact operations
+      default: quay-token-konflux-release-trusted-artifacts-secret
   results:
     - name: result
       description: Success if the task succeeds, the error otherwise
+    - name: checksum_map
+      description: OCI artifact reference containing checksum map JSON for advisory PURL updates
     - name: publishedFiles
       description: List of published files
   volumes:
@@ -152,6 +158,11 @@ spec:
     - name: cgw-secret
       secret:
         secretName: $(params.cgwSecret)
+        defaultMode: 0444
+    - name: trusted-artifacts-dockerconfig-secret
+      secret:
+        optional: true
+        secretName: $(params.trustedArtifactsDockerConfigSecret)
         defaultMode: 0444
     - name: trusted-ca
       configMap:
@@ -1257,6 +1268,8 @@ spec:
 
               if [ "$FORMAT" = "raw" ]; then
                 # Copy all files from os/arch/, preserving nested structure
+                # NOTE: This can cause collisions if multiple archives contain same filenames
+                # Future enhancement: support nested os/arch structure in ready_for_distribution
                 cp -r "${ARCH_DIR}"/* "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
                 echo "  Copied (${ARRAY_NAME}): contents from ${ARCH_DIR}"
               fi
@@ -1651,3 +1664,137 @@ spec:
             --cgw_host "$(params.cgwHostname)" \
             --data_json "$SNAPSHOT_JSON" 2> >(tee "$STDERR_FILE" >&2)
         fi
+
+    - name: build-advisory-checksum-map
+      image: quay.io/konflux-ci/release-service-utils@sha256:653b4782f0693c031a5d1327c026e6895d90b8126d51d8a3d07ffe940f6721fd
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: trusted-artifacts-dockerconfig-secret
+          mountPath: /mnt/trusted_artifacts_dockerconfig
+      env:
+        - name: "SNAPSHOT_JSON"
+          value: "$(params.snapshot_json)"
+        - name: "HOME"
+          value: "/tekton/home"
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        STDERR_FILE=/tmp/stderr.txt
+        CHECKSUM_MAP_REF=""
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
+                fi
+            fi
+            # Write the OCI reference (may be empty if build failed before push)
+            echo -n "${CHECKSUM_MAP_REF}" > "$(results.checksum_map.path)"
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        # Setup docker config for OCI push (same pattern as create-advisory-oci-artifact-task)
+        TA_DOCKERCONFIG_JSON_PATH="/mnt/trusted_artifacts_dockerconfig/.dockerconfigjson"
+        if [ -f "${TA_DOCKERCONFIG_JSON_PATH}" ] && [ -s "${TA_DOCKERCONFIG_JSON_PATH}" ]; then
+          mkdir -p ~/.docker/
+          cp "${TA_DOCKERCONFIG_JSON_PATH}" ~/.docker/config.json
+          echo "Docker config loaded for OCI push"
+        fi
+
+        CONTENT_DIR=/shared/artifacts
+        CHECKSUM_MANIFEST="[]"
+
+        # Use the modified snapshot from shared volume if available
+        if [ -f /shared/snapshot.json ]; then
+          SNAPSHOT_JSON="$(cat /shared/snapshot.json)"
+        fi
+
+        # Process each component and checksum files in ready_for_distribution
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+          READY_FOR_DIST_DIR="$COMPONENT_DIR/ready_for_distribution"
+
+          echo "Generating checksum manifest for component: $COMPONENT_NAME"
+
+          if [ ! -d "$READY_FOR_DIST_DIR" ]; then
+            echo "Warning: ready_for_distribution directory not found for $COMPONENT_NAME"
+            continue
+          fi
+
+          CHECKSUM_FILES="{}"
+          # Find all files in ready_for_distribution, excluding sha256sum.txt*
+          # Use process substitution to avoid subshell variable scope issues
+          while read -r file; do
+            filename=$(basename "$file")
+            checksum=$(sha256sum "$file" | awk '{ print $1 }')
+            CHECKSUM_FILES=$(jq --arg filename "$filename" --arg checksum "sha256:${checksum}" \
+              '. + {($filename): $checksum}' <<< "$CHECKSUM_FILES")
+          done < <(find "$READY_FOR_DIST_DIR" -type f ! -name 'sha256sum.txt*' 2>/dev/null)
+
+          CHECKSUM_MANIFEST=$(jq --arg component "$COMPONENT_NAME" --argjson files "$CHECKSUM_FILES" \
+            '. + [{"component": $component, "files": $files}]' <<< "$CHECKSUM_MANIFEST")
+        done
+
+        # Write checksum manifest to JSON file and push to OCI
+        # This avoids Tekton's 4KB termination message limit by storing large data in OCI
+        # and returning only a small reference string
+        archive_dir="$(mktemp -d)"
+        echo "$CHECKSUM_MANIFEST" | jq -c '.' > "${archive_dir}/checksum_map.json"
+        echo "Checksum manifest contents:"
+        cat "${archive_dir}/checksum_map.json"
+
+        # Create tar archive
+        archive="${archive_dir}/checksum_map"
+        tar --create --use-compress-program='gzip -n' --file "${archive}" -C "${archive_dir}" checksum_map.json
+
+        echo "Prepared checksum_map artifact for push"
+
+        # Push to OCI using oras and capture the actual manifest digest
+        store="quay.io/konflux-ci/release-service-trusted-artifacts"
+
+        oras_opts="--annotation=quay.expires-after=1d"
+        pushd "${archive_dir}" > /dev/null
+        # Capture oras output to extract the actual pushed digest
+        oras_output=$(oras push "${oras_opts}" \
+          --registry-config <(select-oci-auth "${store}") "${store}" checksum_map 2>&1)
+        echo "$oras_output"
+        # Extract the manifest digest specifically from the "Digest: sha256:xxx" line
+        # This avoids accidentally capturing config/layer digests that may appear earlier
+        pushed_digest=$(echo "$oras_output" | grep "^Digest:" | grep -oE 'sha256:[a-f0-9]{64}')
+        popd > /dev/null
+
+        if [ -z "$pushed_digest" ]; then
+          echo "Error: Failed to extract digest from oras push output"
+          exit 1
+        fi
+
+        # Set the OCI reference using the actual pushed digest
+        CHECKSUM_MAP_REF="${store}@${pushed_digest}"
+        echo "Checksum map pushed to OCI: ${CHECKSUM_MAP_REF}"
