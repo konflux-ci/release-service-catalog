@@ -9,15 +9,16 @@ This enables dynamic JQL queries without modifying ReleasePlan for each release 
 
 ## Parameters
 
-| Name                         | Description                                                                             | Optional | Default value |
-|------------------------------|-----------------------------------------------------------------------------------------|----------|---------------|
-| collectorsPath               | Path to the JSON string of the resource containing the collectors in the data workspace | No       | -             |
-| collectorsResourceType       | The type of resource that contains the collectors                                       | No       | -             |
-| resultsDir                   | The relative path in the workspace to save the collector results to                     | No       | -             |
-| collectorsRepository         | Git repository where the collectors will be defined                                     | No       | -             |
-| collectorsRepositoryRevision | Git repository revision                                                                 | Yes      | main          |
-| releasePath                  | Path to the json data file of the current in-progress Release                           | No       | -             |
-| previousReleasePath          | Path to the json data file of the previous successful Release prior to the current one  | No       | -             |
-| caTrustConfigMapName         | The name of the ConfigMap to read CA bundle data from                                   | Yes      | trusted-ca    |
-| caTrustConfigMapKey          | The name of the key in the ConfigMap that contains the CA bundle data                   | Yes      | ca-bundle.crt |
-| roxConfigDir                 | The relative path in the workspace to the roxctl configuration directory (optional)     | Yes      | ""            |
+| Name                         | Description                                                                             | Optional | Default value                                    |
+|------------------------------|-----------------------------------------------------------------------------------------|----------|--------------------------------------------------|
+| collectorsPath               | Path to the JSON string of the resource containing the collectors in the data workspace | No       | -                                                |
+| collectorsResourceType       | The type of resource that contains the collectors                                       | No       | -                                                |
+| resultsDir                   | The relative path in the workspace to save the collector results to                     | No       | -                                                |
+| collectorsRepository         | Git repository where the collectors will be defined                                     | No       | -                                                |
+| collectorsRepositoryRevision | Git repository revision                                                                 | Yes      | main                                             |
+| releasePath                  | Path to the json data file of the current in-progress Release                           | No       | -                                                |
+| previousReleasePath          | Path to the json data file of the previous successful Release prior to the current one  | No       | -                                                |
+| caTrustConfigMapName         | The name of the ConfigMap to read CA bundle data from                                   | Yes      | trusted-ca                                       |
+| caTrustConfigMapKey          | The name of the key in the ConfigMap that contains the CA bundle data                   | Yes      | ca-bundle.crt                                    |
+| roxConfigDir                 | The relative path in the workspace to the roxctl configuration directory (optional)     | Yes      | ""                                               |
+| roxCentralEndpoint           | The url for RHACS Central (optional, required for sbomdiff collector)                   | Yes      | https://acs-d4dgfbkto15c73biblcg.acs.rhcloud.com |
