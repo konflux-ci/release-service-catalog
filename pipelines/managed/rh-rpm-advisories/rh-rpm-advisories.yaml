@@ -1,0 +1,285 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rh-rpm-advisories
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton pipeline to release RPM content.
+    This is the first version of the RPM release pipeline with basic tasks for
+    verifying access, collecting data, reducing snapshot, verifying with Conforma,
+    and mock task of creating advisory.
+  params:
+    - name: release
+      type: string
+      description:
+        The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
+    - name: releasePlan
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the releaseServiceConfig
+    - name: snapshot
+      type: string
+      description: The namespaced name (namespace/name) of the snapshot
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON representation of the EnterpriseContractPolicy
+    - name: enterpriseContractExtraRuleData
+      type: string
+      description: |
+        Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax
+        "key1=value1,key2=value2..."
+      default: "pipeline_intention=release"
+    - name: verify_ec_task_bundle
+      type: string
+      description: The location of the bundle containing the verify-enterprise-contract task
+    - name: verify_ec_task_git_revision
+      type: string
+      description: The git revision to be used when consuming the verify-conforma task
+    - name: mobster_tasks_git_revision
+      type: string
+      description: The git revision to be used when consuming Mobster tasks for SBOM processing
+      default: b63b8eb4c8645806bb7280d8c9e10b7164743e63
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+      default: "quay.io/konflux-ci/release-service-trusted-artifacts"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      # to avoid tar extraction errors, we need to specify a subdirectory
+      # inside the volume.
+      default: "/var/workdir/release"
+    - name: conformaPubKey
+      type: string
+      description: Path to the key used by Conforma to verify attestations signed by it
+      default: "k8s://openshift-pipelines/public-key"
+  results:
+    - name: advisory_url
+      type: string
+      value: $(tasks.create-advisory.results.advisory_url)
+    - name: advisory_internal_url
+      type: string
+      value: $(tasks.create-advisory.results.advisory_internal_url)
+  tasks:
+    - name: verify-access-to-resources
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/verify-access-to-resources/verify-access-to-resources.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: requireInternalServices
+          value: "true"
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-data/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - verify-access-to-resources
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      params:
+        - name: dataDir
+          value: "$(params.dataDir)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".conforma.workerCount", "default": "4"},
+              {"resultIndex": 1, "key": ".conforma.timeout", "default": "8h0m0s"},
+              {"resultIndex": 2, "key": ".sign.cosignSecretName", "default": ""},
+              {"resultIndex": 3, "key": ".enforceContainerFirstSecurityLabels", "default": "false"},
+              {"resultIndex": 4, "key": ".jira.jiraAdvisorySecret", "default": "konflux-advisory-jira-secret"},
+              {"resultIndex": 5, "key": ".cgw.cgwSecret", "default": "publish-to-cgw-secret"}
+            ]
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+      runAfter:
+        - collect-data
+    - name: reduce-snapshot
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/reduce-snapshot/reduce-snapshot.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(params.dataDir)/$(tasks.collect-data.results.snapshotSpec)
+        - name: SINGLE_COMPONENT
+          value: $(tasks.collect-data.results.singleComponentMode)
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE
+          value: snapshot/$(tasks.collect-data.results.snapshotName)
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE_NS
+          value: $(tasks.collect-data.results.snapshotNamespace)
+        - name: SNAPSHOT_PATH
+          value: $(params.dataDir)/$(tasks.collect-data.results.snapshotSpec)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-task-params
+    - name: verify-conforma
+      timeout: "4h00m0s"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/conforma/cli
+          - name: revision
+            value: "$(params.verify_ec_task_git_revision)"
+          - name: pathInRepo
+            value: "tasks/verify-conforma-konflux-ta/0.1/verify-conforma-konflux-ta.yaml"
+      params:
+        - name: SNAPSHOT_FILENAME
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          # only set to false for development
+          value: "true"
+        - name: IGNORE_REKOR
+          value: "true"
+        - name: EXTRA_RULE_DATA
+          value: $(params.enterpriseContractExtraRuleData)
+        - name: TIMEOUT
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: WORKERS
+          value: "$(tasks.collect-task-params.results.extractedValues[0])"
+        - name: SOURCE_DATA_ARTIFACT
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: TRUSTED_ARTIFACTS_DEBUG
+          value: "$(params.trustedArtifactsDebug)"
+      runAfter:
+        - collect-task-params
+        - reduce-snapshot
+    - name: create-advisory
+      runAfter:
+        - verify-conforma
+      taskSpec:
+        results:
+          - name: advisory_url
+            type: string
+          - name: advisory_internal_url
+            type: string
+        steps:
+          - name: fake-create-advisory
+            image: registry.access.redhat.com/ubi8/ubi-minimal:latest
+            script: |
+              #!/bin/bash
+              echo "create-advisory"
+              echo -n "" > "$(results.advisory_url.path)"
+              echo -n "" > "$(results.advisory_internal_url.path)"
+  finally:
+    - name: cleanup-internal-requests
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/cleanup-internal-requests/cleanup-internal-requests.yaml
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+    
