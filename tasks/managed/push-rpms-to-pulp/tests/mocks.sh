@@ -10,15 +10,48 @@ UPLOAD_FAIL_ONCE_ENABLED=0
 # Persisted state across subshells (command substitutions) for "fail once" behavior
 UPLOAD_FAIL_ONCE_ENABLED_FILE="/tmp/mock_upload_failonce_enabled"
 UPLOAD_FAIL_ONCE_DONE_FILE="/tmp/mock_upload_failonce_done"
+# Control whether content queries should pretend items already exist
+CONTENT_EXISTS_MODE_FILE="/tmp/mock_content_exists_mode"
 
 function curl() {
     # Mock curl for OAuth2 and API calls
     local args="$*"
 
     if [[ "$args" == *"sso.redhat.com"* ]]; then
+        # Record token requests (for auth-path tests). Do not record full args to avoid logging secrets.
+        echo "token_request" >> $(params.dataDir)/mock_sso.txt
         # OAuth2 token request
         echo '{"access_token": "mock-access-token", "expires_in": 3600}'
-    elif [[ "$args" == *"repositories/rpm/rpm"* ]]; then
+    elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]]; then
+        # Repository GET by href -> return latest_version_href
+        echo '{"latest_version_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/mock-repo-uuid/versions/1/"}'
+    elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
+        # Content GET (package) by href -> return artifact link
+        echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
+    elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/srpms/mock-existing-uuid/"* ]]; then
+        # Content GET (srpm) by href -> return artifact link
+        echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/srpms/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
+    elif [[ "$args" == *"/api/pulp/mock/api/v3/artifacts/"* ]]; then
+        # Artifact GET -> return sha256 of empty file
+        echo '{"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
+    elif [[ "$args" == *"/content/rpm/packages/"* ]] || [[ "$args" == *"/content/rpm/srpms/"* ]]; then
+        # Content query by NEVRA -> decide existence based on CONTENT_EXISTS_MODE_FILE
+        mode="none"
+        if [[ -f "${CONTENT_EXISTS_MODE_FILE}" ]]; then
+            mode="$(cat "${CONTENT_EXISTS_MODE_FILE}")"
+        fi
+        # record the content query for debugging the tests
+        echo "content_query mode=${mode} url=${args}" >> $(params.dataDir)/mock_content_queries.txt
+        if [[ "${mode}" == "all" ]]; then
+            if [[ "$args" == *"/content/rpm/srpms/"* ]]; then
+                echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/srpms/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}]}'
+            else
+                echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}]}'
+            fi
+        else
+            echo '{"count": 0, "results": []}'
+        fi
+    elif [[ "$args" == *"repositories/rpm/rpm"* && "$args" == *"name="* ]]; then
         # Repository list API call - extract repo name from URL
         if [[ "$args" == *"name=source"* ]]; then
             echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/source-uuid/"}]}'
@@ -86,6 +119,9 @@ function oras() {
         # Initialize a variable to store the value of the -o flag.
         output_file_dir=""
 
+        # Reset content-exists mode to a sane default for each pull to avoid leakage across tests
+        echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
+
         # Loop through all arguments passed to the script.
         while [[ $# -gt 0 ]]; do
             case "$1" in
@@ -116,6 +152,8 @@ function oras() {
             # Persist enablement and reset done flag for this container
             echo "1" > "${UPLOAD_FAIL_ONCE_ENABLED_FILE}"
             rm -f "${UPLOAD_FAIL_ONCE_DONE_FILE}"
+            # For failonce, pretend content does not exist so uploads happen
+            echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
             touch $output_file_dir/hello-2.12.1-6.fc44.aarch64.rpm
             touch $output_file_dir/hello-2.12.1-6.fc44.ppc64le.rpm
             touch $output_file_dir/hello-2.12.1-6.fc44.s390x.rpm
@@ -138,7 +176,42 @@ function oras() {
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
             touch $output_file_dir/logs/hello-debuginfo-2.12.1-6.fc44.aarch64.rpm.log
+        elif [[ "$args" == *"quay.io/test/alreadyexists"* ]]; then
+            # Create the same files; they will be "empty", so sha256 matches the mock artifact
+            echo "all" > "${CONTENT_EXISTS_MODE_FILE}"
+            touch $output_file_dir/hello-2.12.1-6.fc44.aarch64.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.ppc64le.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.s390x.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.src.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.x86_64.rpm
+            touch $output_file_dir/hello-docs-2.12.1-6.fc44.noarch.rpm
+            # mimic having logs from each rpm build
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.aarch64.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.ppc64le.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.s390x.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
+        elif [[ "$args" == *"quay.io/test/digestmismatch"* ]]; then
+            # Pretend content exists in Pulp, but make local RPM digests differ from the (mocked) server artifact digest.
+            # This drives the "exists but digest differs" path.
+            echo "all" > "${CONTENT_EXISTS_MODE_FILE}"
+            printf '%s\n' "not-empty" > $output_file_dir/hello-2.12.1-6.fc44.aarch64.rpm
+            printf '%s\n' "not-empty" > $output_file_dir/hello-2.12.1-6.fc44.ppc64le.rpm
+            printf '%s\n' "not-empty" > $output_file_dir/hello-2.12.1-6.fc44.s390x.rpm
+            printf '%s\n' "not-empty" > $output_file_dir/hello-2.12.1-6.fc44.src.rpm
+            printf '%s\n' "not-empty" > $output_file_dir/hello-2.12.1-6.fc44.x86_64.rpm
+            printf '%s\n' "not-empty" > $output_file_dir/hello-docs-2.12.1-6.fc44.noarch.rpm
+            # mimic having logs from each rpm build
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.aarch64.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.ppc64le.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.s390x.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
         elif [[ "$args" == *"quay.io/test/happypath"* ]]; then
+            # For happy path, pretend content does not exist so uploads proceed
+            echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
             touch $output_file_dir/hello-2.12.1-6.fc44.aarch64.rpm
             touch $output_file_dir/hello-2.12.1-6.fc44.ppc64le.rpm
             touch $output_file_dir/hello-2.12.1-6.fc44.s390x.rpm

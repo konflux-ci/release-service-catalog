@@ -30,6 +30,18 @@ on:
         type: boolean
         required: true
         default: false
+      create-release-service-infra-pr:
+        description: |
+          Create Release Service Infra PR: Create a PR to infra-deployments to promote the Release Service
+        type: boolean
+        required: true
+        default: false
+      create-internal-services-infra-pr:
+        description: |
+          Create Internal Services Infra PR: Create a PR to infra-deployments to promote the Internal Services
+        type: boolean
+        required: true
+        default: false
       update-jira-tickets:
         description: |
           Update Jira tickets: Update Jira tickets that have been promoted
@@ -115,6 +127,75 @@ jobs:
           OVERRIDE_HOTFIX: ${{ inputs.override-hotfix-check }}
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 
+      - name: Create Release Controller PR to infra-deployments
+        if: |
+          steps.promote.outcome == 'success'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_ACTIONS_URL: ${{ vars.RELEASE_AUTOMATIONS_ACTIONS_URL }}
+        run: |
+          PROMOTE_RELEASE_SERVICE=${{ inputs.create-release-service-infra-pr }}
+          PROMOTE_INTERNAL_SERVICES=${{ inputs.create-internal-services-infra-pr }}
+
+          CURL_TIMEOUT=20
+          CURL_RETRY=5
+
+          cat > HEADERS << EOF
+          Accept: application/vnd.github+json
+          Authorization: Bearer ${GITHUB_TOKEN}
+          X-GitHub-Api-Version: 2022-11-28
+          EOF
+
+          # general curl configuration
+          cat > ~/.curlrc << EOF
+          # use HEADERS file
+          -H @HEADERS
+          # follow redirects
+          --location
+          # silent
+          --silent
+          # max timeout
+          --max-time ${CURL_TIMEOUT}
+          --retry ${CURL_RETRY}
+          EOF
+
+          if [ "$PROMOTE_RELEASE_SERVICE" == "true" ] || [ "$PROMOTE_INTERNAL_SERVICES" == "true" ]; then
+
+            curl \
+              "${GH_ACTIONS_URL}/workflows/promote_controller.yaml/dispatches" \
+              -d '{
+                "ref":"main",
+                "inputs": {
+                  "promotion-type": "${{ inputs.promotion-type }}",
+                  "release-service":"'$PROMOTE_RELEASE_SERVICE'",
+                  "internal-services": "'$PROMOTE_INTERNAL_SERVICES'"
+                }
+              }'
+
+            # get the workflow run id
+            ID=""
+            while [[ ! "$ID" =~ ^[0-9]+$ ]]; do
+              ID=$(curl \
+                "${GH_ACTIONS_URL}/workflows/promote_controller.yaml/runs?status=in_progress" \
+                  |jq -r .workflow_runs[0].id)
+              sleep 1
+            done
+
+            STATUS=""
+            # wait for the run status 
+            while [ "$STATUS" != "completed" ]; do
+              STATUS=$(curl "${GH_ACTIONS_URL}/runs/$ID" |jq -r .status)
+              sleep 1
+            done
+
+            CONCLUSION=$(curl "${GH_ACTIONS_URL}/runs/$ID" |jq -r .conclusion)
+
+            # print logs
+            curl "${GH_ACTIONS_URL}/runs/$ID/logs" \
+             | gunzip - |awk '{print substr($0, 30)}'
+
+            echo "Promotion of controllers concluded with \"$CONCLUSION\""
+          fi
       - name: Update Jira ticket(s)
         if: |
           steps.promote.outcome == 'success' && 

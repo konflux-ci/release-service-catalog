@@ -4,6 +4,9 @@ set -eux
 aws() {
     echo "Mock 'aws' called with: $*"
 
+    # Log the S3 target path for verification
+    echo "$*" >> /var/workdir/s3_upload_paths.log
+
     if [ "$1" != "s3" ] || [ "$2" != "cp" ]; then
         echo "ERROR: Mock aws called with wrong command ($1 $2)"
         exit 1
@@ -99,4 +102,23 @@ check_final_status() {
         exit 1
     fi
     echo "SUCCESS: Final check passed. AWS mock was validated."
+
+    # Verify kernel version cleaning: the test uses KERNEL_VERSION="6.5.0-s3.x86_64"
+    # The task should strip the .x86_64 suffix, so S3 paths should contain "6.5.0-s3/" not "6.5.0-s3.x86_64/"
+    UPLOAD_LOG="/var/workdir/s3_upload_paths.log"
+    if [ -f "$UPLOAD_LOG" ]; then
+        echo ""
+        echo "Verifying KERNEL_VERSION architecture suffix was stripped..."
+        # Use grep -F for literal/fixed string matching (dots are literal, not regex)
+        if grep -F -q "6.5.0-s3.x86_64" "$UPLOAD_LOG"; then
+            echo "ERROR: Found dirty kernel version (6.5.0-s3.x86_64) in S3 upload paths!"
+            echo "The .x86_64 suffix should have been stripped."
+            echo "Upload log:"
+            cat "$UPLOAD_LOG"
+            exit 1
+        else
+            echo "SUCCESS: Kernel version architecture suffix was properly stripped"
+            echo "All uploads used cleaned path: 6.5.0-s3 (not 6.5.0-s3.x86_64)"
+        fi
+    fi
 }

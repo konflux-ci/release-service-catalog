@@ -41,6 +41,11 @@ echo "Injecting mock/check scripts into spec.steps[1]..."
 MOCK_SCRIPT=$(cat "$SCRIPT_DIR/mocks.sh")
 ORIG_SCRIPT=$(yq '.spec.steps[1].script' "$TASK_PATH" | sed '1s|^#!/.*||')
 
+CHECK_SCRIPT="
+echo 'Running final mock assertions...'
+check_git_paths
+"
+
 cat > /tmp/injected-script.sh <<EOF
 #!/usr/bin/env bash
 # This is the new, combined script for testing
@@ -50,6 +55,9 @@ $MOCK_SCRIPT
 
 # --- Original Task Script (shebang removed) ---
 $ORIG_SCRIPT
+
+# --- Injected Check Script (runs assertions) ---
+$CHECK_SCRIPT
 EOF
 
 yq -i '.spec.steps[1].script = load_str("/tmp/injected-script.sh")' "$TASK_PATH"

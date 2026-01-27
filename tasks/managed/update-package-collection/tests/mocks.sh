@@ -44,10 +44,22 @@ EOF
 
 function koji() {
     echo "koji $*" >> "$(params.dataDir)/koji_calls.txt"
-    if [[ "$*" == *getTag*-sidetag* ]]; then
+    if [[ "$*" == *getInheritanceData* ]]; then
+        # Only return inheritance data for mock-target collections (koji tags)
+        if [[ "$*" == *mock-target* ]]; then
+            echo '[{"name": "rhel-10.9-beta", "priority": 10}, {"name": "rhel-10.1-beta", "priority": 20}]'
+        else
+            # Return empty array for non-koji tags
+            echo '[]'
+        fi
+    elif [[ "$*" == *getTag*-sidetag* ]]; then
         echo '{"extra": {"sidetag": true}}'
-    elif [[ "$*" == *getTag* ]]; then
+    elif [[ "$*" == *getTag*mock-target* ]]; then
+        # mock-target is a valid koji tag
         echo '{"extra": {"sidetag": false}}'
+    elif [[ "$*" == *getTag* ]]; then
+        # Other collections are not valid koji tags
+        echo 'null'
     elif [[ "$*" == *listBuilds* ]]; then
         echo '[{"build_id": 1,"creation_time": "2025-11-25 11:20:08"},{"build_id": 2,"creation_time": "2025-11-25 11:20:18"}]'
     elif [[ "$*" == *buildinfo* ]]; then
