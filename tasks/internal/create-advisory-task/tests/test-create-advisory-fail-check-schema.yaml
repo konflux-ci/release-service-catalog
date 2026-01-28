@@ -1,0 +1,66 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-create-advisory-fail-check-schema
+spec:
+  description: |
+    Run the create-advisory task and have it fail on JSON schema validation. The
+    failure is due to invalid values in the advisory data since type and severity
+    values are not present in the enum. This task should fail.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: create-advisory-task
+      params:
+        - name: advisory_json
+          value: >-
+            H4sICAUHemkAA2Fkdmlzb3J5Lmpzb24AbVNba9swFH7PrzB+XqzZ7cIwjBXGYHsb29jLCOVUOrFFbUmTjruEkP8+XVxXTgcGWd/N35Ht86YoSmO1mDjdS1G2Rd3cvMlBBSN6uPyOovgCVHxLeLkSPaF1Uqugq6umulmzjizCGEgydaK4iaF+aRm0eITRDNjOhhaH90lGp6T7a7XqfoZNhN1JaeOki5HoqFiA5NJG8oVLu0gIdNxKQ3PVSOdYCtfDtFIsQKLRDyvptNT68QxE2uIBLSqOodxvj3isJzKuZUxo7qp51orrkSntH1B60T4dilaEirzxnIxyhC4LKmY8ckEMUqH9GkShzZ8JTpXUbH4C0waVI+CPd66H5t2uhQeBB5BDbDrHWDTaSdI2DmR77Uy929rev4KXgNxA0OWNIjZAOKhygfaZHizvJSGnycaWMIrdbR5oJjsEwjx27evqqTcX+PGl6b13fLiedlU9z+dP8QjPeeGDPKK4Aj386dfnbfO2abb+J7h9RYeuvtLVK8lZP0GnB1AdS0ulbceOTCGx8A00d3VV+6u8su5X+8vmf/fPd2kNjsvmsvkHJ4X8/L8DAAA=
+          # advisory_json string before `gzip -c|base64 -w 0` encoding:
+          # {"product_id":123, "product_name":"Red Hat Product", "product_version":"1.2.3", "product_stream":"tp1",
+          # "cpe":"cpe:/a:example:product:el8", "type":"wrongType", "synopsis":"test synopsis", "topic":"test
+          # topic", "description":"test description", "solution":"test solution", "severity":"wrongSeverity",
+          # "references":["https://docs.example.com/notes"],
+          # "content":{"images":[{"containerImage":"quay.io/example/openstack@sha256:abdefail",
+          # "repository":"rhosp16-rhel8/openstack", "tags":["latest"], "architecture":"amd64",
+          # "purl":"pkg:example/openstack@256:abcde?repository_url=quay.io/example/rhosp16-rhel8",
+          # "cves":{"fixed":{"CVE-2022-1234":{"packages":["pkg:golang/golang.org/x/net/http2@1.11.1"]}}}}]}}
+        - name: application
+          value: "test-app"
+        - name: origin
+          value: "schema-tenant"
+        - name: config_map_name
+          value: "create-advisory-test-cm"
+        - name: advisory_secret_name
+          value: "create-advisory-secret"
+        - name: errata_secret_name
+          value: "create-advisory-errata-secret"
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: advisory_url
+          value: $(tasks.run-task.results.advisory_url)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: advisory_url
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:a9fc6af1db5fefe43c655b3241326e8115cd9569b810bac7effb33b45dd2a855
+            script: |
+              #!/usr/bin/env bash
+              set -ex # if set -u is here, there will be STDERR_FILE unbound variable errors
+                
+              echo Test that result contains the schema errors
+              grep "wrongType" <<< "$(params.result)"
+              grep "wrongSeverity" <<< "$(params.result)"
+
+              echo Test that advisory_url was not set
+              test -z "$(params.advisory_url)"
