@@ -24,6 +24,13 @@ spec:
         requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
         If empty, no registry.access.redhat.com signatures will be created
       default: ""
+    - name: signExternalRegistries
+      type: string
+      description: |
+        When set to "true", sign images that don't have rh-registry-repo by using the repository
+        url field directly. This is useful for signing images released to external registries
+        like quay.io/konflux-ci. When "false" (default), only sign images with rh-registry-repo
+      default: "false"
     - name: retries
       description: Retry cosign N times
       type: string
@@ -308,14 +315,6 @@ spec:
                 rh_registry_repo=$(jq -r '."rh-registry-repo" // empty' <<< "$REPOSITORY_OBJECT")
                 registry_access_repo=$(jq -r '."registry-access-repo" // empty' <<< "$REPOSITORY_OBJECT")
 
-                # Skip if no rh-registry-repo (not applicable for signing)
-                if [ "$rh_registry_repo" = "" ] || [ "$rh_registry_repo" = "null" ]; then
-                    echo "No rh-registry-repo found for repository ${INTERNAL_CONTAINER_REF}, skipping signing"
-                    continue
-                fi
-
-                repository="${rh_registry_repo#*/}"
-
                 # Get tags from repository object
                 REPO_TAGS=$(jq -r '.tags[]? // empty' <<< "$REPOSITORY_OBJECT")
                 if [ -z "$REPO_TAGS" ]; then
@@ -323,12 +322,26 @@ spec:
                     continue
                 fi
 
-                # Sign rh-registry-repo references (always) and registry-access-repo references
-                # (only if signatures for this registry are required)
-                REGISTRY_REFERENCES=("${rh_registry_repo}")
-                if [ "$registry_access_repo" != "" ] && [ "$registry_access_repo" != "null" ] && \
-                   grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
-                    REGISTRY_REFERENCES+=("${registry_access_repo}")
+                # Determine which registry references to sign based on rh-registry-repo presence
+                # and signExternalRegistries parameter
+                declare -a REGISTRY_REFERENCES=()
+                if [ "$rh_registry_repo" != "" ] && [ "$rh_registry_repo" != "null" ]; then
+                    # Sign rh-registry-repo references (always) and registry-access-repo references
+                    # (only if signatures for this registry are required)
+                    repository="${rh_registry_repo#*/}"
+                    REGISTRY_REFERENCES=("${rh_registry_repo}")
+                    if [ "$registry_access_repo" != "" ] && [ "$registry_access_repo" != "null" ] && \
+                       grep -q "^${repository}$" "${SIGN_REGISTRY_ACCESS_FILE}"; then
+                        REGISTRY_REFERENCES+=("${registry_access_repo}")
+                    fi
+                elif [ "$(params.signExternalRegistries)" = "true" ]; then
+                    # When signExternalRegistries is enabled and no rh-registry-repo is present,
+                    # sign using the repository url directly (for external registries like quay.io)
+                    echo "Signing external registry image: ${INTERNAL_CONTAINER_REF}"
+                    REGISTRY_REFERENCES=("${INTERNAL_CONTAINER_REF}")
+                else
+                    echo "No rh-registry-repo found for repository ${INTERNAL_CONTAINER_REF}, skipping signing"
+                    continue
                 fi
 
                 # Collect data for signing

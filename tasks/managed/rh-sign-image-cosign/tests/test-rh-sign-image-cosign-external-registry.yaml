@@ -1,0 +1,239 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-image-cosign-external-registry
+spec:
+  description: Test signing images released to external registries (e.g., quay.io/konflux-ci) without rh-registry-repo
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:288a903105481b1ea11e558b179cf4010d66a3fa4f4ff22765a256668471554b
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              # Create a snapshot with external registry (no rh-registry-repo)
+              # This simulates tekton task bundles released to quay.io/konflux-ci
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "tekton-tasks",
+                "components": [
+                  {
+                    "name": "task-bundle-1",
+                    "containerImage": "quay.io/redhat-user-workloads/konflux-ci/task-bundle-1@sha256:2222",
+                    "repositories": [
+                      {
+                        "url": "quay.io/konflux-ci/tekton-catalog/task-bundle-1",
+                        "tags": ["0.1", "latest"]
+                      }
+                    ]
+                  },
+                  {
+                    "name": "task-bundle-2",
+                    "containerImage": "quay.io/redhat-user-workloads/konflux-ci/task-bundle-2@sha256:3333",
+                    "repositories": [
+                      {
+                        "url": "quay.io/konflux-ci/tekton-catalog/task-bundle-2",
+                        "tags": ["0.2"]
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              # create empty cosign verify mock files
+              for D in sha256:2222 sha256:3333; do
+                REF1="quay.io/konflux-ci/tekton-catalog/task-bundle-1@${D}"
+                REF2="quay.io/konflux-ci/tekton-catalog/task-bundle-2@${D}"
+                touch "$(params.dataDir)/$(echo $REF1 | tr '/' '-')"
+                touch "$(params.dataDir)/$(echo $REF2 | tr '/' '-')"
+              done
+
+              # Expected cosign calls:
+              # - task-bundle-1: 2 tags * 1 digest = 2 sign calls + 2 verify calls
+              # - task-bundle-2: 1 tag * 1 digest = 1 sign call + 1 verify call
+              # Total: 6 calls
+              for _ in $(seq 1 6); do
+                  echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
+              done
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: rh-sign-image-cosign
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: secretName
+          value: 'test-cosign-secret'
+        - name: signExternalRegistries
+          value: "true"
+        - name: concurrentLimit
+          value: 2
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:288a903105481b1ea11e558b179cf4010d66a3fa4f4ff22765a256668471554b
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              echo "check results"
+              _TEST_REPO1="quay.io/konflux-ci/tekton-catalog/task-bundle-1"
+              _TEST_REPO2="quay.io/konflux-ci/tekton-catalog/task-bundle-2"
+
+              CALLS=$(cat "$(params.dataDir)/mock_skopeo_calls")
+              # Expect skopeo inspect calls for both components
+              EXPECTED=$(cat <<EOF
+              inspect --raw docker://quay.io/redhat-user-workloads/konflux-ci/task-bundle-1@sha256:2222
+              inspect --raw docker://quay.io/redhat-user-workloads/konflux-ci/task-bundle-2@sha256:3333
+              EOF
+              )
+              if [ "$CALLS" != "$EXPECTED" ]; then
+                echo "Skopeo calls differ"
+                echo "EXPECTED: $EXPECTED"
+                echo "GOT: $CALLS"
+                exit 1
+              fi
+
+              # call records need to be sorted as concurrentLimit is set to 2
+              CALLS=$(sort "$(params.dataDir)/mock_cosign_sign_calls")
+              COSIGN_COMMON="-t 3m0s sign --tlog-upload=false --key aws://arn:mykey --sign-container-identity"
+              # For external registries, the identity and reference are the same (repository url)
+              EXPECTED=$(cat <<EOF
+              $COSIGN_COMMON ${_TEST_REPO1}:0.1 ${_TEST_REPO1}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO1}:latest ${_TEST_REPO1}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO2}:0.2 ${_TEST_REPO2}@sha256:3333
+              EOF
+              )
+              echo "TESTING SIGN CALLS"
+              if [ "$CALLS" != "$EXPECTED" ]; then
+                echo "Diff:"
+                CALLS_FILE=$(mktemp XXXXX.calls)
+                EXPECTED_FILE=$(mktemp XXXXX.expected)
+                echo "$CALLS" > "$CALLS_FILE"
+                echo "$EXPECTED" > "$EXPECTED_FILE"
+                diff -Naur "$EXPECTED_FILE" "$CALLS_FILE"
+                exit 1
+              fi
+
+              # Verify calls are sorted because order may vary due to concurrent execution
+              CALLS=$(sort "$(params.dataDir)/mock_cosign_verify_calls")
+              COSIGN_COMMON="verify --insecure-ignore-tlog=true --key temp_key_file"
+              EXPECTED=$(cat <<EOF
+              $COSIGN_COMMON ${_TEST_REPO1}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO1}@sha256:2222
+              $COSIGN_COMMON ${_TEST_REPO2}@sha256:3333
+              EOF
+              )
+              echo "TESTING VERIFY CALLS"
+              if [ "$CALLS" != "$EXPECTED" ]; then
+                echo "Diff:"
+                CALLS_FILE=$(mktemp XXXXX.calls)
+                EXPECTED_FILE=$(mktemp XXXXX.expected)
+                echo "$CALLS" > "$CALLS_FILE"
+                echo "$EXPECTED" > "$EXPECTED_FILE"
+                diff -Naur "$EXPECTED_FILE" "$CALLS_FILE"
+                rm "$CALLS_FILE" "$EXPECTED_FILE"
+                exit 1
+              fi
+      runAfter:
+        - run-task
