@@ -8,8 +8,30 @@ function git() {
   if [[ "$1" == "clone" ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
     mkdir -p "$gitRepo"/schema
-    echo '{"$schema": "http://json-schema.org/draft-07/schema#","type": "object", "properties":{}}' > "$gitRepo"/schema/advisory.json
-
+		cat > "$gitRepo/schema/advisory.json" <<-'EOF'
+		{
+		  "$schema": "http://json-schema.org/draft-07/schema#",
+		  "type": "object",
+		  "required": ["spec"],
+		  "properties": {
+		    "spec": {
+		      "type": "object",
+		      "required": ["type"],
+		      "properties": {
+		        "type": {
+		          "type": "string",
+		          "enum": ["RHEA", "RHBA", "RHSA"]
+		        },
+		        "severity": {
+		          "type": "string",
+		          "enum": ["Critical", "Important", "Moderate", "Low"]
+		        }
+		      }
+		    }
+		  }
+		}
+		EOF
+    
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2025/1602
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2025/1601
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2024/1452
@@ -36,6 +58,28 @@ function git() {
 
 function yq() {
   echo "Mock yq called with: $*" >&2
+
+  if [[ "$1" == "eval" ]]; then
+    json_file="$4"
+    yaml_tmpfile=$(mktemp)
+
+    command yq "$@" | tee "$yaml_tmpfile"
+
+    # Check that tags are preserved correctly in json/yaml conversion.
+    product_name=$(jq -r '.spec.product_name' "$json_file")
+    if [[ "$product_name" == "preserves tags" ]]; then
+      json_tags=$(jq -r '.spec.content.images[].tags[]' "$json_file")
+      yaml_tags=$(command yq '.spec.content.images[].tags[]' "$yaml_tmpfile")
+      while IFS= read -r tag; do
+        if ! grep -qFx "$tag" <<< "$yaml_tags"; then
+          echo "Error: tag '$tag' not preserved in YAML output" >&2
+          exit 1
+        fi
+      done <<< "$json_tags"
+      echo "Tags are preserved correctly" >&2
+    fi
+    return
+  fi
 
   if [[ -z "$3" ]]; then
     echo "Error: Empty file path in yq command" >&2
@@ -119,18 +163,6 @@ function kubectl() {
     echo key1
   else
     /usr/bin/kubectl $*
-  fi
-}
-
-function check-jsonschema() {
-  echo "Mock check-jsonschema called with: $*"
-
-  if [[ "$*" == *"schema-tenant"* ]]; then
-    # Use a bogus file so it fails validation
-    echo "A:B:C" > /tmp/fail.yaml
-    /usr/local/bin/check-jsonschema "$1" "$2" /tmp/fail.yaml
-  else
-    /usr/local/bin/check-jsonschema $*
   fi
 }
 

@@ -86,7 +86,7 @@ spec:
       runAsUser: 1001
   steps:
     - name: create-advisory
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:a9fc6af1db5fefe43c655b3241326e8115cd9569b810bac7effb33b45dd2a855
       computeResources:
         limits:
           memory: 256Mi
@@ -317,7 +317,8 @@ spec:
           # group advisories by <origin workspace>/year
           ADVISORY_DIR="data/advisories/$(params.origin)/${YEAR}/${ADVISORY_NUM}"
           mkdir -p "${ADVISORY_DIR}"
-          ADVISORY_FILEPATH="${ADVISORY_DIR}/advisory.yaml"
+          JSON_ADVISORY_FILEPATH="${ADVISORY_DIR}/advisory.json"
+          YAML_ADVISORY_FILEPATH="${ADVISORY_DIR}/advisory.yaml"
           ADVISORY_NAME="${YEAR}:${ADVISORY_NUM}"
 
           # Prepare variables for the advisory template
@@ -326,20 +327,21 @@ spec:
           jq -c --arg advisory_name "$ADVISORY_NAME" --arg advisory_ship_date "$SHIP_DATE" \
             '$ARGS.named + .' /tmp/template_data.json > /tmp/template_data_final.json
 
-          # Create advisory file using the updated apply_template.py with --data-file option
-          /home/utils/apply_template.py -o "$ADVISORY_FILEPATH" --data-file /tmp/template_data_final.json \
-            --verbose --template /home/templates/advisory.yaml.jinja
-
-          cat "$ADVISORY_FILEPATH"
+          # Create advisory file using the apply_template.py script
+          /home/utils/apply_template.py -o "$JSON_ADVISORY_FILEPATH" --data-file /tmp/template_data_final.json \
+          --template /home/templates/advisory.yaml.jinja -v 2> "$STDERR_FILE"
+           
+          # Convert to yaml for readability
+          yq eval -o yaml "$JSON_ADVISORY_FILEPATH" | tee "$YAML_ADVISORY_FILEPATH"
 
           # Ensure the created advisory file passes the advisory schema
-          check-jsonschema --schemafile schema/advisory.json "$ADVISORY_FILEPATH" 2>&1 | tee "$STDERR_FILE"
+          check-jsonschema --schemafile schema/advisory.json "$YAML_ADVISORY_FILEPATH" 2>&1 | tee "$STDERR_FILE"
 
-          git add "${ADVISORY_FILEPATH}"
+          git add "${YAML_ADVISORY_FILEPATH}"
           git commit -m "[Konflux Release] new advisory for $(params.application)"
           echo "Pushing to ${REPO_BRANCH}..."
           git_push_with_retries --branch $REPO_BRANCH --retries 5 --url origin 2> "$STDERR_FILE"
           # Construct the advisory url on customer portal to report back to the user as a result
           ADVISORY_TYPE=$(jq -r '.type' /tmp/advisory_decoded.json)
           ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
-          ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/${REPO_BRANCH}/${ADVISORY_FILEPATH}"
+          ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/${REPO_BRANCH}/${YAML_ADVISORY_FILEPATH}"
