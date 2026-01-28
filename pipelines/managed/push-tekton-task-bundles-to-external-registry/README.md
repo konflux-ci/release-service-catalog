@@ -1,6 +1,7 @@
 # push-tekton-task-bundles-to-external-registry pipeline
 
-Tekton pipeline to release tekton tasks bundles to an external registry and update trusted-tasks list.
+Tekton pipeline to release tekton tasks bundles to an external registry, optionally sign them
+with cosign, and update trusted-tasks list.
 
 ## Parameters
 
