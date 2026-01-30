@@ -1,0 +1,63 @@
+---
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: ReleasePlanAdmission
+metadata:
+  name: ${release_plan_admission_name}
+  labels:
+    originating-tool: "${originating_tool}"
+  annotations:
+    test.appstudio.openshift.io/large-snapshot: "true"
+    # Skip idempotency check for large snapshot test releases
+    # Expected behavior: Allows repeated releases of the same snapshot for testing
+    # Rationale: Test releases should not be blocked by previous test runs
+    test.appstudio.openshift.io/skip-idempotency: "true"
+spec:
+  applications:
+    - ${application_name}
+  data:
+    pyxis:
+      server: stage
+      secret: pyxis-${component_name}
+    sign:
+      configMapName: "hacbs-signing-pipeline-config-staging-redhatbeta2"
+      cosignSecretName: "konflux-cosign-signing-stage-${component_name}"
+    mapping:
+      defaults:
+        tags:
+          - latest
+        pushSourceContainer: false
+      components:
+        # For large snapshot test, we configure all components
+        # The actual snapshot will contain the component definitions
+        # This mapping ensures they are all processed
+        - name: '*'
+          repositories:
+            - url: quay.io/redhat-pending/rhtap----rh-advisories-large-test
+    fileUpdates:
+      - paths:
+          - path: data/teams/stonesoup/users/shebert.yml
+            replacements:
+              - key: .tag_on_cluster_updates
+                replacement: >-
+                  |^tag_on_cluster_updates:.*|tag_on_cluster_updates: {{ .components[0].containerImage }}|
+        repo: 'https://gitlab.cee.redhat.com/hacbs-release-tests/app-interface/'
+        upstream_repo: 'https://gitlab.cee.redhat.com/hacbs-release-tests/app-interface/'
+        ref: 'master'
+  origin: ${tenant_namespace}
+  pipeline:
+    pipelineRef:
+      params:
+        - name: url
+          value: "${RELEASE_CATALOG_GIT_URL}"
+        - name: revision
+          value: "${RELEASE_CATALOG_GIT_REVISION}"
+        - name: pathInRepo
+          value: pipelines/managed/rh-advisories/rh-advisories.yaml
+      resolver: git
+    serviceAccountName: ${managed_sa_name}
+    timeouts:
+      # Timeout for large snapshot processing (configurable via LARGE_SNAPSHOT_TIMEOUT in test.env)
+      # Default: 8h0m0s for processing ~200 components
+      pipeline: ${LARGE_SNAPSHOT_TIMEOUT}
+      tasks: ${LARGE_SNAPSHOT_TIMEOUT}
+  policy: standard-${component_name}

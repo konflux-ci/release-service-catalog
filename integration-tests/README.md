@@ -12,6 +12,14 @@ The following integration test suites are available:
 - **[rh-push-to-external-registry](rh-push-to-external-registry/)** - Tests for pushing to external registries
 - **[release-to-github](release-to-github/)** - Tests for GitHub release pipeline
 - **[rhtap-service-push](rhtap-service-push/)** - Tests for RHTAP service push pipeline
+- **[rh-advisories-large-snapshot](rh-advisories-large-snapshot/)** - **Manual test** for rh-advisories pipeline with large snapshots (~200 components)
+  - **Trigger**: Comment `/test-large-snapshot` on any PR
+  - **Duration**: 4-8 hours
+  - **⚠️ Hard Requirements**:
+    - **Cluster**: `stg-rh01` staging cluster only
+    - **Namespace**: `rhtap-release-2-tenant` (PaC runs) or `dev-release-team-tenant` (local runs)
+    - **Required Secrets** (must exist in namespace): `vault-password-secret`, `github-token-secret`, `kubeconfig-secret`
+    - Cannot run in arbitrary clusters/namespaces without infrastructure setup
 
 ## Common Setup
 
