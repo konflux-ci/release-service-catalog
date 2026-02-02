@@ -1,0 +1,220 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: prepare-data-acceptable-bundles
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to prepare data-acceptable-bundles repositories by modifying the snapshot.
+    
+    This task reads the snapshot file, extracts repository URLs from components that have
+    public: true set, transforms them to the corresponding data-acceptable-bundles repository
+    format, and adds them to the snapshot as components marked with public: true.
+    For example: quay.io/org/source-repo -> quay.io/org/data-acceptable-bundles
+    
+    Only components with explicit public: true are processed, as these are the components
+    that will be processed by the make-repo-public task. Components without public: true
+    (or with public: false) are ignored.
+    
+    This task does NOT call external APIs, mount secrets, or use tokens.
+    It only processes the snapshot data and modifies it to include data-acceptable-bundles repositories.
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+        subPath: ca-bundle.crt
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: prepare-data-acceptable-bundles
+      image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        
+        # Check if snapshot exists
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was found at ${SNAPSHOT_SPEC_FILE}."
+            exit 1
+        fi
+
+        # Read the snapshot
+        SNAPSHOT=$(cat "${SNAPSHOT_SPEC_FILE}")
+
+        # Extract, transform, and deduplicate data-acceptable-bundles repositories in one pass
+        # This processes all components and repositories in a single jq operation, which is much
+        # more efficient than parsing the JSON multiple times in nested loops.
+        # The jq expression:
+        #   - Filters components that have public: true (only these will be processed by make-repo-public)
+        #   - Extracts repository URLs from those components
+        #   - Filters for quay.io repositories only
+        #   - Transforms each URL to data-acceptable-bundles format (replaces last path segment)
+        #   - Deduplicates the results
+        #   - Outputs one repository per line for readarray
+        readarray -t REPOSITORIES < <(jq -r '
+          [
+            .components[]
+            | select(.public == true)
+            | .repositories[].url 
+            | select(startswith("quay.io")) 
+            | sub("/[^/]+$"; "/data-acceptable-bundles")
+          ] 
+          | unique 
+          | .[]
+        ' "${SNAPSHOT_SPEC_FILE}")
+
+        # Get the number of unique repositories to add
+        NUM_REPOS=${#REPOSITORIES[@]}
+
+        if [ "$NUM_REPOS" -eq 0 ]; then
+            echo "No data-acceptable-bundles repositories found. Snapshot unchanged."
+        else
+            echo "Adding ${NUM_REPOS} data-acceptable-bundles repository/repositories to snapshot..."
+
+            # Add each repository as a component with public: true
+            for repo in "${REPOSITORIES[@]}"; do
+                # Create a component name by replacing / and . with - for valid component names
+                COMPONENT_NAME="data-acceptable-bundles-$(echo "$repo" | tr '/.' '-')"
+                
+                # Create a component for this data-acceptable-bundles repository
+                NEW_COMPONENT=$(jq -n \
+                  --arg name "$COMPONENT_NAME" \
+                  --arg url "$repo" \
+                  '{
+                    "name": $name,
+                    "repositories": [{"url": $url}],
+                    "public": true
+                  }')
+                
+                # Add the component to the snapshot
+                SNAPSHOT=$(echo "$SNAPSHOT" | jq --argjson component "$NEW_COMPONENT" '.components += [$component]')
+                
+                echo "Added component for repository: ${repo}"
+            done
+
+            # Write the modified snapshot back to the file
+            echo "$SNAPSHOT" | jq . > "${SNAPSHOT_SPEC_FILE}"
+            echo "Snapshot updated with ${NUM_REPOS} data-acceptable-bundles repository/repositories"
+        fi
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

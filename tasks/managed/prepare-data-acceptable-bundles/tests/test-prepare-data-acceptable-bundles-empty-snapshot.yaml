@@ -1,0 +1,183 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-prepare-data-acceptable-bundles-empty-snapshot
+spec:
+  description: |
+    Run the prepare-data-acceptable-bundles task with an empty snapshot
+    (no components). Should not add any new components.
+  params:
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the OCI repository
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+          - name: trusted-ca
+            configMap:
+              name: trusted-ca
+              items:
+                - key: ca-bundle.crt
+                  path: ca-bundle.crt
+              optional: true
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+            - name: trusted-ca
+              mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "test-app",
+                "components": []
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: prepare-data-acceptable-bundles
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+          - name: trusted-ca
+            configMap:
+              name: trusted-ca
+              items:
+                - key: ca-bundle.crt
+                  path: ca-bundle.crt
+              optional: true
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+            - name: trusted-ca
+              mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            computeResources:
+              limits:
+                memory: 64Mi
+              requests:
+                memory: 64Mi
+                cpu: 30m
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              SNAPSHOT_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json"
+              
+              # Verify snapshot exists
+              if [ ! -f "${SNAPSHOT_FILE}" ]; then
+                echo "Error: Snapshot file not found at ${SNAPSHOT_FILE}"
+                exit 1
+              fi
+
+              # Verify snapshot still has 0 components (no data-acceptable-bundles added)
+              NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
+              if [ "$NUM_COMPONENTS" != "0" ]; then
+                echo "Error: Expected 0 components, got $NUM_COMPONENTS"
+                echo "Components:"
+                jq '.components' "${SNAPSHOT_FILE}"
+                exit 1
+              fi
+
+              echo "Success: Snapshot unchanged (no components to process)"
+      runAfter:
+        - run-task

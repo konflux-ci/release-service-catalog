@@ -1,0 +1,276 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-prepare-data-acceptable-bundles
+spec:
+  description: |
+    Run the prepare-data-acceptable-bundles task and verify
+    that it correctly modifies the snapshot to include data-acceptable-bundles
+    repositories as components marked as public.
+    
+    This test verifies that the task only processes components with public: true
+    and creates corresponding data-acceptable-bundles components for them.
+  params:
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the OCI repository
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+          - name: trusted-ca
+            configMap:
+              name: trusted-ca
+              items:
+                - key: ca-bundle.crt
+                  path: ca-bundle.crt
+              optional: true
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+            - name: trusted-ca
+              mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "test-app",
+                "components": [
+                  {
+                    "name": "component1",
+                    "repositories": [
+                      {
+                        "url": "quay.io/konflux-ci/my-repo"
+                      }
+                    ],
+                    "public": true
+                  },
+                  {
+                    "name": "component2",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-services-prod/another-repo"
+                      },
+                      {
+                        "url": "quay.io/redhat-services-stage/third-repo"
+                      }
+                    ],
+                    "public": true
+                  },
+                  {
+                    "name": "component3",
+                    "repositories": [
+                      {
+                        "url": "myregistry.org/myspace/my-repo"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: prepare-data-acceptable-bundles
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+          - name: trusted-ca
+            configMap:
+              name: trusted-ca
+              items:
+                - key: ca-bundle.crt
+                  path: ca-bundle.crt
+              optional: true
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+            - name: trusted-ca
+              mountPath: /etc/ssl/certs/ca-custom-bundle.crt
+              subPath: ca-bundle.crt
+              readOnly: true
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            computeResources:
+              limits:
+                memory: 64Mi
+              requests:
+                memory: 64Mi
+                cpu: 30m
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              SNAPSHOT_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json"
+              
+              # Verify snapshot exists
+              if [ ! -f "${SNAPSHOT_FILE}" ]; then
+                echo "Error: Snapshot file not found at ${SNAPSHOT_FILE}"
+                exit 1
+              fi
+
+              # Verify snapshot has the original 3 components plus new data-acceptable-bundles components
+              NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_FILE}")
+              if [ "$NUM_COMPONENTS" -lt 3 ]; then
+                echo "Error: Expected at least 3 components, got $NUM_COMPONENTS"
+                exit 1
+              fi
+
+              # Verify data-acceptable-bundles components were added
+              # Should have 3 new components: konflux-ci, redhat-services-prod, and redhat-services-stage
+              # Only components with public: true are processed (component1 and component2)
+              # Non-quay.io repos are filtered out (component3 has non-quay.io repo and no public: true)
+              DATA_ACCEPTABLE_COUNT=$(jq \
+                '[.components[] | select(.name | startswith("data-acceptable-bundles-"))] | length' \
+                "${SNAPSHOT_FILE}")
+              if [ "$DATA_ACCEPTABLE_COUNT" != "3" ]; then
+                echo "Error: Expected 3 data-acceptable-bundles components, got $DATA_ACCEPTABLE_COUNT"
+                echo "Components:"
+                jq '.components[] | select(.name | startswith("data-acceptable-bundles-"))' "${SNAPSHOT_FILE}"
+                exit 1
+              fi
+
+              # Verify each data-acceptable-bundles component has public: true
+              for ((i = 0; i < NUM_COMPONENTS; i++)); do
+                COMPONENT=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
+                COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+                
+                if [[ "$COMPONENT_NAME" == data-acceptable-bundles-* ]]; then
+                  PUBLIC=$(jq -r '.public // false' <<< "$COMPONENT")
+                  if [ "$PUBLIC" != "true" ]; then
+                    echo "Error: Component $COMPONENT_NAME should have public: true, got public: $PUBLIC"
+                    exit 1
+                  fi
+                  
+                  # Verify it has the correct repository URL
+                  REPO_URL=$(jq -r '.repositories[0].url' <<< "$COMPONENT")
+                  if [[ "$REPO_URL" != quay.io/*/data-acceptable-bundles ]]; then
+                    echo "Error: Component $COMPONENT_NAME has invalid repository URL: $REPO_URL"
+                    exit 1
+                  fi
+                fi
+              done
+
+              # Check for expected repositories (non-quay.io repos filtered out)
+              COMPONENT_NAME_1="data-acceptable-bundles-quay-io-konflux-ci-data-acceptable-bundles"
+              if ! jq -e --arg name "$COMPONENT_NAME_1" \
+                '[.components[] | select(.name == $name)] | length > 0' \
+                "${SNAPSHOT_FILE}" > /dev/null 2>&1; then
+                echo "Error: Expected $COMPONENT_NAME_1 component not found"
+                exit 1
+              fi
+
+              COMPONENT_NAME_2="data-acceptable-bundles-quay-io-redhat-services-prod-data-acceptable-bundles"
+              if ! jq -e --arg name "$COMPONENT_NAME_2" \
+                '[.components[] | select(.name == $name)] | length > 0' \
+                "${SNAPSHOT_FILE}" > /dev/null 2>&1; then
+                echo "Error: Expected $COMPONENT_NAME_2 component not found"
+                exit 1
+              fi
+
+              # Verify redhat-services-stage/data-acceptable-bundles is present
+              COMPONENT_NAME_3="data-acceptable-bundles-quay-io-redhat-services-stage-data-acceptable-bundles"
+              if ! jq -e --arg name "$COMPONENT_NAME_3" \
+                '[.components[] | select(.name == $name)] | length > 0' \
+                "${SNAPSHOT_FILE}" > /dev/null 2>&1; then
+                echo "Error: Expected $COMPONENT_NAME_3 component not found"
+                exit 1
+              fi
+
+              echo "Success: Snapshot correctly modified with data-acceptable-bundles components"
+      runAfter:
+        - run-task
