@@ -149,7 +149,7 @@ spec:
               '[.items[] |
                 select(.fbc_fragments != null) |
                 select((.fbc_fragments | sort) == $fbc_fragments) |
-                select(.distribution_scope == "prod" or .distribution_scope == null)
+                select(.distribution_scope | IN("prod", "stage", null))
               ] | sort_by(.updated) | last // empty')
 
           if [ -n "${completed_build}" ] && [ "${completed_build}" != "null" ]; then
@@ -197,7 +197,7 @@ spec:
                   # Extract the last build (most recent, regardless of fbc_fragments)
                   last_build_updated=$(echo "${all_builds_data}" | jq \
                     '[.items[] |
-                      select(.distribution_scope == "prod" or .distribution_scope == null) |
+                      select(.distribution_scope | IN("prod", "stage", null)) |
                       select(.updated != null and .updated != "")
                     ] | sort_by(.updated) | reverse | .[0].updated // empty')
 
@@ -240,8 +240,11 @@ spec:
             return 0
           fi
 
-          # Step 2: Look for in-progress builds with PLR collision prevention
+          # Step 2: Look for in-progress builds
+          # When build_tags are provided, use them for PLR collision prevention (matching only our own PLR's builds)
+          # When build_tags are empty, match any in-progress build with the same fbc_fragments
           if [ "${current_build_tags}" != "[]" ] && [ -n "${current_build_tags}" ]; then
+            # Build tags provided - filter to only match our PLR's builds
             in_progress_build=$(curl -s \
               "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}&state=in_progress" | \
               jq --argjson fbc_fragments "${fbc_fragments_json}" \
@@ -249,15 +252,26 @@ spec:
                 '[.items[] |
                   select(.fbc_fragments != null) |
                   select((.fbc_fragments | sort) == $fbc_fragments) |
-                  select(.distribution_scope == "prod" or .distribution_scope == null) |
-                  select(.build_tags != null and ($current_tags | length > 0) and
-                         (. as $build | $current_tags | map(. as $tag | $tag | IN($build.build_tags[])) | any))
+                  select(.distribution_scope | IN("prod", "stage", null)) |
+                  select(.build_tags != null and
+                         (. as $build | $current_tags |
+                          map(. as $tag | $tag | IN($build.build_tags[])) | any))
                 ] | sort_by(.updated) | last // empty')
+          else
+            # No build tags - resume any in-progress build with matching fbc_fragments
+            in_progress_build=$(curl -s \
+              "${IIB_SERVICE_URL}/builds?user=${user}&from_index=${from_index}&state=in_progress" | \
+              jq --argjson fbc_fragments "${fbc_fragments_json}" \
+                '[.items[] |
+                  select(.fbc_fragments != null) |
+                  select((.fbc_fragments | sort) == $fbc_fragments) |
+                  select(.distribution_scope | IN("prod", "stage", null))
+                ] | sort_by(.updated) | last // empty')
+          fi
 
-            if [ -n "${in_progress_build}" ] && [ "${in_progress_build}" != "null" ]; then
-              echo "${in_progress_build}"
-              return 0
-            fi
+          if [ -n "${in_progress_build}" ] && [ "${in_progress_build}" != "null" ]; then
+            echo "${in_progress_build}"
+            return 0
           fi
 
           # No suitable build found

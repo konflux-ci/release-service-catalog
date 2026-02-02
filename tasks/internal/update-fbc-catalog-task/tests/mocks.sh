@@ -31,9 +31,10 @@ export buildSeed buildJson calls
 
 # Helper function to generate jq expression for auth-failure test build
 # Takes timestamp as parameter and returns jq expression string
+# Note: This is for a PRODUCTION index test, so distribution_scope must be "prod"
 get_auth_failure_jq_expr() {
   local timestamp="$1"
-  echo '.items[0] |= (.fbc_fragments = ["registry.io/image0@sha256:0000"] | .from_index = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .from_index_resolved = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:3d6fe02b28ab876d60af3c3df5100a6fe4c99b084651af547659173d680c6f4d" | .index_image = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .index_image_resolved = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:10b1d5b1d053d8c3a2263201baa983c760e6b61f3a50e3cde244fdaf68a4aed9" | .updated = "'"${timestamp}"'" | .state = "complete" | .state_reason = "The FBC fragment was successfully added in the index image")'
+  echo '.items[0] |= (.fbc_fragments = ["registry.io/image0@sha256:0000"] | .from_index = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .from_index_resolved = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:3d6fe02b28ab876d60af3c3df5100a6fe4c99b084651af547659173d680c6f4d" | .index_image = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12" | .index_image_resolved = "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:10b1d5b1d053d8c3a2263201baa983c760e6b61f3a50e3cde244fdaf68a4aed9" | .distribution_scope = "prod" | .updated = "'"${timestamp}"'" | .state = "complete" | .state_reason = "The FBC fragment was successfully added in the index image")'
 }
 
 function mock_build_progress() {
@@ -125,6 +126,21 @@ function curl() {
     else
       # Fall back to taskrun name matching
       case "${taskrun_name}" in
+        *stage-resume-inprogress*)
+          # For stage-resume-inprogress test: validate KONFLUX-12016 fix
+          # Return in-progress stage build only for in_progress queries, empty for complete queries
+          echo "DEBUG: Setting stage-resume-inprogress case" >&2
+          if [[ "$params" == *"state=in_progress"* ]]; then
+            # Return the in-progress stage build - this should be resumed
+            build=$(jq -rc '.items[0].distribution_scope = "stage"' <<< "${build}")
+            build=$(jq -rc '.items[0].state = "in_progress"' <<< "${build}")
+            build=$(jq -rc '.items[0].from_index = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
+            build=$(jq -rc '.items[0].index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${build}")
+          else
+            # For state=complete queries, return empty (no completed build to resume)
+            build='{"items": []}'
+          fi
+        ;;
         *auth-failure*)
           # For auth-failure test, return an OLD build (>24 hours) that should be rejected
           # Check this BEFORE *complete* to avoid pattern collision
@@ -220,6 +236,15 @@ function curl() {
   elif [[ "$params" =~ "-u : --negotiate -s -X POST -H Content-Type: application/json -d@".*" --insecure https://fakeiib.host/builds/fbc-operations" ]]; then
     # For POST requests, use the buildSeed template as the base
     buildJson=$(jq -cr '.items[0]' <<< "${buildSeed}")
+    
+    # Check if this is stage-resume-inprogress test
+    # If we reach here in the stage-resume-inprogress test, it means the resume failed
+    # (should not happen with the fix, but good to track for debugging)
+    if [[ "$(context.taskRun.name)" == *"stage-resume-inprogress"* ]]; then
+      echo "DEBUG: WARNING - POST request in stage-resume-inprogress test means build was NOT resumed!" >&2
+      # Set up stage build for this test case
+      buildJson=$(jq -c '.distribution_scope = "stage" | .from_index = "quay.io/scoheb/fbc-index-testing:latest" | .index_image = "quay.io/scoheb/fbc-index-testing:latest"' <<< "${buildJson}")
+    fi
     
     # Check if this is auth-failure test by taskrun name
     if [[ "$(context.taskRun.name)" == *"auth-failure"* ]]; then

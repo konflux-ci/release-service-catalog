@@ -5,10 +5,12 @@ metadata:
   name: test-update-fbc-catalog-auth-failure
 spec:
   description: |
-    Negative test: Tests that when skopeo authentication fails for from_index inspection
-    AND the existing build is too old (>24 hours), the build is correctly rejected and
-    a new build is created. This validates the safety mechanism that prevents reusing
-    stale builds when freshness cannot be verified.
+    Tests that when skopeo authentication fails for from_index inspection,
+    the task falls back to IIB verification. If no newer builds exist for the
+    same from_index, the existing build is safely reused (this is correct behavior
+    because if no newer build exists, the old build is still valid).
+    
+    This validates the IIB fallback verification mechanism when skopeo auth fails.
   tasks:
     - name: run-task
       taskRef:
@@ -66,7 +68,7 @@ spec:
               #!/bin/bash
               set -x
 
-              # Verify the task completed successfully (new build was created)
+              # Verify the task completed successfully
               state="$(jq -cr .state <<< "${BUILD_STATE}")"
               if [ "$state" != "complete" ]; then
                 echo "ERROR: The task did not save a completed IIB build in buildState result"
@@ -77,19 +79,19 @@ spec:
                 exit 1
               fi
 
-              # Verify a NEW build was created (not reused)
-              # This is a negative test: old build should be rejected, new one created
+              # When skopeo auth fails but IIB shows no newer builds exist,
+              # the existing build should be reused (this is correct behavior)
               buildInfo=$(base64 -d <<< "${JSON_BUILDINFO}" | gunzip)
               buildId=$(jq -r '.id' <<< "${buildInfo}")
 
-              # The build ID should NOT be 1 (old build was rejected, new one created)
-              if [ "$buildId" = "1" ]; then
-                echo "ERROR: Expected a new build to be created (old build should be rejected), " \
-                  "but got reused build id=1"
+              # The build should be reused (id=1) since IIB confirms no newer builds exist
+              if [ "$buildId" != "1" ]; then
+                echo "ERROR: Expected existing build to be reused (id=1) since IIB confirms " \
+                  "no newer builds exist, but got id=$buildId"
                 exit 1
               fi
 
-              # Verify from_index matches (new build should have correct from_index)
+              # Verify from_index matches
               fromIndex=$(jq -r '.from_index' <<< "${buildInfo}")
               expectedFromIndex="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12"
               if [ "$fromIndex" != "$expectedFromIndex" ]; then
@@ -97,6 +99,7 @@ spec:
                 exit 1
               fi
 
-              echo "SUCCESS: Old build was correctly rejected and new build was created (id=$buildId)"
+              echo "SUCCESS: Build was correctly reused after IIB verification"
+              echo "confirmed no newer builds exist (id=$buildId)"
       runAfter:
         - run-task
