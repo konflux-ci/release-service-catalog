@@ -198,9 +198,12 @@ spec:
             REMOTE_DIR="$HOME/$TASK_UID/kmods"
         fi
 
-        # Check if any .ko files exist in the remote directory
-        if ls "$REMOTE_DIR"/*.ko 1> /dev/null 2>&1; then
-            for kmod in "$REMOTE_DIR"/*.ko; do
+        # Check if any .ko files exist in the remote directory (recursively)
+        if find "$REMOTE_DIR" -name "*.ko" -type f | head -1 | grep -q "."; then
+            echo "Remote: Found .ko files in directory structure, signing recursively..."
+
+            # Process each .ko file found recursively
+            find "$REMOTE_DIR" -name "*.ko" -type f | while read -r kmod; do
                 if [ -f "$kmod" ]; then
                     echo "Remote: Signing kernel module $kmod for $ARCH"
                     rh-signing-client --key "$KEY" --onbehalfof "${SIGNING_AUTHOR}" --lkmsign "$kmod"
@@ -212,6 +215,10 @@ spec:
                     echo "Remote: Skipping entry $kmod (not a regular file)"
                 fi
             done
+
+            # Count and report signed files
+            signed_count=$(find "$REMOTE_DIR" -name "*.ko" -type f | wc -l)
+            echo "Remote: Successfully signed $signed_count .ko files for $ARCH"
         else
             echo "Remote: ERROR: No .ko files found in $REMOTE_DIR for $ARCH"
             exit 1
@@ -257,12 +264,19 @@ spec:
                             cp "$arch_dir/envfile" "/tmp/envfile.backup.$arch_name"
                         fi
 
-                        # Verify we have .ko files to sign
+                        # Verify we have .ko files to sign (check recursively)
                         ko_files_found=false
-                        if ls "$arch_dir"/*.ko 1> /dev/null 2>&1; then
+                        if find "$arch_dir" -name "*.ko" -type f | head -1 | grep -q "."; then
                             ko_files_found=true
                             ko_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
-                            echo "Found $ko_count .ko files to sign for $arch_name"
+                            echo "Found $ko_count .ko files to sign for $arch_name (recursive search)"
+
+                            # Show directory structure for verification
+                            echo "Directory structure for $arch_name:"
+                            find "$arch_dir" -name "*.ko" -type f | sort | head -10 | sed 's|^|  |'
+                            if [ "$(find "$arch_dir" -name "*.ko" -type f | wc -l)" -gt 10 ]; then
+                                echo "  ... (showing first 10 files)"
+                            fi
                         else
                             echo "WARNING: No .ko files found for architecture $arch_name, skipping"
                             continue
@@ -275,10 +289,29 @@ spec:
                             ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
                                 "mkdir -p ~/${task_uid}/kmods/${arch_name}"
 
-                            # Copy unsigned kmods to signing server for this architecture
-                            echo "Copying unsigned .ko files to signing server for $arch_name..."
-                            scp "${SSH_OPTS[@]}" "$arch_dir"/*.ko \
-                                "${signUser}@${signHost}:~/${task_uid}/kmods/${arch_name}/"
+                            # Copy unsigned kmods to signing server for this architecture (preserving structure)
+                            echo "Copying directory structure with .ko files to signing server for $arch_name..."
+
+                            # Create a temporary tarball with the directory structure
+                            temp_tarball="/tmp/kmods_${arch_name}_${task_uid}.tar.gz"
+                            cd "$arch_dir"
+
+                            # Create tarball including all .ko files and their directory structure
+                            find . -name "*.ko" -type f | tar -czf "$temp_tarball" --files-from=-
+
+                            # Copy tarball to signing server
+                            scp "${SSH_OPTS[@]}" "$temp_tarball" \
+                                "${signUser}@${signHost}:~/${task_uid}/kmods_${arch_name}.tar.gz"
+
+                            # Extract on remote server preserving structure
+                            # Intentional client-side expansion: task_uid expands locally for unique remote directories
+                            # shellcheck disable=SC2029
+                            ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                                "cd ~/${task_uid}/kmods/${arch_name} && tar -xzf ~/kmods_${arch_name}.tar.gz"
+
+                            # Cleanup local temp file
+                            rm -f "$temp_tarball"
+                            cd - > /dev/null
 
                             # Verify files were copied to remote server
                             echo "Verifying files on remote server for $arch_name..."
@@ -291,26 +324,40 @@ spec:
                             # Sign kmods for this architecture
                             sign_kmods_for_arch "$arch_name"
 
-                            # Copy back signed kmods to workspace
-                            # Remove unsigned files first to ensure complete replacement
-                            echo "Copying back signed .ko files for $arch_name..."
-                            rm -f "$arch_dir"/*.ko
-                            # Get list of .ko files from remote server and copy them individually
+                            # Copy back signed kmods to workspace (preserving directory structure)
+                            echo "Copying back signed .ko files with preserved structure for $arch_name..."
+
+                            # Remove all .ko files first to ensure complete replacement
+                            find "$arch_dir" -name "*.ko" -type f -delete
+
+                            # Create tarball on remote server with signed files and copy back
+                            signed_tarball="/tmp/signed_kmods_${arch_name}_${task_uid}.tar.gz"
                             # Intentional client-side expansion: task_uid expands locally for unique remote directories
                             # shellcheck disable=SC2029
-                            kmod_files=$(ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
-                                "cd ~/${task_uid}/kmods/${arch_name}/ && ls -1 *.ko 2>/dev/null || echo ''" )
-                            if [ -n "$kmod_files" ]; then
-                                echo "$kmod_files" | while IFS= read -r kmod_file; do
-                                    if [ -n "$kmod_file" ]; then
-                                        echo "Copying back signed file: $kmod_file"
-                                        scp "${SSH_OPTS[@]}" \
-                                            "${signUser}@${signHost}:~/${task_uid}/kmods/${arch_name}/$kmod_file" \
-                                            "$arch_dir/"
-                                    fi
-                                done
+                            ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                                "cd ~/${task_uid}/kmods/${arch_name} && \
+                                 find . -name '*.ko' -type f | \
+                                 tar -czf ~/signed_${arch_name}.tar.gz --files-from=-"
+
+                            # Copy back the tarball
+                            scp "${SSH_OPTS[@]}" \
+                                "${signUser}@${signHost}:~/${task_uid}/signed_${arch_name}.tar.gz" \
+                                "$signed_tarball"
+
+                            # Extract to workspace preserving directory structure
+                            cd "$arch_dir"
+                            tar -xzf "$signed_tarball"
+                            cd - > /dev/null
+
+                            # Cleanup temp file
+                            rm -f "$signed_tarball"
+
+                            # Verify extraction worked
+                            signed_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+                            if [ "$signed_count" -gt 0 ]; then
+                                echo "Successfully copied back $signed_count signed .ko files for $arch_name"
                             else
-                                echo "WARNING: No .ko files found on remote server for $arch_name"
+                                echo "WARNING: No .ko files found after copy back for $arch_name"
                             fi
 
                             # Restore envfile
@@ -392,36 +439,71 @@ spec:
                     cp "$arch_dir/envfile" "/tmp/envfile.backup.$arch_subdir_name"
                 fi
 
-                # Copy unsigned kmods to signing server
+                # Copy unsigned kmods to signing server (preserving structure)
                 # Intentional client-side expansion: task_uid expands locally for unique remote directories
                 # shellcheck disable=SC2029
                 ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "mkdir -p ~/${task_uid}/kmods"
 
-                echo "Copying unsigned .ko files from $arch_subdir_name to signing server..."
-                scp "${SSH_OPTS[@]}" "$arch_dir"/*.ko "${signUser}@${signHost}:~/${task_uid}/kmods/"
+                echo "Copying directory structure with .ko files from $arch_subdir_name to signing server..."
+
+                # Create a temporary tarball with the directory structure
+                temp_tarball="/tmp/kmods_single_${task_uid}.tar.gz"
+                cd "$arch_dir"
+
+                # Create tarball including all .ko files and their directory structure
+                find . -name "*.ko" -type f | tar -czf "$temp_tarball" --files-from=-
+
+                # Copy tarball to signing server
+                scp "${SSH_OPTS[@]}" "$temp_tarball" \
+                    "${signUser}@${signHost}:~/${task_uid}/kmods.tar.gz"
+
+                # Extract on remote server
+                # Intentional client-side expansion: task_uid expands locally for unique remote directories
+                # shellcheck disable=SC2029
+                ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                    "cd ~/${task_uid}/kmods && tar -xzf ~/kmods.tar.gz"
+
+                # Cleanup local temp file
+                rm -f "$temp_tarball"
+                cd - > /dev/null
 
                 # Sign kmods
                 sign_kmods_for_arch "single"
 
-                # Copy back signed kmods to workspace
-                echo "Copying back signed .ko files for $arch_subdir_name..."
-                rm -f "$arch_dir"/*.ko
-                # Get list of .ko files from remote server and copy them individually
+                # Copy back signed kmods to workspace (preserving directory structure)
+                echo "Copying back signed .ko files with preserved structure for $arch_subdir_name..."
+
+                # Remove all .ko files first to ensure complete replacement
+                find "$arch_dir" -name "*.ko" -type f -delete
+
+                # Create tarball on remote server with signed files and copy back
+                signed_tarball="/tmp/signed_kmods_single_${task_uid}.tar.gz"
                 # Intentional client-side expansion: task_uid expands locally for unique remote directories
                 # shellcheck disable=SC2029
-                kmod_files=$(ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
-                    "cd ~/${task_uid}/kmods/ && ls -1 *.ko 2>/dev/null || echo ''" )
-                if [ -n "$kmod_files" ]; then
-                    echo "$kmod_files" | while IFS= read -r kmod_file; do
-                        if [ -n "$kmod_file" ]; then
-                            echo "Copying back signed file: $kmod_file"
-                            scp "${SSH_OPTS[@]}" \
-                                "${signUser}@${signHost}:~/${task_uid}/kmods/$kmod_file" \
-                                "$arch_dir/"
-                        fi
-                    done
+                ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                    "cd ~/${task_uid}/kmods && \
+                     find . -name '*.ko' -type f | \
+                     tar -czf ~/signed_single.tar.gz --files-from=-"
+
+                # Copy back the tarball
+                scp "${SSH_OPTS[@]}" \
+                    "${signUser}@${signHost}:~/${task_uid}/signed_single.tar.gz" \
+                    "$signed_tarball"
+
+                # Extract to workspace preserving directory structure
+                cd "$arch_dir"
+                tar -xzf "$signed_tarball"
+                cd - > /dev/null
+
+                # Cleanup temp file
+                rm -f "$signed_tarball"
+
+                # Verify extraction worked
+                signed_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+                if [ "$signed_count" -gt 0 ]; then
+                    echo "Successfully copied back $signed_count signed .ko files for $arch_subdir_name"
                 else
-                    echo "ERROR: No .ko files found on remote server"
+                    echo "ERROR: No .ko files found after signing process"
                     exit 1
                 fi
 
@@ -461,33 +543,75 @@ spec:
                 cp envfile /tmp/envfile.backup
             fi
 
-            # Copy unsigned kmods to signing server
+            # Copy unsigned kmods to signing server (preserving structure if any)
             # Intentional client-side expansion: task_uid expands locally for unique remote directories
             # shellcheck disable=SC2029
             ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "mkdir -p ~/${task_uid}/kmods"
-            scp "${SSH_OPTS[@]}" "${SIGNED_KMODS_PATH}"/*.ko "${signUser}@${signHost}:~/${task_uid}/kmods/"
+
+            cd "$SIGNED_KMODS_PATH"
+            # Check if we have any .ko files in subdirectories or just in root
+            if find . -name "*.ko" -type f | head -1 | grep -q "."; then
+                echo "Creating tarball with directory structure for fallback case..."
+                # Create tarball including all .ko files and their directory structure
+                temp_tarball="/tmp/kmods_fallback_${task_uid}.tar.gz"
+                find . -name "*.ko" -type f | tar -czf "$temp_tarball" --files-from=-
+
+                # Copy tarball to signing server
+                scp "${SSH_OPTS[@]}" "$temp_tarball" \
+                    "${signUser}@${signHost}:~/${task_uid}/kmods.tar.gz"
+
+                # Extract on remote server
+                # Intentional client-side expansion: task_uid expands locally for unique remote directories
+                # shellcheck disable=SC2029
+                ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                    "cd ~/${task_uid}/kmods && tar -xzf ~/kmods.tar.gz"
+
+                # Cleanup local temp file
+                rm -f "$temp_tarball"
+            fi
+            cd - > /dev/null
 
             # Sign kmods
             sign_kmods_for_arch "single"
 
-            # Copy back signed kmods to workspace
-            echo "Copying back signed .ko files for fallback single architecture..."
-            rm -f "${SIGNED_KMODS_PATH}"/*.ko
-            # Get list of .ko files from remote server and copy them individually
+            # Copy back signed kmods to workspace (preserving structure)
+            echo "Copying back signed .ko files for fallback case with preserved structure..."
+
+            # Remove all .ko files first to ensure complete replacement
+            find "${SIGNED_KMODS_PATH}" -name "*.ko" -type f -delete
+
+            # Create tarball on remote server with signed files and copy back
+            signed_tarball="/tmp/signed_kmods_fallback_${task_uid}.tar.gz"
             # Intentional client-side expansion: task_uid expands locally for unique remote directories
             # shellcheck disable=SC2029
-            kmod_files=$(ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
-                "cd ~/${task_uid}/kmods/ && ls -1 *.ko 2>/dev/null || echo ''" )
-            if [ -n "$kmod_files" ]; then
-                echo "$kmod_files" | while IFS= read -r kmod_file; do
-                    if [ -n "$kmod_file" ]; then
-                        echo "Copying back signed file: $kmod_file"
-                        scp "${SSH_OPTS[@]}" \
-                            "${signUser}@${signHost}:~/${task_uid}/kmods/$kmod_file" "${SIGNED_KMODS_PATH}"/
-                    fi
-                done
+            ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" \
+                "cd ~/${task_uid}/kmods && \
+                 find . -name '*.ko' -type f | \
+                 tar -czf ~/signed_fallback.tar.gz --files-from=-"
+
+            # Copy back the tarball
+            if ssh "${SSH_OPTS[@]}" "${signUser}@${signHost}" "test -f ~/signed_fallback.tar.gz"; then
+                scp "${SSH_OPTS[@]}" \
+                    "${signUser}@${signHost}:~/${task_uid}/signed_fallback.tar.gz" \
+                    "$signed_tarball"
+
+                # Extract to workspace preserving directory structure
+                cd "${SIGNED_KMODS_PATH}"
+                tar -xzf "$signed_tarball"
+                cd - > /dev/null
+
+                # Cleanup temp file
+                rm -f "$signed_tarball"
+
+                # Verify extraction worked
+                signed_count=$(find "${SIGNED_KMODS_PATH}" -name "*.ko" -type f | wc -l)
+                if [ "$signed_count" -gt 0 ]; then
+                    echo "Successfully copied back $signed_count signed .ko files for fallback case"
+                else
+                    echo "WARNING: No .ko files found after copy back for fallback case"
+                fi
             else
-                echo "WARNING: No .ko files found on remote server for fallback case"
+                echo "WARNING: No signed files tarball found on remote server for fallback case"
             fi
 
             # Restore envfile after signing process

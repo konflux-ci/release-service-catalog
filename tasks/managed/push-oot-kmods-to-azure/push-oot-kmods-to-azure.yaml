@@ -172,22 +172,34 @@ spec:
             AZURE_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION_CLEAN}${arch_suffix}/"
             echo "Azure target path: ${ACCOUNT}/${CONTAINER}/${AZURE_TARGET_PATH}"
 
-            # Upload .ko files
-            if ls "$source_dir"/*.ko 1> /dev/null 2>&1; then
-                echo "Uploading .ko files for $arch_name"
-                for f in "$source_dir"/*.ko; do
-                    if [ -f "$f" ]; then
-                        BLOB_NAME="${AZURE_TARGET_PATH}$(basename "$f")"
-                        echo "Uploading ${f} to ${BLOB_NAME}..."
-                        az storage blob upload \
-                          --account-name "$ACCOUNT" \
-                          --container-name "$CONTAINER" \
-                          --name "$BLOB_NAME" \
-                          --file "$f" \
-                          --auth-mode login \
-                          --overwrite
-                    fi
+            # Upload .ko files (with recursive directory structure support)
+            if find "$source_dir" -name "*.ko" -type f | head -1 | grep -q "."; then
+                ko_file_count=$(find "$source_dir" -name "*.ko" -type f | wc -l)
+                echo "Uploading $ko_file_count .ko files for $arch_name (preserving directory structure)"
+
+                # Show directory structure being uploaded for verification
+                echo "Directory structure for $arch_name:"
+                find "$source_dir" -name "*.ko" -type f | sort | head -10 | sed 's|^|  |'
+                if [ "$(find "$source_dir" -name "*.ko" -type f | wc -l)" -gt 10 ]; then
+                    echo "  ... (showing first 10 files)"
+                fi
+
+                # Upload each .ko file preserving the directory structure
+                cd "$source_dir"
+                find . -name "*.ko" -type f | while read -r ko_file; do
+                    # Remove the leading "./" from the path and construct blob name
+                    relative_path="${ko_file#./}"
+                    BLOB_NAME="${AZURE_TARGET_PATH}${relative_path}"
+                    echo "Uploading ${ko_file} to ${BLOB_NAME}..."
+                    az storage blob upload \
+                      --account-name "$ACCOUNT" \
+                      --container-name "$CONTAINER" \
+                      --name "$BLOB_NAME" \
+                      --file "$ko_file" \
+                      --auth-mode login \
+                      --overwrite
                 done
+                cd - > /dev/null
             else
                 echo "WARNING: No .ko files found for architecture $arch_name"
                 return 1
