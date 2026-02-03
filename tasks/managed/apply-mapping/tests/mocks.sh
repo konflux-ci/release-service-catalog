@@ -46,6 +46,18 @@ function skopeo() {
       return
   fi
 
+  # 7 digit tags: ignored by {1,6} regex, incrementer starts at 1
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-leadingzero ]]; then
+      echo '{"Tags": ["v0.7.0-0760387", "v0.7.0-0760386"]}'
+      return
+  fi
+
+  # Leading 0 with invalid octal digit: 10# fix prevents octal error
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-octal ]]; then
+      echo '{"Tags": ["v1.0.0-08", "v1.0.0-07"]}'
+      return
+  fi
+
   # Raw manifest inspections (for annotations and config.mediaType) - these use the digest from get-image-architectures
   if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/helm-chart"* ]]
   then
