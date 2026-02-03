@@ -30,6 +30,10 @@ declare -gA GLOBAL_TEST_MATRIX=(
 # Global tracking for releases to verify
 declare -gA RELEASES_TO_VERIFY=()
 
+# Global tracking for ALL PipelineRun UIDs to cleanup
+# This array stores UIDs from ALL releases in the test suite
+declare -ga ALL_PIPELINERUN_UIDS=()
+
 # --- GitHub API Integration (Works within existing pipeline) ---
 
 # Use GitHub API to detect changed task names (PR_NUMBER and GITHUB_TOKEN available)
@@ -873,6 +877,26 @@ verify_release_contents() {
         
         # Wait for release completion
         wait_for_release "$release_name"
+        
+        # IMMEDIATE cleanup after this release completes (before next release starts)
+        # This prevents IR accumulation between releases in the same test suite
+        echo "  🧹 Cleaning up InternalRequests from this release..."
+        local plr_name=$(kubectl get release "$release_name" -n "${RELEASE_NAMESPACE}" \
+            -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null | cut -d'/' -f2)
+        if [ -n "$plr_name" ]; then
+            local plr_uid=$(kubectl get pipelinerun "$plr_name" -n managed-release-team-tenant \
+                -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+            if [ -n "$plr_uid" ]; then
+                echo "    Deleting InternalRequests for PipelineRun UID: $plr_uid"
+                kubectl delete internalrequest -n managed-release-team-tenant \
+                    -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$plr_uid" \
+                    --timeout=30s 2>/dev/null || true
+                echo "  ✅ Cleanup completed for $release_name"
+                
+                # Track for final cleanup as well
+                ALL_PIPELINERUN_UIDS+=("$plr_uid")
+            fi
+        fi
         
         # Mode-specific verification
         local mode_result=0

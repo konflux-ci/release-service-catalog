@@ -1,5 +1,21 @@
 # Maintenance
 
+## Resource Cleanup
+
+Integration tests automatically clean up resources before and after each test run. For manual cleanup of accumulated resources:
+
+```bash
+cd integration-tests
+
+# Clean resources older than 24 hours
+./scripts/cleanup-accumulated-resources.sh
+
+# Preview what would be deleted
+./scripts/cleanup-accumulated-resources.sh --dry-run
+```
+
+The script removes InternalRequests, PipelineRuns, Releases, Applications, Components, and ReleasePlans to prevent quota exhaustion (Release objects can hit 1024 quota limit).
+
 ## Create the e2e service account k8s token and kubeconfig
 
   * Since Secrets cannot be managed by argoCD and tenants-config, the e2e service account token must be manually created initially

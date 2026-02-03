@@ -4,7 +4,7 @@ kind: Pipeline
 metadata:
   name: test-add-fbc-contribution-adaptive-1gi
 spec:
-  description: Test adaptive parallelism with 1Gi memory limit (expects 8 workers, capped)
+  description: Test adaptive parallelism with 1Gi memory limit (expects 2 workers - low memory scenario)
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -26,7 +26,34 @@ spec:
       description: The location where data will be stored
       type: string
   tasks:
+    - name: cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: cleanup
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Pre-test cleanup ==="
+              echo "Cleaning up old InternalRequests from previous test runs..."
+              kubectl get internalrequests 2>/dev/null || echo "None found"
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/group-id \
+                --timeout=30s 2>/dev/null || true
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/pipelinerun-uid \
+                --timeout=30s 2>/dev/null || true
+              kubectl get internalrequests -o name 2>/dev/null | \
+                grep "update-fbc-catalog" | \
+                xargs -r kubectl delete --timeout=30s 2>/dev/null || true
+              sleep 5
+              echo "Cleanup completed"
+    
     - name: setup
+      runAfter:
+        - cleanup-previous-runs
       taskSpec:
         results:
           - name: sourceDataArtifact
@@ -54,7 +81,7 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
 
-              # Create snapshot with 5 OCP versions to test higher concurrency
+              # Create snapshot with 5 OCP versions to test low memory parallelism (2 workers)
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
                 "application": "test-adaptive-1gi-app",
@@ -115,7 +142,7 @@ spec:
               }
               EOF
 
-              echo "Test setup complete for 1Gi adaptive test"
+              echo "Test setup complete for 1Gi adaptive test (expects 2 workers)"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -215,6 +242,7 @@ spec:
               set -eux
 
               echo "=== ADAPTIVE 1Gi VERIFICATION ==="
+              echo "Expected: floor((1024Mi - 400Mi) / 274Mi) = floor(624 / 274) = 2 workers"
 
               RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
               
@@ -231,7 +259,7 @@ spec:
                 echo "❌ Expected 5 components, found: $component_count"
                 exit 1
               fi
-              echo "✅ All 5 components processed"
+              echo "✅ All 5 components processed (2 workers handling 5 OCP versions sequentially)"
 
               # Get task logs to verify adaptive calculation
               TASK_POD=$(kubectl get pods \
@@ -249,27 +277,19 @@ spec:
                   exit 1
                 fi
                 
-                # Verify calculated 8 workers (capped)
-                if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers: 8"; then
-                  echo "✅ Correctly calculated 8 workers for 1Gi (capped at max)"
+                # Verify calculated 2 workers per formula
+                if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers: 2"; then
+                  echo "✅ Correctly calculated 2 workers: floor((1024Mi - 400Mi) / 274Mi) = 2"
                 else
-                  echo "❌ Did not calculate 8 workers for 1Gi"
+                  echo "❌ Did not calculate 2 workers"
                   exit 1
                 fi
                 
-                # Verify all 5 could run in parallel (5 < 8 limit)
-                if echo "$TASK_LOGS" | grep -q "Processing 5 OCP groups with maximum 8 parallel workers"; then
-                  echo "✅ Confirmed 5 OCP groups with 8 worker capacity (all can run simultaneously)"
+                # Verify limited parallelism (5 OCP versions with 2 workers)
+                if echo "$TASK_LOGS" | grep -q "Processing 5 OCP groups with maximum 2 parallel workers"; then
+                  echo "✅ Confirmed limited parallelism: 5 OCP groups with 2 worker limit"
                 else
                   echo "⚠️  Worker limit log not found"
-                fi
-                
-                # With 5 OCP versions and 8 worker limit, all should run simultaneously
-                # Check that we don't see "At parallel limit" (since 5 < 8)
-                if echo "$TASK_LOGS" | grep -q "At parallel limit"; then
-                  echo "⚠️  Unexpected: hit parallel limit with 5 OCP versions and 8 worker capacity"
-                else
-                  echo "✅ All 5 OCP versions ran without hitting worker limit (5 < 8)"
                 fi
               else
                 echo "⚠️  Could not verify logs (pod not found)"

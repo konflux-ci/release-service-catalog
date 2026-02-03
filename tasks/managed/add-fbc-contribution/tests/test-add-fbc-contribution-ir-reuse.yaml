@@ -1,0 +1,451 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-ir-reuse
+spec:
+  description: |
+    Test that InternalRequests with correct labels are successfully reused
+    in retry scenarios (simulating a pipeline retry after transient failure).
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: cleanup
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Pre-test cleanup ==="
+              echo "Cleaning up old InternalRequests from previous test runs..."
+              kubectl get internalrequests 2>/dev/null || echo "None found"
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/group-id \
+                --timeout=30s 2>/dev/null || true
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/pipelinerun-uid \
+                --timeout=30s 2>/dev/null || true
+              kubectl get internalrequests -o name 2>/dev/null | \
+                grep "update-fbc-catalog" | \
+                xargs -r kubectl delete --timeout=30s 2>/dev/null || true
+              sleep 5
+              echo "Cleanup completed"
+    
+    - name: setup
+      runAfter:
+        - cleanup-previous-runs
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with single component
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "test-reuse-app",
+                "components": [
+                  {
+                    "name": "comp1-v4.13",
+                    "containerImage": "registry.io/image1@sha256:aaa111",
+                    "repository": "prod-registry.io/prod-location1",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Test setup complete for IR reuse test"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: create-pre-existing-ir
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+        steps:
+          - name: create-ir-with-correct-labels
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== Creating pre-existing IR with CORRECT labels ==="
+
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # Create an IR that looks like it was created by a previous run
+              # with ALL the correct labels that should make it reusable
+              cat <<EOF | kubectl apply -f -
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: InternalRequest
+              metadata:
+                name: update-fbc-catalog-reuse-test
+                labels:
+                  internal-services.appstudio.openshift.io/pipelinerun-uid: "${PIPELINE_UID}"
+                  batch-number: "1"
+                  ocp-version: "4.13"
+              spec:
+                pipeline:
+                  pipelineRef:
+                    resolver: cluster
+                    params:
+                    - name: name
+                      value: update-fbc-catalog
+              EOF
+
+              # Wait for IR to be created
+              for _ in {1..10}; do
+                if kubectl get internalrequest update-fbc-catalog-reuse-test &>/dev/null; then
+                  echo "✅ Pre-existing IR created successfully"
+                  break
+                fi
+                sleep 1
+              done
+              
+              # CRITICAL: Set the status separately (Kubernetes ignores .status in kubectl apply)
+              # The status must show Succeeded=True for the IR to be reusable
+              
+              # Prepare values to avoid complex command substitution in JSON
+              transition_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              
+              # Create mock jsonBuildInfo (gzipped base64 JSON)
+              json_data='{"updated":"2024-03-06T16:39:11.314092Z",'
+              json_data+='"index_image":"registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:123456",'
+              json_data+='"index_image_resolved":"registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib@sha256:abcd1234"}'
+              json_build_info="$(echo "$json_data" | gzip -c | base64 -w0)"
+              
+              kubectl patch internalrequest update-fbc-catalog-reuse-test --type=merge --subresource=status --patch '{
+                "status": {
+                  "conditions": [
+                    {
+                      "type": "Succeeded",
+                      "status": "True",
+                      "reason": "Succeeded",
+                      "message": "IR completed successfully",
+                      "lastTransitionTime": "'"${transition_time}"'"
+                    }
+                  ],
+                  "results": {
+                    "jsonBuildInfo": "'"${json_build_info}"'",
+                    "indexImageDigests": "quay.io/test1 quay.io/test2",
+                    "iibLog": "Test IIB Log for reuse test",
+                    "exitCode": "0"
+                  }
+                }
+              }'
+              
+              # Verify the status was set correctly
+              echo "Verifying IR status was set..."
+              for _ in {1..10}; do
+                status=$(kubectl get internalrequest update-fbc-catalog-reuse-test \
+                  -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' \
+                  2>/dev/null || echo "")
+                if [[ "$status" == "True" ]]; then
+                  echo "✅ IR status confirmed: Succeeded=True"
+                  break
+                fi
+                echo "Waiting for status to propagate (current: $status)..."
+                sleep 1
+              done
+
+              # Verify it has all the correct labels
+              actual_uid=$(kubectl get internalrequest update-fbc-catalog-reuse-test \
+                -o jsonpath='{.metadata.labels.internal-services\.appstudio\.openshift\.io/pipelinerun-uid}')
+              actual_batch=$(kubectl get internalrequest update-fbc-catalog-reuse-test \
+                -o jsonpath='{.metadata.labels.batch-number}')
+              actual_ocp=$(kubectl get internalrequest update-fbc-catalog-reuse-test \
+                -o jsonpath='{.metadata.labels.ocp-version}')
+
+              echo "Pre-existing IR labels:"
+              echo "  pipelinerun-uid: $actual_uid"
+              echo "  batch-number: $actual_batch"
+              echo "  ocp-version: $actual_ocp"
+
+              if [[ "$actual_uid" != "$PIPELINE_UID" ]] || \
+                 [[ "$actual_batch" != "1" ]] || \
+                 [[ "$actual_ocp" != "4.13" ]]; then
+                echo "❌ Pre-existing IR doesn't have expected labels"
+                exit 1
+              fi
+
+              echo "✅ Pre-existing IR has all correct labels and should be reusable"
+      runAfter:
+        - setup
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "main"
+        - name: maxBatchSize
+          value: "5"
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+      runAfter:
+        - create-pre-existing-ir
+
+    - name: verify-ir-reused
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify-reuse
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== IR REUSE TEST: Verify Existing IR Was Reused ==="
+
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # Test 1: Verify only 1 IR exists (the pre-existing one, not a new one)
+              ir_count=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers | wc -l)
+              
+              if [[ "$ir_count" -ne 1 ]]; then
+                echo "❌ Expected exactly 1 IR (the reused one), found: $ir_count"
+                echo "This means a new IR was created instead of reusing the existing one!"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+                exit 1
+              fi
+              echo "✅ Test 1 PASSED: Only 1 IR exists"
+
+              # Test 2: Verify the IR is the one we pre-created
+              ir_name=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o jsonpath='{.items[0].metadata.name}')
+              
+              if [[ "$ir_name" != "update-fbc-catalog-reuse-test" ]]; then
+                echo "❌ IR name mismatch! Expected 'update-fbc-catalog-reuse-test', got: '$ir_name'"
+                echo "This means the pre-existing IR was NOT reused!"
+                exit 1
+              fi
+              echo "✅ Test 2 PASSED: Pre-existing IR was reused: $ir_name"
+
+              # Test 3: Check task logs for reuse message
+              echo "=== Checking task logs for IR reuse confirmation ==="
+              TASK_POD=$(kubectl get pods \
+                -l "tekton.dev/task=add-fbc-contribution,tekton.dev/pipelineRun=$(context.pipelineRun.name)" \
+                --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+              
+              if [[ -n "$TASK_POD" ]]; then
+                TASK_LOGS=$(kubectl logs "$TASK_POD" -c step-add-contribution 2>/dev/null || echo "")
+                
+                if [[ -n "$TASK_LOGS" ]]; then
+                  # Look for the key messages indicating IR reuse
+                  if echo "$TASK_LOGS" | grep -q "Found potential InternalRequest"; then
+                    echo "✅ Log shows IR was found"
+                  else
+                    echo "⚠️  'Found potential InternalRequest' message not in logs"
+                  fi
+
+                  if echo "$TASK_LOGS" | grep -q "Verifying all required labels are present"; then
+                    echo "✅ Log shows label verification was performed"
+                  else
+                    echo "⚠️  Label verification message not in logs"
+                  fi
+
+                  if echo "$TASK_LOGS" | grep -q "All labels verified"; then
+                    echo "✅ Log confirms all labels matched"
+                  else
+                    echo "⚠️  'All labels verified' message not in logs"
+                  fi
+
+                  if echo "$TASK_LOGS" | grep -q "Reusing existing InternalRequest"; then
+                    echo "✅ Test 3 PASSED: Log confirms IR was reused"
+                  else
+                    echo "❌ Test 3 FAILED: 'Reusing existing InternalRequest' not found in logs"
+                    echo "--- Relevant log excerpt ---"
+                    echo "$TASK_LOGS" | grep -A5 -B5 "InternalRequest" || echo "(no matches)"
+                    exit 1
+                  fi
+
+                  # Verify NO new IR creation happened
+                  if echo "$TASK_LOGS" | grep -q "No existing non-failed InternalRequest found, creating new one"; then
+                    echo "❌ CRITICAL: Log shows a NEW IR was created (should have reused!)"
+                    exit 1
+                  fi
+                  echo "✅ No new IR creation occurred (as expected)"
+                else
+                  echo "⚠️  Could not retrieve task logs"
+                fi
+              else
+                echo "⚠️  Could not find task pod"
+              fi
+
+              # Test 4: Verify the results file contains the correct index_image from reused IR
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              if [[ -f "$RESULTS_FILE" ]]; then
+                index_image=$(jq -r '.components[0].index_image' "$RESULTS_FILE")
+                expected_image="registry-proxy-stage.engineering.redhat.com/rh-osbs-stage/iib:123456"
+                
+                if [[ "$index_image" == "$expected_image" ]]; then
+                  echo "✅ Test 4 PASSED: Results contain correct index_image from reused IR"
+                else
+                  echo "❌ Index image mismatch! Expected: $expected_image, Got: $index_image"
+                  exit 1
+                fi
+              else
+                echo "⚠️  Results file not found: $RESULTS_FILE"
+              fi
+
+              echo "=== ALL IR REUSE TESTS PASSED ==="
+      runAfter:
+        - run-task
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+              
+              kubectl delete internalrequest update-fbc-catalog-reuse-test || true
+
+              echo "IR reuse test cleanup completed"

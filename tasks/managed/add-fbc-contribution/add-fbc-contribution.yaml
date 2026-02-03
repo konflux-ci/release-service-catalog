@@ -169,13 +169,14 @@ spec:
         - name: orasOptions
           value: $(params.orasOptions)
     - name: add-contribution
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
       computeResources:
         limits:
-          memory: 512Mi
+          memory: 4096Mi
           cpu: 200m
         requests:
-          memory: 512Mi  # was exiting with code 137 when set to 256Mi
+          memory: 4096Mi  # increased to 4Gi to prevent OOM with parallel processing 
           cpu: 200m
       script: |
         #!/usr/bin/env bash
@@ -259,6 +260,28 @@ spec:
         TASK_ID=$(context.taskRun.uid)
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
+        # ============================================================================
+        # Configuration Constants - Timing and Retry Behavior
+        # ============================================================================
+        # These constants control polling, retries, and jitter behavior
+        # Adjust these values to tune performance vs. reliability trade-offs
+        
+        # InternalRequest status polling configuration
+        readonly IR_STATUS_POLL_INTERVAL_SECONDS=10    # How often to check IR status
+        readonly IR_API_ERROR_THRESHOLD=3              # Max consecutive API errors before failing
+        readonly IR_MIN_WAIT_FOR_VISIBILITY_SECONDS=20 # Grace period before checking terminal states
+        readonly IR_NOT_FOUND_TOLERANCE_SECONDS=30     # How long to tolerate "not found" errors
+        
+        # Jitter configuration to prevent thundering herd
+        readonly WORKER_STARTUP_JITTER_MIN_SECONDS=1   # Min delay when launching parallel workers
+        readonly WORKER_STARTUP_JITTER_MAX_SECONDS=3   # Max delay when launching parallel workers
+        readonly API_CALL_JITTER_MIN_SECONDS=0         # Min delay before API calls in execute_batch
+        readonly API_CALL_JITTER_MAX_SECONDS=2         # Max delay before API calls in execute_batch
+        
+        # Parallel worker coordination
+        readonly WORKER_COMPLETION_POLL_INTERVAL_SECONDS=1  # How often to check worker completion
+        # ============================================================================
+
         # Create batches with size limits
         LENGTH=$(jq -r '.components | length' "${SNAPSHOT_PATH}")
         MAX_BATCH_SIZE="$(params.maxBatchSize)"
@@ -285,6 +308,34 @@ spec:
         finally_task_timeout=300
         pipeline_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds + finally_task_timeout )))
         task_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds )))
+
+        # Helper function to sleep with random jitter to prevent thundering herd
+        # Arguments: min_seconds max_seconds
+        # Example: sleep_with_jitter 1 3  # sleeps for 1-3 seconds
+        sleep_with_jitter() {
+            local min=${1:-0}
+            local max=${2:-0}
+            
+            # Validate inputs are numeric
+            if ! [[ "$min" =~ ^[0-9]+$ ]] || ! [[ "$max" =~ ^[0-9]+$ ]]; then
+                echo "WARNING: sleep_with_jitter received non-numeric input (min=$min, max=$max)"
+                return 0
+            fi
+            
+            # Validate max >= min
+            if [ "$max" -lt "$min" ]; then
+                echo "WARNING: sleep_with_jitter max ($max) < min ($min), swapping values"
+                local temp=$min
+                min=$max
+                max=$temp
+            fi
+            
+            local range=$((max - min + 1))
+            local delay=$((min + RANDOM % range))
+            if [ "$delay" -gt 0 ]; then
+                sleep "$delay"
+            fi
+        }
 
         # Group components by OCP version for isolated processing
         group_components_by_ocp_version() {
@@ -352,19 +403,22 @@ spec:
                 echo "INFO: Memory limit: ${memory_limit_mib}Mi" >&2
             fi
             
-            # Estimated memory usage per worker (based on observed usage):
-            # - JSON processing with jq: ~30-40Mi
-            # - kubectl operations and output buffers: ~30-40Mi
-            # - Bash subprocess overhead: ~10-20Mi
-            # - Safety margin: 20%
-            # Total: ~100Mi per worker conservatively
-            local memory_per_worker_mib=100
+            # Estimated memory usage per worker (calibrated from production OOM incidents):
+            # - JSON processing with jq: ~65-85Mi (peak with large snapshots)
+            # - kubectl operations and output buffers: ~55-75Mi
+            # - Bash subprocess overhead: ~25-35Mi
+            # - Fork overhead during peak operations: ~45-65Mi
+            # - Safety margin per worker: ~24Mi
+            # Total: ~274Mi per worker 
+            # With 4Gi: allows 12 workers capped (13 calculated, capped at 12 for IIB safety)
+            local memory_per_worker_mib=274
             
-            # Reserve base memory for main script operations
-            # - Initial snapshot loading and parsing: ~50Mi
-            # - Results aggregation: ~30Mi
-            # - System overhead: ~50Mi
-            local base_memory_mib=130
+            # Reserve base memory for main script operations (optimized):
+            # - Initial snapshot loading and parsing: ~120Mi (large snapshots)
+            # - Results aggregation and merging: ~120Mi (concurrent writes)
+            # - System overhead and buffers: ~90Mi
+            # - Emergency reserve for OOM prevention: ~70Mi
+            local base_memory_mib=400
             
             local available_for_workers=$((memory_limit_mib - base_memory_mib))
             
@@ -376,7 +430,17 @@ spec:
             
             local optimal_workers=$((available_for_workers / memory_per_worker_mib))
             
-            local max_cap=8
+            # Dynamic cap based on memory to balance IIB load and parallelism
+            # - 4Gi (12 workers): Good balance for most releases
+            # - 6Gi (18 workers): Enhanced parallelism for large releases  
+            # - 8Gi+ (24 workers): Maximum safe parallelism to avoid IIB overload
+            local max_cap=24
+            if [ "$memory_limit_mib" -lt 6000 ]; then
+                max_cap=12  # 4Gi-5.9Gi: cap at 12 workers
+            elif [ "$memory_limit_mib" -lt 8000 ]; then
+                max_cap=18  # 6Gi-7.9Gi: cap at 18 workers
+            fi
+            
             if [ "$optimal_workers" -gt "$max_cap" ]; then
                 echo "INFO: Calculated $optimal_workers workers, capping at $max_cap to avoid IIB overload" >&2
                 optimal_workers=$max_cap
@@ -396,10 +460,7 @@ spec:
         process_all_ocp_groups() {
             echo "INFO: Starting parallel group processing with adaptive worker limits"
 
-            local parallel_dir
-            parallel_dir="$(params.dataDir)/parallel-tracking"
-            mkdir -p "$parallel_dir"
-            
+            # parallel_dir is now defined globally before this function is called
             export parallel_dir
 
             # Calculate optimal parallelism based on available memory
@@ -432,17 +493,28 @@ spec:
                     done
                     
                     if [ -z "$completed_pid" ]; then
-                        sleep 1
+                        sleep "$WORKER_COMPLETION_POLL_INTERVAL_SECONDS"
                         continue
                     fi
                     
+                    # Extract OCP version for this PID
+                    local completed_ocp_version="unknown"
+                    for mapping in "${pid_to_ocp[@]}"; do
+                        if [[ "$mapping" == "$completed_pid:"* ]]; then
+                            completed_ocp_version="${mapping#*:}"
+                            break
+                        fi
+                    done
+                    
                     if wait "$completed_pid" 2>/dev/null; then
-                        echo "INFO: Worker (PID: $completed_pid) completed successfully"
+                        echo "INFO: Worker for OCP $completed_ocp_version (PID: $completed_pid) completed successfully"
                         completed_count=$((completed_count + 1))
                     else
                         local exit_code=$?
-                        echo "ERROR: Worker (PID: $completed_pid) failed with exit code $exit_code"
-                        failed_groups+=("$completed_pid")
+                        echo "ERROR: Worker for OCP $completed_ocp_version (PID: $completed_pid)" \
+                             "failed with exit code $exit_code"
+                        # Store failure diagnostics: ocpVersion:pid:exitCode
+                        failed_groups+=("${completed_ocp_version}:${completed_pid}:${exit_code}")
                     fi
                     
                     local new_pids=()
@@ -469,6 +541,12 @@ spec:
 
                 (
                     set -euo pipefail
+                    
+
+                    # Add small random delay to prevent thundering herd on Kubernetes API
+                    # when all workers try to create InternalRequests simultaneously
+                    sleep_with_jitter "$WORKER_STARTUP_JITTER_MIN_SECONDS" \
+                        "$WORKER_STARTUP_JITTER_MAX_SECONDS"
                     
                     echo "INFO: [Parallel Worker $current_ocp_version] Starting processing"
                     
@@ -504,7 +582,8 @@ spec:
                 else
                     local exit_code=$?
                     echo "ERROR: Worker for OCP $ocp_version (PID: $pid) failed with exit code $exit_code"
-                    failed_groups+=("$ocp_version")
+                    # Store failure diagnostics: ocpVersion:pid:exitCode
+                    failed_groups+=("${ocp_version}:${pid}:${exit_code}")
                 fi
             done
 
@@ -514,7 +593,12 @@ spec:
                 echo "ERROR: ${#failed_groups[@]} OCP group(s) failed processing" \
                      "(adaptive limit: $max_parallel_workers):"
                 for failed_group in "${failed_groups[@]}"; do
-                    echo "  - OCP version: $failed_group"
+                    # Parse failure diagnostics: ocpVersion:pid:exitCode
+                    local ocp_ver="${failed_group%%:*}"
+                    local rest="${failed_group#*:}"
+                    local worker_pid="${rest%%:*}"
+                    local worker_exit="${rest#*:}"
+                    echo "  - OCP version: $ocp_ver, Worker PID: $worker_pid, Exit code: $worker_exit"
                 done
                 echo "Cannot proceed with partial release - all OCP groups must succeed"
                 exit 1
@@ -608,6 +692,9 @@ spec:
 
             echo "INFO: Creating $group_num_batches batch(es) for $num_components components" \
                 "in OCP group $group_ocp_version"
+            
+            # Write batch count to file for aggregation in verification
+            echo "$group_num_batches" > "${parallel_dir}/${group_ocp_version}.batch_count"
 
             # Determine fromIndex for batch chaining
             get_current_from_index() {
@@ -661,62 +748,394 @@ spec:
                 # Get batch fragments
                 local batch_fragments
                 batch_fragments=$(get_batch_fragments "$batch_num")
+        
+                # Add small random delay to stagger parallel API calls and reduce resource quota conflicts
+                # Random delay helps prevent thundering herd on Kubernetes API
+                sleep_with_jitter "$API_CALL_JITTER_MIN_SECONDS" "$API_CALL_JITTER_MAX_SECONDS"
 
-                # Create InternalRequest for this batch
-                internal-request --pipeline "update-fbc-catalog" \
-                    -p fromIndex="${from_index}" \
-                    -p fbcFragments="$(printf '%s' "${batch_fragments}" | jq -c .)" \
-                    -p iibServiceAccountSecret="${iib_service_account_secret}" \
-                    -p publishingCredentials="${publishing_credentials}" \
-                    -p buildTimeoutSeconds="${build_timeout_seconds}" \
-                    -p buildTags="$(jq -c . <<< "${group_build_tags}")" \
-                    -p addArches="$(jq -c . <<< "${add_arches}")" \
-                    -p mustPublishIndexImage="${mustPublishIndexImage}" \
-                    -p mustOverwriteFromIndexImage="${mustOverwriteFromIndexImage}" \
-                    -p taskGitUrl="$(params.taskGitUrl)" \
-                    -p taskGitRevision="$(params.taskGitRevision)" \
-                    --service-account "${internal_request_service_account}" \
-                    -l ${TASK_LABEL}="${TASK_ID}" \
-                    -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-                    --pipeline-timeout "${pipeline_timeout}" \
-                    --task-timeout "${task_timeout}" \
-                    -t "${request_timeout_seconds}" \
-                    | tee "${batch_file_prefix}-output.log"
+                # Use file-based mutex to prevent race condition when creating InternalRequests
+                # Multiple parallel workers might check for existing IRs at the same time and both create duplicates
+                # Lock file is scoped to OCP version and batch number to allow parallelism across different groups
+                local lock_dir
+                lock_dir="$(params.dataDir)/ir-creation-locks"
+                mkdir -p "$lock_dir"
+                
+                local lock_file
+                lock_file="${lock_dir}/ocp-${group_ocp_version}-batch-$((batch_num + 1)).lock"
+                
+                # Acquire exclusive lock with 60-second timeout to prevent deadlock
+                # Use file descriptor 200 to avoid conflicts with other file operations
+                local lock_timeout=60
+                local lock_acquired=false
+                
+                echo "Acquiring lock for InternalRequest creation: ${lock_file}"
+                exec 200>"$lock_file"
+                if flock -w "$lock_timeout" 200; then
+                    lock_acquired=true
+                    echo "Lock acquired successfully"
+                else
+                    echo "ERROR: Failed to acquire lock after ${lock_timeout} seconds"
+                    exec 200>&-  # Close file descriptor
+                    return 1
+                fi
 
-                # Extract request name
-                local internalRequest
-                internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-                    "${batch_file_prefix}-output.log")
+                # Check for existing InternalRequest for this batch to avoid duplicates during retries
+                # CRITICAL: This check is now inside the mutex, preventing race conditions
+                # CRITICAL: Only reuse IRs that are NOT in failed state (status != "False")
+                # Retrying a failed IR will immediately fail again
+                local internalRequest=""
+                local existing_ir
+                
+                local max_query_attempts=5
+                local query_attempt=0
+                
+                while [ $query_attempt -lt $max_query_attempts ]; do
+                    query_attempt=$((query_attempt + 1))
+                    
+                    local label_selector
+                    label_selector="${PIPELINERUN_LABEL}=$(params.pipelineRunUid)"
+                    label_selector="${label_selector},batch-number=$((batch_num + 1))"
+                    label_selector="${label_selector},ocp-version=${group_ocp_version}"
+                    existing_ir=$(kubectl get internalrequests -n "$(context.taskRun.namespace)" \
+                        -l "${label_selector}" \
+                        -o json 2>/dev/null | \
+                        jq -r '.items[] | select(.status.conditions[]? | 
+                            select(.type == "Succeeded") | .status != "False") | 
+                            .metadata.name' | head -1 || true)
+                    
+                    if [ -z "$existing_ir" ]; then
+                        # No IR found - this is expected for first batch creation
+                        if [ $query_attempt -gt 1 ]; then
+                            echo "Query attempt $query_attempt: No existing IR found (as expected)"
+                        fi
+                        break
+                    fi
+                    
+                    echo "Found potential InternalRequest for batch $((batch_num + 1)):" \
+                        "${existing_ir} (attempt $query_attempt)"
+                    
+                    # Verify the InternalRequest actually has ALL required labels
+                    local ir_pipeline_uid ir_batch_num ir_ocp_version
+                    local label_path="internal-services\.appstudio\.openshift\.io/pipelinerun-uid"
+                    ir_pipeline_uid=$(kubectl get internalrequest "$existing_ir" -n "$(context.taskRun.namespace)" \
+                        -o jsonpath="{.metadata.labels.${label_path}}" 2>/dev/null || echo "")
+                    ir_batch_num=$(kubectl get internalrequest "$existing_ir" -n "$(context.taskRun.namespace)" \
+                        -o jsonpath="{.metadata.labels.batch-number}" 2>/dev/null || echo "")
+                    ir_ocp_version=$(kubectl get internalrequest "$existing_ir" -n "$(context.taskRun.namespace)" \
+                        -o jsonpath="{.metadata.labels.ocp-version}" 2>/dev/null || echo "")
+                    
+                    # Check if all labels match expected values
+                    if [ "$ir_pipeline_uid" = "$(params.pipelineRunUid)" ] && \
+                       [ "$ir_batch_num" = "$((batch_num + 1))" ] && \
+                       [ "$ir_ocp_version" = "${group_ocp_version}" ]; then
+                        echo "✓ All labels verified (pipeline-uid: $ir_pipeline_uid," \
+                            "batch: $ir_batch_num, ocp: $ir_ocp_version)"
+                        echo "Reusing existing InternalRequest (retry scenario)"
+                        internalRequest="$existing_ir"
+                        
+                        # Add group-id label if missing (for reused IRs from before this feature)
+                        ir_group_id=$(kubectl get internalrequest "$existing_ir" -n "$(context.taskRun.namespace)" \
+                            -o jsonpath="{.metadata.labels.${TASK_LABEL}}" 2>/dev/null || echo "")
+                        if [ -z "$ir_group_id" ]; then
+                            echo "Adding missing group-id label to reused IR"
+                            kubectl label internalrequest "$existing_ir" -n "$(context.taskRun.namespace)" \
+                                "${TASK_LABEL}=${TASK_ID}" --overwrite 2>/dev/null || true
+                        fi
+                        
+                        # Release lock early since we're reusing existing IR
+                        flock -u 200
+                        exec 200>&-
+                        echo "Lock released (reusing existing IR)"
+                        break
+                    else
+                        echo "✗ Label mismatch detected on attempt $query_attempt"
+                        echo "  Expected: pipeline-uid=$(params.pipelineRunUid)," \
+                            "batch=$((batch_num + 1)), ocp=${group_ocp_version}"
+                        echo "  Found:    pipeline-uid=$ir_pipeline_uid," \
+                            "batch=$ir_batch_num, ocp=$ir_ocp_version"
+                        
+                        existing_ir=""  # Clear for retry
+                        
+                        # If not last attempt, wait before retrying
+                        if [ $query_attempt -lt $max_query_attempts ]; then
+                            echo "  This may indicate kubectl label selector returning stale results."
+                            echo "  Waiting 1 second before retry $((query_attempt + 1))/$max_query_attempts..."
+                            sleep 1
+                        else
+                            echo "  After $max_query_attempts attempts, kubectl still returning mismatched IR."
+                            echo "  This suggests a Kubernetes API consistency issue in the test environment."
+                            echo "  Proceeding to create new IR (may result in duplicate detection by verification)."
+                        fi
+                    fi
+                done
+                
+                if [ -z "$existing_ir" ]; then
+                    echo "No existing non-failed InternalRequest found, creating new one for batch $((batch_num + 1))"
+                    
+                    # Create InternalRequest for this batch and capture output directly
+                    # This eliminates the file I/O race condition by parsing from memory
+                    local ir_exit_code
+                    local ir_log_file
+                    # Include OCP version in filename to prevent collisions between parallel workers
+                    ir_log_file="$(params.dataDir)/ir-$(context.taskRun.uid)-${group_ocp_version}"
+                    ir_log_file+="-batch-$((batch_num + 1))-output.log"
+                    
+                    # Stream output directly to file to avoid OOM from large outputs
+                    # Capture exit code for error handling
+                    set +e  # Temporarily disable exit on error to capture exit code
+                    internal-request --pipeline "update-fbc-catalog" \
+                        -s false \
+                        -p fromIndex="${from_index}" \
+                        -p fbcFragments="$(printf '%s' "${batch_fragments}" | jq -c .)" \
+                        -p iibServiceAccountSecret="${iib_service_account_secret}" \
+                        -p publishingCredentials="${publishing_credentials}" \
+                        -p buildTimeoutSeconds="${build_timeout_seconds}" \
+                        -p buildTags="$(jq -c . <<< "${group_build_tags}")" \
+                        -p addArches="$(jq -c . <<< "${add_arches}")" \
+                        -p mustPublishIndexImage="${mustPublishIndexImage}" \
+                        -p mustOverwriteFromIndexImage="${mustOverwriteFromIndexImage}" \
+                        -p taskGitUrl="$(params.taskGitUrl)" \
+                        -p taskGitRevision="$(params.taskGitRevision)" \
+                        --service-account "${internal_request_service_account}" \
+                        -l "${TASK_LABEL}=${TASK_ID}" \
+                        -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
+                        -l "batch-number=$((batch_num + 1))" \
+                        -l "ocp-version=${group_ocp_version}" \
+                        --pipeline-timeout "${pipeline_timeout}" \
+                        --task-timeout "${task_timeout}" \
+                        -t "${request_timeout_seconds}" > "$ir_log_file" 2>&1
+                    ir_exit_code=$?
+                    set -e  # Re-enable exit on error
+                    
+                    # Check if internal-request command succeeded before parsing
+                    if [ $ir_exit_code -ne 0 ]; then
+                        echo "ERROR: internal-request command failed with exit code $ir_exit_code"
+                        echo "Command output (last 50 lines):"
+                        tail -n 50 "$ir_log_file" 2>/dev/null || echo "(log file unavailable)"
+                        echo "FATAL: Internal-request command failure - cannot proceed with this worker"
+                        
+                        # Release lock before exiting
+                        if [ "$lock_acquired" = "true" ]; then
+                            flock -u 200
+                            exec 200>&-
+                            echo "Lock released (error path)"
+                        fi
+                        exit 1
+                    fi
+                    
+                    # Extract InternalRequest name from log file (read only tail to avoid OOM)
+                    # Use more specific pattern to avoid matching error messages
+                    # Note: internal-request CLI may output with or without trailing period
+                    internalRequest=$(tail -n 100 "$ir_log_file" 2>/dev/null | \
+                        awk -F"'" '/^InternalRequest .* created\.?$/ { print $2; exit }' || true)
+                    
+                    if [ -z "${internalRequest}" ]; then
+                        echo "ERROR: internal-request succeeded but failed to extract InternalRequest name"
+                        echo "Command output (last 100 lines):"
+                        tail -n 100 "$ir_log_file" 2>/dev/null || echo "(log file unavailable)"
+                        echo "FATAL: Unexpected output format from internal-request command"
+                        
+                        # Release lock before exiting
+                        if [ "$lock_acquired" = "true" ]; then
+                            flock -u 200
+                            exec 200>&-
+                            echo "Lock released (error path)"
+                        fi
+                        exit 1
+                    fi
+                    
+                    # Validate InternalRequest name format (Kubernetes resource name requirements)
+                    # Must be lowercase alphanumeric, '-' or '.', start/end with alphanumeric
+                    local k8s_name_regex='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    if ! [[ "$internalRequest" =~ $k8s_name_regex ]]; then
+                        echo "ERROR: Parsed InternalRequest name has invalid format: ${internalRequest}"
+                        echo "Expected: Kubernetes DNS-1123 subdomain format"
+                        echo "Command output (last 100 lines):"
+                        tail -n 100 "$ir_log_file" 2>/dev/null || echo "(log file unavailable)"
+                        echo "FATAL: InternalRequest name does not match expected format"
+                        
+                        # Release lock before exiting
+                        if [ "$lock_acquired" = "true" ]; then
+                            flock -u 200
+                            exec 200>&-
+                            echo "Lock released (error path)"
+                        fi
+                        exit 1
+                    fi
+                    
+                    # Additional length validation (Kubernetes limit: 253 chars)
+                    if [ ${#internalRequest} -gt 253 ]; then
+                        echo "ERROR: InternalRequest name exceeds maximum length: ${#internalRequest} > 253"
+                        echo "Name: ${internalRequest}"
+                        echo "FATAL: InternalRequest name too long for Kubernetes"
+                        
+                        # Release lock before exiting
+                        if [ "$lock_acquired" = "true" ]; then
+                            flock -u 200
+                            exec 200>&-
+                            echo "Lock released (error path)"
+                        fi
+                        exit 1
+                    fi
+                    
+                    echo "Created InternalRequest: ${internalRequest}"
+                    
+                    # Release lock after successful IR creation
+                    if [ "$lock_acquired" = "true" ]; then
+                        flock -u 200
+                        exec 200>&-
+                        echo "Lock released (IR created successfully)"
+                    fi
+                fi
+
+                # Wait for InternalRequest pipeline to complete
+                echo "Waiting for InternalRequest pipeline to complete..."
+                local max_wait_seconds="${request_timeout_seconds}"
+                local wait_interval="$IR_STATUS_POLL_INTERVAL_SECONDS"
+                local elapsed=0
+                local request_status=""
+                # Create temp file for kubectl errors with unique name per OCP version
+                local kubectl_error
+                kubectl_error=$(mktemp)
+                local consecutive_api_errors=0
+                local max_consecutive_errors="$IR_API_ERROR_THRESHOLD"
+                local min_wait_before_terminal_check="$IR_MIN_WAIT_FOR_VISIBILITY_SECONDS"
+
+                while [ "$elapsed" -lt "$max_wait_seconds" ]; do
+                    # Clear temp file for reuse and capture stderr
+                    : > "$kubectl_error"
+                    request_status=$(kubectl get internalrequest "${internalRequest}" \
+                        -n "$(context.taskRun.namespace)" \
+                        -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' \
+                        2>"$kubectl_error" || echo "")
+                    
+                    # Check for API errors (excluding transient "not found")
+                    if [ -s "$kubectl_error" ]; then
+                        local error_msg
+                        error_msg=$(cat "$kubectl_error")
+                        
+                        # Tolerate "not found" during initial seconds (race condition)
+                        if [[ "$error_msg" == *"not found"* ]] && \
+                           [ "$elapsed" -lt "$IR_NOT_FOUND_TOLERANCE_SECONDS" ]; then
+                            echo "INFO: InternalRequest not yet visible, waiting..."
+                        # Fail fast on RBAC/permission errors
+                        elif [[ "$error_msg" == *"forbidden"* ]] || \
+                             [[ "$error_msg" == *"Forbidden"* ]] || \
+                             [[ "$error_msg" == *"unauthorized"* ]] || \
+                             [[ "$error_msg" == *"Unauthorized"* ]]; then
+                            echo "ERROR: API permission error (fail fast):"
+                            echo "$error_msg"
+                            echo "FATAL: Cannot query InternalRequest status due to RBAC/auth issue"
+                            exit 1
+                        # Track consecutive API errors for other issues
+                        else
+                            consecutive_api_errors=$((consecutive_api_errors + 1))
+                            echo "WARNING: kubectl error" \
+                                 "(${consecutive_api_errors}/${max_consecutive_errors}): $error_msg"
+                            
+                            if [ "$consecutive_api_errors" -ge "$max_consecutive_errors" ]; then
+                                echo "ERROR: ${max_consecutive_errors} consecutive API errors, failing fast"
+                                echo "FATAL: Persistent API connectivity or cluster issue"
+                                exit 1
+                            fi
+                        fi
+                    else
+                        # Reset error counter on successful API call
+                        consecutive_api_errors=0
+                        
+                        # Only check for terminal status after minimum wait time
+                        # This prevents treating "False" status as a real failure when the
+                        # InternalRequest pipeline hasn't actually started yet
+                        if [ "$elapsed" -ge "$min_wait_before_terminal_check" ]; then
+                            # Check if we have a terminal status
+                            if [ "$request_status" = "True" ]; then
+                                echo "InternalRequest completed successfully after ${elapsed}s"
+                                break
+                            elif [ "$request_status" = "False" ]; then
+                                # Check the reason - only treat as terminal failure if not still running
+                                local request_reason
+                                local reason_query='{.status.conditions[?(@.type=="Succeeded")].reason}'
+                                request_reason=$(kubectl get internalrequest "${internalRequest}" \
+                                    -n "$(context.taskRun.namespace)" \
+                                    -o jsonpath="${reason_query}" 2>/dev/null || echo "")
+                                
+                                # If reason is "Running", the pipeline is still active - keep waiting
+                                if [ "$request_reason" = "Running" ]; then
+                                    local show_progress=false
+                                    if [ $((elapsed % 30)) -eq 0 ] || \
+                                       [ "$elapsed" -eq "$min_wait_before_terminal_check" ]; then
+                                        show_progress=true
+                                    fi
+                                    if [ "$show_progress" = "true" ]; then
+                                        echo "INFO: InternalRequest still running (${elapsed}s)..."
+                                    fi
+                                else
+                                    # Actual terminal failure (Failed, Error, etc.)
+                                    echo "InternalRequest failed after ${elapsed}s"
+                                    break
+                                fi
+                            fi
+                        else
+                            # Still in startup period - just log if we see anything unexpected
+                            if [ -n "$request_status" ] && [ "$request_status" != "Unknown" ]; then
+                                echo "INFO: Early status check (${elapsed}s): status=${request_status}"
+                            fi
+                        fi
+                    fi
+                    
+                    sleep "$wait_interval"
+                    elapsed=$((elapsed + wait_interval))
+                    
+                    if [ $((elapsed % 60)) -eq 0 ]; then
+                        echo "Still waiting for InternalRequest... (${elapsed}/${max_wait_seconds}s)"
+                    fi
+                done
+
+                # Check if we timed out or have an invalid/incomplete status
+                # Valid terminal states are: "True" or "False"
+                if [[ -z "$request_status" || ( "$request_status" != "True" && "$request_status" != "False" ) ]]; then
+                    echo "ERROR: InternalRequest did not complete within ${max_wait_seconds}s"
+                    echo "Last known status: ${request_status}"
+                    rm -f "$kubectl_error" || true
+                    return 1
+                fi
 
                 # Validate internal request succeeded
-                local request_status
-                request_status=$(kubectl get internalrequest "${internalRequest}" \
-                    -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}')
-
                 if [ "${request_status}" != "True" ]; then
                     echo "ERROR: Batch $((batch_num + 1)) internal request failed"
                     local request_reason
                     request_reason=$(kubectl get internalrequest "${internalRequest}" \
+                        -n "$(context.taskRun.namespace)" \
                         -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}')
                     local request_message
                     request_message=$(kubectl get internalrequest "${internalRequest}" \
+                        -n "$(context.taskRun.namespace)" \
                         -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
                     echo "Reason: ${request_reason}"
                     echo "Message: ${request_message}"
+                    
+                    rm -f "$kubectl_error" || true
                     return 1
                 fi
 
                 # Extract and validate results
                 local results
-                results=$(kubectl get internalrequest "${internalRequest}" -o jsonpath='{.status.results}')
+                results=$(kubectl get internalrequest "${internalRequest}" -n "$(context.taskRun.namespace)" \
+                    -o jsonpath='{.status.results}')
 
                 if [ -z "${results}" ] || [ "${results}" = "{}" ]; then
                     echo "ERROR: Batch $((batch_num + 1)) succeeded but returned empty results"
+                    echo "InternalRequest: ${internalRequest}"
+                    echo "FATAL: Logic bug detected - pipeline succeeded without results"
+                    rm -f "$kubectl_error" || true
                     return 1
                 fi
 
-                # Store results for this batch
-                echo "${results}" > "${batch_file_prefix}-result.json"
+                # Store results for this batch (include OCP version to prevent worker collisions)
+                local result_file
+                result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-${group_ocp_version}"
+                result_file+="-batch-$((batch_num + 1))-result.json"
+                echo "${results}" > "$result_file"
 
                 # Process results for each fragment in this batch
                 local decompressed_json_build_info
@@ -758,6 +1177,9 @@ spec:
                     fragment_index=$((fragment_index + 1))
                 done
 
+                # Clean up temp file before successful return
+                rm -f "$kubectl_error" || true
+                
                 echo "Group batch $((batch_num + 1)) completed successfully" \
                     "for OCP $group_ocp_version"
                 return 0
@@ -777,7 +1199,7 @@ spec:
                     # Extract latest IIB index image for next batch (only when not overwriting)
                     if [ "${mustOverwriteFromIndexImage}" = "false" ]; then
                         result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-${group_ocp_version}"
-                        result_file="${result_file}-batch-$((batch_num + 1))-result.json"
+                        result_file+="-batch-$((batch_num + 1))-result.json"
                         batch_results=$(cat "${result_file}")
                         group_latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
                             base64 -d | gunzip | jq -r '.index_image')
@@ -809,8 +1231,7 @@ spec:
                 for batch_num in "${group_failed_batches[@]}"; do
                     group_current_from_index=$(get_current_from_index)
 
-                    if execute_batch "$batch_num" "$group_current_from_index" \
-                        "$group_target_index"; then
+                    if execute_batch "$batch_num" "$group_current_from_index"; then
                         echo "Group batch $((batch_num + 1)) succeeded on retry attempt ${retry_attempt}" \
                             "for OCP $group_ocp_version"
 
@@ -855,8 +1276,94 @@ spec:
                 "successfully for OCP $group_ocp_version"
         }
 
+        # Define parallel_dir globally so it can be used after process_all_ocp_groups completes
+        parallel_dir="$(params.dataDir)/parallel-tracking"
+        mkdir -p "$parallel_dir"
+
         # Execute the multi-OCP processing
         process_all_ocp_groups
+
+        # DEFENSIVE CHECK #1: Verify IR count matches total batch count (RACE CONDITION DETECTION)
+        echo "INFO: Verifying InternalRequest count..."
+        
+        # Calculate expected IR count by summing batch counts from all OCP groups
+        expected_ir_count=0
+        for ocp_version in "${ocp_versions_array[@]}"; do
+            batch_count_file="${parallel_dir}/${ocp_version}.batch_count"
+            if [ -f "$batch_count_file" ]; then
+                ocp_batch_count=$(cat "$batch_count_file")
+                expected_ir_count=$((expected_ir_count + ocp_batch_count))
+                echo "  OCP $ocp_version: $ocp_batch_count batch(es)"
+            else
+                echo "WARNING: Batch count file not found for OCP $ocp_version, assuming 1 batch"
+                expected_ir_count=$((expected_ir_count + 1))
+            fi
+        done
+        echo "  Total expected batches across all OCP versions: $expected_ir_count"
+        
+        echo "DEBUG: Variables for IR verification:"
+        echo "  TASK_LABEL='${TASK_LABEL}'"
+        echo "  TASK_ID='${TASK_ID}'"
+        echo "  PIPELINERUN_LABEL='${PIPELINERUN_LABEL}'"
+        echo "  pipelineRunUid='$(params.pipelineRunUid)'"
+        
+        # First, check how many IRs match just pipelinerun-uid
+        total_pipeline_irs=$(kubectl get internalrequest -n "$(context.taskRun.namespace)" \
+            -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
+            --no-headers 2>/dev/null | wc -l)
+        echo "  Total IRs in pipeline (pipelinerun-uid only): ${total_pipeline_irs}"
+        
+        # Then check how many match both pipelinerun-uid AND group-id AND have ocp-version
+        # (ocp-version filter excludes non-batch IRs like check-fbc-opt-in)
+        actual_ir_count=$(kubectl get internalrequest -n "$(context.taskRun.namespace)" \
+            -l "${TASK_LABEL}=${TASK_ID},${PIPELINERUN_LABEL}=$(params.pipelineRunUid),ocp-version" \
+            --no-headers 2>/dev/null | wc -l)
+        echo "  Batch IRs for this task (with ocp-version label): ${actual_ir_count}"
+        
+        if [ "$actual_ir_count" -ne "$expected_ir_count" ]; then
+            echo "ERROR: InternalRequest count mismatch detected!"
+            echo "Expected: $expected_ir_count (total batches across all OCP versions)"
+            echo "Actual:   $actual_ir_count"
+            echo "This indicates stale IRs from previous test runs or a race condition."
+            echo ""
+            echo "Batch InternalRequests created by this task:"
+            cols="NAME:.metadata.name,OCP:.metadata.labels.ocp-version"
+            cols="${cols},BATCH:.metadata.labels.batch-number,STATUS:.status.conditions[0].status"
+            kubectl get internalrequest -n "$(context.taskRun.namespace)" \
+                -l "${TASK_LABEL}=${TASK_ID},${PIPELINERUN_LABEL}=$(params.pipelineRunUid),ocp-version" \
+                -o custom-columns="$cols"
+            echo ""
+            echo "All InternalRequests in pipeline (for debugging):"
+            kubectl get internalrequest -n "$(context.taskRun.namespace)" \
+                -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
+                -o custom-columns="$cols"
+            echo ""
+            echo "DEBUG: Checking group-id labels on all pipeline IRs:"
+            jp='{range .items[*]}{.metadata.name}{"\t"}'
+            jp="${jp}{.metadata.labels.internal-services\.appstudio\.openshift\.io/group-id}"
+            jp="${jp}{\"\n\"}{end}"
+            kubectl get internalrequest -n "$(context.taskRun.namespace)" \
+                -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
+                -o jsonpath="$jp"
+            exit 1
+        fi
+        echo "INFO: ✅ InternalRequest count verified: $actual_ir_count (expected: $expected_ir_count)"
+        
+        # DEFENSIVE CHECK #2: Check for IRs without status (stuck IRs from status patching race)
+        stuck_irs=$(kubectl get internalrequest -n "$(context.taskRun.namespace)" \
+            -l "${TASK_LABEL}=${TASK_ID},${PIPELINERUN_LABEL}=$(params.pipelineRunUid),ocp-version" \
+            -o json 2>/dev/null | jq -r '.items[] | select(.status.conditions == null or 
+                .status.conditions == [] or 
+                .status.conditions[0].status == "") | 
+                .metadata.name')
+        
+        if [ -n "$stuck_irs" ]; then
+            echo "ERROR: InternalRequests without status detected (stuck IRs):"
+            echo "$stuck_irs"
+            echo "This indicates a race condition in status patching."
+            exit 1
+        fi
+        echo "INFO: ✅ No stuck InternalRequests detected"
 
         # Classify the targets by `target_index`, but if this is a staging build, we should classify
         # the targets by `ocp_version` instead, as `target_index` will be missing for this case.
@@ -900,18 +1407,19 @@ spec:
             -type f -exec ls -t {} + 2>/dev/null | head -1)
         if [[ -n "$latest_result_file" ]]; then
             results=$(cat "$latest_result_file")
-            # Extract OCP version and batch number from filename with validation
-            # Expected format: ir-<uid>-v4.12-batch-1-result.json or ir-<uid>-4.12-batch-1-result.json
-            result_filename=$(basename "$latest_result_file")
-            if [[ "$result_filename" =~ ^ir-(.+)-(v?[0-9]+\.[0-9]+)-batch-([0-9]+)-result\.json$ ]]; then
-                result_ocp_version="${BASH_REMATCH[2]}"
-                result_batch_number="${BASH_REMATCH[3]}"
-                internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-                    "$(params.dataDir)/ir-${task_run_uid}-${result_ocp_version}-batch-${result_batch_number}-output.log")
+            # Derive log filename from result filename using simple string substitution
+            # Format: ir-{taskRunUid}-{ocpVersion}-batch-{batchNum}-result.json
+            #      -> ir-{taskRunUid}-{ocpVersion}-batch-{batchNum}-output.log
+            log_file="${latest_result_file%.json}"
+            log_file="${log_file%-result}-output.log"
+            
+            if [ -f "$log_file" ] && [ -r "$log_file" ]; then
+                # Use more specific pattern to avoid matching error messages
+                # Note: internal-request CLI may output with or without trailing period
+                internalRequest=$(awk -F"'" '/^InternalRequest .* created\.?$/ { print $2; exit }' "$log_file" || true)
             else
-                echo "ERROR: Result filename does not match expected format: $result_filename"
-                echo "Expected format: ir-<uid>-[v]<X.Y>-batch-<N>-result.json"
-                exit 1
+                echo "WARNING: Output log file not found or unreadable: $log_file"
+                internalRequest=""
             fi
         else
             echo "ERROR: No batch result files found"

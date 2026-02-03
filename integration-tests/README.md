@@ -115,8 +115,18 @@ When debugging test failures, use the `--skip-cleanup` option to preserve resour
 
 When debugging is complete, you can clean up resources using these scripts:
 
-- **`utils/cleanup-resources.sh`** - Cleans up Kubernetes resources
+- **`scripts/cleanup-accumulated-resources.sh`** - Cleans up accumulated test resources (Releases, PipelineRuns, InternalRequests, etc.)
 - **`scripts/delete-branches.sh`** - Cleans up GitHub branches
+
+Releases can hit the 1024 quota limit, causing ExceededQuota failures.
+
+```bash
+# Clean resources older than 24 hours
+./scripts/cleanup-accumulated-resources.sh
+
+# Preview what would be deleted
+./scripts/cleanup-accumulated-resources.sh --dry-run
+```
 
 ## Secret Management
 
@@ -157,12 +167,13 @@ To update encrypted secrets:
 The integration tests follow this general workflow:
 
 1. **Environment Setup** - Load test-specific configuration and validate required variables
-2. **Secret Decryption** - Decrypt and apply required secrets to the cluster
-3. **GitHub Operations** - Create branches, make commits, and manage pull requests
-4. **Kubernetes Resources** - Create and manage namespaces, applications, components, and releases
-5. **Pipeline Execution** - Monitor Konflux Components and Tekton PipelineRuns
-6. **Verification** - Validate Release custom resources and pipeline outcomes
-7. **Cleanup** - Remove created resources (unless `--skip-cleanup` is specified)
+2. **Old Resource Cleanup** - Remove resources from previous test runs (prevents quota exhaustion)
+3. **Secret Decryption** - Decrypt and apply required secrets to the cluster
+4. **GitHub Operations** - Create branches, make commits, and manage pull requests
+5. **Kubernetes Resources** - Create and manage namespaces, applications, components, and releases
+6. **Pipeline Execution** - Monitor Konflux Components and Tekton PipelineRuns
+7. **Verification** - Validate Release custom resources and pipeline outcomes
+8. **Cleanup** - Remove created resources (unless `--skip-cleanup` is specified)
 
 ## CI/CD Integration
 

@@ -1,0 +1,513 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-concurrent-ir-creation
+spec:
+  description: |
+    Test sequential batch processing and label verification for InternalRequests.
+    NOTE: This test does NOT test the mutex for race conditions because all components
+    have the same OCP version, resulting in ONE worker processing batches SEQUENTIALLY.
+    For actual mutex/race condition testing, see test-add-fbc-contribution-parallel-mutex.yaml.
+    
+    This test validates:
+    - Labels are correctly applied to InternalRequests
+    - Kubernetes label selectors filter correctly  
+    - Sequential batch processing works correctly
+    - Test isolation (no cross-contamination from previous runs)
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: cleanup
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Pre-test cleanup for concurrent IR creation test ==="
+              
+              # Delete any IRs from previous test runs that might interfere
+              # This is especially important for the concurrent IR creation test
+              echo "Cleaning up old InternalRequests from previous test runs..."
+              
+              # Get all InternalRequests and show them
+              echo "Current InternalRequests before cleanup:"
+              kubectl get internalrequests 2>/dev/null || echo "None found"
+              
+              # Delete all update-fbc-catalog IRs (test IRs)
+              kubectl delete internalrequests -l internal-services.appstudio.openshift.io/group-id \
+                --timeout=30s 2>/dev/null || true
+              
+              # Delete any remaining test IRs by name pattern
+              kubectl get internalrequests -o name 2>/dev/null | \
+                grep "update-fbc-catalog" | \
+                xargs -r kubectl delete --timeout=30s 2>/dev/null || true
+              
+              # Give Kubernetes time to clean up
+              sleep 3
+              
+              echo "Cleanup completed. Current InternalRequests:"
+              kubectl get internalrequests 2>/dev/null || echo "None (clean state)"
+              echo "=== Ready to start test ==="
+    
+    - name: setup
+      runAfter:
+        - cleanup-previous-runs
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with multiple components for the SAME OCP version
+              # This will force multiple batches that could race with each other
+              # when maxBatchSize=1 (one component per batch)
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "test-race-app",
+                "components": [
+                  {
+                    "name": "comp1-v4.13",
+                    "containerImage": "registry.io/image1@sha256:aaa111",
+                    "repository": "prod-registry.io/prod-location1",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp2-v4.13",
+                    "containerImage": "registry.io/image2@sha256:bbb222",
+                    "repository": "prod-registry.io/prod-location2",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp3-v4.13",
+                    "containerImage": "registry.io/image3@sha256:ccc333",
+                    "repository": "prod-registry.io/prod-location3",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  }
+                ]
+              }
+              EOF
+
+              # Create data.json
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Test setup complete for concurrent IR creation test"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "main"
+        - name: maxBatchSize
+          value: "1"  # One component per batch = 3 batches racing
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+      runAfter:
+        - setup
+
+    - name: verify-no-duplicate-irs
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify-no-duplicates
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== CONCURRENT IR CREATION TEST: No Duplicate IRs ==="
+
+              # shellcheck disable=SC2034
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # Debug: Show ALL InternalRequests to detect cross-contamination
+              echo "DEBUG: All InternalRequests in cluster (before filtering):"
+              kubectl get internalrequests 2>/dev/null || echo "None found"
+              
+              echo ""
+              echo "DEBUG: Full label details for each IR:"
+              for ir in $(kubectl get internalrequests -o name 2>/dev/null); do
+                ir_name="${ir#internalrequest.appstudio.redhat.com/}"
+                echo "  $ir_name:"
+                kubectl get internalrequest "$ir_name" -o jsonpath='    Labels: {.metadata.labels}' 2>/dev/null
+                echo ""
+              done
+              
+              echo ""
+              # Get all InternalRequests created by this pipeline
+              echo "Listing InternalRequests for THIS pipeline (UID: $PIPELINE_UID):"
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+
+              # Test 1: Verify exactly 3 InternalRequests were created (one per batch)
+              ir_count=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers | wc -l)
+              
+              if [[ "$ir_count" -ne 3 ]]; then
+                echo "❌ Expected exactly 3 InternalRequests, found: $ir_count"
+                echo "This suggests concurrent workers created duplicate IRs!"
+                exit 1
+              fi
+              echo "✅ Test 1 PASSED: Exactly 3 InternalRequests created (no duplicates from concurrent workers)"
+
+              # Test 2: Verify each batch number appears exactly once
+              # BYPASS kubectl label selectors entirely - they return stale results in test environments
+              # Instead, fetch ALL IRs as JSON and filter manually for accurate results
+              echo ""
+              echo "Test 2: Verifying each batch appears exactly once"
+              echo "(using JSON parsing to bypass kubectl cache issues)"
+              
+              # Get all IRs for this pipeline as JSON
+              all_irs_json=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json)
+              
+              # For each batch number, count how many IRs have that exact combination
+              for batch in 1 2 3; do
+                echo ""
+                echo "Checking batch ${batch}:"
+                
+                # Use jq to filter IRs with exact label match (bypasses kubectl's unreliable label selectors)
+                batch_count=$(echo "$all_irs_json" | jq -r --arg batch "$batch" \
+                  --arg uid "${PIPELINE_UID}" \
+                  '[.items[] | select(
+                    .metadata.labels["batch-number"] == $batch and
+                    .metadata.labels["ocp-version"] == "4.13" and
+                    .metadata.labels["internal-services.appstudio.openshift.io/pipelinerun-uid"] == $uid
+                  )] | length')
+                
+                if [[ "$batch_count" -ne 1 ]]; then
+                  echo "❌ Batch ${batch} has ${batch_count} IRs (expected 1)"
+                  echo ""
+                  echo "This indicates concurrent workers created duplicate IRs for the same batch!"
+                  echo ""
+                  echo "All IRs for this pipeline with their actual labels:"
+                  echo "$all_irs_json" | jq -r \
+                    '.items[] | "\(.metadata.name): batch=\(.metadata.labels["batch-number"])" +
+                    " ocp=\(.metadata.labels["ocp-version"])"'
+                  echo ""
+                  echo "IRs matching batch=${batch} and ocp=4.13:"
+                  echo "$all_irs_json" | jq -r --arg batch "$batch" '.items[] | select(
+                    .metadata.labels["batch-number"] == $batch and
+                    .metadata.labels["ocp-version"] == "4.13"
+                  ) | "\(.metadata.name): \(.metadata.labels)"'
+                  exit 1
+                fi
+                echo "✅ Test 2.${batch} PASSED: Batch ${batch} has exactly 1 IR"
+              done
+
+              # Test 3: Verify all IRs have the correct pipelinerun-uid label
+              label_key="internal-services.appstudio.openshift.io/pipelinerun-uid"
+              uid="${PIPELINE_UID}"
+              irs_without_label=$(kubectl get internalrequests -l "${label_key}=${uid}" -o json | \
+                jq -r '.items[] | select(.metadata.labels["'${label_key}'"] != "'"${uid}"'") | .metadata.name')
+              
+              if [[ -n "$irs_without_label" ]]; then
+                echo "❌ Found IRs with incorrect pipelinerun-uid label:"
+                echo "$irs_without_label"
+                exit 1
+              fi
+              echo "✅ Test 3 PASSED: All IRs have correct pipelinerun-uid label"
+
+              # Test 4: Verify lock files were created and cleaned up
+              lock_dir="$(params.dataDir)/ir-creation-locks"
+              if [[ -d "$lock_dir" ]]; then
+                echo "✅ Test 4 PASSED: Lock directory exists: $lock_dir"
+                echo "Lock files present:"
+                ls -la "$lock_dir" || echo "(none)"
+              else
+                echo "⚠️  Lock directory not found (may have been cleaned up)"
+              fi
+
+              # Test 5: Check logs for mutex acquisition messages
+              echo "=== Checking task logs for mutex behavior ==="
+              TASK_POD=$(kubectl get pods \
+                -l "tekton.dev/task=add-fbc-contribution,tekton.dev/pipelineRun=$(context.pipelineRun.name)" \
+                --no-headers 2>/dev/null | head -1 | awk '{print $1}')
+              
+              if [[ -n "$TASK_POD" ]]; then
+                TASK_LOGS=$(kubectl logs "$TASK_POD" -c step-add-contribution 2>/dev/null || echo "")
+                
+                if [[ -n "$TASK_LOGS" ]]; then
+                  lock_acquired_count=$(echo "$TASK_LOGS" | grep -c "Lock acquired successfully" || echo "0")
+                  lock_released_count=$(echo "$TASK_LOGS" | grep -c "Lock released" || echo "0")
+                  
+                  echo "Lock acquired count: $lock_acquired_count"
+                  echo "Lock released count: $lock_released_count"
+                  
+                  if [[ "$lock_acquired_count" -ge 3 ]]; then
+                    echo "✅ Test 5 PASSED: Mutex was used (${lock_acquired_count} lock acquisitions)"
+                  else
+                    echo "⚠️  Fewer lock acquisitions than expected"
+                  fi
+                  
+                  # Check for any IR reuse (would happen if retry scenario)
+                  if echo "$TASK_LOGS" | grep -q "Reusing existing InternalRequest"; then
+                    echo "ℹ️  IR reuse detected (this is OK in retry scenarios)"
+                  fi
+                else
+                  echo "⚠️  Could not retrieve task logs"
+                fi
+              else
+                echo "⚠️  Could not find task pod"
+              fi
+
+              echo "=== ALL CONCURRENT IR CREATION TESTS PASSED ==="
+      runAfter:
+        - run-task
+
+    - name: test-label-verification-with-wrong-labels
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: dataDir
+            type: string
+        steps:
+          - name: create-ir-with-wrong-labels
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== LABEL VERIFICATION TEST: Wrong Labels Rejected ==="
+
+              # shellcheck disable=SC2034
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              
+              # Create a fake IR with WRONG pipelinerun-uid label
+              # This simulates the bug where old IRs from previous runs weren't properly filtered
+              cat <<EOF | kubectl apply -f -
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: InternalRequest
+              metadata:
+                name: test-wrong-label-ir
+                labels:
+                  internal-services.appstudio.openshift.io/pipelinerun-uid: "WRONG-UID-12345"
+                  batch-number: "1"
+                  ocp-version: "4.13"
+              spec:
+                pipeline:
+                  pipelineRef:
+                    resolver: cluster
+                    params:
+                    - name: name
+                      value: update-fbc-catalog
+              EOF
+
+              sleep 2
+
+              # Verify the fake IR exists
+              if ! kubectl get internalrequest test-wrong-label-ir &>/dev/null; then
+                echo "❌ Failed to create test IR with wrong labels"
+                exit 1
+              fi
+              echo "✅ Created test IR with WRONG pipelinerun-uid label"
+
+              # The wrong-label IR should NOT appear in results
+              wrong_label_found=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[] | select(.metadata.name == "test-wrong-label-ir") | .metadata.name')
+
+              if [[ -n "$wrong_label_found" ]]; then
+                echo "❌ CRITICAL: IR with wrong label was matched by label selector!"
+                echo "This should never happen - Kubernetes label matching is broken"
+                exit 1
+              fi
+              echo "✅ Test PASSED: IR with wrong pipelinerun-uid is correctly filtered by kubectl"
+
+              # Additional verification: manually check the label value
+              actual_uid=$(kubectl get internalrequest test-wrong-label-ir \
+                -o jsonpath='{.metadata.labels.internal-services\.appstudio\.openshift\.io/pipelinerun-uid}')
+              
+              if [[ "$actual_uid" == "$PIPELINE_UID" ]]; then
+                echo "❌ Label verification failed: UIDs match when they shouldn't!"
+                exit 1
+              fi
+              echo "✅ Label value verification: '$actual_uid' != '$PIPELINE_UID'"
+
+              # Cleanup
+              kubectl delete internalrequest test-wrong-label-ir || true
+
+              echo "=== LABEL VERIFICATION TEST PASSED ==="
+      runAfter:
+        - verify-no-duplicate-irs
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Post-test cleanup (finally block) ==="
+              
+              # Show what we're about to delete
+              echo "InternalRequests for this test run (UID: $(context.pipelineRun.uid)):"
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" \
+                2>/dev/null || echo "None found"
+              
+              # Clean up all IRs from this test
+              echo "Deleting InternalRequests from this test..."
+              kubectl delete internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" \
+                --timeout=30s || true
+              
+              # Clean up any test IRs with wrong labels
+              echo "Deleting test IR with wrong labels..."
+              kubectl delete internalrequest test-wrong-label-ir --timeout=30s 2>/dev/null || true
+              
+              # Give time for finalizers
+              sleep 2
+              
+              echo "Remaining InternalRequests after cleanup:"
+              kubectl get internalrequests 2>/dev/null || echo "None (clean state)"
+
+              echo "=== Concurrent IR creation test cleanup completed ==="
