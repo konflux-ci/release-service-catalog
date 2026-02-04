@@ -1,0 +1,249 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-index-image-multiple-components
+spec:
+  description: Test that multiple components each use their correct source images
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "publishingCredentials": "test-credentials"
+                }
+              }
+              EOF
+              cat > "$(params.dataDir)/internal-requests-results.json" << EOF
+              {
+                "index_image": {
+                  "target_index": "quay.io/redhat-prod/redhat----redhat-operator-index:v4.12"
+                },
+                "components": [
+                  {
+                    "fbc_fragment": "registry.io/image0@sha256:0000",
+                    "target_index": "quay.io/redhat-prod/redhat----redhat-operator-index:v4.12",
+                    "ocp_version": "v4.12",
+                    "index_image": "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12-tag",
+                    "index_image_resolved": "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:aaa111",
+                    "completion_time": "1770154672",
+                    "iibLog": "v4.12 IIB Log"
+                  },
+                  {
+                    "fbc_fragment": "registry.io/image1@sha256:1111",
+                    "target_index": "quay.io/redhat-prod/redhat----redhat-operator-index:v4.16",
+                    "ocp_version": "v4.16",
+                    "index_image": "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.16-tag",
+                    "index_image_resolved": "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:bbb222",
+                    "completion_time": "1770154673",
+                    "iibLog": "v4.16 IIB Log"
+                  },
+                  {
+                    "fbc_fragment": "registry.io/image2@sha256:2222",
+                    "target_index": "quay.io/redhat-prod/redhat----redhat-operator-index:v4.18",
+                    "ocp_version": "v4.18",
+                    "index_image": "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.18-tag",
+                    "index_image_resolved": "registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:ccc333",
+                    "completion_time": "1770154674",
+                    "iibLog": "v4.18 IIB Log"
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: publish-index-image
+      params:
+        - name: buildTimestamp
+          value: 11111111111
+        - name: internalRequestResultsFile
+          value: "internal-requests-results.json"
+        - name: retries
+          value: 2
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Get all internal requests sorted by creation time
+              internalRequests=$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
+                -o json | jq '.items')
+
+              # We expect 6 internal requests total (2 per component: base tag + timestamped tag)
+              irCount=$(jq '. | length' <<< "${internalRequests}")
+              if [ "${irCount}" -ne 6 ]; then
+                  echo "Expected 6 internalrequests but found ${irCount}"
+                  exit 1
+              fi
+
+              # Define expected mappings: [sourceIndex, targetIndex]
+              # Component 0 (v4.12):
+              declare -A expected
+              expected[0]="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.12-tag|quay.io/redhat-prod/redhat----redhat-operator-index:v4.12"
+              expected[1]="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:aaa111|quay.io/redhat-prod/redhat----redhat-operator-index:v4.12-1770154672"
+              # Component 1 (v4.16):
+              expected[2]="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.16-tag|quay.io/redhat-prod/redhat----redhat-operator-index:v4.16"
+              expected[3]="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:bbb222|quay.io/redhat-prod/redhat----redhat-operator-index:v4.16-1770154673"
+              # Component 2 (v4.18):
+              expected[4]="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub:v4.18-tag|quay.io/redhat-prod/redhat----redhat-operator-index:v4.18"
+              expected[5]="registry-proxy.engineering.redhat.com/rh-osbs/iib-pub@sha256:ccc333|quay.io/redhat-prod/redhat----redhat-operator-index:v4.18-1770154674"
+
+              # Verify each internal request
+              for((i=0; i<irCount; i++)); do
+                  params=$(jq -r ".[$i] | .spec.params" <<< "${internalRequests}")
+                  
+                  sourceIndex=$(jq -r '.sourceIndex' <<< "${params}")
+                  targetIndex=$(jq -r '.targetIndex' <<< "${params}")
+                  
+                  expectedPair="${expected[$i]}"
+                  expectedSource="${expectedPair%%|*}"
+                  expectedTarget="${expectedPair##*|}"
+                  
+                  echo "=== Verifying InternalRequest $i ==="
+                  echo "Source: $sourceIndex (expected: $expectedSource)"
+                  echo "Target: $targetIndex (expected: $expectedTarget)"
+                  
+                  if [ "$sourceIndex" != "$expectedSource" ]; then
+                      echo "ERROR: sourceIndex mismatch for request $i"
+                      echo "  Expected: $expectedSource"
+                      echo "  Got: $sourceIndex"
+                      exit 1
+                  fi
+                  
+                  if [ "$targetIndex" != "$expectedTarget" ]; then
+                      echo "ERROR: targetIndex mismatch for request $i"
+                      echo "  Expected: $expectedTarget"
+                      echo "  Got: $targetIndex"
+                      exit 1
+                  fi
+                  
+                  echo "✓ InternalRequest $i is correct"
+              done
+
+              echo ""
+              echo "✅ All 6 InternalRequests have correct source and target images!"
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete internalrequests --all
