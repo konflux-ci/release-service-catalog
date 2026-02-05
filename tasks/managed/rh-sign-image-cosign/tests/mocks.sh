@@ -153,8 +153,12 @@ function cosign () {
   # mock_cosign_success_calls file is expected to contain lines with "1" or "0" where
   # "1" means that the call should end successfully and "0" means that the call should end with an error
   # following command pops the first line from the file and stores it in successfull_run variable
-  successfull_run=$(sed -n '1p' $(params.dataDir)/mock_cosign_success_calls && \
-    sed -i '1d' $(params.dataDir)/mock_cosign_success_calls)
+  # Use flock to prevent race conditions when multiple parallel cosign calls access the file
+  successfull_run=$(
+    flock -x "$(params.dataDir)/mock_cosign_success_calls.lock" bash -c \
+      "sed -n '1p' '$(params.dataDir)/mock_cosign_success_calls' && \
+       sed -i '1d' '$(params.dataDir)/mock_cosign_success_calls'"
+  )
 
   if [ "$1" = "verify" ]; then
     mock_existing_sig_file=$(echo "${*: -1}" | tr "/" "-")

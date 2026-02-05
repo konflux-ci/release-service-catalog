@@ -391,34 +391,41 @@ spec:
           for entry in filter(None, to_yield):
             print(' '.join(entry))
           print('---') # group separator
-        " | while read -r ENTRY; do
-          if [ "$ENTRY" = "---" ]; then
-            echo "... waiting for group to be signed ..."
-            # wait for group to finish
-            while (( ${RUNNING_JOBS@P} > 0 )); do
-              wait -n
+        " | {
+          SUCCESS=true
+          while read -r ENTRY; do
+            if [ "$ENTRY" = "---" ]; then
+              echo "... waiting for group to be signed ..."
+              # wait for group to finish
+              while (( ${RUNNING_JOBS@P} > 0 )); do
+                wait -n || SUCCESS=false
+              done
+              spawn_count=0
+              continue
+            fi
+            INTERNAL_REF=$(echo "$ENTRY" | cut -d' ' -f1)
+            PUBLIC_REF=$(echo "$ENTRY" | cut -d' ' -f2)
+            DIGEST=$(echo "$ENTRY" | cut -d' ' -f3)
+            TAG=$(echo "$ENTRY" | cut -d' ' -f4)
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit
+            wait_for_memory 80
+            while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
+              wait -n || SUCCESS=false
             done
-            spawn_count=0
-            continue
-          fi
-          INTERNAL_REF=$(echo "$ENTRY" | cut -d' ' -f1)
-          PUBLIC_REF=$(echo "$ENTRY" | cut -d' ' -f2)
-          DIGEST=$(echo "$ENTRY" | cut -d' ' -f3)
-          TAG=$(echo "$ENTRY" | cut -d' ' -f4)
-          # This function is stored in the utils/memory-throttle.sh file
-          # Wait for memory and concurrent limit
-          wait_for_memory 80
-          while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
-            wait -n
-          done
-          check_and_sign "${PUBLIC_REF}:${TAG}" "${INTERNAL_REF}" "${DIGEST}" &
-          spawn_count=$((spawn_count + 1))
+            check_and_sign "${PUBLIC_REF}:${TAG}" "${INTERNAL_REF}" "${DIGEST}" &
+            spawn_count=$((spawn_count + 1))
 
-          # Allow memory usage to stabilize every BURST_SIZE spawns.
-          if (( spawn_count % BURST_SIZE == 0 )); then
-            sleep $STABILIZATION_DELAY
+            # Allow memory usage to stabilize every BURST_SIZE spawns.
+            if (( spawn_count % BURST_SIZE == 0 )); then
+              sleep $STABILIZATION_DELAY
+            fi
+          done
+          if [ "$SUCCESS" != true ]; then
+            echo "ERROR: One or more signing jobs failed"
+            exit 1
           fi
-        done
+        }
         # Note: The pipe runs the while loop in a subshell, but every group ends with "---"
         # which waits for all jobs in that group, so no jobs remain when the subshell exits.
         echo "done"
