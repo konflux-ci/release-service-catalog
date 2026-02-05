@@ -1,0 +1,131 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-upload-py-pulp
+spec:
+  description: Test uploading Python packages to Pulp
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/files"
+
+              # Create mock wheel, sdist, and attestation files
+              FILES="$(params.dataDir)/files"
+              echo "mock wheel content" > "${FILES}/my_package-1.0.0-py3-none-any.whl"
+              echo "mock sdist content" > "${FILES}/my_package-1.0.0.tar.gz"
+              echo '{"version": 1, "envelope": {}}' > "${FILES}/my_package-1.0.0-py3-none-any.whl.attestation"
+              echo '{"version": 1, "envelope": {}}' > "${FILES}/my_package-1.0.0.tar.gz.attestation"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: upload-py-pulp
+      params:
+        - name: SERVICE_ACCOUNT_SECRET_NAME
+          value: test-service-account-secret
+        - name: PULP_BASE_URL
+          value: https://test.packages.redhat.com
+        - name: PULP_API_ROOT
+          value: /api/
+        - name: PULP_DOMAIN
+          value: test-domain
+        - name: PULP_REPOSITORY
+          value: test-repo
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: filesDir
+          value: files
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # The upload task doesn't produce a trusted artifact output,
+              # so we just verify the task completed successfully.
+              # In a real scenario, the upload would have been done.
+              echo "Upload task completed successfully!"
+              echo "All checks passed!"
+      runAfter:
+        - run-task

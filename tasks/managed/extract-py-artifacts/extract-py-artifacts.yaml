@@ -1,0 +1,155 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: extract-py-artifacts
+spec:
+  description: |
+    Extract Python packages from OCI artifacts for signing and upload.
+  params:
+    - name: SNAPSHOT_PATH
+      type: string
+      description: Path to the snapshot spec file containing image information
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact to use to obtain the Snapshot
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: /var/workdir
+    - name: filesDir
+      type: string
+      description: The relative path within dataDir where files will be extracted
+      default: files
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for the trusted artifacts created
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  results:
+    - name: sourceDataArtifact
+      description: Produced trusted data artifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: SNAPSHOT_PATH
+        value: $(params.SNAPSHOT_PATH)
+      - name: IMAGES_TXT
+        value: $(params.dataDir)/images.txt
+      - name: FILES_DIR
+        value: $(params.dataDir)/$(params.filesDir)
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: TRUSTED_ARTIFACTS_EXTRACT_DIR
+        value: $(params.dataDir)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+    workingDir: /var/workdir
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: get-image-urls
+      image: quay.io/konflux-ci/buildah-task:latest@sha256:b82d465a06c926882d02b721cf8a8476048711332749f39926a01089cf85a3f9
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        < "${TRUSTED_ARTIFACTS_EXTRACT_DIR}/${SNAPSHOT_PATH}" jq -r '.components[].containerImage' | tee "${IMAGES_TXT}"
+
+    - name: extract-artifacts
+      image: quay.io/konflux-ci/oras:latest@sha256:1beeecce012c99794568f74265c065839f9703d28306a8430b667f639343a98b
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        AUTHFILE='/tmp/auth.json'
+        mkdir -p "${FILES_DIR}"
+        while read -r IMAGE; do
+          echo "Processing ${IMAGE}"
+          select-oci-auth "${IMAGE}" > "${AUTHFILE}"
+          retry oras pull --registry-config "${AUTHFILE}" "${IMAGE}" -o "${FILES_DIR}"
+        done < "${IMAGES_TXT}"
+
+        echo "Extracted files:"
+        ls -la "${FILES_DIR}"
+
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)

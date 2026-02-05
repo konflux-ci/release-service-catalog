@@ -1,0 +1,121 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: upload-py-pulp
+spec:
+  description: |
+    Upload Python packages (with attestations) to a Pulp repository.
+  params:
+    - name: SERVICE_ACCOUNT_SECRET_NAME
+      type: string
+      description: >-
+        The name of the secret containing the terms-based registry service account credentials
+      default: service-account-credentials
+    - name: PULP_BASE_URL
+      type: string
+      description: The base URL of the Pulp server
+    - name: PULP_API_ROOT
+      type: string
+      description: The API root path of the Pulp server
+      default: "/api/"
+    - name: PULP_DOMAIN
+      type: string
+      description: The domain to use for Pulp operations
+    - name: PULP_REPOSITORY
+      type: string
+      description: The Pulp repository to upload to
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact containing the signed wheels and attestations
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: /var/workdir
+    - name: filesDir
+      type: string
+      description: The relative path within dataDir where wheel files are located
+      default: files
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for the trusted artifacts created
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+  volumes:
+    - name: service-account-secret
+      secret:
+        secretName: $(params.SERVICE_ACCOUNT_SECRET_NAME)
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: PULP_BASE_URL
+        value: $(params.PULP_BASE_URL)
+      - name: PULP_API_ROOT
+        value: $(params.PULP_API_ROOT)
+      - name: PULP_DOMAIN
+        value: $(params.PULP_DOMAIN)
+      - name: PULP_REPOSITORY
+        value: $(params.PULP_REPOSITORY)
+      - name: FILES_DIR
+        value: $(params.dataDir)/$(params.filesDir)
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    volumeMounts:
+      - name: service-account-secret
+        mountPath: "/etc/service-account-secret"
+        readOnly: true
+      - name: workdir
+        mountPath: /var/workdir
+    workingDir: /var/workdir
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: upload
+      image: quay.io/redhat-user-workloads/calunga-tenant/plumbing-utils@sha256:fd4f21622982bfa5c64dd58973de8e18e056c11fc15f87ad2fae0721511c7910
+      command:
+        - pulp-upload
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m

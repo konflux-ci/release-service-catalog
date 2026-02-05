@@ -1,0 +1,277 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: calunga-push-to-pulp
+spec:
+  description: >-
+    Release Components in a Snapshot to a pulp-backed python index. Each image in a Component is
+    expected to contain a python wheel and sdist under the /releases directory.
+  params:
+    - name: release
+      type: string
+      description:
+        The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution
+    - name: releasePlan
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name (namespace/name) of the releasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the releaseServiceConfig
+    - name: snapshot
+      type: string
+      description: The namespaced name (namespace/name) of the snapshot
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON representation of the EnterpriseContractPolicy
+    - name: enterpriseContractExtraRuleData
+      type: string
+      description: |
+        Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax
+        "key1=value1,key2=value2..."
+      default: "pipeline_intention=release"
+    - name: enterpriseContractTimeout
+      type: string
+      description: Timeout setting for `ec validate`
+      default: 40m0s
+    - name: verify_ec_task_bundle
+      type: string
+      description: The location of the bundle containing the verify-enterprise-contract task
+    - name: verify_ec_task_git_revision
+      type: string
+      description: The git revision to be used when consuming the verify-conforma task
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+      default: https://github.com/konflux-ci/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+      default: production
+    - name: pulpBaseUrl
+      type: string
+      description: The base URL of the Pulp server
+      default: https://packages.redhat.com
+    - name: pulpDomain
+      type: string
+      description: The domain to use for Pulp operations
+      default: trusted-libraries
+    - name: pulpApiRoot
+      type: string
+      description: The API root path of the Pulp server
+      default: "/api/"
+    - name: serviceAccountSecretName
+      type: string
+      description: The name of the secret containing the Pulp service account credentials
+      default: service-account-credentials
+    - name: pulpRepository
+      type: string
+      description: The Pulp repository to upload packages to
+      default: main
+    - name: signingSecretName
+      type: string
+      description: The name of the AWS KMS signing secret configured in the ReleasePlanAdmission
+      default: ""
+    - name: config
+      description: Name of the ConfigMap with config options, e.g. ociStorage
+      type: string
+      default: release-pipeline-config
+  tasks:
+
+    - name: config
+      taskRef:
+        params:
+          - name: name
+            value: get-config
+          - name: bundle
+            value: quay.io/redhat-user-workloads/calunga-tenant/task-get-config@sha256:abe408d7365a23a548268b994dc7d758660fc595ba6af0f455f000a4f3f535d7
+          - name: kind
+            value: task
+        resolver: bundles
+      params:
+        - name: configMapName
+          value: $(params.config)
+
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-data/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: ociStorage
+          value: $(tasks.config.results.ociStorage)
+
+    # TODO: We probably don't need to support single component mode.
+    - name: reduce-snapshot
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/reduce-snapshot/reduce-snapshot.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)
+        - name: SINGLE_COMPONENT
+          value: $(tasks.collect-data.results.singleComponentMode)
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE
+          value: snapshot/$(tasks.collect-data.results.snapshotName)
+        - name: SINGLE_COMPONENT_CUSTOM_RESOURCE_NS
+          value: $(tasks.collect-data.results.snapshotNamespace)
+        - name: SNAPSHOT_PATH
+          value: $(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(tasks.config.results.ociStorage)
+      runAfter:
+        - collect-data
+
+    - name: verify-enterprise-contract
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: https://github.com/enterprise-contract/ec-cli
+          - name: revision
+            # TODO: How to keep this up to date?
+            value: cdfd9188f9352d7269ae1fe8c273a9e67f60ab8a
+          - name: pathInRepo
+            value: "tasks/verify-conforma-konflux-ta/0.1/verify-conforma-konflux-ta.yaml"
+      params:
+        - name: SNAPSHOT_FILENAME
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: SSL_CERT_DIR
+          value: /var/run/secrets/kubernetes.io/serviceaccount
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          value: "true"
+        - name: IGNORE_REKOR
+          value: "true"
+        - name: EXTRA_RULE_DATA
+          value: $(params.enterpriseContractExtraRuleData)
+        - name: TIMEOUT
+          value: $(params.enterpriseContractTimeout)
+        - name: SOURCE_DATA_ARTIFACT
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+      runAfter:
+        - reduce-snapshot
+
+    - name: extract-py-artifacts
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/extract-py-artifacts/extract-py-artifacts.yaml
+      params:
+        - name: SNAPSHOT_PATH
+          value: $(tasks.collect-data.results.snapshotSpec)
+        - name: sourceDataArtifact
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(tasks.config.results.ociStorage)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - verify-enterprise-contract
+
+    - name: rh-sign-python-wheels
+      timeout: "2h00m0s"
+      when:
+        - input: $(params.signingSecretName)
+          operator: notin
+          values: [""]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/rh-sign-python-wheels/rh-sign-python-wheels.yaml
+      params:
+        - name: secretName
+          value: "$(params.signingSecretName)"
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-py-artifacts.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(tasks.config.results.ociStorage)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - extract-py-artifacts
+
+    - name: push-py-pulp
+      when:
+        - input: $(params.signingSecretName)
+          operator: notin
+          values: [""]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/upload-py-pulp/upload-py-pulp.yaml
+      params:
+        - name: PULP_BASE_URL
+          value: $(params.pulpBaseUrl)
+        - name: PULP_API_ROOT
+          value: $(params.pulpApiRoot)
+        - name: PULP_DOMAIN
+          value: $(params.pulpDomain)
+        - name: SERVICE_ACCOUNT_SECRET_NAME
+          value: $(params.serviceAccountSecretName)
+        - name: PULP_REPOSITORY
+          value: $(params.pulpRepository)
+        - name: sourceDataArtifact
+          value: "$(tasks.rh-sign-python-wheels.results.sourceDataArtifact)"
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - rh-sign-python-wheels
