@@ -114,13 +114,17 @@ All steps in the [managed](tasks/managed) and [internal](tasks/internal) tasks h
 If you are contributing a new managed or internal task (or adding a step to an existing one), you must provide appropriate `computeResources`. If you do not do this, your PR will fail
 the linting check due to the check defined in [this script](.github/scripts/tkn_check_compute_resources.sh).
 
-When setting `computeResources`, you should set the `limits.memory` and `requests.memory` to the same value. No `limits.cpu` should be defined, but a `requests.cpu` should be.
-Here is an example
+When setting `computeResources`, you should set:
+- `limits.memory` and `requests.memory` to the same value
+- `limits.cpu` and `requests.cpu` to the same value
+
+Here is an example:
 ```yaml
 - name: my-new-step
   computeResources:
     limits:
       memory: 256Mi
+      cpu: 250m
     requests:
       memory: 256Mi
       cpu: 250m
