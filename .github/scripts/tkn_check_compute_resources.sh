@@ -30,12 +30,6 @@ for file in ${CHANGED_FILES}; do
     limits=$(yq '.limits' <<< "$compute_resources")
     requests=$(yq '.requests' <<< "$compute_resources")
 
-    # Ensure limits.cpu is not defined
-    if yq -e 'has("cpu")' <<< "$limits" > /dev/null 2>&1; then
-      echo "ERROR: $file step $step_name (index $i) has limits.cpu defined. This should not be set"
-      fail=1
-    fi
-
     # Ensure requests.cpu is defined
     if ! yq -e 'has("cpu")' <<< "$requests" > /dev/null 2>&1; then
       echo "ERROR: $file step $step_name (index $i) does not have requests.cpu defined"
@@ -55,9 +49,9 @@ for file in ${CHANGED_FILES}; do
       echo "ERROR: $file step $step_name (index $i) computeResources has extra or missing keys"
       fail=1
     else
-      # Check that limits only has memory and requests only has cpu and memory (order-agnostic)
-      if ! yq -e 'keys | contains(["memory"]) and length == 1' <<< "$limits" > /dev/null 2>&1; then
-        echo "ERROR: $file step $step_name (index $i) computeResources.limits has keys other than memory"
+      # Check that limits only has memory and/or cpu, requests only has cpu and memory (order-agnostic)
+      if ! yq -e 'keys - ["cpu","memory"] | length == 0' <<< "$limits" > /dev/null 2>&1; then
+        echo "ERROR: $file step $step_name (index $i) computeResources.limits has keys other than memory and cpu"
         fail=1
       fi
       if ! yq -e 'keys | contains(["cpu","memory"]) and length == 2' <<< "$requests" > /dev/null 2>&1; then
