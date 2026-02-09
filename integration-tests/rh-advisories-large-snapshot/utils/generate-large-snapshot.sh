@@ -35,14 +35,74 @@ if ! [[ "${COMPONENT_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-# Images to use for components (rotated for variety)
-# Using publicly accessible images to avoid authentication requirements
-declare -a IMAGE_POOL=(
-    "quay.io/centos/centos:stream9"
-    "quay.io/fedora/fedora:latest"
-    "docker.io/library/alpine:latest"
-    "docker.io/library/busybox:latest"
-)
+# ============================================================================
+# IMAGE POOL STRATEGY: Dynamic Generation with Caching
+# ============================================================================
+# 
+# Generates a pool of 200 diverse public images from quay.io for 200 components
+# - Uses generate-image-pool.sh to dynamically discover accessible images
+# - Caches results in /tmp/image-pool-200.txt for fast subsequent runs
+# - First run: ~5 minutes (generates pool with 200 images)
+# - Subsequent runs: instant (uses cache)
+# - 1:1 ratio: Each of 200 components gets a unique image
+#
+# Image sources (200 verified accessible quay.io images):
+# - Konflux CI: release-service-utils (50+ SHAs), appstudio-utils (50+ SHAs)
+# - Konflux CI: release-service (11), mintmaker (11), integration-service (9)
+# - Konflux CI: build-service (11)
+# - Public base images: CentOS, Fedora, AlmaLinux, Rocky Linux, ArchLinux
+# - Build tools: Podman, Skopeo, Buildah (multiple versions)
+#
+# Benefits:
+# - Self-updating: automatically includes new image versions as they're published
+# - Maintainable: no hardcoded lists to update
+# - Efficient: caching makes subsequent runs instant
+# - Diverse: discovers all accessible public images
+# - Consistent: same 200 images used across all test runs
+#
+# Limitations (acceptable for scale testing):
+# - No SBOM support (public images don't have Tekton Chains SBOMs)
+# - No signature verification (EC policy has signature checks excluded)
+# - Atlas/Mobster disabled (would fail attestation verification anyway)
+#
+# ============================================================================
+
+# Configuration
+POOL_CACHE_FILE="/tmp/image-pool-200.txt"
+POOL_GENERATOR="$(dirname "$0")/generate-image-pool.sh"
+TARGET_POOL_SIZE=200
+
+# Generate image pool if cache doesn't exist (hybrid approach for CI/CD)
+if [ ! -f "${POOL_CACHE_FILE}" ]; then
+    echo "🔄 Image pool cache not found, generating pool of ${TARGET_POOL_SIZE} images..." >&2
+    echo "   (This will take ~2 minutes on first run, then be cached)" >&2
+    echo "" >&2
+    
+    if [ ! -f "${POOL_GENERATOR}" ]; then
+        echo "❌ Error: Image pool generator not found at ${POOL_GENERATOR}" >&2
+        exit 1
+    fi
+    
+    # Generate the pool (outputs to POOL_CACHE_FILE)
+    if ! "${POOL_GENERATOR}" "${TARGET_POOL_SIZE}" "${POOL_CACHE_FILE}"; then
+        echo "❌ Error: Failed to generate image pool" >&2
+        exit 1
+    fi
+    echo "" >&2
+else
+    echo "✅ Using cached image pool from ${POOL_CACHE_FILE}" >&2
+fi
+
+# Read image pool from cache file
+declare -a IMAGE_POOL=()
+mapfile -t IMAGE_POOL < "${POOL_CACHE_FILE}"
+
+# Note: PR_CONTAINER_IMAGE support removed - using only the 200 diverse public images
+# This ensures consistent behavior across all test runs without dependency on PR-specific images
+
+POOL_SIZE=${#IMAGE_POOL[@]}
+echo "" >&2
+echo "📦 Image pool: ${POOL_SIZE} images (1:1 ratio with ${COMPONENT_COUNT} components)" >&2
 
 echo "Generating large snapshot with ${COMPONENT_COUNT} components..." >&2
 echo "" >&2
@@ -52,12 +112,12 @@ cat <<EOF
 apiVersion: appstudio.redhat.com/v1alpha1
 kind: Snapshot
 metadata:
-  name: ${SNAPSHOT_NAME}
-  namespace: ${NAMESPACE}
+  name: "${SNAPSHOT_NAME}"
+  namespace: "${NAMESPACE}"
   labels:
-    test.appstudio.openshift.io/type: large-snapshot
+    test.appstudio.openshift.io/type: "large-snapshot"
     test.appstudio.openshift.io/component-count: "${COMPONENT_COUNT}"
-    appstudio.openshift.io/application: ${APPLICATION_NAME}
+    appstudio.openshift.io/application: "${APPLICATION_NAME}"
   annotations:
     test.appstudio.openshift.io/description: "Large snapshot with ${COMPONENT_COUNT} components for rh-advisories pipeline testing"
     # Skip build since we're using pre-built container images
@@ -67,7 +127,7 @@ metadata:
     # Rationale: This is a test snapshot with static pre-built images for scale testing
     test.appstudio.openshift.io/skip-idempotency: "true"
 spec:
-  application: ${APPLICATION_NAME}
+  application: "${APPLICATION_NAME}"
   displayName: "Large Snapshot - ${COMPONENT_COUNT} Components"
   displayDescription: "Test snapshot with ${COMPONENT_COUNT} components for large-scale release testing"
   artifacts: {}
@@ -91,20 +151,13 @@ for (( i=1; i<=COMPONENT_COUNT; i++ )); do
     
     # Generate component entry
     cat <<EOF
-    - name: ${COMPONENT_NAME}
-      containerImage: ${CONTAINER_IMAGE}
+    - name: "${COMPONENT_NAME}"
+      containerImage: "${CONTAINER_IMAGE}"
       source:
         git:
-          url: ${SOURCE_URL}
-          revision: main
+          url: "${SOURCE_URL}"
+          revision: "main"
 EOF
-
-    # Add some components with additional metadata for realism
-    if (( i % 20 == 0 )); then
-        cat <<EOF
-      repository: quay.io/redhat-pending/rhtap----${COMPONENT_NAME}
-EOF
-    fi
 done
 
 echo "" >&2

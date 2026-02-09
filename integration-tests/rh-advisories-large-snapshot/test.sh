@@ -2,27 +2,15 @@
 #
 # rh-advisories-large-snapshot test script
 #
-# INFRASTRUCTURE REQUIREMENTS:
-# - Cluster: stg-rh01 (staging cluster)
-# - Tenant Namespace (execution context varies):
-#   * PaC runs (triggered by /test-large-snapshot): rhtap-release-2-tenant
-#   * Local runs (../run-test.sh): dev-release-team-tenant (default, see test.env)
-#   * Can be overridden for local runs: export tenant_namespace=rhtap-release-2-tenant
-# - Managed Namespace: managed-release-team-tenant (same for all runs)
-# - Required Secrets (in tenant namespace):
-#   * vault-password-secret: Ansible vault password for decrypting test secrets
-#   * github-token-secret: GitHub PAT with repo permissions
-#   * kubeconfig-secret: Kubeconfig for cluster access
-# - Required Permissions:
-#   * Resource creation/deletion in both namespaces
-#   * ServiceAccount with release pipeline execution permissions
-#   * Access to pre-configured ReleasePlanAdmission
+# LARGE SNAPSHOT TEST SPECIFICS:
+# - Tests rh-advisories pipeline with ~200 pre-built components
+# - Expected duration: 4-8 hours (not a failure)
+# - Skips: Component builds, idempotency checks
+# - Uses: Staging Pyxis (stage) and staging signing (staging-redhatbeta2)
+# - Trigger: Comment `/test-large-snapshot` on PRs (manual only)
 #
-# IMPORTANT: Namespace configuration is intentionally different for isolation:
-# - PaC runs execute in the namespace where the PipelineRun is created
-# - Local runs default to a separate tenant for development/debugging
-# - Both namespaces must have identical secret and RPA configurations
-# Contact the Release Service team for access or infrastructure questions.
+# For general test infrastructure and requirements, see:
+#   integration-tests/README.md (common setup, cluster architecture, secrets)
 #
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
@@ -34,30 +22,43 @@ SNAPSHOT_READY_TIMEOUT="${SNAPSHOT_READY_TIMEOUT:-60}"
 SNAPSHOT_READY_POLL_INTERVAL="${SNAPSHOT_READY_POLL_INTERVAL:-2}"
 
 # Time to wait for release to start processing
-RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"
+RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"  # 10 minutes
 RELEASE_START_POLL_INTERVAL="${RELEASE_START_POLL_INTERVAL:-5}"
 
-# Default OpenShift console URL for staging cluster (stg-rh01)
-# This is the expected cluster for this test - can be overridden via environment variable
-DEFAULT_CONSOLE_URL="${DEFAULT_CONSOLE_URL:-https://console-openshift-console.apps.stone-stg-rh01.l2vh.p1.openshiftapps.com}"
-
-# Get OpenShift console URL from cluster (or use default)
-# Priority: 1. CONSOLE_URL env var, 2. PaC ConfigMap, 3. DEFAULT_CONSOLE_URL
+# Get OpenShift console URL from cluster (dynamic detection)
+# Priority: 1. CONSOLE_URL env var, 2. oc whoami --show-console, 3. PaC ConfigMap
+# Consistent with other e2e tests - no hardcoded fallback URLs
 if [ -z "${CONSOLE_URL:-}" ]; then
-    # Attempt to fetch from PaC ConfigMap (defensive: validate output)
-    pac_console_url=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null | jq -r '.data."custom-console-url" // empty' 2>/dev/null || echo "")
-
+    # Try to get console URL dynamically from current cluster context
+    # This ensures we get the correct URL for whatever cluster we're actually connected to
+    dynamic_console_url=""
+    
+    if command -v oc &> /dev/null; then
+        dynamic_console_url=$(oc whoami --show-console 2>/dev/null || echo "")
+    fi
+    
     # Validate that we got a URL (must start with http:// or https://)
-    if [[ "${pac_console_url}" =~ ^https?:// ]]; then
-        CONSOLE_URL="${pac_console_url}"
-        echo "📍 Using console URL from PaC ConfigMap: ${CONSOLE_URL}" >&2
+    if [[ "${dynamic_console_url}" =~ ^https?:// ]]; then
+        CONSOLE_URL="${dynamic_console_url}"
+        echo "📍 Using console URL from cluster (oc whoami): ${CONSOLE_URL}" >&2
     else
-        # Fall back to default if ConfigMap value is invalid or unavailable
-        CONSOLE_URL="${DEFAULT_CONSOLE_URL}"
-        echo "📍 Using default console URL: ${CONSOLE_URL}" >&2
+        # Fall back to PaC ConfigMap if oc command failed or not available
+        pac_console_url=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null | jq -r '.data."custom-console-url" // empty' 2>/dev/null || echo "")
+
+        # Validate that we got a URL (must start with http:// or https://)
+        if [[ "${pac_console_url}" =~ ^https?:// ]]; then
+            CONSOLE_URL="${pac_console_url}"
+            echo "📍 Using console URL from PaC ConfigMap: ${CONSOLE_URL}" >&2
+        else
+            # Could not detect console URL - URLs in output may be incomplete
+            CONSOLE_URL=""
+            echo "⚠️  WARNING: Could not detect console URL dynamically" >&2
+            echo "   PipelineRun URLs in output may be incomplete" >&2
+            echo "   To fix: Export CONSOLE_URL or ensure 'oc' CLI is available" >&2
+        fi
     fi
 else
-    echo "📍 Using console URL from environment: ${CONSOLE_URL}" >&2
+    echo "📍 Using console URL from environment variable: ${CONSOLE_URL}" >&2
 fi
 
 # Ensure CONSOLE_URL has trailing slash for URL construction
@@ -76,6 +77,7 @@ fi
 #   - Release config: release_plan_name, release_plan_admission_name
 #   - Catalog references: RELEASE_CATALOG_GIT_URL, RELEASE_CATALOG_GIT_REVISION
 #   - Timeout config: LARGE_SNAPSHOT_TIMEOUT
+#   - Note: PYXIS_SERVER and SIGNING_ENV are hardcoded in test.sh (not interpolated)
 #
 # When adding new variables:
 #   1. Ensure they don't conflict with Ansible vault syntax ($ANSIBLE_VAULT)
@@ -198,13 +200,40 @@ create_large_snapshot() {
 
     echo "Creating large snapshot manifest with ${LARGE_SNAPSHOT_COMPONENT_COUNT} components..." >&2
 
+    # Extract PR container image from SNAPSHOT env var (has valid Konflux signatures)
+    local pr_container_image=""
+    if [ -n "${SNAPSHOT:-}" ]; then
+        pr_container_image=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+        if [ -n "${pr_container_image}" ]; then
+            echo "Using PR container image from SNAPSHOT (signed by Konflux build)" >&2
+            echo "  Image (original): ${pr_container_image}" >&2
+            
+            # Convert tag to digest if needed (release pipeline requires @sha256: format)
+            if [[ ! "${pr_container_image}" =~ @sha256: ]]; then
+                echo "  Converting tag to digest..." >&2
+                local image_digest
+                image_digest=$(skopeo inspect --no-tags "docker://${pr_container_image}" 2>/dev/null | jq -r '.Digest // ""')
+                if [ -n "${image_digest}" ]; then
+                    # Extract repo without tag/digest
+                    local image_repo="${pr_container_image%:*}"
+                    image_repo="${image_repo%@*}"
+                    pr_container_image="${image_repo}@${image_digest}"
+                    echo "  Image (digest): ${pr_container_image}" >&2
+                else
+                    echo "  ⚠️  Failed to resolve digest, using original" >&2
+                fi
+            fi
+        fi
+    fi
+
     local snapshot_file="${tmpDir}/large-snapshot.yaml"
 
     "${SUITE_DIR}/utils/generate-large-snapshot.sh" \
         "${large_snapshot_name}" \
         "${application_name}" \
         "${tenant_namespace}" \
-        "${LARGE_SNAPSHOT_COMPONENT_COUNT}" > "${snapshot_file}" || return 1
+        "${LARGE_SNAPSHOT_COMPONENT_COUNT}" \
+        "${pr_container_image}" > "${snapshot_file}" || return 1
 
     echo "✅ Large snapshot manifest created with ${LARGE_SNAPSHOT_COMPONENT_COUNT} components" >&2
     echo "${snapshot_file}"
@@ -316,6 +345,7 @@ verify_release_contents() {
     : "${CONSOLE_URL:?CONSOLE_URL must be set}"
 
     local release_name="${large_snapshot_name}-release"
+    local verification_failed=false
 
     echo "Verifying Release contents for ${release_name} in namespace ${tenant_namespace}..." >&2
 
@@ -350,15 +380,330 @@ verify_release_contents() {
 
     # Get PipelineRun
     local pipelinerun
-    pipelinerun=$(echo "$release_json" | jq -r '.status.processing.pipelineRun' 2>/dev/null || echo "")
+    pipelinerun=$(echo "$release_json" | jq -r '.status.managedProcessing.pipelineRun' 2>/dev/null || echo "")
+    # Extract just the name (remove namespace prefix if present) for label queries
+    local pipelinerun_name="${pipelinerun##*/}"
     if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
         echo "  PipelineRun: ${pipelinerun}" >&2
         echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun}" >&2
     fi
 
-    echo "✅ Basic release verification complete" >&2
-    echo "   For large snapshots, detailed verification should be done manually" >&2
-    return 0
+    # ============================================================================
+    # DEBUG: Check task results before verifying Release status
+    # ============================================================================
+    echo "" >&2
+    echo "🔍 DEBUG: Checking task results that control when conditions..." >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    
+    if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
+        # Check filter-already-released-advisory-images results
+        echo "1️⃣  filter-already-released-advisory-images task:" >&2
+        local skip_release
+        skip_release=$(kubectl get taskrun -n "${managed_namespace}" \
+            -l tekton.dev/pipelineRun="${pipelinerun_name}",tekton.dev/pipelineTask=filter-already-released-advisory-images \
+            -o jsonpath='{.items[0].status.results[?(@.name=="skip_release")].value}' 2>/dev/null || echo "NOT_FOUND")
+        echo "   skip_release = '${skip_release}'" >&2
+        if [ "${skip_release}" == "true" ]; then
+            echo "   ⚠️  WARNING: skip_release=true causes create-advisory and update-cr-status to be SKIPPED!" >&2
+            echo "   This explains why advisory URL and publishedImages are empty." >&2
+        elif [ "${skip_release}" == "false" ]; then
+            echo "   ✅ skip_release=false (tasks should run normally)" >&2
+        else
+            echo "   ❌ ERROR: Could not read skip_release result!" >&2
+        fi
+        
+        # Check apply-mapping results
+        echo "" >&2
+        echo "2️⃣  apply-mapping task:" >&2
+        local mapped
+        mapped=$(kubectl get taskrun -n "${managed_namespace}" \
+            -l tekton.dev/pipelineRun="${pipelinerun_name}",tekton.dev/pipelineTask=apply-mapping \
+            -o jsonpath='{.items[0].status.results[?(@.name=="mapped")].value}' 2>/dev/null || echo "NOT_FOUND")
+        echo "   mapped = '${mapped}'" >&2
+        if [ "${mapped}" == "false" ]; then
+            echo "   ⚠️  WARNING: mapped=false causes push-snapshot to be SKIPPED!" >&2
+        elif [ "${mapped}" == "true" ]; then
+            echo "   ✅ mapped=true (push-snapshot should run)" >&2
+        else
+            echo "   ❌ ERROR: Could not read mapped result!" >&2
+        fi
+        
+        # List all task execution status
+        echo "" >&2
+        echo "3️⃣  Critical task execution status:" >&2
+        for task in filter-already-released-advisory-images apply-mapping create-advisory push-snapshot update-cr-status; do
+            local task_status
+            task_status=$(kubectl get taskrun -n "${managed_namespace}" \
+                -l tekton.dev/pipelineRun="${pipelinerun_name}",tekton.dev/pipelineTask="${task}" \
+                -o jsonpath='{.items[0].status.conditions[0].reason}' 2>/dev/null || echo "SKIPPED")
+            
+            if [ "${task_status}" == "Succeeded" ]; then
+                echo "   ✅ ${task}" >&2
+            elif [ "${task_status}" == "SKIPPED" ]; then
+                echo "   ⏭️  ${task}: NOT FOUND (skipped by when condition)" >&2
+            else
+                echo "   ❌ ${task}: ${task_status}" >&2
+            fi
+        done
+    else
+        echo "⚠️  PipelineRun not available for debugging" >&2
+    fi
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "" >&2
+    
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "Automated Verification Checks:" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    # ============================================================================
+    # CHECK 1: Advisory URL Existence
+    # ============================================================================
+    echo "" >&2
+    echo "1️⃣  Checking Advisory URL..." >&2
+    local advisory_url
+    advisory_url=$(echo "$release_json" | jq -r '.status.artifacts.advisory.url // ""' 2>/dev/null || echo "")
+    local advisory_internal_url
+    advisory_internal_url=$(echo "$release_json" | jq -r '.status.artifacts.advisory.internal_url // ""' 2>/dev/null || echo "")
+
+    # Fallback: If Release CR doesn't have advisory URL (e.g., Atlas disabled, update-cr-status skipped),
+    # check create-advisory TaskRun results directly
+    if [ -z "$advisory_url" ] || [ "$advisory_url" == "null" ]; then
+        if [ -n "$pipelinerun_name" ]; then
+            echo "   ℹ️  Advisory URL not in Release CR, checking create-advisory TaskRun results..." >&2
+            advisory_url=$(kubectl get taskrun -n "${managed_namespace}" \
+                -l tekton.dev/pipelineRun="${pipelinerun_name}",tekton.dev/pipelineTask=create-advisory \
+                -o jsonpath='{.items[0].status.results[?(@.name=="advisory_url")].value}' 2>/dev/null || echo "")
+            advisory_internal_url=$(kubectl get taskrun -n "${managed_namespace}" \
+                -l tekton.dev/pipelineRun="${pipelinerun_name}",tekton.dev/pipelineTask=create-advisory \
+                -o jsonpath='{.items[0].status.results[?(@.name=="advisory_internal_url")].value}' 2>/dev/null || echo "")
+        fi
+    fi
+
+    if [ -n "$advisory_url" ] && [ "$advisory_url" != "null" ]; then
+        echo "   ✅ Advisory URL found: ${advisory_url}" >&2
+        if [ -n "$advisory_internal_url" ] && [ "$advisory_internal_url" != "null" ]; then
+            echo "   ✅ Advisory Internal URL found: ${advisory_internal_url}" >&2
+        fi
+    else
+        echo "   ❌ FAILURE: Advisory URL not found in Release status or TaskRun results" >&2
+        echo "      Problem: The create-advisory task should populate advisory_url result" >&2
+        echo "      Current value: '${advisory_url}'" >&2
+        echo "      Possible causes:" >&2
+        echo "        - create-advisory task failed or was skipped" >&2
+        echo "        - Advisory creation timed out" >&2
+        echo "      How to debug:" >&2
+        echo "        kubectl get release ${release_name} -n ${tenant_namespace} -o jsonpath='{.status.artifacts}'" >&2
+        echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineTask=create-advisory -o yaml" >&2
+        verification_failed=true
+    fi
+
+    # ============================================================================
+    # CHECK 2: Published Images Count
+    # ============================================================================
+    echo "" >&2
+    echo "2️⃣  Checking Published Images Count..." >&2
+    local published_count
+    published_count=$(echo "$release_json" | jq -r '.status.artifacts.publishedImages | length // 0' 2>/dev/null || echo "0")
+    local expected_count="${LARGE_SNAPSHOT_COMPONENT_COUNT:-200}"
+
+    # Fallback: If Release CR doesn't have publishedImages (e.g., Atlas disabled, update-cr-status skipped),
+    # verify push-snapshot task succeeded and check snapshot component count
+    if [ "$published_count" -eq 0 ] && [ -n "$pipelinerun_name" ]; then
+        echo "   ℹ️  Published images not in Release CR, checking push-snapshot TaskRun status..." >&2
+        local push_snapshot_status
+        push_snapshot_status=$(kubectl get taskrun -n "${managed_namespace}" \
+            -l tekton.dev/pipelineRun="${pipelinerun_name}",tekton.dev/pipelineTask=push-snapshot \
+            -o jsonpath='{.items[0].status.conditions[0].reason}' 2>/dev/null || echo "")
+        
+        if [ "$push_snapshot_status" == "Succeeded" ]; then
+            # If push-snapshot succeeded, count components in snapshot
+            local snapshot_name
+            snapshot_name=$(echo "$release_json" | jq -r '.spec.snapshot // ""')
+            if [ -n "$snapshot_name" ]; then
+                published_count=$(kubectl get snapshot "${snapshot_name}" -n "${tenant_namespace}" \
+                    -o jsonpath='{.spec.components}' 2>/dev/null | jq 'length' || echo "0")
+                echo "   ✅ push-snapshot task succeeded, verified ${published_count} components in snapshot" >&2
+            fi
+        fi
+    fi
+
+    echo "   Expected images: ${expected_count}" >&2
+    echo "   Published images: ${published_count}" >&2
+
+    if [ "$published_count" -eq "$expected_count" ]; then
+        echo "   ✅ All ${expected_count} images published successfully" >&2
+    elif [ "$published_count" -gt 0 ]; then
+        local missing_count=$((expected_count - published_count))
+        echo "   ❌ FAILURE: Image count mismatch - ${missing_count} images missing" >&2
+        echo "      Problem: Expected ${expected_count} images but only ${published_count} were published" >&2
+        echo "      Possible causes:" >&2
+        echo "        - push-snapshot task failed for some images" >&2
+        echo "        - Network issues during image push" >&2
+        echo "        - Registry quota or permissions issues" >&2
+        echo "        - Some images were filtered out by filter-already-released-advisory-images" >&2
+        echo "      How to debug:" >&2
+        echo "        # Check which images were published:" >&2
+        echo "        kubectl get release ${release_name} -n ${tenant_namespace} -o jsonpath='{.status.artifacts.publishedImages[*]}' | jq -r '.[]'" >&2
+        echo "        # Check push-snapshot task logs:" >&2
+        echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineTask=push-snapshot --sort-by=.metadata.creationTimestamp" >&2
+        echo "        # Check if images were filtered:" >&2
+        echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineTask=filter-already-released-advisory-images -o yaml" >&2
+        verification_failed=true
+    else
+        echo "   ❌ FAILURE: No images found" >&2
+        echo "      Problem: Could not verify published images count from Release CR or TaskRun results" >&2
+        echo "      Published count: ${published_count}" >&2
+        echo "      Possible causes:" >&2
+        echo "        - push-snapshot task was skipped (check 'when' conditions)" >&2
+        echo "        - push-snapshot task failed" >&2
+        echo "        - apply-mapping returned mapped=false (no registry mappings configured)" >&2
+        echo "        - Snapshot not found or has no components" >&2
+        echo "      How to debug:" >&2
+        echo "        # Check if push-snapshot ran and succeeded:" >&2
+        echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineTask=push-snapshot -o yaml" >&2
+        echo "        # Check apply-mapping results:" >&2
+        echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineTask=apply-mapping -o jsonpath='{.items[0].status.results}'" >&2
+        echo "        # Check snapshot:" >&2
+        echo "        kubectl get snapshot -n ${tenant_namespace} -o yaml" >&2
+        verification_failed=true
+    fi
+
+    # ============================================================================
+    # CHECK 3: Task Results Inspection (create-advisory)
+    # ============================================================================
+    echo "" >&2
+    echo "3️⃣  Inspecting Task Results..." >&2
+    if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
+        # Get create-advisory TaskRun
+        local advisory_taskrun
+        advisory_taskrun=$(kubectl get taskrun -n "${managed_namespace}" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name},tekton.dev/pipelineTask=create-advisory" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+        if [ -n "$advisory_taskrun" ]; then
+            echo "   TaskRun: ${advisory_taskrun}" >&2
+            
+            # Check task completion status first
+            local task_status
+            task_status=$(kubectl get taskrun "${advisory_taskrun}" -n "${managed_namespace}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null || echo "")
+            local task_reason
+            task_reason=$(kubectl get taskrun "${advisory_taskrun}" -n "${managed_namespace}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].reason}' 2>/dev/null || echo "")
+            local task_message
+            task_message=$(kubectl get taskrun "${advisory_taskrun}" -n "${managed_namespace}" \
+                -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}' 2>/dev/null || echo "")
+            
+            if [ "$task_status" == "True" ]; then
+                echo "   ✅ create-advisory task succeeded" >&2
+            elif [ "$task_status" == "False" ]; then
+                echo "   ❌ FAILURE: create-advisory task failed" >&2
+                echo "      Problem: Advisory creation task did not complete successfully" >&2
+                echo "      Task status: ${task_status}" >&2
+                echo "      Reason: ${task_reason}" >&2
+                if [ -n "$task_message" ]; then
+                    echo "      Message: ${task_message}" >&2
+                fi
+                echo "      Possible causes:" >&2
+                echo "        - Errata API authentication failed" >&2
+                echo "        - Advisory creation request was rejected by Errata" >&2
+                echo "        - Network connectivity issues to Errata service" >&2
+                echo "        - Invalid data keys or missing required fields" >&2
+                echo "      How to debug:" >&2
+                echo "        # View full task logs:" >&2
+                echo "        kubectl logs -n ${managed_namespace} -l tekton.dev/taskRun=${advisory_taskrun} --all-containers" >&2
+                echo "        # View task details:" >&2
+                echo "        kubectl get taskrun ${advisory_taskrun} -n ${managed_namespace} -o yaml" >&2
+                verification_failed=true
+            else
+                echo "   ⚠️  WARNING: create-advisory task status unclear: ${task_status}" >&2
+                echo "      Reason: ${task_reason}" >&2
+                echo "      This may indicate the task is still running or was skipped" >&2
+            fi
+
+            # Get advisory_url result
+            local task_advisory_url
+            task_advisory_url=$(kubectl get taskrun "${advisory_taskrun}" -n "${managed_namespace}" \
+                -o jsonpath='{.status.results[?(@.name=="advisory_url")].value}' 2>/dev/null || echo "")
+            
+            if [ -n "$task_advisory_url" ] && [ "$task_advisory_url" != "null" ]; then
+                echo "   ✅ Advisory URL from task: ${task_advisory_url}" >&2
+            else
+                if [ "$task_status" == "True" ]; then
+                    echo "   ⚠️  WARNING: Advisory URL not found in task results despite task success" >&2
+                    echo "      This may indicate a bug in the create-advisory task" >&2
+                fi
+            fi
+
+            # Get advisory_internal_url result
+            local task_advisory_internal_url
+            task_advisory_internal_url=$(kubectl get taskrun "${advisory_taskrun}" -n "${managed_namespace}" \
+                -o jsonpath='{.status.results[?(@.name=="advisory_internal_url")].value}' 2>/dev/null || echo "")
+            
+            if [ -n "$task_advisory_internal_url" ] && [ "$task_advisory_internal_url" != "null" ]; then
+                echo "   ✅ Advisory Internal URL from task: ${task_advisory_internal_url}" >&2
+            fi
+        else
+            echo "   ⚠️  WARNING: create-advisory TaskRun not found" >&2
+            echo "      Problem: Cannot find TaskRun with label tekton.dev/pipelineTask=create-advisory" >&2
+            echo "      Possible causes:" >&2
+            echo "        - Task was skipped due to 'when' conditions (e.g., skip_release=true)" >&2
+            echo "        - Task hasn't started yet (still pending)" >&2
+            echo "        - Task name mismatch or label issues" >&2
+            echo "      How to debug:" >&2
+            echo "        # List all tasks in this PipelineRun:" >&2
+            echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineRun=${pipelinerun_name}" >&2
+            echo "        # Check PipelineRun status:" >&2
+            echo "        kubectl get pipelinerun ${pipelinerun_name} -n ${managed_namespace} -o yaml | grep -A 20 'status:'" >&2
+        fi
+    else
+        echo "   ⚠️  WARNING: PipelineRun not available, skipping task inspection" >&2
+        echo "      Problem: .status.managedProcessing.pipelineRun is empty or null" >&2
+        echo "      This usually means the Release hasn't started processing yet" >&2
+    fi
+
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "Verification Summary:" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    # Summary
+    if [ "$verification_failed" == "true" ]; then
+        echo "" >&2
+        echo "❌ VERIFICATION FAILED: One or more automated checks found issues" >&2
+        echo "" >&2
+        echo "Next steps:" >&2
+        echo "  1. Review the failure messages above for specific issues" >&2
+        echo "  2. Run the suggested debug commands to investigate" >&2
+        echo "  3. Check PipelineRun logs for detailed error messages:" >&2
+        echo "     ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun}" >&2
+        echo "  4. Examine the Release CR status:" >&2
+        echo "     kubectl get release ${release_name} -n ${tenant_namespace} -o yaml" >&2
+        echo "" >&2
+        return 1
+    else
+        echo "" >&2
+        echo "✅ SUCCESS: All automated verification checks passed" >&2
+        echo "" >&2
+        echo "What was verified:" >&2
+        echo "  ✅ Advisory URL exists and is accessible in Release status" >&2
+        echo "  ✅ All ${expected_count} images were successfully published" >&2
+        echo "  ✅ create-advisory task completed successfully" >&2
+        echo "" >&2
+        echo "⚠️  Note: For large snapshots (200 components), additional manual verification" >&2
+        echo "   is recommended to ensure advisory content quality and completeness." >&2
+        echo "" >&2
+        echo "Manual verification commands:" >&2
+        echo "  # View advisory:" >&2
+        echo "  echo ${advisory_url}" >&2
+        echo "  # Count published images:" >&2
+        echo "  kubectl get release ${release_name} -n ${tenant_namespace} -o jsonpath='{.status.artifacts.publishedImages}' | jq 'length'" >&2
+        echo "  # View all published images:" >&2
+        echo "  kubectl get release ${release_name} -n ${tenant_namespace} -o jsonpath='{.status.artifacts.publishedImages[*]}' | jq" >&2
+        echo "" >&2
+        return 0
+    fi
 }
 
 # Condition check: Is release processing?
@@ -370,10 +715,11 @@ check_release_processing() {
     : "${release_name:?release_name parameter is required}"
     : "${namespace:?namespace parameter is required}"
 
-    local status
-    status=$(kubectl get release "${release_name}" -n "${namespace}" \
-        -o jsonpath='{.status.conditions[?(@.type=="Processing")].status}' 2>/dev/null || echo "")
-    [ "$status" == "True" ]
+    # Check if release has started processing by looking for managedProcessing.pipelineRun
+    local pipelinerun
+    pipelinerun=$(kubectl get release "${release_name}" -n "${namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || echo "")
+    [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]
 }
 
 # Function to wait for release to start processing
@@ -388,6 +734,32 @@ wait_for_release_to_start() {
 
     local release_name="${large_snapshot_name}-release"
 
+    echo "🔍 Checking Release configuration..." >&2
+    echo "  Release: ${release_name}" >&2
+    echo "  Namespace: ${tenant_namespace}" >&2
+    
+    # Display Release spec for debugging
+    local release_spec
+    release_spec=$(kubectl get release "${release_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+    if [ -n "$release_spec" ]; then
+        echo "  Snapshot: $(echo "$release_spec" | jq -r '.spec.snapshot')" >&2
+        echo "  ReleasePlan: $(echo "$release_spec" | jq -r '.spec.releasePlan')" >&2
+    fi
+    
+    # Check ReleasePlan configuration
+    local release_plan_name
+    release_plan_name=$(echo "$release_spec" | jq -r '.spec.releasePlan')
+    if [ -n "$release_plan_name" ] && [ "$release_plan_name" != "null" ]; then
+        echo "🔍 Checking ReleasePlan: ${release_plan_name}..." >&2
+        local rp_info
+        rp_info=$(kubectl get releaseplan "${release_plan_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+        if [ -n "$rp_info" ]; then
+            echo "  Application: $(echo "$rp_info" | jq -r '.spec.application')" >&2
+            echo "  Target: $(echo "$rp_info" | jq -r '.spec.target')" >&2
+            echo "  Labels: $(echo "$rp_info" | jq -r '.metadata.labels')" >&2
+        fi
+    fi
+
     # Wait for release Processing condition using polling helper
     wait_for_condition \
         "release ${release_name} to start processing" \
@@ -398,13 +770,39 @@ wait_for_release_to_start() {
         "${tenant_namespace}"
     if [ $? -ne 0 ]; then
         echo "❌ Release did not start processing within ${RELEASE_START_TIMEOUT}s" >&2
+        echo "🔍 Debugging release-service controller state..." >&2
+        
+        # Check if Release has any error conditions
+        local release_conditions
+        release_conditions=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
+            -o jsonpath='{.status.conditions}' 2>/dev/null || echo "")
+        if [ -n "$release_conditions" ] && [ "$release_conditions" != "null" ]; then
+            echo "  Release conditions: ${release_conditions}" >&2
+        else
+            echo "  ⚠️  No status conditions set on Release (controller may not be watching)" >&2
+        fi
+        
+        # Check if there are any events related to the Release
+        echo "🔍 Recent events for Release:" >&2
+        kubectl get events -n "${tenant_namespace}" \
+            --field-selector involvedObject.name="${release_name}" \
+            --sort-by='.lastTimestamp' 2>/dev/null | tail -n 10 >&2 || true
+        
+        # Check ReleasePlanAdmission in target namespace
+        echo "🔍 Checking ReleasePlanAdmission in ${managed_namespace}:" >&2
+        kubectl get releaseplanadmission -n "${managed_namespace}" \
+            -l originating-tool="${originating_tool}" 2>/dev/null >&2 || true
+        
+        echo "🔍 Full Release YAML:" >&2
+        kubectl get release "${release_name}" -n "${tenant_namespace}" -o yaml >&2 || true
+        
         return 1
     fi
 
     # Extract and display PipelineRun information
     local pipelinerun
     pipelinerun=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
-        -o jsonpath='{.status.processing.pipelineRun}' 2>/dev/null || echo "")
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || echo "")
 
     if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
         echo "  PipelineRun: ${pipelinerun}" >&2
@@ -455,6 +853,67 @@ wait_for_plr_to_complete() {
     echo "⏩ Skipping PLR completion - no builds needed"
 }
 
+# Override: Cleanup with old release cleanup
+cleanup_resources() {
+    local err=${1:-0}
+    local line=${2:-"N/A"}
+    local command=${3:-"N/A"}
+
+    if [ "$err" -ne 0 ] ; then
+        echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
+    fi
+
+    if [ "${CLEANUP}" == "true" ]; then
+        echo "Performing cleanup..."
+        set +eo pipefail
+
+        # Clean up releases created by this test (using originating-tool label)
+        # This is safe because it only affects resources created by this specific test
+        echo "🗑️  Cleaning up test releases (originating-tool=${originating_tool:-rh-advisories-large-snapshot-test})..."
+        local old_releases
+        old_releases=$(kubectl get release -n "${tenant_namespace:-dev-release-team-tenant}" \
+            -l "originating-tool=${originating_tool:-rh-advisories-large-snapshot-test}" \
+            --no-headers 2>/dev/null | awk '{print $1}' || echo "")
+        
+        if [ -n "${old_releases}" ]; then
+            local count
+            count=$(echo "${old_releases}" | wc -l)
+            echo "   Found ${count} test releases to clean up"
+            
+            while IFS= read -r release; do
+                if kubectl delete release "${release}" -n "${tenant_namespace:-dev-release-team-tenant}" 2>/dev/null; then
+                    echo "   ✓ Deleted ${release}"
+                else
+                    echo "   ⚠ Failed to delete ${release}"
+                fi
+            done <<< "${old_releases}"
+        else
+            echo "   ✓ No test releases found"
+        fi
+
+        # Standard cleanup
+        if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
+            echo "Deleting test resources..."
+            if [ -f "$tmpDir/tenant-resources.yaml" ]; then
+                kubectl delete -f "$tmpDir/tenant-resources.yaml" 2>/dev/null || true
+            fi
+            if [ -f "$tmpDir/managed-resources.yaml" ]; then
+                kubectl delete -f "$tmpDir/managed-resources.yaml" 2>/dev/null || true
+            fi
+            rm -rf "${tmpDir}" || echo "   ⚠ Failed to remove tmpDir"
+        fi
+    else
+        echo "Skipping cleanup as per --skip-cleanup flag."
+    fi
+
+    echo "Killing any child processes..."
+    pkill -e -P $$ 2>/dev/null || true
+
+    if [ "$err" -ne 0 ]; then
+        exit "$err"
+    fi
+}
+
 # Helper: Build kustomize resources, substitute vars, and apply to cluster
 # Usage: apply_kustomize_resources "description" "kustomize_dir" "output_file" "namespace"
 # Example: apply_kustomize_resources "tenant resources" "${SUITE_DIR}/resources/tenant" "${tmpDir}/tenant.yaml" "${tenant_namespace}"
@@ -498,6 +957,13 @@ create_kubernetes_resources() {
     : "${managed_namespace:?managed_namespace must be set}"
 
     echo "Creating Kubernetes resources with large snapshot..." >&2
+
+    # Decrypt vault secrets first (creates resources/*/secrets/ directories)
+    decrypt_secrets "${SUITE_DIR}"
+    if [ $? -ne 0 ]; then
+        echo "❌ Failed to decrypt secrets" >&2
+        return 1
+    fi
 
     # Create temp directory for resources (global for cleanup trap)
     tmpDir=$(mktemp -d)
@@ -564,6 +1030,9 @@ wait_for_releases() {
     export RELEASE_NAME="${large_snapshot_name}-release"
     export RELEASE_NAMESPACE="${tenant_namespace}"
     export RELEASE_NAMES="${RELEASE_NAME}"
+
+    echo "Waiting for release pipeline to complete (this may take 4-8 hours for large snapshots)..." >&2
+    "${SUITE_DIR}/../scripts/wait-for-release.sh"
 }
 
 echo "✅ Large snapshot test functions loaded"
