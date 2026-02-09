@@ -1,0 +1,322 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: update-released-snapshot
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: promote-koji
+spec:
+  description: |-
+    Syncs the promoted build into the integration snapshot in releng-integration-tenant.
+    After promote-koji-draft-build, gets the dev namespace Snapshot metadata and components,
+    maps package-collections to application names (replace "." with "-"), and creates or
+    updates the Snapshot in the integration tenant with the latest RPM OCI.
+  params:
+    - name: snapshotPath
+      type: string
+      description: |
+        Path to the JSON file of the mapped Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace
+    - name: snapshotName
+      type: string
+      description: Name of the Snapshot resource in the dev namespace
+    - name: snapshotNamespace
+      type: string
+      description: Namespace where the Snapshot that triggered the release lives (e.g. rhel-osci-tenant)
+    - name: integrationNamespace
+      type: string
+      description: Namespace for the integration snapshot (e.g. releng-integration-tenant)
+      default: "releng-integration-tenant"
+    - name: pushSecret
+      type: string
+      description: |
+        The secret used for OCI registry auth when fetching image manifests (oras)
+    - name: pipelineImage
+      type: string
+      description: |
+        Image with oras, jq and kubectl for fetching image annotations and updating cluster resources
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: secret-volume
+      secret:
+        secretName: $(params.pushSecret)
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: sync-integration-snapshot
+      image: $(params.pipelineImage)
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+        - name: DEV_SNAPSHOT_NAME
+          value: $(params.snapshotName)
+        - name: DEV_SNAPSHOT_NAMESPACE
+          value: $(params.snapshotNamespace)
+        - name: INTEGRATION_NAMESPACE
+          value: $(params.integrationNamespace)
+      volumeMounts:
+        - mountPath: /etc/secret
+          name: secret-volume
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ]; then
+            echo "No valid snapshot spec file was provided."
+            exit 1
+        fi
+        if [ ! -f "${DATA_FILE}" ]; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        # Get release components (same as update-package-collection)
+        get_release_components() {
+            jq -r '
+                if .pushOptions.components then
+                    .pushOptions.components[]
+                else
+                    .mapping.components[].name
+                end' "${DATA_FILE}" 2>/dev/null || jq -r '.mapping.components[].name' "${DATA_FILE}"
+        }
+
+        # Get package collections for a component: koji tag from image annotation + mapping package-collections.
+        # After promote, tag is without -draft.
+        get_package_collections() {
+            local comp_name="$1"
+            local container_image="$2"
+            local auth_file
+            auth_file=$(mktemp)
+            select-oci-auth "$container_image" > "$auth_file" 2>/dev/null || true
+            local koji_target
+            koji_target=$(oras manifest fetch "$container_image" --registry-config "$auth_file" 2>/dev/null |
+                jq -r '.annotations."koji.build-target" // empty' 2>/dev/null || echo "")
+            rm -f "$auth_file"
+            if [ -n "$koji_target" ]; then
+                echo "$koji_target"
+            fi
+            jq -r --arg comp "$comp_name" '
+                .mapping.components[] | select(.name == $comp) | ."package-collections" // [] | .[]' \
+                "${DATA_FILE}" 2>/dev/null || true
+        }
+
+        # Package collection name to application name: replace "." with "-" (e.g. rhel-10.1.z -> rhel-10-1-z)
+        to_application_name() {
+            echo "${1//./-}"
+        }
+
+        RELEASE_COMPONENTS=$(get_release_components)
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+
+        # Collect unique application names (from package-collections) for this release
+        APPLICATION_NAMES=""
+        for ((i = 0; i < NUM_COMPONENTS; i++)); do
+            component_json=$(jq -c --argjson idx "$i" '.components[$idx]' "${SNAPSHOT_SPEC_FILE}")
+            component_name=$(jq -r '.name' <<< "$component_json")
+            container_image=$(jq -r '.containerImage' <<< "$component_json")
+            if ! echo "$RELEASE_COMPONENTS" | grep -q -x "$component_name"; then
+                continue
+            fi
+            while IFS= read -r collection; do
+                [ -z "$collection" ] && continue
+                app_name=$(to_application_name "$collection")
+                if [ -n "$app_name" ] && ! echo "$APPLICATION_NAMES" | grep -q -x "$app_name"; then
+                    APPLICATION_NAMES="${APPLICATION_NAMES:+$APPLICATION_NAMES$'\n'}$app_name"
+                fi
+            done < <(get_package_collections "$component_name" "$container_image")
+        done
+
+        # If no application names from package-collections, use snapshot .application with "." -> "-"
+        if [ -z "$APPLICATION_NAMES" ]; then
+            SNAPSHOT_APP=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+            APPLICATION_NAMES=$(to_application_name "${SNAPSHOT_APP}")
+        fi
+
+        # Get full Snapshot CR from dev namespace (metadata.annotations, metadata.labels, status)
+        if ! kubectl get "snapshot/${DEV_SNAPSHOT_NAME}" -n "${DEV_SNAPSHOT_NAMESPACE}" -o json > /tmp/dev-snapshot.json 2>/dev/null; then
+            echo "Failed to get dev snapshot ${DEV_SNAPSHOT_NAMESPACE}/${DEV_SNAPSHOT_NAME}"
+            exit 1
+        fi
+
+        DEV_ANNOTATIONS=$(jq -c '.metadata.annotations // {}' /tmp/dev-snapshot.json)
+        DEV_LABELS=$(jq -c '.metadata.labels // {}' /tmp/dev-snapshot.json)
+        DEV_STATUS=$(jq -c '.status // {}' /tmp/dev-snapshot.json)
+        DEV_SPEC_COMPONENTS=$(jq -c '.spec.components // .components' "${SNAPSHOT_SPEC_FILE}")
+        DEV_SPEC_APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+
+        echo "$APPLICATION_NAMES" | while IFS= read -r APP_NAME; do
+            [ -z "$APP_NAME" ] && continue
+            echo "Processing application name: $APP_NAME"
+
+            # Check if Application exists in integration namespace
+            if ! kubectl get "application.appstudio.redhat.com/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" -o name &>/dev/null; then
+                echo "Application ${APP_NAME} not found in ${INTEGRATION_NAMESPACE}, skipping."
+                continue
+            fi
+
+            # Build integration Snapshot: metadata from dev (override name and namespace), spec and status from dev
+            INTEGRATION_SNAPSHOT=$(jq -n \
+                --arg name "$APP_NAME" \
+                --arg namespace "$INTEGRATION_NAMESPACE" \
+                --arg application "$APP_NAME" \
+                --argjson annotations "$DEV_ANNOTATIONS" \
+                --argjson labels "$DEV_LABELS" \
+                --argjson status "$DEV_STATUS" \
+                --argjson components "$DEV_SPEC_COMPONENTS" \
+                '{
+                    apiVersion: "appstudio.redhat.com/v1alpha1",
+                    kind: "Snapshot",
+                    metadata: {
+                        name: $name,
+                        namespace: $namespace,
+                        annotations: $annotations,
+                        labels: (($labels // {}) + {"appstudio.openshift.io/application": $application})
+                    },
+                    spec: {
+                        application: $application,
+                        artifacts: {},
+                        components: $components
+                    },
+                    status: $status
+                }')
+
+            # OwnerReference to Application (for create)
+            APP_UID=$(kubectl get "application.appstudio.redhat.com/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" -o jsonpath='{.metadata.uid}')
+            APP_API_VERSION=$(kubectl get "application.appstudio.redhat.com/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" -o jsonpath='{.apiVersion}')
+            INTEGRATION_SNAPSHOT=$(echo "$INTEGRATION_SNAPSHOT" | jq --arg uid "$APP_UID" --arg apiVersion "$APP_API_VERSION" --arg app_name "$APP_NAME" \
+                '.metadata.ownerReferences = [{
+                    apiVersion: $apiVersion,
+                    kind: "Application",
+                    name: $app_name,
+                    uid: $uid,
+                    controller: true,
+                    blockOwnerDeletion: true
+                }]')
+
+            if kubectl get "snapshot/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" &>/dev/null; then
+                # Patch existing snapshot: spec.components and status
+                echo "$INTEGRATION_SNAPSHOT" | jq -c '{spec: .spec, status: .status}' | \
+                    kubectl patch "snapshot/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" --type=merge -p @-
+                echo "Updated snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}"
+            else
+                echo "$INTEGRATION_SNAPSHOT" | kubectl apply -f -
+                echo "Created snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}"
+            fi
+        done
+
+        printf 'Completed "%s"\n' "$(context.task.name)"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
