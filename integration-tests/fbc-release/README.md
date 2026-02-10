@@ -23,3 +23,16 @@ The FBC release test follows this specific workflow:
 2. **Release Pipeline Execution** - Executes the FBC release pipeline
 3. **Catalog Validation** - Validates the generated catalog structure
 4. **Release Verification** - Confirms successful FBC release deployment
+5. **Parallel Behavior Verification** - Validates parallel processing resilience
+
+### Parallel Behavior Tests
+
+The test suite includes validation for:
+- Stale InternalRequest tolerance
+- Namespace isolation for concurrent releases
+- Cross-OCP version parallelism
+- Label selector consistency
+- Parallel mutex effectiveness
+- IIB queue handling
+- Resource cleanup
+
