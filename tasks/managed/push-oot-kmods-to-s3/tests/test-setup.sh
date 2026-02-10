@@ -24,5 +24,14 @@ $(sha256sum "$(params.dataDir)/$(params.signedKmodsPath)/x86_64/mod1.ko" | awk '
 $(sha256sum "$(params.dataDir)/$(params.signedKmodsPath)/x86_64/mod2.ko" | awk '{print $1}')  mod2.ko
 EOF
 
+# Create signed-kmods.tar.gz file to simulate what sign-oot-kmods produces
+echo "Creating signed-kmods.tar.gz to simulate signing task output..."
+cd "$(params.dataDir)"
+tar -czf signed-kmods.tar.gz "$(params.signedKmodsPath)"
+
 echo "Test data setup complete:"
 ls -la "$(params.dataDir)/$(params.signedKmodsPath)/x86_64"
+echo "Tarball created:"
+ls -la "$(params.dataDir)/signed-kmods.tar.gz"
+echo "Tarball contents:"
+tar -tzf "$(params.dataDir)/signed-kmods.tar.gz" | head -5

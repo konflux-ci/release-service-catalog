@@ -13,7 +13,9 @@ echo "Neutralizing StepAction at spec.steps[0]..."
 SETUP_SCRIPT_CONTENT=$(cat "$SCRIPT_DIR/test-setup.sh")
 cat > /tmp/mock-setup-script.sh <<EOF
 #!/usr/bin/env sh
-echo "Mocked use-trusted-artifact step. Running setup script..."
+echo "Mocked use-trusted-artifact step. Setting up test data..."
+mkdir -p /var/workdir/release
+cd /var/workdir/release
 
 # --- Injected Setup Script ---
 (
@@ -37,9 +39,9 @@ yq -i '.spec.steps[0] = load("/tmp/mock-step.yaml")' "$TASK_PATH"
 rm /tmp/mock-step.yaml
 
 
-echo "Injecting mock/check scripts into spec.steps[1]..."
+echo "Injecting mock/check scripts into spec.steps[2]..."
 MOCK_SCRIPT=$(cat "$SCRIPT_DIR/mocks.sh")
-ORIG_SCRIPT=$(yq '.spec.steps[1].script' "$TASK_PATH" | sed '1s|^#!/.*||')
+ORIG_SCRIPT=$(yq '.spec.steps[2].script' "$TASK_PATH" | sed '1s|^#!/.*||')
 
 CHECK_SCRIPT="
 echo 'Running final mock assertions...'
@@ -60,7 +62,7 @@ $ORIG_SCRIPT
 $CHECK_SCRIPT
 EOF
 
-yq -i '.spec.steps[1].script = load_str("/tmp/injected-script.sh")' "$TASK_PATH"
+yq -i '.spec.steps[2].script = load_str("/tmp/injected-script.sh")' "$TASK_PATH"
 rm /tmp/injected-script.sh
 
 echo "Injection complete. Creating secret..."

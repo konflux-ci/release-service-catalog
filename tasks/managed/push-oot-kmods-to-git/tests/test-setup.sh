@@ -38,7 +38,16 @@ DRIVER_VERSION="1.2.3"
 KERNEL_VERSION="6.5.0.x86_64"
 EOF
 
+# Create signed-kmods.tar.gz file to simulate what sign-oot-kmods produces
+echo "Creating signed-kmods.tar.gz to simulate signing task output..."
+cd "$(params.dataDir)"
+tar -czf signed-kmods.tar.gz "$(params.signedKmodsPath)"
+
 echo "Test data setup complete:"
 ls -la "$KMODS_DIR"
 echo "Architecture directory structure:"
 find "$ARCH_DIR" -type f | sort
+echo "Tarball created:"
+ls -la "$(params.dataDir)/signed-kmods.tar.gz"
+echo "Tarball contents:"
+tar -tzf "$(params.dataDir)/signed-kmods.tar.gz" | head -5
