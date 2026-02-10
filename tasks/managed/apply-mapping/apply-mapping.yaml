@@ -83,6 +83,13 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: addImplicitTimestampTag
+      type: string
+      description: |
+        When "true", for each repository the resolved {{ timestamp }} value is added to the list of
+        tags after translation (deduplicated). Fails if timestamp is empty. Only pipelines referencing
+        the check-labels task should set this to "true"
+      default: "false"
   results:
     - name: mapped
       type: string
@@ -227,6 +234,23 @@ spec:
                 result="$(jq -r --arg variable "$variable" '.[$variable] // ""' <<< "${substitute_map}")"
             fi
             echo "$result"
+        }
+
+        # When addImplicitTimestampTag is true, append the resolved timestamp value to the
+        # translated tag list (and deduplicate). Fails if timestamp is empty. Only used by
+        # the rh-advisories pipeline.
+        ensure_implicit_timestamp_value() {
+            local tags_json="$1"
+            local timestamp_val="$2"
+            if [ "$(params.addImplicitTimestampTag)" != "true" ]; then
+                echo "$tags_json"
+                return
+            fi
+            if [ -z "$timestamp_val" ]; then
+                echo "Error: addImplicitTimestampTag is true but timestamp is empty (no build-date or Created)." >&2
+                exit 1
+            fi
+            echo "$tags_json" | jq -c --arg ts "$timestamp_val" '. + [$ts] | unique'
         }
 
         # Expected arguments are [tags, substitute_map, labels_map, repo]
@@ -552,6 +576,7 @@ spec:
               oldAllTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson imageTags \
                 "$imageTags" '$defaults? + $imageTags? | unique')
               oldTags=$(translate_tags "${oldAllTagsPreSubstitution}" "${substitute_map}" "${labels}" "${repository}")
+              oldTags=$(ensure_implicit_timestamp_value "${oldTags}" "${timestamp}")
               if [ "$(jq 'length' <<< "$oldTags")" -gt 0 ] ; then
                 jq --argjson i "$i" --argjson updatedTags "$oldTags" '.components[$i].tags = $updatedTags' \
                   "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
@@ -602,8 +627,8 @@ spec:
 
                 allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson repoTags \
                   "$repoTags" '$defaults? + $repoTags? | unique')
-
                 tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}" "${url}")
+                tags=$(ensure_implicit_timestamp_value "${tags}" "${timestamp}")
                 if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
                   jq --argjson i "$i" --argjson j "$j" --argjson updatedTags "$tags" \
                     '.components[$i].repositories[$j].tags = $updatedTags' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
