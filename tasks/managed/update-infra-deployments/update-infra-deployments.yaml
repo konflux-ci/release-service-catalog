@@ -364,6 +364,7 @@ spec:
                 return json_output
 
             def create_reset_branch(self):
+                # Reset branch to main (no push yet). We will force-push once after adding this run's changes.
                 branch = originRepo.split('/')[-1]
                 target_gh_repo = os.environ.get('TARGET_GH_REPO')
                 target_branch = self._request("GET", f"/repos/{target_gh_repo}/git/refs/heads/{branch}").json()
@@ -384,21 +385,27 @@ spec:
                         data={"sha": main_branch_sha, "ref": f"refs/heads/{branch}"}
                     )
 
-            def upload_content(self):
+            def force_push_changes(self):
+                # We use git in the clone instead of the GitHub Contents API so we get one commit per run.
+                # The Contents API creates one commit per PUT (one per file); there is no way to batch
+                # multiple file changes into a single commit. One commit per run keeps the PR history clean
+                # and the same PR stays open (we only force-push this single commit after resetting the branch).
                 branch = originRepo.split('/')[-1]
                 target_gh_repo = os.environ.get('TARGET_GH_REPO')
-                for file in open('updated_files.txt').readlines():
-                    file = file.strip()
-                    with open(f"cloned/{file}", "rb") as fd:
-                        encoded_string = base64.b64encode(fd.read()).decode("utf-8")
-                    old_sha = self._request("GET", f'/repos/{target_gh_repo}/contents/{file}').json().get("sha")
-                    if old_sha is None:
-                        self._request("PUT", f'/repos/{target_gh_repo}/contents/{file}', \
-                          data={"message": f"update {file}", "branch": branch, "content": encoded_string})
-                    else:
-                        self._request("PUT", f'/repos/{target_gh_repo}/contents/{file}', \
-                          data={"message": f"update {file}", "branch": branch, \
-                          "content": encoded_string, "sha": old_sha})
+                repo_url = f"https://x-access-token:{self.token}@github.com/{target_gh_repo}.git"
+                subprocess.run(["git", "-C", "cloned", "remote", "set-url", "origin", repo_url], check=True)
+                subprocess.run(["git", "-C", "cloned", "checkout", "-b", branch], check=True)
+                with open("updated_files.txt", "r") as f:
+                    for line in f:
+                        path = line.strip()
+                        if path:
+                            subprocess.run(["git", "-C", "cloned", "add", path], check=True)
+                subprocess.run(
+                    ["git", "-C", "cloned", "-c", "user.email=release-service@redhat.com", "-c",
+                     "user.name=release-service", "commit", "-m", "Update from release-service"],
+                    check=True
+                )
+                subprocess.run(["git", "-C", "cloned", "push", "--force", "origin", branch], check=True)
 
             def get_pr(self):
                 repo_name = originRepo.split('/')[-1]
@@ -458,7 +465,7 @@ spec:
                 installation_id=os.environ.get('GITHUBAPP_INSTALLATION_ID'))
 
             github_app.create_reset_branch()
-            github_app.upload_content()
+            github_app.force_push_changes()
             infra_pr = github_app.create_mr()
             if "url" not in infra_pr:
                 infra_pr = github_app.get_pr()
