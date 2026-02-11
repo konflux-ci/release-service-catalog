@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # Create a dummy service account secret (and delete it first if it exists)
-kubectl delete secret test-service-account-secret --ignore-not-found
-kubectl create secret generic test-service-account-secret \
+kubectl delete secret rhtl-pulp-credentials-secret --ignore-not-found
+kubectl create secret generic rhtl-pulp-credentials-secret \
   --from-literal=username=test-user \
   --from-literal=password=test-password
 
