@@ -1,0 +1,195 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-marketplacesvm-push-disk-images-fail-process-component
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Run the marketplacesvm-push-disk-images task with invalid data so that it fails in the
+    process_component function. The failure is caused by the containerImage ending in
+    fail-raw-disk-image, which is handled in the mocks. Ensure the task fails.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/results"
+              cat > "$(params.dataDir)/snapshot_spec.json" << EOF
+              {
+                "application": "amd-bootc-1-3-raw-disk-image",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/workload/tenant/test-product/fail-raw-disk-image@sha256:123456",
+                    "name": "amd-bootc-1-3-raw-disk-image",
+                    "source": {
+                      "git": {
+                        "revision": "1abbfcdbc1c5e8b7aba07673297237ed192b50e2",
+                        "url": "https://gitlab.com/konflux/test-product/disk-images/amd-bootc"
+                      }
+                    },
+                    "staged": {
+                      "destination": "test-product-1_DOT_3-x86_64-isos",
+                      "files": [
+                        {
+                          "filename": "test-product-amd-1.3-1732045201-x86_64.raw",
+                          "source": "disk.raw"
+                        }
+                      ],
+                      "version": "1.3"
+                    },
+                    "productInfo": {
+                      "filePrefix": "test-product-amd-1.3",
+                      "productCode": "TESTPRDOCUT",
+                      "productName": "Test Product",
+                      "productVersionName": "1.3"
+                    },
+                    "starmap": [
+                      {
+                        "cloud": "aws",
+                        "mappings": {
+                          "aws-emea": {
+                            "destinations": [
+                              {
+                                "architecture": "x86_64",
+                                "destination": "00000000-0000-0000-0000-000000000000",
+                                "overwrite": false,
+                                "restrict_version": true
+                              }
+                            ],
+                            "provider": null
+                          },
+                          "aws-na": {
+                            "destinations": [
+                              {
+                                "architecture": "x86_64",
+                                "destination": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                                "overwrite": false,
+                                "restrict_version": true
+                              }
+                            ],
+                            "provider": null
+                          }
+                        },
+                        "name": "test-product",
+                        "workflow": "stratosphere"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/starmap.json" << EOF
+              [
+                {
+                  "cloud": "aws",
+                  "mappings": {
+                    "aws-emea": {
+                      "destinations": [
+                        {
+                          "architecture": "x86_64",
+                          "destination": "00000000-0000-0000-0000-000000000000",
+                          "overwrite": false,
+                          "restrict_version": true
+                        }
+                      ],
+                      "provider": null
+                    },
+                    "aws-na": {
+                      "destinations": [
+                        {
+                          "architecture": "x86_64",
+                          "destination": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                          "overwrite": false,
+                          "restrict_version": true
+                        }
+                      ],
+                      "provider": null
+                    }
+                  },
+                  "name": "test-product",
+                  "workflow": "stratosphere"
+                }
+              ]
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: marketplacesvm-push-disk-images
+      params:
+        - name: snapshotPath
+          value: "snapshot_spec.json"
+        - name: cloudMarketplacesSecret
+          value: marketplacesvm-test-secret
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
