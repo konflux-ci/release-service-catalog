@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-set -x
 
 # mocks to be injected into task step scripts
 
 function skopeo() {
-  echo Mock skopeo called with: $* >&2
+  # echo Mock skopeo called with: $* >&2
 
   if [[ "$1" == "inspect" ]]; then
     # Handle `skopeo inspect`
@@ -14,7 +13,7 @@ function skopeo() {
     elif [[ "$*" == *"docker://quay.io/target"* ]]; then
       echo "sha256:target1234567890"
       return 0
-    elif [[ "$*" == *"--tls-verify=false --src-creds source docker://quay.io/source"* ]]; then
+    elif [[ "$*" == *"--tls-verify=false --src-creds SENSITIVE_DATA_source docker://quay.io/source"* ]]; then
       echo "sha256:abcdef1234567890"
       return 0
     elif [[ "$*" == *"--tls-verify=false docker://registry-proxy.engineering.redhat.com/foo"* ]]; then
@@ -28,13 +27,13 @@ function skopeo() {
     fi
   elif [[ "$1" == "copy" ]]; then
     # Handle `skopeo copy`
-    if [[ "$*" == *"--src-tls-verify=false --src-creds source docker://quay.io/source"* ]]; then
+    if [[ "$*" == *"--src-tls-verify=false --src-creds SENSITIVE_DATA_source docker://quay.io/source"* ]]; then
       return 0
     elif [[ "$*" == *"--src-tls-verify=false docker://registry-proxy.engineering.redhat.com/foo"* ]]; then
       return 0
     elif [[ "$*" == *"--src-tls-verify=false docker://registry-proxy.engineering.redhat.com/fail"* ]]; then
       return 1
-    elif [[ "$*" == *"--src-tls-verify=false --src-creds source docker://quay.io/match-source-digest"* ]]; then
+    elif [[ "$*" == *"--src-tls-verify=false --src-creds SENSITIVE_DATA_source docker://quay.io/match-source-digest"* ]]; then
       echo "Error: Copy should not be triggered when digests match"
       exit 1
     else

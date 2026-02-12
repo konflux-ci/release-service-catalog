@@ -4,13 +4,13 @@
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 for i in `seq 0 5`; do
-  yq -i '.spec.steps['$i'].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps['$i'].script' "$TASK_PATH"
+  yq -i '.spec.steps['$i'].script = load_str("'$SCRIPT_DIR'/mocks.sh") + "set +x\n" + .spec.steps['$i'].script' "$TASK_PATH"
 done
 
 # Create a dummy secret for ssl cert for pyxis interactions (and delete it first if it exists)
 kubectl delete secret pyxis-ssl-cert --ignore-not-found
-kubectl create secret generic pyxis-ssl-cert --from-literal=cert=mypyxiscert --from-literal=key=mypyxiskey
+kubectl create secret generic pyxis-ssl-cert --from-literal=cert=SENSITIVE_DATA_mypyxiscert --from-literal=key=SENSITIVE_DATA_mypyxiskey
 
 # Create a dummy secret for ssl cert for UMB interactions (and delete it first if it exists)
 kubectl delete secret umb-ssl-cert --ignore-not-found
-kubectl create secret generic umb-ssl-cert --from-literal=cert=myumbcert --from-literal=key=myumbkey
+kubectl create secret generic umb-ssl-cert --from-literal=cert=SENSITIVE_DATA_myumbcert --from-literal=key=SENSITIVE_DATA_myumbkey

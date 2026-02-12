@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 
 function kinit() {
-  echo "kinit $*"
+  echo "kinit"  # remove $* to pass secret leak detection
 }
 
 function curl() {

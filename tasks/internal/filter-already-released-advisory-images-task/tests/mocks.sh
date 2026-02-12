@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # Mock git
 function git() {
-  echo "Mock git called with: $*"
+  # echo "Mock git called with: $*"
 
   if [[ "$1" == "clone" ]]; then
     mkdir -p "$6"
@@ -19,7 +19,7 @@ function git() {
 
 # Mock find
 function find() {
-  echo "Mock find called with: $*" >&2
+ # echo "Mock find called with: $*" >&2
 
   if echo "$*" | grep -q "not-existing-origin"; then
     # Simulate missing advisory directory
@@ -39,7 +39,7 @@ function find() {
 
 # Mock yq
 function yq() {
-  echo "Mock yq called with: $*" >&2
+ # echo "Mock yq called with: $*" >&2
 
   if [[ -z "$3" ]]; then
     echo "Error: Empty file path in yq command" >&2

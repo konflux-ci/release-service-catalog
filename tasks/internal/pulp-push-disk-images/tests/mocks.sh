@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -ex
+set -e
 
 # mocks to be injected into task step scripts
 
@@ -43,7 +43,7 @@ function gzip() {
 }
 
 function pulp_push_wrapper() {
-    echo Mock pulp_push_wrapper called with: $*
+    # echo Mock pulp_push_wrapper called with: $*
 
     if [[ "$*" != *"--pulp-url https://pulp.com"* ]]; then
         printf "Mocked failure of pulp_push_wrapper" > /nonexistent/location
@@ -51,7 +51,7 @@ function pulp_push_wrapper() {
 }
 
 function developer_portal_wrapper() {
-  echo Mock developer_portal_wrapper called with: $*
+  # echo Mock developer_portal_wrapper called with: $*
 
   /home/developer-portal-wrapper/developer_portal_wrapper "$@" --dry-run
 

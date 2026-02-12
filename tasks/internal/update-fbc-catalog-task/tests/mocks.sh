@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-set -x
 
 echo "CLAUDE_DEBUGGING: mocks.sh file loaded successfully with fix attempt $(date)" >&2
 

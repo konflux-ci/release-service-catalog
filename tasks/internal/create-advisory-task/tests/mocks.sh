@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -eux
+set -eu
 
 # mocks to be injected into task step scripts
 function git() {
-  echo "Mock git called with: $*"
+  # echo "Mock git called with: $*"
 
   if [[ "$1" == "clone" ]]; then
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
@@ -119,7 +119,7 @@ function yq() {
 }
 
 function glab() {
-  echo "Mock glab called with: $*"
+  # echo "Mock glab called with: $*"
 
   if [[ "$*" != "auth login"* ]]; then
     echo Error: Unexpected call
@@ -128,7 +128,7 @@ function glab() {
 }
 
 function kinit() {
-  echo "kinit $*"
+  echo "kinit"   #remove $* to pass secret leak detection
 }
 
 function curl() {
