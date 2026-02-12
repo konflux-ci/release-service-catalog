@@ -1,0 +1,546 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rh-advisories-large-snapshot-pipeline
+spec:
+  params:
+    - name: SNAPSHOT
+      type: string
+    - name: PIPELINE_TEST_SUITE
+      type: string
+      description: 'The name of the test corresponding to a defined Konflux integration test.'
+    - name: VAULT_PASSWORD_SECRET_NAME
+      default: 'e2e-test-vault-password'
+      type: string
+    - name: GITHUB_TOKEN_SECRET_NAME
+      default: 'e2e-test-github-token'
+      type: string
+    - name: KUBECONFIG_SECRET_NAME
+      default: 'e2e-test-service-account-kubeconfig'
+      type: string
+  tasks:
+    - name: get-snapshot-data
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: SNAPSHOT
+        results:
+          - name: CONTAINER_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+        steps:
+          - name: get-container-image
+            image: quay.io/konflux-ci/release-service-utils@sha256:e852a62497c4537059bb1f4c3ddf5c1a813b2b22bd9f4bb826cffb36af7d5f65  # yamllint disable-line
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            script: |
+              #!/usr/bin/env bash
+
+              containerImage=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+              gitUrl=$(jq -r '.components[0].source.git.url // ""' <<< "${SNAPSHOT}")
+              gitRevision=$(jq -r '.components[0].source.git.revision // ""' <<< "${SNAPSHOT}")
+              echo "${SNAPSHOT}"
+              echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
+              echo -n "${gitUrl}" | tee "$(results.PR_GIT_URL.path)"
+              echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
+
+    - name: run-test
+      params:
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: PR_GIT_URL
+          value: $(tasks.get-snapshot-data.results.PR_GIT_URL)
+        - name: PR_GIT_REVISION
+          value: $(tasks.get-snapshot-data.results.PR_GIT_REVISION)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+
+      taskSpec:
+        params:
+          - name: PIPELINE_TEST_SUITE
+          - name: STEP_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+        results:
+          - name: TEST_OUTPUT
+            description: Test output
+        steps:
+          - name: run-test
+            image: $(params.STEP_IMAGE)
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: PR_NUMBER
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['pac.test.appstudio.openshift.io/pull-request']
+              - name: BRANCH_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['pac.test.appstudio.openshift.io/branch']
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+            script: |
+              #!/usr/bin/env bash
+              
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+
+              # shellcheck disable=SC2317
+              exitfunc() {
+                local err=$1
+                local line=$2
+                local command="$3"
+
+                successcount=0
+                failurecount=0
+                if [ "$err" -eq 0 ] ; then   
+                  RESULT="SUCCESS"
+                  successcount=1
+                else
+                  echo "$0: ERROR $command failed at line $line - exited with status $err"
+                  RESULT="FAILURE"
+                  failurecount=1
+                fi
+                # shellcheck disable=SC2086
+                TEST_OUTPUT=$(jq -rc --arg date "$(date -u --iso-8601=seconds)" --arg RESULT "${RESULT}" \
+                  --argjson successcount ${successcount} --argjson failurecount ${failurecount} --null-input \
+                  '{result: $RESULT, timestamp: $date, failures: $failurecount, successes: $successcount, warnings: 0}')
+                echo -n "${TEST_OUTPUT}" | tee "$(results.TEST_OUTPUT.path)"
+                exit "$err"
+              }
+              trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+              echo "PR_GIT_URL: $(params.PR_GIT_URL)"
+              echo "PR_GIT_REVISION: $(params.PR_GIT_REVISION)"
+              echo "PR_NUMBER: ${PR_NUMBER}"
+              
+              # Create debug script to check Release status
+              cat > /tmp/debug-release.sh << 'DEBUG_EOF'
+              #!/bin/bash
+              set +e
+              RELEASE_NAME="${1}"
+              NAMESPACE="${2}"
+              echo "🔍 =========================================="
+              echo "🔍 DEBUG: Release Status Check"
+              echo "🔍 =========================================="
+              echo "🔍 Release: ${RELEASE_NAME}"
+              echo "🔍 Namespace: ${NAMESPACE}"
+              echo ""
+              echo "🔍 Release Spec:"
+              kubectl get release "${RELEASE_NAME}" -n "${NAMESPACE}" \
+                -o jsonpath='{.spec}' 2>/dev/null | jq '.' || echo "Failed to get spec"
+              echo ""
+              echo "🔍 Release Status:"
+              kubectl get release "${RELEASE_NAME}" -n "${NAMESPACE}" \
+                -o jsonpath='{.status}' 2>/dev/null | jq '.' || echo "No status set"
+              echo ""
+              echo "🔍 Release Labels:"
+              kubectl get release "${RELEASE_NAME}" -n "${NAMESPACE}" \
+                -o jsonpath='{.metadata.labels}' 2>/dev/null | jq '.' || echo "No labels"
+              echo ""
+              echo "🔍 ReleasePlan Check:"
+              RP_NAME=$(kubectl get release "${RELEASE_NAME}" -n "${NAMESPACE}" \
+                -o jsonpath='{.spec.releasePlan}' 2>/dev/null)
+              if [ -n "${RP_NAME}" ]; then
+                echo "  ReleasePlan: ${RP_NAME}"
+                kubectl get releaseplan "${RP_NAME}" -n "${NAMESPACE}" -o yaml 2>/dev/null || echo "  Not found"
+              fi
+              echo ""
+              echo "🔍 ReleasePlanAdmission in managed namespace:"
+              kubectl get releaseplanadmission -n managed-release-team-tenant -o json 2>/dev/null \
+                | jq -r '.items[] | "\(.metadata.name) - app: \(.spec.applications[])"' \
+                || echo "None found"
+              echo ""
+              echo "🔍 Recent Events:"
+              kubectl get events -n "${NAMESPACE}" \
+                --field-selector involvedObject.name="${RELEASE_NAME}" \
+                --sort-by='.lastTimestamp' 2>/dev/null | tail -20 || echo "No events"
+              echo "🔍 =========================================="
+              DEBUG_EOF
+              chmod +x /tmp/debug-release.sh
+              
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+              
+              KUBECONFIG_FILE=$(mktemp)
+              set +x
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              set -x
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+              
+              RELEASE_CATALOG_GIT_URL="$(params.PR_GIT_URL)"
+              RELEASE_CATALOG_GIT_REVISION="$(params.PR_GIT_REVISION)"
+              export RELEASE_CATALOG_GIT_URL
+              export RELEASE_CATALOG_GIT_REVISION
+
+              # For manual trigger via /test-large-snapshot, ALWAYS run the test
+              # Skip the affected pipelines check that other tests use
+              echo "Manual trigger: Running test unconditionally"
+              
+              # Fix test.env to use an existing branch
+              # (container image has old test.env with non-existent rh-adv-large-base)
+              TEST_ENV_FILE="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+              if grep -q 'component_base_branch=.*-base' "$TEST_ENV_FILE"; then
+                echo "Patching test.env to use existing branch..."
+                sed -i \
+                  's/component_base_branch=.*/component_base_branch=push-to-external-registry-base/' \
+                  "$TEST_ENV_FILE"
+                echo "Updated component_base_branch in test.env"
+              fi
+              
+              # Fix snapshot generation script to remove invalid repository field
+              # (container image has old script with invalid Snapshot CRD field)
+              SNAPSHOT_SCRIPT="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/generate-large-snapshot.sh"
+              if [ -f "$SNAPSHOT_SCRIPT" ] && grep -q 'repository: quay.io' "$SNAPSHOT_SCRIPT"; then
+                echo "Patching snapshot generation script..."
+                # Remove the invalid repository field lines
+                sed -i '/# Add some components with additional metadata for realism/,/fi$/d' \
+                  "$SNAPSHOT_SCRIPT"
+                echo "Updated generate-large-snapshot.sh"
+              fi
+              
+              # Fix test.sh to add decrypt_secrets() call if missing
+              # (container image may have old test.sh without decrypt_secrets in create_kubernetes_resources)
+              TEST_SCRIPT="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.sh"
+              if [ -f "$TEST_SCRIPT" ] && ! grep -q "decrypt_secrets.*SUITE_DIR" "$TEST_SCRIPT"; then
+                echo "Patching test.sh to add decrypt_secrets() call..."
+                # Using perl for more reliable multi-line insertion in YAML context
+                perl -i -pe 'if (/echo "Creating Kubernetes resources with large snapshot/) {
+                  $_ .= "\n    # Decrypt vault secrets first (creates resources/*/secrets/ directories)\n";
+                  $_ .= "    decrypt_secrets \"\${SUITE_DIR}\"\n";
+                  $_ .= "    if [ \$? -ne 0 ]; then\n";
+                  $_ .= "        echo \"❌ Failed to decrypt secrets\" >&2\n";
+                  $_ .= "        return 1\n";
+                  $_ .= "    fi\n\n";
+                }' "$TEST_SCRIPT"
+                echo "Added decrypt_secrets() call to test.sh"
+              fi
+              
+              # Fix test.sh to check for correct Release processing indicator
+              # (container image has old check for non-existent "Processing" condition)
+              if [ -f "$TEST_SCRIPT" ] && grep -q 'conditions\[?(@.type=="Processing")\]' "$TEST_SCRIPT"; then
+                echo "Patching test.sh to check for managedProcessing.pipelineRun..."
+                # Replace the incorrect condition check with correct one
+                OLD_JSONPATH="jsonpath='{.status.conditions\[?(@.type==\"Processing\")\].status}'"
+                NEW_JSONPATH="jsonpath='{.status.managedProcessing.pipelineRun}'"
+                sed -i "s|${OLD_JSONPATH}|${NEW_JSONPATH}|" "$TEST_SCRIPT"
+                # Update the check to look for non-empty pipelinerun instead of status=="True"
+                # shellcheck disable=SC2016
+                OLD_CHECK='\\[ "$status" == "True" \\]'
+                # shellcheck disable=SC2016
+                NEW_CHECK='[ -n "$pipelinerun" ] \\&\\& [ "$pipelinerun" != "null" ]'
+                sed -i "s/${OLD_CHECK}/${NEW_CHECK}/" "$TEST_SCRIPT"
+                # Update variable name from status to pipelinerun
+                sed -i '/check_release_processing/,/^}$/ s/local status$/local pipelinerun/' "$TEST_SCRIPT"
+                # shellcheck disable=SC2016
+                sed -i '/check_release_processing/,/^}$/ s/status=$(kubectl/pipelinerun=$(kubectl/' "$TEST_SCRIPT"
+                echo "Updated test.sh"
+              fi
+              
+              # Fix RoleBinding files to use correct ClusterRole
+              # (container image has old files with wrong ClusterRole names)
+              # Note: SC2016 disabled where needed - we want literal ${var} in files for envsubst
+              TENANT_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant/sa-rolebinding.yaml"
+              MANAGED_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa-rolebinding.yaml"
+              
+              if [ -f "$TENANT_ROLEBINDING" ]; then
+                echo "Replacing tenant RoleBinding with correct ClusterRole..."
+                sed -i \
+                  's/name: release-service-account$/name: release-pipeline-resource-role/' \
+                  "$TENANT_ROLEBINDING"
+                # shellcheck disable=SC2016
+                TENANT_NAME_PATTERN='s/name: release-service-account-\${tenant_sa_name}/'
+                # shellcheck disable=SC2016
+                TENANT_NAME_REPLACE='name: release-pipeline-resource-role-binding-for-\${component_name}/'
+                sed -i "${TENANT_NAME_PATTERN}${TENANT_NAME_REPLACE}" "$TENANT_ROLEBINDING"
+                # Add namespace if missing
+                if ! grep -q "namespace:" "$TENANT_ROLEBINDING"; then
+                  # shellcheck disable=SC2016
+                  sed -i '/^metadata:/a\  namespace: ${tenant_namespace}' \
+                    "$TENANT_ROLEBINDING"
+                fi
+                # Add managed SA subject if missing
+                if ! grep -q "managed_sa_name" "$TENANT_ROLEBINDING"; then
+                  # shellcheck disable=SC2016
+                  SUBJ_PATTERN='/^subjects:/a\  - kind: ServiceAccount\n'
+                  SUBJ_PATTERN="${SUBJ_PATTERN}    name: \${managed_sa_name}\n"
+                  SUBJ_PATTERN="${SUBJ_PATTERN}    namespace: \${managed_namespace}"
+                  sed -i "${SUBJ_PATTERN}" "$TENANT_ROLEBINDING"
+                fi
+                echo "Updated tenant RoleBinding"
+              fi
+              
+              if [ -f "$MANAGED_ROLEBINDING" ]; then
+                echo "Replacing managed RoleBinding with correct ClusterRole..."
+                sed -i \
+                  's/name: release-service-account-managed$/name: release-pipeline-resource-role/' \
+                  "$MANAGED_ROLEBINDING"
+                # shellcheck disable=SC2016
+                MANAGED_NAME_PATTERN='s/name: release-service-account-\${managed_sa_name}/'
+                # shellcheck disable=SC2016
+                MANAGED_NAME_REPLACE='name: release-pipeline-resource-role-binding-for-\${managed_sa_name}/'
+                sed -i "${MANAGED_NAME_PATTERN}${MANAGED_NAME_REPLACE}" "$MANAGED_ROLEBINDING"
+                # Add namespace after the name field in subjects if missing
+                if ! grep -q "namespace:" "$MANAGED_ROLEBINDING"; then
+                  # shellcheck disable=SC2016
+                  sed -i '/^    name: \${managed_sa_name}/a\    namespace: ${managed_namespace}' \
+                    "$MANAGED_ROLEBINDING"
+                fi
+                echo "Updated managed RoleBinding"
+              fi
+              
+              # Fix ServiceAccount to include trusted artifacts secrets
+              # (container image has old sa.yaml without secrets)
+              MANAGED_SA="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa.yaml"
+              if [ -f "$MANAGED_SA" ]; then
+                # Check if sa.yaml is missing secrets (old version)
+                if ! grep -q "secrets:" "$MANAGED_SA"; then
+                  echo "Patching managed ServiceAccount to add secrets..."
+                  # shellcheck disable=SC2016
+                  TRUSTED_ARTIFACTS_SECRET='konflux-ci-konflux-release-trusted-artifacts-pull-secret-${component_name}'
+                  # shellcheck disable=SC2016
+                  {
+                    echo 'secrets:'
+                    echo "  - name: ${TRUSTED_ARTIFACTS_SECRET}"
+                    echo '  - name: push-${component_name}'
+                    echo '  - name: registry-redhat-io-quay-token-secret-${component_name}'
+                    echo 'imagePullSecrets:'
+                    echo '  - name: push-${component_name}'
+                    echo "  - name: ${TRUSTED_ARTIFACTS_SECRET}"
+                  } >> "$MANAGED_SA"
+                  echo "Updated managed ServiceAccount"
+                else
+                  echo "Managed ServiceAccount already has secrets"
+                fi
+              fi
+              
+              # Fix ReleasePlanAdmission mapping to include all components explicitly
+              # (container image has old rpa.yaml with wildcard that doesn't work)
+              MANAGED_RPA="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/rpa.yaml"
+              if [ -f "$MANAGED_RPA" ]; then
+                # Check if rpa.yaml still has wildcard mapping (old version)
+                # shellcheck disable=SC2016
+                if grep -q 'name: \x27\*\x27' "$MANAGED_RPA" || grep -q 'name: "\*"' "$MANAGED_RPA"; then
+                  echo "Patching managed RPA to replace wildcard with explicit component mappings..."
+                  
+                  # Extract everything before the wildcard component
+                  sed -n '1,/^      components:$/p' "$MANAGED_RPA" > "${MANAGED_RPA}.new"
+                  
+                  # Generate all 200 component mappings
+                  for i in $(seq -f "%03g" 1 200); do
+                    {
+                      echo "        - name: component-${i}"
+                      echo "          repositories:"
+                      echo "            - url: quay.io/redhat-pending/rhtap----rh-advisories-large-test"
+                    } >> "${MANAGED_RPA}.new"
+                  done
+                  
+                  # Append everything after the wildcard component section
+                  sed -n '/^    fileUpdates:$/,$p' "$MANAGED_RPA" >> "${MANAGED_RPA}.new"
+                  
+                  mv "${MANAGED_RPA}.new" "$MANAGED_RPA"
+                  echo "Updated managed RPA with 200 explicit component mappings"
+                else
+                  echo "Managed RPA already has explicit component mappings"
+                fi
+              fi
+              
+              # Run test and capture result
+              set +e
+              "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
+              TEST_RESULT=$?
+              set -e
+              
+              # Always run debug script to check Release state
+              echo ""
+              echo "🔍 Running post-test Release diagnostics..."
+              # Find the Release created by this test (most recent with our originating-tool label)
+              RELEASE_NAME=$(kubectl get release -n dev-release-team-tenant \
+                -l originating-tool=rh-advisories-large-snapshot-test \
+                --sort-by=.metadata.creationTimestamp \
+                -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null || echo "")
+              
+              if [ -n "${RELEASE_NAME}" ]; then
+                echo "🔍 Found Release: ${RELEASE_NAME}"
+                /tmp/debug-release.sh "${RELEASE_NAME}" "dev-release-team-tenant" || true
+              else
+                echo "⚠️  Could not find Release to debug"
+              fi
+              
+              # Exit with test result
+              exit ${TEST_RESULT}
+
+      runAfter:
+        - get-snapshot-data
+  finally:
+    - name: cleanup-resources
+      params:
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+      taskSpec:
+        params:
+          - name: PIPELINE_TEST_SUITE
+          - name: STEP_IMAGE
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+        steps:
+          - name: cleanup-resources
+            image: $(params.STEP_IMAGE)
+            env:
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+            script: |
+              #!/usr/bin/env bash
+              
+              set +e
+              
+              # Fix test.env to use an existing branch (same as in run-test)
+              TEST_ENV_FILE="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+              if grep -q 'component_base_branch=.*-base' "$TEST_ENV_FILE"; then
+                sed -i \
+                  's/component_base_branch=.*/component_base_branch=push-to-external-registry-base/' \
+                  "$TEST_ENV_FILE"
+              fi
+              
+              # Fix RoleBinding files (same as in run-test)
+              # Note: SC2016 disabled where needed - we want literal ${var} in files for envsubst
+              TENANT_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant/sa-rolebinding.yaml"
+              MANAGED_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa-rolebinding.yaml"
+              
+              if [ -f "$TENANT_ROLEBINDING" ]; then
+                sed -i \
+                  's/name: release-service-account$/name: release-pipeline-resource-role/' \
+                  "$TENANT_ROLEBINDING"
+                # shellcheck disable=SC2016
+                TENANT_NAME_PATTERN='s/name: release-service-account-\${tenant_sa_name}/'
+                # shellcheck disable=SC2016
+                TENANT_NAME_REPLACE='name: release-pipeline-resource-role-binding-for-\${component_name}/'
+                sed -i "${TENANT_NAME_PATTERN}${TENANT_NAME_REPLACE}" "$TENANT_ROLEBINDING"
+                if ! grep -q "namespace:" "$TENANT_ROLEBINDING"; then
+                  # shellcheck disable=SC2016
+                  sed -i '/^metadata:/a\  namespace: ${tenant_namespace}' \
+                    "$TENANT_ROLEBINDING"
+                fi
+                if ! grep -q "managed_sa_name" "$TENANT_ROLEBINDING"; then
+                  # shellcheck disable=SC2016
+                  SUBJ_PATTERN='/^subjects:/a\  - kind: ServiceAccount\n'
+                  SUBJ_PATTERN="${SUBJ_PATTERN}    name: \${managed_sa_name}\n"
+                  SUBJ_PATTERN="${SUBJ_PATTERN}    namespace: \${managed_namespace}"
+                  sed -i "${SUBJ_PATTERN}" "$TENANT_ROLEBINDING"
+                fi
+              fi
+              
+              if [ -f "$MANAGED_ROLEBINDING" ]; then
+                sed -i \
+                  's/name: release-service-account-managed$/name: release-pipeline-resource-role/' \
+                  "$MANAGED_ROLEBINDING"
+                # shellcheck disable=SC2016
+                MANAGED_NAME_PATTERN='s/name: release-service-account-\${managed_sa_name}/'
+                # shellcheck disable=SC2016
+                MANAGED_NAME_REPLACE='name: release-pipeline-resource-role-binding-for-\${managed_sa_name}/'
+                sed -i "${MANAGED_NAME_PATTERN}${MANAGED_NAME_REPLACE}" "$MANAGED_ROLEBINDING"
+                if ! grep -q "namespace:" "$MANAGED_ROLEBINDING"; then
+                  # shellcheck disable=SC2016
+                  sed -i '/^    name: \${managed_sa_name}/a\    namespace: ${managed_namespace}' \
+                    "$MANAGED_ROLEBINDING"
+                fi
+              fi
+              
+              # Source test.env for resource names
+              # shellcheck disable=SC1090
+              . "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+              
+              # Source lib functions
+              # shellcheck disable=SC1091
+              . "/home/e2e/tests/lib/test-functions.sh"
+              
+              # Delete GH repo if exists
+              "/home/e2e/tests/scripts/delete-repository.sh" "${component_repo_name:?}" || true
+              
+              # Setup vault
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+              
+              KUBECONFIG_FILE=$(mktemp)
+              set +x
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              set -x
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+              
+              # Decrypt and delete k8s resources
+              decrypt_secrets "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)" || true
+              
+              tmpDir=$(mktemp -d)
+              
+              echo "Cleaning up tenant resources..."
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant" \
+                | envsubst > "$tmpDir/tenant-resources.yaml" || true
+              kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found=true || true
+              
+              echo "Cleaning up managed resources..."
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed" \
+                | envsubst > "$tmpDir/managed-resources.yaml" || true
+              kubectl delete -f "$tmpDir/managed-resources.yaml" --ignore-not-found=true || true
+              
+              rm -rf "$tmpDir"
+              echo "Cleanup completed"

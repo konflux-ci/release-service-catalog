@@ -3,10 +3,14 @@
 # generate-large-snapshot.sh - Utility to generate a large snapshot manifest
 #
 # This script creates a Snapshot CR with approximately 200 components
-# for testing the rh-advisories pipeline with large-scale data.
+# for testing the rh-advisories pipeline with worst-case signing performance.
+#
+# REQUIRES: Fresh Konflux builds (unsigned images)
+#   Run: ./test.sh (builds + tests)
 #
 # Usage:
-#   ./generate-large-snapshot.sh <snapshot-name> <application-name> <namespace> [component-count]
+#   FRESH_BUILDS_FILE=/tmp/fresh-images-pool.txt \
+#     ./generate-large-snapshot.sh <snapshot-name> <application-name> <namespace> [component-count]
 #
 # Arguments:
 #   snapshot-name      : Name for the snapshot
@@ -14,10 +18,14 @@
 #   namespace          : Kubernetes namespace
 #   component-count    : Number of components (default: 200)
 #
+# Environment:
+#   FRESH_BUILDS_FILE  : Path to fresh builds file (REQUIRED)
+#
 # Output:
 #   Writes snapshot YAML to stdout
 #
 # Example:
+#   export FRESH_BUILDS_FILE=/tmp/fresh-images-pool.txt
 #   ./generate-large-snapshot.sh my-snapshot my-app dev-tenant 200 > snapshot.yaml
 #   kubectl apply -f snapshot.yaml
 #
@@ -35,14 +43,70 @@ if ! [[ "${COMPONENT_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 
-# Images to use for components (rotated for variety)
-# Using publicly accessible images to avoid authentication requirements
-declare -a IMAGE_POOL=(
-    "quay.io/centos/centos:stream9"
-    "quay.io/fedora/fedora:latest"
-    "docker.io/library/alpine:latest"
-    "docker.io/library/busybox:latest"
-)
+# ============================================================================
+# IMAGE STRATEGY: Fresh Konflux Builds Only
+# ============================================================================
+# 
+# This test uses ONLY fresh Konflux builds to test worst-case signing performance:
+#
+# Why fresh builds?
+# - Zero existing Red Hat signatures
+# - Signing tasks must sign ALL ~600 digests (200 images × ~3 architectures)
+# - Tests true signing service capacity and bottlenecks
+# - Realistic worst-case scenario
+#
+# Build fresh images:
+#   ./utils/build-fresh-images.sh 200 dev-release-team-tenant
+#
+# Or use the wrapper script:
+#   ./test.sh
+#
+# Expected performance:
+# - Build time: 15-30 minutes (200 Konflux builds)
+# - Signing time: 1-2 hours (ALL digests need signing)
+# - Total pipeline: 5.5-7.5 hours
+#
+# ============================================================================
+
+# Configuration
+FRESH_BUILDS_FILE="${FRESH_BUILDS_FILE:-/tmp/fresh-images-pool.txt}"
+
+# Verify fresh builds file exists
+if [ -z "${FRESH_BUILDS_FILE}" ]; then
+    echo "❌ Error: FRESH_BUILDS_FILE environment variable not set" >&2
+    echo "" >&2
+    echo "This test requires fresh Konflux builds for worst-case signing performance." >&2
+    echo "" >&2
+    echo "To build fresh images:" >&2
+    echo "  ./utils/build-fresh-images.sh 200" >&2
+    echo "" >&2
+    echo "Or use the wrapper script:" >&2
+    echo "  ./test.sh" >&2
+    echo "" >&2
+    exit 1
+fi
+
+if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
+    echo "❌ Error: Fresh builds file not found: ${FRESH_BUILDS_FILE}" >&2
+    echo "" >&2
+    echo "Run utils/build-fresh-images.sh to build fresh components first:" >&2
+    echo "  ./utils/build-fresh-images.sh 200 dev-release-team-tenant" >&2
+    echo "" >&2
+    echo "Or use the wrapper script:" >&2
+    echo "  ./test.sh" >&2
+    echo "" >&2
+    exit 1
+fi
+
+# Read image pool from fresh builds file
+declare -a IMAGE_POOL=()
+mapfile -t IMAGE_POOL < "${FRESH_BUILDS_FILE}"
+
+POOL_SIZE=${#IMAGE_POOL[@]}
+
+echo "🏗️  Using fresh Konflux builds (unsigned images)" >&2
+echo "   Source: ${FRESH_BUILDS_FILE}" >&2
+echo "   Images: ${POOL_SIZE}" >&2
 
 echo "Generating large snapshot with ${COMPONENT_COUNT} components..." >&2
 echo "" >&2
@@ -52,12 +116,12 @@ cat <<EOF
 apiVersion: appstudio.redhat.com/v1alpha1
 kind: Snapshot
 metadata:
-  name: ${SNAPSHOT_NAME}
-  namespace: ${NAMESPACE}
+  name: "${SNAPSHOT_NAME}"
+  namespace: "${NAMESPACE}"
   labels:
-    test.appstudio.openshift.io/type: large-snapshot
+    test.appstudio.openshift.io/type: "large-snapshot"
     test.appstudio.openshift.io/component-count: "${COMPONENT_COUNT}"
-    appstudio.openshift.io/application: ${APPLICATION_NAME}
+    appstudio.openshift.io/application: "${APPLICATION_NAME}"
   annotations:
     test.appstudio.openshift.io/description: "Large snapshot with ${COMPONENT_COUNT} components for rh-advisories pipeline testing"
     # Skip build since we're using pre-built container images
@@ -67,7 +131,7 @@ metadata:
     # Rationale: This is a test snapshot with static pre-built images for scale testing
     test.appstudio.openshift.io/skip-idempotency: "true"
 spec:
-  application: ${APPLICATION_NAME}
+  application: "${APPLICATION_NAME}"
   displayName: "Large Snapshot - ${COMPONENT_COUNT} Components"
   displayDescription: "Test snapshot with ${COMPONENT_COUNT} components for large-scale release testing"
   artifacts: {}
@@ -91,20 +155,13 @@ for (( i=1; i<=COMPONENT_COUNT; i++ )); do
     
     # Generate component entry
     cat <<EOF
-    - name: ${COMPONENT_NAME}
-      containerImage: ${CONTAINER_IMAGE}
+    - name: "${COMPONENT_NAME}"
+      containerImage: "${CONTAINER_IMAGE}"
       source:
         git:
-          url: ${SOURCE_URL}
-          revision: main
+          url: "${SOURCE_URL}"
+          revision: "main"
 EOF
-
-    # Add some components with additional metadata for realism
-    if (( i % 20 == 0 )); then
-        cat <<EOF
-      repository: quay.io/redhat-pending/rhtap----${COMPONENT_NAME}
-EOF
-    fi
 done
 
 echo "" >&2
