@@ -2,21 +2,23 @@
 
 Tekton task to mark all repositories in the mapped snapshot as published in Pyxis.
 This is currently only meant to be used in the rh-push-to-registry-redhat-io
-and rh-advisories pipelines,
-so it will convert the values to the ones used for registry.redhat.io releases.
-E.g. repository "quay.io/redhat-prod/my-product----my-image" will be converted to use
-registry "registry.access.redhat.com" and repository "my-product/my-image" to identify
-the right Container Registry object in Pyxis. The task also optionally
-marks the repositories as source_container_image_enabled true if pushSourceContainer
-is true in the data JSON.
+and rh-advisories pipelines.
+It converts repository URLs to the registry and repository values used in Pyxis:
+- Standard releases: e.g. "quay.io/redhat-prod/my-product----my-image" uses registry
+  "registry.access.redhat.com" and repository "my-product/my-image" in Pyxis.
+- Flatpak releases: images pushed to quay.io/rh-flatpaks-prod/* or quay.io/rh-flatpaks-stage/*
+  use registry "flatpaks.registry.redhat.io" in Pyxis (for both prod and stage).
+The task also optionally marks repositories as source_container_image_enabled true if
+pushSourceContainer is true in the data JSON.
 Additionally, this task respects the `publish-on-push` flag. If `false`, then the task
 does not publish the repository.
 
 The task emits a result: `signRegistryAccessPath`
 
-This contains the relative path in the workspace to a text file that contains a list of repositories
-that needs registry.access.redhat.com image references to be signed (i.e.
+This contains the relative path in the workspace to a text file that contains a list of
+repositories that need registry.access.redhat.com image references to be signed (i.e.
 requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
+Only standard (non-flatpak) repositories are included; flatpak repos are never added.
 
 Note: This task runs quite early on in the pipeline, because we need the result it produces
 for the signing tasks (and `rh-sign-image` runs quite early to begin with). So this means

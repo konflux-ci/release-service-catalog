@@ -2,11 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-create-pyxis-image-multi-containerimages-one-arch
+  name: test-publish-pyxis-repository-flatpak-no-sign-registry-access
 spec:
   description: |
-    Run the create-pyxis-image task with multiple containerImages in the snapshot
-    and a single arch.
+    Run the publish-pyxis-repository task with components using quay.io/rh-flatpaks-stage/*
+    repositories. Flatpak repos must never be added to signRegistryAccessPath (we do not sign
+    registry.access.redhat.com identity for flatpaks). Verify the results file and that the
+    sign-registry-access file is empty.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -49,62 +51,38 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:66a9265f7e767058f3632124ab39280b62039200da428657fb515d072566fe50
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)"/mapped_snapshot.json << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
-                "application": "myapp",
+                "application": "my-app",
                 "components": [
                   {
-                    "name": "comp1",
-                    "containerImage": "source1@sha256:mydigest1",
+                    "name": "component1",
                     "repositories": [
                       {
-                        "url": "registry.io/image1a",
-                        "tags": [
-                          "testtag1"
-                        ]
-                      },
-                      {
-                        "url": "registry.io/image1b",
-                        "tags": [
-                          "testtag1b1",
-                          "testtag1b2"
-                        ]
-                      },
-                      {
-                        "url": "registry.io/image1c",
-                        "tags": [
-                          "testtag1c"
-                        ]
+                        "url": "quay.io/rh-flatpaks-stage/my-product----my-image1"
                       }
                     ]
                   },
                   {
-                    "name": "comp2",
-                    "containerImage": "source2@sha256:mydigest2",
+                    "name": "component2",
                     "repositories": [
                       {
-                        "url": "registry.io/image2",
-                        "tags": [
-                          "testtag2"
-                        ]
+                        "url": "quay.io/rh-flatpaks-stage/my-product----my-image5"
                       }
                     ]
                   },
                   {
-                    "name": "comp3",
-                    "containerImage": "source3@sha256:mydigest3",
+                    "name": "component3",
                     "repositories": [
                       {
-                        "url": "registry.io/image3",
-                        "tags": [
-                          "testtag3"
-                        ]
+                        "url": "quay.io/rh-flatpaks-stage/my-product----my-image6"
                       }
                     ]
                   }
@@ -114,6 +92,8 @@ spec:
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/mydata.json" << EOF
               {
+                "mapping": {
+                }
               }
               EOF
           - name: create-trusted-artifact
@@ -128,16 +108,16 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: create-pyxis-image
+        name: publish-pyxis-repository
       params:
         - name: pyxisSecret
-          value: test-create-pyxis-image-cert
-        - name: server
-          value: stage
+          value: test-publish-pyxis-repository-cert
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/mapped_snapshot.json
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
         - name: dataPath
           value: $(context.pipelineRun.uid)/mydata.json
+        - name: resultsDirPath
+          value: $(context.pipelineRun.uid)/results
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -156,15 +136,15 @@ spec:
         - setup
     - name: check-result
       params:
-        - name: pyxisDataPath
-          value: $(tasks.run-task.results.pyxisDataPath)
+        - name: signRegistryAccessPath
+          value: $(tasks.run-task.results.signRegistryAccessPath)
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
       taskSpec:
         params:
-          - name: pyxisDataPath
+          - name: signRegistryAccessPath
             type: string
           - name: sourceDataArtifact
             type: string
@@ -194,65 +174,66 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:66a9265f7e767058f3632124ab39280b62039200da428657fb515d072566fe50
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              if [ "$(wc -l < \
-                "$(params.dataDir)/mock_create_container_image.txt")" != 5 ]; then
-                echo Error: create_container_image was expected to be called 5 times. Actual calls:
-                cat "$(params.dataDir)/mock_create_container_image.txt"
-                exit 1
+              RESULTS_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/results/publish-pyxis-repository-results.json"
+
+              if [ ! -f "$RESULTS_FILE" ]; then
+                  echo "Error: Results file not found."
+                  exit 1
               fi
 
-              if [ -f "$(params.dataDir)/mock_cleanup_tags.txt" ]; then
-                echo Error: cleanup_tags was not expected to be called. Actual calls:
-                cat "$(params.dataDir)/mock_cleanup_tags.txt"
-                exit 1
-              fi
+              # Flatpak stage repos use catalog.stage.redhat.com
+              EXPECTED_RESULTS='{
+                "catalog_urls": [
+                  {
+                    "name": "component1",
+                    "url": "https://catalog.stage.redhat.com/software/containers/my-product/my-image1/1"
+                  },
+                  {
+                    "name": "component2",
+                    "url": "https://catalog.stage.redhat.com/software/containers/my-product/my-image5/3"
+                  },
+                  {
+                    "name": "component3",
+                    "url": "https://catalog.stage.redhat.com/software/containers/my-product/my-image6/5"
+                  }
+                ]
+              }'
 
-              cat > "$(params.dataDir)/skopeo_expected_calls.txt" << EOF
-              inspect --retry-times 3 --raw docker://registry.io/image1a@sha256:mydigest1
-              inspect --retry-times 3 --raw docker://registry.io/image1b@sha256:mydigest1
-              inspect --retry-times 3 --raw docker://registry.io/image1c@sha256:mydigest1
-              inspect --retry-times 3 --raw docker://registry.io/image2@sha256:mydigest2
-              inspect --retry-times 3 --raw docker://registry.io/image3@sha256:mydigest3
-              EOF
-
-              mock_skopeo_calls="$(sort < "$(params.dataDir)/mock_skopeo.txt" | md5sum)"
-              # check that the actual calls match the expected calls
-              if [ "$(md5sum < "$(params.dataDir)/skopeo_expected_calls.txt")" \
-                != "${mock_skopeo_calls}" ]
+              if ! echo "$EXPECTED_RESULTS" | jq --slurpfile actual "$RESULTS_FILE" -e '. == $actual[0]' > /dev/null
               then
-                echo "Error: Actual skopeo calls do not match expected calls."
-                echo Expected calls:
-                cat "$(params.dataDir)/skopeo_expected_calls.txt"
-                echo Actual calls:
-                echo "${mock_skopeo_calls}"
-                exit 1
+                  echo "Error: Results do not match expected output."
+                  echo "Expected: $EXPECTED_RESULTS"
+                  echo "Actual: $(cat "$RESULTS_FILE")"
+                  exit 1
               fi
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 8 ]; then
-                echo Error: oras was expected to be called 8 times. Actual calls:
-                cat "$(params.dataDir)/mock_oras.txt"
-                exit 1
+              if [ "$(wc -l < "$(params.dataDir)/mock_curl.txt")" != 6 ]; then
+                  echo Error: curl was expected to be called 6 times. Actual calls:
+                  cat "$(params.dataDir)/mock_curl.txt"
+                  exit 1
               fi
 
-              amdCount=$(jq '[.components[].pyxisImages[] | select(.arch == "amd64")] | length' \
-                "$(params.dataDir)/$(params.pyxisDataPath)")
-              if [ "$amdCount" != 3 ]; then
-                echo "Error: amd64 images were expected to be 3. Actual count: $amdCount"
+              # Pyxis GETs use flatpaks.registry.redhat.io for flatpak repos
+              [[ "$(head -n 1 "$(params.dataDir)/mock_curl.txt")" \
+                  == *"flatpaks.registry.redhat.io"* ]]
+              [[ "$(head -n 1 "$(params.dataDir)/mock_curl.txt")" \
+                  == *"/my-product/my-image1 "* ]]
+              [[ "$(head -n 3 "$(params.dataDir)/mock_curl.txt" | tail -n 1)" \
+                  == *"/my-product/my-image5 "* ]]
+              [[ "$(head -n 5 "$(params.dataDir)/mock_curl.txt" | tail -n 1)" \
+                  == *"/my-product/my-image6 "* ]]
+
+              # Flatpak repos must never be added to signRegistryAccessPath
+              SIGN_ACCESS_FILE="$(params.dataDir)/$(params.signRegistryAccessPath)"
+              if [ -s "$SIGN_ACCESS_FILE" ]; then
+                echo "Error: signRegistryAccessPath must be empty for flatpak repos. It contains:"
+                cat "$SIGN_ACCESS_FILE"
                 exit 1
               fi
-
-              osCount=$(jq '[.components[].pyxisImages[]] | all(.os == "linux")' \
-                "$(params.dataDir)/$(params.pyxisDataPath)")
-              if [ "$osCount" != "true" ]; then
-                echo "Error: all images were expected to be linux."
-                echo "osCount: $osCount"
-                exit 1
-              fi
-
       runAfter:
         - run-task

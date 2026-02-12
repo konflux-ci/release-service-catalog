@@ -10,21 +10,23 @@ spec:
   description: |-
     Tekton task to mark all repositories in the mapped snapshot as published in Pyxis.
     This is currently only meant to be used in the rh-push-to-registry-redhat-io
-    and rh-advisories pipelines,
-    so it will convert the values to the ones used for registry.redhat.io releases.
-    E.g. repository "quay.io/redhat-prod/my-product----my-image" will be converted to use
-    registry "registry.access.redhat.com" and repository "my-product/my-image" to identify
-    the right Container Registry object in Pyxis. The task also optionally
-    marks the repositories as source_container_image_enabled true if pushSourceContainer
-    is true in the data JSON.
+    and rh-advisories pipelines.
+    It converts repository URLs to the registry and repository values used in Pyxis:
+    - Standard releases: e.g. "quay.io/redhat-prod/my-product----my-image" uses registry
+      "registry.access.redhat.com" and repository "my-product/my-image" in Pyxis.
+    - Flatpak releases: images pushed to quay.io/rh-flatpaks-prod/* or quay.io/rh-flatpaks-stage/*
+      use registry "flatpaks.registry.redhat.io" in Pyxis (for both prod and stage).
+    The task also optionally marks repositories as source_container_image_enabled true if
+    pushSourceContainer is true in the data JSON.
     Additionally, this task respects the `publish-on-push` flag. If `false`, then the task
     does not publish the repository.
 
     The task emits a result: `signRegistryAccessPath`
 
-    This contains the relative path in the workspace to a text file that contains a list of repositories
-    that needs registry.access.redhat.com image references to be signed (i.e.
+    This contains the relative path in the workspace to a text file that contains a list of
+    repositories that need registry.access.redhat.com image references to be signed (i.e.
     requires_terms=true), one repository string per line, e.g. "rhtas/cosign-rhel9".
+    Only standard (non-flatpak) repositories are included; flatpak repos are never added.
 
     Note: This task runs quite early on in the pipeline, because we need the result it produces
     for the signing tasks (and `rh-sign-image` runs quite early to begin with). So this means
@@ -173,8 +175,6 @@ spec:
 
         set -x
 
-        PYXIS_REGISTRY=registry.access.redhat.com
-
         if [[ "$(params.server)" == "production" ]]
         then
           PYXIS_URL="https://pyxis.api.redhat.com"
@@ -247,6 +247,12 @@ spec:
             for ((j = 0; j < NUM_REPOSITORIES; j++))
             do
                 REPOSITORY=$(jq -r --argjson j "$j" '.repositories[$j].url' <<< "$COMPONENT")
+                if [[ "$REPOSITORY" == quay.io/rh-flatpaks-prod/* || "$REPOSITORY" == quay.io/rh-flatpaks-stage/* ]]
+                then
+                  PYXIS_REGISTRY=flatpaks.registry.redhat.io
+                else
+                  PYXIS_REGISTRY=registry.access.redhat.com
+                fi
                 PYXIS_REPOSITORY=${REPOSITORY##*/}
                 # Replace "----" with "/"
                 PYXIS_REPOSITORY=${PYXIS_REPOSITORY//----//}
@@ -261,8 +267,10 @@ spec:
                     exit 1
                 fi
 
+                # Only add to sign list for registry.access.redhat.com; flatpak repos never use it
                 PYXIS_REPOSITORY_REQUIRES_TERMS=$(jq '.requires_terms' <<< "$PYXIS_REPOSITORY_JSON")
-                if [ "$PYXIS_REPOSITORY_REQUIRES_TERMS" = false ]; then
+                if [ "$PYXIS_REGISTRY" = "registry.access.redhat.com" ] && \
+                   [ "$PYXIS_REPOSITORY_REQUIRES_TERMS" = false ]; then
                   echo "$PYXIS_REPOSITORY" >> "$SIGN_REGISTRY_ACCESS_PATH"
                 fi
 
