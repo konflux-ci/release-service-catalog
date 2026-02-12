@@ -7,8 +7,15 @@ function skopeo() {
   echo Mock skopeo called with: $* >&2
 
   if [[ "$1" == "inspect" ]]; then
+    if [[ "$*" == *"config"* ]]; then
+      if [[ "$*" == *"quay.io/mismatch-ver-target-digest"* ]]; then
+          echo '{ "config": { "Labels":  { "version": "4.13.0"} } }'
+      else
+          echo '{ "config": { "Labels":  { "version": "4.12.0"} } }'
+      fi
+      return 0
     # Handle `skopeo inspect`
-    if [[ "$*" == *"docker://quay.io/match-target-digest"* ]]; then
+    elif [[ "$*" == *"docker://quay.io/match-target-digest"* ]]; then
       echo "sha256:match1234567890"  # Mock target digest for idempotency check
       return 0
     elif [[ "$*" == *"docker://quay.io/target"* ]]; then
@@ -22,6 +29,12 @@ function skopeo() {
       return 0
     elif [[ "$*" == *"--tls-verify=false docker://registry-proxy.engineering.redhat.com/fail"* ]]; then
       return 1
+    elif [[ "$*" == *"registry-proxy.engineering.redhat.com/mismatchver@sha256:1234567890"* ]]; then
+      echo "sha256:target1234567890"
+      return 0
+    elif [[ "$*" == *"quay.io/mismatch-ver-target-digest"* ]]; then
+      echo "sha256:0987654321fedcba"
+      return 0
     else
       echo "Error: Unexpected inspect call"
       exit 1
