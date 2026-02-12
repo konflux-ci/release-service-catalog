@@ -16,6 +16,10 @@ spec:
     - name: targetIndex
       type: string
       description: targetIndex signing image
+    - name: targetOcpVersion
+      description: OCP Version this image was built to
+      type: string
+      default: ""
     - name: retries
       type: string
       default: "0"
@@ -75,6 +79,21 @@ spec:
         #!/usr/bin/env bash
         set -euo pipefail
 
+        function getIndexVersion() {
+            # if dest- and src- string is given, remove them from the auth param
+            if [[ "$#" -gt 1 ]]; then
+              shift
+              indexVersion="$(skopeo inspect --config --creds "$@" \
+                | jq -r '.config.Labels."com.redhat.index.delivery.version"')"
+            else
+              # no auth given
+              indexVersion="$(skopeo inspect --config "$@" \
+                | jq -r '.config.Labels."com.redhat.index.delivery.version"')"
+            fi
+
+            echo "$indexVersion"
+        }
+
         SOURCE_INDEX_CREDENTIAL="$(cat /mnt/publishingCredentials/sourceIndexCredential)"
         TARGET_INDEX_CREDENTIAL="$(cat /mnt/publishingCredentials/targetIndexCredential)"
 
@@ -109,6 +128,27 @@ spec:
             fi
         else
             echo "Target image does not exist. Proceeding to copy the image."
+        fi
+
+        # check to make sure the image to be published is for the intended ocpVersion
+        targetOcpVersion="$(params.targetOcpVersion)"
+        sourceVer=$(getIndexVersion "${SOURCE_AUTH_ARGS[@]}" "docker://$(params.sourceIndex)")
+        if [[ "${sourceVer}" != "${targetOcpVersion}" ]]; then
+            echo -n "The source index does not match its targetOcpVersion ($sourceVer != $targetOcpVersion)" \
+              | tee "$(results.requestMessage.path)"
+            exit 0
+        fi
+
+        # hotfix and pre-ga targetIndex should be skip the next check, as they don't exist in the upstream quay
+        # until skopeo copy runs.
+        if [[ "$(params.targetIndex)" =~ .*\:v[0-9]{1}\.[0-9]{2}$ ]]; then
+            targetVer=$(getIndexVersion "${TARGET_AUTH_ARGS[@]}" "docker://$(params.targetIndex)")
+            # check if both indexes are of the same OCP version and exit in case they mismatch.
+            if [ "${sourceVer}" != "${targetVer}" ]; then
+              echo -n "The indexes versions does not match ($sourceVer != $targetVer)" \
+              | tee "$(results.requestMessage.path)"
+              exit 0
+            fi
         fi
 
         # Proceed with copying the image
