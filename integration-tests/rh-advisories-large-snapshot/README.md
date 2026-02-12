@@ -104,7 +104,47 @@ export tenant_namespace=rhtap-release-2-tenant
 There is a `--skip-cleanup` option to the script in the event that you want to examine the resources
 after a test has ended.
 
-### Maintenance
+#### Automatic Cleanup
+
+By default, the test automatically cleans up fresh build Applications and Components on completion (success or failure). To disable automatic cleanup for debugging:
+
+```bash
+CLEANUP_FRESH_BUILDS=false ../run-test.sh rh-advisories-large-snapshot
+```
+
+#### Manual Cleanup
+
+To manually clean up fresh build resources from previous test runs:
+
+```bash
+# Dry run - see what would be deleted
+./utils/cleanup-fresh-builds.sh dev-release-team-tenant --dry-run
+
+# Delete all fresh build applications and components
+./utils/cleanup-fresh-builds.sh dev-release-team-tenant
+
+# Delete only builds older than 24 hours
+./utils/cleanup-fresh-builds.sh dev-release-team-tenant --older-than 24
+
+# Delete specific test run by timestamp
+./utils/cleanup-fresh-builds.sh dev-release-team-tenant --app-prefix dummy-build-1770918239
+```
+
+The cleanup script safely deletes Applications (which cascade-deletes their Components) using label-based filtering to avoid affecting production resources.
+
+## Documentation
+
+Comprehensive documentation is available in the [../../solution-docs/](../../solution-docs/) folder at the repository root:
+
+- **Quick Start**: [../../solution-docs/QUICK_REFERENCE.md](../../solution-docs/QUICK_REFERENCE.md) - One-page cheat sheet
+- **Complete Guide**: [../../solution-docs/USAGE_GUIDE.md](../../solution-docs/USAGE_GUIDE.md) - Detailed usage instructions
+- **Strategy Analysis**: [../../solution-docs/STRATEGY_COMPARISON.md](../../solution-docs/STRATEGY_COMPARISON.md) - Why Strategy C?
+- **Architecture**: [../../solution-docs/MULTI-VERSION-APPROACH.md](../../solution-docs/MULTI-VERSION-APPROACH.md) - Multi-version design
+- **Complete Solution**: [../../solution-docs/RELEASE-2157-SOLUTION.md](../../solution-docs/RELEASE-2157-SOLUTION.md) - Full documentation
+
+See [../../solution-docs/README.md](../../solution-docs/README.md) for a complete documentation index.
+
+## Maintenance
 
 - Should you require to add or update a secret, follow these steps:
 ```shell

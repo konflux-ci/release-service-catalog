@@ -1,0 +1,666 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: apply-mapping
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to apply a mapping to a Snapshot.
+
+    The purpose of this task is to merge a mapping with the components contained in a Snapshot.
+    The mapping is expected to be present in the data field of the ReleasePlanAdmission provided in
+    the `releasePlanAdmissionPath`. If the data field does not contain a `mapping` key, the original
+    Snapshot is returned. If there is a `mapping` key, it is merged with the `components` key in the
+    Snapshot based on component name.
+
+    A `mapped` result is also returned from this task containing a simple true/false value that is
+    meant to inform whether a mapped Snapshot is being returned or the original one.
+
+    This task supports variable expansion in tag values from the mapping. The currently supported variables are:
+    * "{{ timestamp }}" -> The build-date label from the image in the format provided by timestampFormat or %s as the
+      default.
+      If the build-date label is not available, we use the Created field in the image metadata as a fallback.
+    * "{{ release_timestamp }}" -> The current time in the format provided by timestampFormat or %s as the default
+    * "{{ git_sha }}" -> The git sha that triggered the snapshot being processed
+    * "{{ git_short_sha }}" -> The git sha reduced to 7 characters
+    * "{{ digest_sha }}" -> The image digest of the respective component
+    * "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the
+      repository and generates the next sequential tag (e.g., if the highest tag is v1.0.0-2, it will generate v1.0.0-3)
+    * "{{ oci_version }}" -> The version from OCI image annotations (org.opencontainers.image.version), with fallback
+      to OCI image labels if not present in annotations (converts + to _ for tag compliance)
+
+    You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the config workspace to apply the mapping to
+    - name: dataPath
+      type: string
+      description: Path to the JSON string of the merged data to use in the data workspace
+    - name: failOnEmptyResult
+      type: string
+      description: Fail the task if the resulting snapshot contains 0 components
+      default: "false"
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: mapped
+      type: string
+      description: A true/false value depicting whether or not the snapshot was mapped.
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: apply-mapping
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 2Gi
+          cpu: '2'
+        requests:
+          memory: 2Gi
+          cpu: '2'
+      script: |
+        #!/usr/bin/env bash
+        set -euxo pipefail
+
+        SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        SNAPSHOT_SPEC_FILE_ORIG="${SNAPSHOT_SPEC_FILE}.orig"
+
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was found."
+            exit 1
+        fi
+
+        # Copy the original Snapshot spec file before overriding
+        cp "${SNAPSHOT_SPEC_FILE}" "${SNAPSHOT_SPEC_FILE_ORIG}"
+
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON file was found."
+            printf "false" | tee "$(results.mapped.path)"
+            exit 0
+        fi
+
+        MAPPING=$(jq '.mapping' "${DATA_FILE}")
+
+        if [[ $MAPPING == "null" ]] ; then
+            echo "Data file contains no mapping key."
+            printf "false" | tee "$(results.mapped.path)"
+            exit 0
+        fi
+
+        # Function to handle incrementer logic
+        increment_tag() {
+            local tag_template="$1"
+            local repo="$2"
+
+            # Use `skopeo list-tags` to fetch all tags from the repository
+            existing_tags=$(skopeo list-tags --retry-times 3 docker://"${repo}" | jq -r '.Tags[]')
+
+            # Remove `{{ incrementer }}` placeholder to get the version prefix for regex pattern
+            # shellcheck disable=SC2001
+            version_prefix=$(echo "${tag_template}" | sed 's/{{ incrementer }}//g')
+            # Match tags with 1–6 digit increments only. Ignore 7+ digit tags to avoid
+            # treating short commit SHAs as incrementer values
+            tag_pattern="^${version_prefix}[0-9]{1,6}$"
+
+            # Extract the numeric part of existing tags and find the max increment
+            max_increment=$(echo "${existing_tags}" | { grep -E "${tag_pattern}" || true; } \
+            | sed -E "s/${version_prefix}//" | sort -nr | head -n1)
+
+            # Calculate the next increment (default to 1 if max_increment is empty or unset)
+            # Use 10# to force decimal input preventing leading 0 from being treated as octal
+            increment=$((10#${max_increment:-0} + 1))
+
+            # Substitute `{{ incrementer }}` in the tag template with the calculated increment
+            tag="${tag_template//\{\{ incrementer \}\}/${increment}}"
+
+            # Validate the final tag format to avoid malformed tags
+            if [[ ! "${tag}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                echo "Error: Invalid tag format after substitution: ${tag}"
+                exit 1
+            fi
+
+            echo "$tag"  # Return the final tag
+        }
+
+        # Expected arguments are: [variable, substitute_map, labels_map]
+        substitute() {
+            variable=$1
+            substitute_map=$2
+            labels_map=$3
+
+            result=""
+            if [[ "$variable" == labels.* ]]; then
+                label="${variable#labels.}"
+                result="$(jq -r --arg labelval "$label" '.[$labelval] // ""' <<< "${labels_map}")"
+            else
+                result="$(jq -r --arg variable "$variable" '.[$variable] // ""' <<< "${substitute_map}")"
+            fi
+            echo "$result"
+        }
+
+        # Expected arguments are [tags, substitute_map, labels_map, repo]
+        # The tags argument is a json array
+        translate_tags () {
+            tags=$1
+            substitute_map=$2
+            labels_map=$3
+            repo=$4
+            if [ "$tags" = '' ] ; then
+                echo ''
+                return
+            fi
+
+            translated_tags='[]'
+            NUM_TAGS="$(jq 'length' <<< "${tags}")"
+            for ((i = 0; i < NUM_TAGS; i++)); do
+                tag="$(jq -r --argjson i "$i" '.[$i]' <<< "${tags}")"
+
+                # Repeatedly translate {{}} references until none are left
+                while [[ $tag =~ \{\{\ *([[:alnum:]_\.-]+)\ *\}\} ]]; do
+                  # Extract the variable name (e.g., timestamp), trimming any surrounding spaces
+                  var_name="${BASH_REMATCH[1]}"
+
+                  # Sanity check of the template variable name
+                  if [[ ! "$var_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                    echo "Error: Invalid variable name in tag definition: $var_name" >&2
+                    exit 1
+                  fi
+
+                  # Handle incrementer logic
+                  if [[ "$var_name" == "incrementer" ]]; then
+                      tag=$(increment_tag "$tag" "$repo")
+                  else
+                      replacement=$(substitute "$var_name" "$substitute_map" "$labels_map")
+                      if [ -z "$replacement" ]; then
+                          echo Error: Substitution variable unknown or empty: "$var_name" >&2
+                          exit 1
+                      fi
+                      # Shellcheck suggests ${var//find/replace}, but
+                      # that won't work here - we need to match arbitrary amount of spaces
+                      # shellcheck disable=SC2001
+                      tag="$(sed "s/{{ *$var_name *}}/$replacement/" <<< "$tag")"
+                  fi
+                done
+
+                # Sanity check of the resulting tag value
+                if [[ ! "$tag" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                  echo "Error: Invalid tag format: $tag" >&2
+                  exit 1
+                fi
+
+                # Avoid duplicate tags - only add a tag if not already present
+                if [ "$(jq -c --arg tag "$tag" 'index($tag)' <<< "$translated_tags")" = null ]
+                then
+                  translated_tags="$(jq -c --arg tag "$tag" '. + [$tag]' <<< "$translated_tags")"
+                fi
+            done
+
+            echo "$translated_tags"
+        }
+
+        convert_to_quay () { # Convert the registry.redhat.io URL to the quay.io format
+            local repository=$1
+            case "$repository" in
+                registry.redhat.io/*)
+                    echo "${repository/registry.redhat.io/quay.io/redhat-prod}" \
+                        | sed 's|/|----|g; s|quay.io----redhat-prod----|quay.io/redhat-prod/|'
+                    ;;
+                registry.stage.redhat.io/*)
+                    echo "${repository/registry.stage.redhat.io/quay.io/redhat-pending}" \
+                        | sed 's|/|----|g; s|quay.io----redhat-pending----|quay.io/redhat-pending/|'
+                    ;;
+                flatpaks.registry.redhat.io/*)
+                    echo "${repository/flatpaks.registry.redhat.io/quay.io/rh-flatpaks-prod}" \
+                        | sed 's|/|----|g; s|quay.io----rh-flatpaks-prod----|quay.io/rh-flatpaks-prod/|'
+                    ;;
+                flatpaks.registry.stage.redhat.io/*)
+                    echo "${repository/flatpaks.registry.stage.redhat.io/quay.io/rh-flatpaks-stage}" \
+                        | sed 's|/|----|g; s|quay.io----rh-flatpaks-stage----|quay.io/rh-flatpaks-stage/|'
+                    ;;
+                *)
+                    echo "$repository"
+                    ;;
+            esac
+        }
+
+        # This block is temporary to support both quay.io and registry.redhat.io
+        # It should be removed once all repositories are migrated to registry.redhat.io
+        convert_to_registry () { # Convert the repository URL to the registry.redhat.io format
+            local repository=$1
+            case "$repository" in
+                quay.io/redhat-prod/*)
+                    repository="${repository//quay.io\/redhat-prod/registry.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
+                    ;;
+                quay.io/redhat-pending/*)
+                    repository="${repository//quay.io\/redhat-pending/registry.stage.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
+                    ;;
+                quay.io/rh-flatpaks-prod/*)
+                    repository="${repository//quay.io\/rh-flatpaks-prod/flatpaks.registry.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
+                    ;;
+                quay.io/rh-flatpaks-stage/*)
+                    repository="${repository//quay.io\/rh-flatpaks-stage/flatpaks.registry.stage.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
+                    ;;
+                registry.redhat.io/* | registry.stage.redhat.io/*)
+                    # Return the original Red Hat registry paths
+                    echo "$repository"
+                    ;;
+                *)
+                    # Return empty for unhandled formats
+                    echo ""
+                    ;;
+            esac
+        }
+
+        convert_to_registry_access () { # Convert the repository URL to the registry.access.redhat.com format
+            local repository=$1
+            case "$repository" in
+                registry.redhat.io/*)
+                    echo "${repository/registry.redhat.io/registry.access.redhat.com}"
+                    ;;
+                registry.stage.redhat.io/*)
+                    echo "${repository/registry.stage.redhat.io/registry.access.stage.redhat.com}"
+                    ;;
+                *)
+                    echo ""
+                    ;;
+            esac
+        }
+
+        # Merge the mapping key contents in the data JSON file with the components key in the snapshot based
+        # on component name. Save the output as a compact JSON in the mapped_snapshot.json file in the workspace
+        { echo -n "$(cat "${SNAPSHOT_SPEC_FILE_ORIG}")"; echo "${MAPPING}"; } | jq -c -s '
+          .[0] as $snapshot | .[0].components + .[1].components | group_by(.name) |
+          [.[] | select(length > 1)] | map(reduce .[] as $x ({}; . * $x)) as $mergedComponents |
+          $snapshot | .components = $mergedComponents' > "${SNAPSHOT_SPEC_FILE}"
+
+        printf "true" | tee "$(results.mapped.path)"
+
+        if [ "$(params.failOnEmptyResult)" = "true" ] && \
+          [ "$(jq '.components | length' < "${SNAPSHOT_SPEC_FILE}")" -eq 0 ]; then
+          echo "ERROR: Resulting snapshot contains 0 components. This means that there were 0 components present in"
+          echo "both your Snapshot and your ReleasePlanAdmission mapping. Take a look at your component names and"
+          echo "make sure that all components you want to release from the snapshot are present in the"
+          echo "ReleasePlanAdmission (by the name field of the component)."
+          echo "Components in snapshot: $(jq -c '[.components[].name]' "${SNAPSHOT_SPEC_FILE_ORIG}")"
+          echo "Components in mapping: $(jq -c '[.components[].name]' <<< "${MAPPING}")"
+          exit 1
+        fi
+
+        # Expand the tags in the data file
+        defaultTags=$(jq '.defaults.tags // []' <<< "$MAPPING")
+        defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< "$MAPPING")
+        currentTimestamp="$(date "+%Y%m%d %T")"
+        defaultCGWSettings=$(jq -c '.defaults.contentGateway // {}' <<< "$MAPPING")
+        NUM_MAPPED_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+        for ((i = 0; i < NUM_MAPPED_COMPONENTS; i++)) ; do
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            componentTags=$(jq '.componentTags // []' <<< "$component")
+            defaultComponentTags=$(jq -n --argjson defaults "$defaultTags" --argjson componentTags \
+              "$componentTags" '$defaults? + $componentTags? | unique')
+
+            # images are required to use sha reference - check this
+            NAME=$(jq -r '.name' <<< "$component")
+            IMAGE_REF=$(jq -r '.containerImage' <<< "$component")
+            if ! [[ "$IMAGE_REF" =~ ^[^:]+@sha256:[0-9a-f]+$ ]] ; then
+              echo "Component ${NAME} contains an invalid containerImage value. sha reference is required: ${IMAGE_REF}"
+              exit 1
+            fi
+
+            git_sha=$(jq -r '.source.git.revision' <<< "$component") # this sets the value to "null" if it doesn't exist
+            build_sha=$(echo "$IMAGE_REF" | cut -d ':' -f 2)
+            passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
+              '.timestampFormat // $default' <<< "$component")
+            release_timestamp="$(date -d "$currentTimestamp" "+$passedTimestampFormat")"
+            arch_json="$(get-image-architectures "${IMAGE_REF}")"
+            # The build-date label and Created values are not the same per architecture, but we don't support separate
+            # tags per arch. So, we just use the first digest listed.
+            arch="$(jq -rs 'map(.platform.architecture) | .[0]' <<< "$arch_json")"
+            os="$(jq -rs 'map(.platform.os) | .[0]' <<< "$arch_json")"
+
+            # Get first digest from architecture info to construct image reference
+            first_digest="$(jq -rs '.[0].digest' <<< "$arch_json")"
+
+            # Construct image reference with the first architecture's digest for annotations
+            image_with_digest="${IMAGE_REF%@*}@${first_digest}"
+
+            # Get raw manifest to extract annotations (works for all image types)
+            raw_manifest="$(skopeo inspect --retry-times 3 --no-tags --raw docker://"${image_with_digest}" | jq -c)"
+            annotations="$(jq -c '.annotations // {}' <<< "$raw_manifest")"
+
+            # Get config.mediaType from raw manifest to determine if this is a standard container image
+            config_media_type="$(jq -r '.config.mediaType // ""' <<< "$raw_manifest")"
+
+            # Get image metadata for labels, env, build_date
+            # Only standard container images support skopeo inspect without --raw
+            # Standard config types are:
+            #   - application/vnd.oci.image.config.v1+json (OCI images)
+            #   - application/vnd.docker.container.image.v1+json (Docker images)
+            # All other artifacts (Helm charts, ML models, empty configs, etc.) don't have
+            # labels/env and would fail with skopeo inspect
+            if [[ "$config_media_type" == "application/vnd.oci.image.config.v1+json" ]] || \
+               [[ "$config_media_type" == "application/vnd.docker.container.image.v1+json" ]]; then
+                # Standard container images - use standard skopeo inspect
+                image_metadata="$(skopeo inspect --retry-times 3 --no-tags \
+                  --override-os "${os}" --override-arch "${arch}" docker://"${IMAGE_REF}" | jq -c)"
+                # For timestamp, use Labels.build-date and fallback to Created
+                build_date="$(jq -r '.Labels."build-date" // .Created // ""' <<< "$image_metadata")"
+                env_variables="$(jq -c '.Env // []' <<< "${image_metadata}")"
+                labels="$(jq -c '.Labels // {}' <<< "${image_metadata}")"
+            else
+                # Non-standard artifacts (Helm charts, ML models, etc.) don't support
+                # standard skopeo inspect - get build_date from annotations if available
+                build_date="$(jq -r '.["org.opencontainers.image.created"] // ""' <<< "$annotations")"
+                env_variables="[]"
+                labels="{}"
+            fi
+
+            # Get oci_version_raw from annotations, fallback to labels
+            oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$annotations")"
+            if [ -z "$oci_version_raw" ]; then
+              oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$labels")"
+            fi
+
+            # Add image env_variables metadata to component
+            if [ "$(jq 'length' <<< "$env_variables")" -ne 0 ] ; then
+              env_file=$(mktemp)
+              echo "$env_variables" > "$env_file"
+              jq --argjson i "$i" --slurpfile env "$env_file" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {env_variables: $env[0]}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # Add image annotations metadata to component
+            if [ "$(jq 'length' <<< "$annotations")" -ne 0 ] ; then
+              annotations_file=$(mktemp)
+              # Convert annotations from {key: value} to [{name: key, value: value}]
+              jq -c 'if . then to_entries | map({name: .key, value: .value}) else [] end' \
+               <<< "$annotations" > "$annotations_file"
+              jq --argjson i "$i" --slurpfile annotations "$annotations_file" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {annotations: $annotations[0]}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # Add image labels metadata to component
+            if [ "$(jq 'length' <<< "$labels")" -ne 0 ] ; then
+              labels_file=$(mktemp)
+              # Convert labels from {key: value} to [{name: key, value: value}]
+              jq -c 'if . then to_entries | map({name: .key, value: .value}) else [] end' \
+               <<< "$labels" > "$labels_file"
+              jq --argjson i "$i" --slurpfile labels "$labels_file" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {labels: $labels[0]}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # Add media type to component
+            if [ -n "$config_media_type" ]; then
+              jq --argjson i "$i" --arg media_type "$config_media_type" \
+                '.components[$i].metadata = (.components[$i].metadata // {}) * {media_type: $media_type}' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # Transform version to OCI tag format: replace + with _ (convention for OCI compliance)
+            # Set default value if empty (common for regular container images without OCI annotations)
+            oci_version="${oci_version_raw//+/_}"
+            oci_version="${oci_version:-unknown}"
+
+            if [ "${build_date}" = "" ] ; then
+              timestamp=""
+            else
+              timestamp="$(date -d "${build_date}" "+$passedTimestampFormat")"
+            fi
+
+            substitute_map="$(jq -n -c \
+              --arg timestamp "${timestamp}" \
+              --arg release_timestamp "${release_timestamp}" \
+              --arg git_sha "${git_sha}" \
+              --arg git_short_sha "${git_sha:0:7}" \
+              --arg digest_sha "${build_sha}" \
+              --arg oci_version "${oci_version}" \
+              '$ARGS.named')"
+
+            # Also substitute filename values in the staged section of components
+            STAGED_FILES=$(jq '.staged.files | length' <<< "$component")
+            for ((j = 0; j < STAGED_FILES; j++)) ; do
+                file=$(jq -c --argjson j "$j" '.staged.files[$j]' <<< "$component")
+                filenameArrayPreSubstitution=$(jq '.filename' <<< "$file" | jq -cs)
+                # {{ incrementer }} is not supported in staged.files values, so we just pass
+                # "" as the repo argument
+                subbedFilename=$(translate_tags "${filenameArrayPreSubstitution}" \
+                  "${substitute_map}" "${labels}" ""| jq -r '.[0]')
+                jq --argjson i "$i" --argjson j "$j" --arg filename "$subbedFilename" \
+                  '.components[$i].staged.files[$j].filename = $filename' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
+                  && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            done
+
+            # apply defaults for contentGateway
+            componentCGWSettings=$(jq -c '.contentGateway // {}' <<< "$component")
+            updatedComponentCGWSettings=$(merge-json "$defaultCGWSettings" "$componentCGWSettings")
+            componentCGWSettingsSize=$(jq '. | length' <<< "${updatedComponentCGWSettings}")
+
+            if [ "${componentCGWSettingsSize}" -gt "0" ]; then
+              jq --argjson i "$i" --argjson componentCGWSettings "$updatedComponentCGWSettings" \
+              '.components[$i].contentGateway = $componentCGWSettings' \
+              "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+            fi
+
+            # *** Temporary code to maintain backwards compatibility and set .repositories[0] to .repository ***
+            if [[ $(jq 'has("repository")' <<< "$component") == "true" ]] ; then
+              repository=$(jq -r '.repository' <<< "$component")
+              echo "Processing component: $NAME"
+              echo "Original repository: $repository"
+
+              imageTags=$(jq '.tags // []' <<< "$component")
+              oldAllTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson imageTags \
+                "$imageTags" '$defaults? + $imageTags? | unique')
+              oldTags=$(translate_tags "${oldAllTagsPreSubstitution}" "${substitute_map}" "${labels}" "${repository}")
+              if [ "$(jq 'length' <<< "$oldTags")" -gt 0 ] ; then
+                jq --argjson i "$i" --argjson updatedTags "$oldTags" '.components[$i].tags = $updatedTags' \
+                  "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+              fi
+
+              if [[ "$repository" == quay.io/redhat-prod/* || "$repository" == quay.io/redhat-pending/* ]]; then
+                  repository=$(convert_to_registry "$repository")
+              fi
+
+              if [[ "$repository" == registry.redhat.io/* || "$repository" == registry.stage.redhat.io/* ]]; then
+                rh_registry_repo=$repository
+                registry_access_repo=$(convert_to_registry_access "$repository")
+                repository=$(convert_to_quay "$repository")
+
+                jq --argjson i "$i" \
+                  --arg repository "$repository" \
+                  --arg rh_registry_repo "$rh_registry_repo" \
+                  --arg registry_access_repo "$registry_access_repo" \
+                  '(.components[$i].repository = $repository) |
+                      .components[$i]["rh-registry-repo"] = $rh_registry_repo |
+                      .components[$i]["registry-access-repo"] = $registry_access_repo' \
+                "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+
+                if [[ $(jq 'has("repositories")' <<< "$component") == "false" ]] ; then
+                  jq --argjson i "$i" --arg rh_registry_repo "$rh_registry_repo" \
+                    --arg registry_access_repo "$registry_access_repo" \
+                      '.components[$i].repositories[0]["rh-registry-repo"] = $rh_registry_repo |
+                      .components[$i].repositories[0]["registry-access-repo"] = $registry_access_repo' \
+                    "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+                fi
+              fi
+              if [[ $(jq 'has("repositories")' <<< "$component") == "false" ]] ; then
+                jq --argjson i "$i" --arg url "$repository" \
+                  --argjson tags "$oldTags" \
+                  '.components[$i].repositories[0].url = $url |
+                    .components[$i].repositories[0]["tags"] = $tags' \
+                  "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+              fi
+            fi
+            # *** End of temporary code ***
+
+            NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$component")
+            for ((j = 0; j < NUM_REPOSITORIES; j++)) ; do
+                repository=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
+                repoTags=$(jq '.tags // []' <<< "$repository")
+                url=$(jq -r '.url' <<< "$repository")
+                echo "Processing component: $NAME, repository: $url"
+
+                allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson repoTags \
+                  "$repoTags" '$defaults? + $repoTags? | unique')
+
+                tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}" "${url}")
+                if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
+                  jq --argjson i "$i" --argjson j "$j" --argjson updatedTags "$tags" \
+                    '.components[$i].repositories[$j].tags = $updatedTags' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
+                    && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+                fi
+
+                # This block is temporary to support both quay.io and registry.redhat.io
+                # It should be removed once all repositories are migrated to registry.redhat.io
+                if [[ "$url" == quay.io/redhat-prod/* ||
+                  "$url" == quay.io/redhat-pending/* ||
+                  "$url" == quay.io/rh-flatpaks-prod/* ||
+                  "$url" == quay.io/rh-flatpaks-stage/* ]]; then
+                    url=$(convert_to_registry "$url")
+                fi
+
+                # Convert to registry and quay format
+                if [[ "$url" == registry.redhat.io/* ||
+                  "$url" == registry.stage.redhat.io/* ||
+                  "$url" == flatpaks.registry.redhat.io/* ||
+                  "$url" == flatpaks.registry.stage.redhat.io/* ]]; then
+                  rh_registry_repo=$url
+                  registry_access_repo=$(convert_to_registry_access "$url")
+                  url=$(convert_to_quay "$url")
+
+                  jq --argjson i "$i" \
+                    --argjson j "$j" \
+                    --arg url "$url" \
+                    --arg rh_registry_repo "$rh_registry_repo" \
+                    --arg registry_access_repo "$registry_access_repo" \
+                    '.components[$i].repositories[$j].url = $url |
+                        .components[$i].repositories[$j]["rh-registry-repo"] = $rh_registry_repo |
+                        .components[$i].repositories[$j]["registry-access-repo"] = $registry_access_repo' \
+                  "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+                fi
+            done
+        done
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 250m
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
