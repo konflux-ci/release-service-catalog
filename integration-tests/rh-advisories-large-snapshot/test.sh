@@ -3,16 +3,16 @@
 # rh-advisories-large-snapshot test script
 #
 # MAXIMUM STRESS TEST - Tests rh-advisories pipeline with worst-case configuration:
-# - 200 fresh Konflux builds (unsigned images, zero existing signatures)
+# - 200 fresh Konflux multi-arch builds (4 architectures: amd64, arm64, s390x, ppc64le)
 # - Expected duration: 
-#     First run: 7-9 hours total (3-4 hours build + 4-5 hours test)
-#     Subsequent runs: 4-5 hours (reuses builds, 2-3 min + 4-5 hours test)
-# - Tests: Signing service capacity, production-scale component processing
-# - Configuration: NO idempotency, NO SBOM, minimal EC validation
+#     Every run: 10-13 hours total (120-180 min build + 8-11 hours signing)
+#     (Components cleaned up after each run to ensure worst-case signing performance)
+# - Tests: Signing service capacity, production-scale multi-arch component processing
+# - Configuration: 4-arch builds, NO idempotency, NO SBOM, STRICT EC validation
 #
 # USAGE:
 #   # Default: Smart build (reuses existing images, builds missing ones)
-#   # First run: ~3 hours with 15-min batching | Subsequent: ~3 minutes
+#   # First run: ~35-50 min (no batching delays) | Subsequent: ~1-2 minutes
 #   ./test.sh
 #
 #   # Force rebuild all images (slower, ignores existing builds)
@@ -21,12 +21,11 @@
 #   # Custom configuration (via environment variables)
 #   COMPONENT_COUNT=100 NAMESPACE=my-namespace ./test.sh
 #
-#   # Batch control (adjust GitHub API rate limit protection)
-#   BATCH_SIZE=20 BATCH_DELAY=900 ./test.sh  # 20 per batch, 15 min delay (default)
-#   BATCH_SIZE=30 BATCH_DELAY=600 ./test.sh  # 30 per batch, 10 min delay (faster, riskier)
+#   # No batching delays needed - builds start only after ALL components are ready
+#   # Retry logic with exponential backoff handles any GitHub API rate limit errors
 #
-#   # Disable automatic cleanup of fresh builds (for debugging)
-#   CLEANUP_FRESH_BUILDS=false ./test.sh
+#   # Keep components for fast re-runs (default: true for worst-case signing every run)
+#   CLEANUP_TEST_COMPONENTS=false ./test.sh
 #
 #   # Advanced: Skip build entirely (use pre-existing image pool file)
 #   SKIP_BUILD=true FRESH_BUILDS_FILE=/path/to/existing ./test.sh
@@ -46,10 +45,11 @@ COMPONENT_COUNT="${COMPONENT_COUNT:-200}"
 NAMESPACE="${NAMESPACE:-dev-release-team-tenant}"
 FRESH_BUILDS_FILE="${FRESH_BUILDS_FILE:-/tmp/fresh-images-pool-$(date +%s).txt}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
-CLEANUP_FRESH_BUILDS="${CLEANUP_FRESH_BUILDS:-true}"  # Auto-cleanup fresh build apps/components
+CLEANUP_TEST_COMPONENTS="${CLEANUP_TEST_COMPONENTS:-true}"  # Default: cleanup after test for worst-case signing on every run
 
 # --- Build Phase (if needed) ---
 if [ "${SKIP_BUILD}" = "false" ]; then
+    # Build fresh images via PAC
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "🏗️  MAXIMUM STRESS TEST: FRESH KONFLUX BUILDS"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -67,23 +67,22 @@ if [ "${SKIP_BUILD}" = "false" ]; then
     echo "Step 1/2: Building Fresh Konflux Components"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    batch_delay_min=$((${BATCH_DELAY:-900} / 60))
     if [ "${FORCE_REBUILD:-false}" = "true" ]; then
-        echo "⏱️  Force rebuild mode - will rebuild all components"
-        echo "   This will take several hours due to GitHub API rate limit protection"
-        echo "   Building ${COMPONENT_COUNT} components in batches of ${BATCH_SIZE:-20}..."
-        echo "   Delay between batches: ${batch_delay_min} minutes (only when creating NEW components)"
+        echo "⏱️  Force rebuild mode - will rebuild components"
+        echo "   Building up to 100 new components (smart deletion keeps needed components)"
+        echo "   Estimated time: ~35-50 minutes for 100 components"
+        echo "   No batching delays - retry logic handles rate limits automatically"
     else
         echo "⏱️  Smart build mode - reusing existing successful builds"
         echo "   Will check existing components and only build missing/failed ones"
-        echo "   First run: Several hours with batching | Subsequent runs: 1-5 min (if all exist)"
-        echo "   Batch size: ${BATCH_SIZE:-20} | Delay between batches: ${batch_delay_min} min (NEW components only)"
+        echo "   First run: ~35-50 min (if building new) | Subsequent runs: 1-2 min (if all exist)"
+        echo "   No batching delays - builds start only after ALL components are ready"
     fi
     echo ""
     
-    if ! "${SCRIPT_DIR}/utils/build-fresh-images.sh" "${COMPONENT_COUNT}" "${NAMESPACE}" "${FRESH_BUILDS_FILE}"; then
+    if ! "${SCRIPT_DIR}/utils/build-images.sh" "${COMPONENT_COUNT}" "${NAMESPACE}" "${FRESH_BUILDS_FILE}"; then
         echo ""
-        echo "❌ Failed to build fresh images"
+        echo "❌ Failed to build images"
         exit 1
     fi
     
@@ -91,18 +90,19 @@ if [ "${SKIP_BUILD}" = "false" ]; then
     echo "✅ Fresh builds complete!"
     echo ""
 else
+    # Reuse existing images without building
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⚠️  ⚠️  ⚠️  WARNING: SKIPPING BUILD ⚠️  ⚠️  ⚠️"
+    echo "⚠️  ⚠️  ⚠️  WARNING: REUSING EXISTING IMAGES (NOT WORST-CASE) ⚠️  ⚠️  ⚠️"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
-    echo "You are reusing existing builds. This means:"
+    echo "You are reusing existing images without rebuilding. This means:"
     echo "  ❌ Images may already have signatures in Pyxis"
     echo "  ❌ Signing tasks will use idempotency (skip existing signatures)"
     echo "  ❌ Signing will be FAST (~1-2 min instead of 1-2 hours)"
     echo "  ❌ This is NOT testing worst-case signing performance!"
     echo ""
-    echo "To test TRUE worst-case, run without SKIP_BUILD:"
-    echo "  ./test.sh"
+    echo "To test TRUE worst-case signing with NEW digests:"
+    echo "  SKIP_BUILD=false FORCE_REBUILD=true ./test.sh  (rebuilds all components)"
     echo ""
     
     if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
@@ -115,27 +115,39 @@ else
     echo "   Using existing ${EXISTING_COUNT} images from ${FRESH_BUILDS_FILE}"
     echo ""
     
-    read -p "Continue with existing builds? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Aborted. Run without SKIP_BUILD to build fresh images."
-        exit 1
+    # Skip interactive prompt in CI/automation
+    if [ "${CI:-false}" != "true" ] && [ "${SKIP_BUILD_PROMPT:-false}" != "true" ]; then
+        read -p "Continue with existing builds? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Aborted. Run without SKIP_BUILD to build fresh images."
+            exit 1
+        fi
+        echo ""
+    else
+        echo "   ℹ️  Automation detected - skipping confirmation prompt"
+        echo ""
     fi
-    echo ""
 fi
+
+echo "DEBUG: After skip-build block, COMPONENT_COUNT=${COMPONENT_COUNT}" >&2
 
 # --- Export Configuration ---
 export FRESH_BUILDS_FILE
 
+echo "DEBUG: After export FRESH_BUILDS_FILE" >&2
+
 # --- Test Phase Header ---
+echo "DEBUG: About to print test phase header" >&2
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Step 2/2: Running Maximum Stress Test"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+echo "DEBUG: About to do arithmetic: COMPONENT_COUNT * 3" >&2
 echo "⚠️  Expected behavior with fresh builds:"
 echo "   • rh-sign-image tasks will sign ALL ~$((COMPONENT_COUNT * 3)) digests"
 echo "   • Expected test duration: 4-5 hours (worst-case signing performance)"
-echo "   • Note: First test run adds 3-4 hours for building components"
+echo "   • Note: First test run adds 35-50 min for building 100 components"
 echo ""
 
 # --- Timeout Configuration (in seconds, configurable via environment) ---
@@ -476,9 +488,13 @@ verify_release_contents() {
     # Get PipelineRun
     local pipelinerun
     pipelinerun=$(echo "$release_json" | jq -r '.status.managedProcessing.pipelineRun' 2>/dev/null || echo "")
+    
+    # Extract just the name part (pipelinerun is stored as "namespace/name")
+    local pipelinerun_name="${pipelinerun##*/}"
+    
     if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
         echo "  PipelineRun: ${pipelinerun}" >&2
-        echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun}" >&2
+        echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
     fi
 
     echo "" >&2
@@ -496,7 +512,7 @@ verify_release_contents() {
         # Check filter-already-released-advisory-images: skip_release result
         local skip_release
         skip_release=$(kubectl get taskrun -n "${managed_namespace}" \
-            -l "tekton.dev/pipelineRun=${pipelinerun},tekton.dev/pipelineTask=filter-already-released-advisory-images" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name},tekton.dev/pipelineTask=filter-already-released-advisory-images" \
             -o jsonpath='{.items[0].status.results[?(@.name=="skip_release")].value}' 2>/dev/null || echo "")
         
         echo "   skip_release: '${skip_release}' (should be 'false' for release to proceed)" >&2
@@ -512,7 +528,7 @@ verify_release_contents() {
         # Check apply-mapping: mapped result
         local mapped
         mapped=$(kubectl get taskrun -n "${managed_namespace}" \
-            -l "tekton.dev/pipelineRun=${pipelinerun},tekton.dev/pipelineTask=apply-mapping" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name},tekton.dev/pipelineTask=apply-mapping" \
             -o jsonpath='{.items[0].status.results[?(@.name=="mapped")].value}' 2>/dev/null || echo "")
         
         echo "   mapped: '${mapped}' (should be 'true' for images to be pushed)" >&2
@@ -614,7 +630,7 @@ verify_release_contents() {
         # Get create-advisory TaskRun
         local advisory_taskrun
         advisory_taskrun=$(kubectl get taskrun -n "${managed_namespace}" \
-            -l "tekton.dev/pipelineRun=${pipelinerun},tekton.dev/pipelineTask=create-advisory" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name},tekton.dev/pipelineTask=create-advisory" \
             -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 
         if [ -n "$advisory_taskrun" ]; then
@@ -689,9 +705,9 @@ verify_release_contents() {
             echo "        - Task name mismatch or label issues" >&2
             echo "      How to debug:" >&2
             echo "        # List all tasks in this PipelineRun:" >&2
-            echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineRun=${pipelinerun}" >&2
+            echo "        kubectl get taskrun -n ${managed_namespace} -l tekton.dev/pipelineRun=${pipelinerun_name}" >&2
             echo "        # Check PipelineRun status:" >&2
-            echo "        kubectl get pipelinerun ${pipelinerun} -n ${managed_namespace} -o yaml | grep -A 20 'status:'" >&2
+            echo "        kubectl get pipelinerun ${pipelinerun_name} -n ${managed_namespace} -o yaml | grep -A 20 'status:'" >&2
         fi
     else
         echo "   ⚠️  WARNING: PipelineRun not available, skipping task inspection" >&2
@@ -709,7 +725,7 @@ verify_release_contents() {
         # List all TaskRuns in the PipelineRun
         local all_taskruns
         all_taskruns=$(kubectl get taskrun -n "${managed_namespace}" \
-            -l "tekton.dev/pipelineRun=${pipelinerun}" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name}" \
             -o jsonpath='{range .items[*]}{.metadata.labels.tekton\.dev/pipelineTask}{"\t"}{.status.conditions[?(@.type=="Succeeded")].status}{"\n"}{end}' 2>/dev/null || echo "")
         
         if [ -n "$all_taskruns" ]; then
@@ -742,7 +758,7 @@ verify_release_contents() {
             
             echo "   Total tasks: ${task_count} (✅ ${succeeded_count} succeeded, ❌ ${failed_count} failed)" >&2
         else
-            echo "   ⚠️  No TaskRuns found for PipelineRun ${pipelinerun}" >&2
+            echo "   ⚠️  No TaskRuns found for PipelineRun ${pipelinerun_name}" >&2
         fi
     fi
 
@@ -760,7 +776,7 @@ verify_release_contents() {
         echo "  1. Review the failure messages above for specific issues" >&2
         echo "  2. Run the suggested debug commands to investigate" >&2
         echo "  3. Check PipelineRun logs for detailed error messages:" >&2
-        echo "     ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun}" >&2
+        echo "     ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
         echo "  4. Examine the Release CR status:" >&2
         echo "     kubectl get release ${release_name} -n ${tenant_namespace} -o yaml" >&2
         echo "" >&2
@@ -886,10 +902,13 @@ wait_for_release_to_start() {
     local pipelinerun
     pipelinerun=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
         -o jsonpath='{.status.processing.pipelineRun}' 2>/dev/null || echo "")
+    
+    # Extract just the name part (pipelinerun is stored as "namespace/name")
+    local pipelinerun_name="${pipelinerun##*/}"
 
     if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
         echo "  PipelineRun: ${pipelinerun}" >&2
-        echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun}" >&2
+        echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
 
         export RELEASE_PIPELINERUN="${pipelinerun}"
     fi
@@ -974,9 +993,9 @@ cleanup_resources() {
             echo "   ✓ No test releases found"
         fi
 
-        # Clean up fresh build Applications and Components (if enabled)
-        if [ "${CLEANUP_FRESH_BUILDS}" == "true" ] && [ "${SKIP_BUILD}" == "false" ]; then
-            echo "🗑️  Cleaning up fresh build Applications and Components..."
+        # Clean up test Applications and Components (if enabled)
+        if [ "${CLEANUP_TEST_COMPONENTS}" == "true" ] && [ "${SKIP_BUILD}" == "false" ]; then
+            echo "🗑️  Cleaning up test Applications and Components..."
             
             # Find and delete all multi-version-build applications (cascade deletes components)
             local fresh_apps
@@ -1000,9 +1019,9 @@ cleanup_resources() {
                 echo "   ✓ No fresh build applications found"
             fi
         elif [ "${SKIP_BUILD}" == "true" ]; then
-            echo "⏩ Skipping fresh builds cleanup (SKIP_BUILD=true)"
+            echo "⏩ Skipping component cleanup (SKIP_BUILD=true)"
         else
-            echo "⏩ Skipping fresh builds cleanup (CLEANUP_FRESH_BUILDS=false)"
+            echo "⏩ Skipping component cleanup (CLEANUP_TEST_COMPONENTS=false)"
         fi
 
         # Standard cleanup

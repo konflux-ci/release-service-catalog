@@ -51,12 +51,13 @@ fi
 #
 # Why fresh builds?
 # - Zero existing Red Hat signatures
-# - Signing tasks must sign ALL ~600 digests (200 images × ~3 architectures)
-# - Tests true signing service capacity and bottlenecks
-# - Realistic worst-case scenario
+# - Multi-arch builds: 4 architectures (amd64, arm64, s390x, ppc64le)
+# - Signing tasks must sign ALL ~800 digests (200 images × 4 architectures)
+# - Tests signing service capacity and bottlenecks
+# - Maximum worst-case scenario
 #
-# Build fresh images:
-#   ./utils/build-fresh-images.sh 200 dev-release-team-tenant
+# Build images:
+#   ./utils/build-images.sh 200 dev-release-team-tenant
 #
 # Or use the wrapper script:
 #   ./test.sh
@@ -77,8 +78,8 @@ if [ -z "${FRESH_BUILDS_FILE}" ]; then
     echo "" >&2
     echo "This test requires fresh Konflux builds for worst-case signing performance." >&2
     echo "" >&2
-    echo "To build fresh images:" >&2
-    echo "  ./utils/build-fresh-images.sh 200" >&2
+    echo "To build images:" >&2
+    echo "  ./utils/build-images.sh 200" >&2
     echo "" >&2
     echo "Or use the wrapper script:" >&2
     echo "  ./test.sh" >&2
@@ -89,8 +90,8 @@ fi
 if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
     echo "❌ Error: Fresh builds file not found: ${FRESH_BUILDS_FILE}" >&2
     echo "" >&2
-    echo "Run utils/build-fresh-images.sh to build fresh components first:" >&2
-    echo "  ./utils/build-fresh-images.sh 200 dev-release-team-tenant" >&2
+    echo "Run utils/build-images.sh to build components first:" >&2
+    echo "  ./utils/build-images.sh 200 dev-release-team-tenant" >&2
     echo "" >&2
     echo "Or use the wrapper script:" >&2
     echo "  ./test.sh" >&2
@@ -104,9 +105,31 @@ mapfile -t IMAGE_POOL < "${FRESH_BUILDS_FILE}"
 
 POOL_SIZE=${#IMAGE_POOL[@]}
 
+# Validate pool has images
+if [ ${POOL_SIZE} -eq 0 ]; then
+    echo "❌ Error: No images found in ${FRESH_BUILDS_FILE}" >&2
+    echo "   The image pool file is empty or contains no valid images" >&2
+    exit 1
+fi
+
 echo "🏗️  Using fresh Konflux builds (unsigned images)" >&2
 echo "   Source: ${FRESH_BUILDS_FILE}" >&2
 echo "   Images: ${POOL_SIZE}" >&2
+
+# Limit COMPONENT_COUNT to available images in pool
+if [ ${COMPONENT_COUNT} -gt ${POOL_SIZE} ]; then
+    echo "⚠️  Requested ${COMPONENT_COUNT} components but only ${POOL_SIZE} images available" >&2
+    echo "   Limiting snapshot to ${POOL_SIZE} components" >&2
+    COMPONENT_COUNT=${POOL_SIZE}
+fi
+
+# Also limit to 200 components for snapshot (even if more images available)
+MAX_SNAPSHOT_COMPONENTS=200
+ACTUAL_COMPONENT_COUNT=${COMPONENT_COUNT}
+if [ ${COMPONENT_COUNT} -gt ${MAX_SNAPSHOT_COMPONENTS} ]; then
+    echo "⚠️  Limiting snapshot to ${MAX_SNAPSHOT_COMPONENTS} components (found ${COMPONENT_COUNT} images)" >&2
+    COMPONENT_COUNT=${MAX_SNAPSHOT_COMPONENTS}
+fi
 
 echo "Generating large snapshot with ${COMPONENT_COUNT} components..." >&2
 echo "" >&2
@@ -123,7 +146,8 @@ metadata:
     test.appstudio.openshift.io/component-count: "${COMPONENT_COUNT}"
     appstudio.openshift.io/application: "${APPLICATION_NAME}"
   annotations:
-    test.appstudio.openshift.io/description: "Large snapshot with ${COMPONENT_COUNT} components for rh-advisories pipeline testing"
+    test.appstudio.openshift.io/description: "Large snapshot with ${COMPONENT_COUNT} components for rh-advisories pipeline testing (using actual component names from images)"
+    test.appstudio.openshift.io/available-images: "${ACTUAL_COMPONENT_COUNT}"
     # Skip build since we're using pre-built container images
     test.appstudio.openshift.io/skip-build: "true"
     # Skip idempotency to allow re-testing with the same snapshot data
@@ -133,25 +157,24 @@ metadata:
 spec:
   application: "${APPLICATION_NAME}"
   displayName: "Large Snapshot - ${COMPONENT_COUNT} Components"
-  displayDescription: "Test snapshot with ${COMPONENT_COUNT} components for large-scale release testing"
+  displayDescription: "Test snapshot with ${COMPONENT_COUNT} components using actual component names for large-scale release testing"
   artifacts: {}
   components:
 EOF
 
 for (( i=1; i<=COMPONENT_COUNT; i++ )); do
-    COMPONENT_NUMBER=$(printf "%03d" "$i")
-    COMPONENT_NAME="component-${COMPONENT_NUMBER}"
-    
     # Use different images from the pool for variety
     IMAGE_INDEX=$(((i - 1) % ${#IMAGE_POOL[@]}))
     CONTAINER_IMAGE="${IMAGE_POOL[$IMAGE_INDEX]}"
     
-    # Add some variation in the source URLs
-    if (( i % 10 == 0 )); then
-        SOURCE_URL="https://github.com/hacbs-release-tests/large-snapshot-test-alt"
-    else
-        SOURCE_URL="https://github.com/hacbs-release-tests/large-snapshot-test"
-    fi
+    # Extract actual component name from image URL
+    # Format: quay.io/.../COMPONENT_NAME@sha256:...
+    COMPONENT_NAME="${CONTAINER_IMAGE##*/}"  # Get everything after last /
+    COMPONENT_NAME="${COMPONENT_NAME%%@*}"    # Remove everything after @
+    
+    # Use the actual source repository that components were built from
+    # This matches the attestations created during PAC builds
+    SOURCE_URL="https://github.com/hacbs-release-tests/e2e-base"
     
     # Generate component entry
     cat <<EOF
