@@ -1,0 +1,145 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-large-snapshot-pipeline
+spec:
+  description: |-
+    Pipeline to create components for large snapshot test.
+    Uses standard PAC trigger (configure-pac annotation).
+    Creates all components needed to reach target count in a single run.
+  params:
+    - name: SNAPSHOT
+      type: string
+    - name: PIPELINE_TEST_SUITE
+      type: string
+    - name: VAULT_PASSWORD_SECRET_NAME
+      default: 'e2e-test-vault-password'
+      type: string
+    - name: GITHUB_TOKEN_SECRET_NAME
+      default: 'hacbs-release-tests-token'
+      type: string
+    - name: KUBECONFIG_SECRET_NAME
+      default: 'e2e-test-service-account-kubeconfig'
+      type: string
+    - name: TARGET_COMPONENTS
+      default: '100'
+      description: 'Target total number of components to create'
+      type: string
+    - name: FORCE_REBUILD
+      default: 'false'
+      description: 'Force fresh builds, disable image reuse (true/false)'
+      type: string
+  tasks:
+    - name: get-snapshot-data
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: SNAPSHOT
+        results:
+          - name: CONTAINER_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+        steps:
+          - name: get-container-image
+            image: quay.io/konflux-ci/release-service-utils@sha256:e852a62497c4537059bb1f4c3ddf5c1a813b2b22bd9f4bb826cffb36af7d5f65  # yamllint disable-line
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            script: |
+              #!/usr/bin/env bash
+              containerImage=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+              gitUrl=$(jq -r '.components[0].source.git.url // ""' <<< "${SNAPSHOT}")
+              gitRevision=$(jq -r '.components[0].source.git.revision // ""' <<< "${SNAPSHOT}")
+              echo "${SNAPSHOT}"
+              echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
+              echo -n "${gitUrl}" | tee "$(results.PR_GIT_URL.path)"
+              echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
+
+    - name: create-builds
+      timeout: "3h0m0s"
+      params:
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: TARGET_COMPONENTS
+          value: $(params.TARGET_COMPONENTS)
+      taskSpec:
+        params:
+          - name: PIPELINE_TEST_SUITE
+          - name: STEP_IMAGE
+          - name: KUBECONFIG_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: TARGET_COMPONENTS
+        results:
+          - name: BUILD_OUTPUT
+            description: Build creation output
+        steps:
+          - name: create-builds
+            image: $(params.STEP_IMAGE)
+            imagePullPolicy: Always
+            env:
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+            script: |
+              #!/usr/bin/env bash
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+
+              KUBECONFIG_FILE=$(mktemp)
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              echo "Starting component and build creation for large snapshot test..."
+              echo "  Target components: $(params.TARGET_COMPONENTS)"
+              echo "  Namespace: dev-release-team-tenant"
+              echo ""
+              
+              # Use build-images.sh to create components and builds
+              # This script already handles:
+              # - Creating applications/components with proper naming
+              # - Tracking existing components (continues from where left off)
+              # - Stopping at 200 max components
+              # - Smart reuse of existing builds
+              
+              BUILD_SCRIPT="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/build-images.sh"
+              
+              if [ ! -f "${BUILD_SCRIPT}" ]; then
+                echo "❌ ERROR: Script not found: ${BUILD_SCRIPT}"
+                exit 1
+              fi
+              
+              # Set environment variables for the build script
+              COMPONENT_COUNT="$(params.TARGET_COMPONENTS)"
+              FORCE_REBUILD="$(params.FORCE_REBUILD)"
+              
+              export COMPONENT_COUNT
+              export NAMESPACE="dev-release-team-tenant"
+              # Override template branch (exists in repo)
+              export PAC_TEMPLATE_BRANCH="konflux-v4-15-apiserver-watcher-01"
+              # GITHUB_TOKEN is already set from env above
+              
+              # Run the build script (4th param controls force_rebuild)
+              "${BUILD_SCRIPT}" "${COMPONENT_COUNT}" "${NAMESPACE}" "/tmp/fresh-builds-$$.txt" "${FORCE_REBUILD}"
+
+              # Return summary
+              echo -n "Components and builds created successfully" | tee "$(results.BUILD_OUTPUT.path)"
+      runAfter:
+        - get-snapshot-data

@@ -49,6 +49,7 @@ spec:
               echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
 
     - name: run-test
+      timeout: "7h0m0s"
       params:
         - name: PIPELINE_TEST_SUITE
           value: $(params.PIPELINE_TEST_SUITE)
@@ -83,6 +84,27 @@ spec:
             env:
               - name: SNAPSHOT
                 value: $(params.SNAPSHOT)
+              - name: SKIP_BUILD
+                # "false" = Enable build phase (can rebuild components)
+                # "true" = Skip build phase entirely (reuse existing)
+                value: "false"
+              - name: FORCE_REBUILD
+                # "true" = Force rebuild ALL components (creates new digests, worst-case signing)
+                # "false" = Reuse existing successful builds (fast but may have existing signatures)
+                value: "false"
+              - name: COMPONENT_COUNT
+                # Number of components to build/test (default: 100)
+                # Build times scale with component count:
+                #   50 = ~18-25 min builds (no batching delays) + 2-3 hours test = 2.5-3.5 hours
+                #   100 = ~35-50 min builds (no batching delays) + 4-5 hours test = 4.5-5.5 hours
+                #   200 = ~70-100 min builds (no batching delays) + 8-10 hours test = 9-11 hours
+                # No batching delays - builds start only after ALL components are ready
+                value: "200"
+              - name: BASE_REPO
+                # GitHub repository with PAC template branch (must be accessible by GITHUB_TOKEN)
+                # Default: hacbs-release-tests/e2e-base
+                # Alternative: konflux-ci/integration-examples or another accessible repo
+                value: "hacbs-release-tests/e2e-base"
               - name: VAULT_PASSWORD
                 valueFrom:
                   secretKeyRef:
@@ -191,14 +213,10 @@ spec:
               
               VAULT_PASSWORD_FILE=$(mktemp)
               export VAULT_PASSWORD_FILE
-              set +x
               echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
-              set -x
               
               KUBECONFIG_FILE=$(mktemp)
-              set +x
               echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
-              set -x
               KUBECONFIG="${KUBECONFIG_FILE}"
               export KUBECONFIG
               
@@ -211,172 +229,47 @@ spec:
               # Skip the affected pipelines check that other tests use
               echo "Manual trigger: Running test unconditionally"
               
-              # Fix test.env to use an existing branch
-              # (container image has old test.env with non-existent rh-adv-large-base)
-              TEST_ENV_FILE="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
-              if grep -q 'component_base_branch=.*-base' "$TEST_ENV_FILE"; then
-                echo "Patching test.env to use existing branch..."
-                sed -i \
-                  's/component_base_branch=.*/component_base_branch=push-to-external-registry-base/' \
-                  "$TEST_ENV_FILE"
-                echo "Updated component_base_branch in test.env"
-              fi
-              
-              # Fix snapshot generation script to remove invalid repository field
-              # (container image has old script with invalid Snapshot CRD field)
-              SNAPSHOT_SCRIPT="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/generate-large-snapshot.sh"
-              if [ -f "$SNAPSHOT_SCRIPT" ] && grep -q 'repository: quay.io' "$SNAPSHOT_SCRIPT"; then
-                echo "Patching snapshot generation script..."
-                # Remove the invalid repository field lines
-                sed -i '/# Add some components with additional metadata for realism/,/fi$/d' \
-                  "$SNAPSHOT_SCRIPT"
-                echo "Updated generate-large-snapshot.sh"
-              fi
-              
-              # Fix test.sh to add decrypt_secrets() call if missing
-              # (container image may have old test.sh without decrypt_secrets in create_kubernetes_resources)
-              TEST_SCRIPT="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.sh"
-              if [ -f "$TEST_SCRIPT" ] && ! grep -q "decrypt_secrets.*SUITE_DIR" "$TEST_SCRIPT"; then
-                echo "Patching test.sh to add decrypt_secrets() call..."
-                # Using perl for more reliable multi-line insertion in YAML context
-                perl -i -pe 'if (/echo "Creating Kubernetes resources with large snapshot/) {
-                  $_ .= "\n    # Decrypt vault secrets first (creates resources/*/secrets/ directories)\n";
-                  $_ .= "    decrypt_secrets \"\${SUITE_DIR}\"\n";
-                  $_ .= "    if [ \$? -ne 0 ]; then\n";
-                  $_ .= "        echo \"❌ Failed to decrypt secrets\" >&2\n";
-                  $_ .= "        return 1\n";
-                  $_ .= "    fi\n\n";
-                }' "$TEST_SCRIPT"
-                echo "Added decrypt_secrets() call to test.sh"
-              fi
-              
-              # Fix test.sh to check for correct Release processing indicator
-              # (container image has old check for non-existent "Processing" condition)
-              if [ -f "$TEST_SCRIPT" ] && grep -q 'conditions\[?(@.type=="Processing")\]' "$TEST_SCRIPT"; then
-                echo "Patching test.sh to check for managedProcessing.pipelineRun..."
-                # Replace the incorrect condition check with correct one
-                OLD_JSONPATH="jsonpath='{.status.conditions\[?(@.type==\"Processing\")\].status}'"
-                NEW_JSONPATH="jsonpath='{.status.managedProcessing.pipelineRun}'"
-                sed -i "s|${OLD_JSONPATH}|${NEW_JSONPATH}|" "$TEST_SCRIPT"
-                # Update the check to look for non-empty pipelinerun instead of status=="True"
-                # shellcheck disable=SC2016
-                OLD_CHECK='\\[ "$status" == "True" \\]'
-                # shellcheck disable=SC2016
-                NEW_CHECK='[ -n "$pipelinerun" ] \\&\\& [ "$pipelinerun" != "null" ]'
-                sed -i "s/${OLD_CHECK}/${NEW_CHECK}/" "$TEST_SCRIPT"
-                # Update variable name from status to pipelinerun
-                sed -i '/check_release_processing/,/^}$/ s/local status$/local pipelinerun/' "$TEST_SCRIPT"
-                # shellcheck disable=SC2016
-                sed -i '/check_release_processing/,/^}$/ s/status=$(kubectl/pipelinerun=$(kubectl/' "$TEST_SCRIPT"
-                echo "Updated test.sh"
-              fi
-              
-              # Fix RoleBinding files to use correct ClusterRole
-              # (container image has old files with wrong ClusterRole names)
-              # Note: SC2016 disabled where needed - we want literal ${var} in files for envsubst
-              TENANT_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant/sa-rolebinding.yaml"
-              MANAGED_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa-rolebinding.yaml"
-              
-              if [ -f "$TENANT_ROLEBINDING" ]; then
-                echo "Replacing tenant RoleBinding with correct ClusterRole..."
-                sed -i \
-                  's/name: release-service-account$/name: release-pipeline-resource-role/' \
-                  "$TENANT_ROLEBINDING"
-                # shellcheck disable=SC2016
-                TENANT_NAME_PATTERN='s/name: release-service-account-\${tenant_sa_name}/'
-                # shellcheck disable=SC2016
-                TENANT_NAME_REPLACE='name: release-pipeline-resource-role-binding-for-\${component_name}/'
-                sed -i "${TENANT_NAME_PATTERN}${TENANT_NAME_REPLACE}" "$TENANT_ROLEBINDING"
-                # Add namespace if missing
-                if ! grep -q "namespace:" "$TENANT_ROLEBINDING"; then
-                  # shellcheck disable=SC2016
-                  sed -i '/^metadata:/a\  namespace: ${tenant_namespace}' \
-                    "$TENANT_ROLEBINDING"
-                fi
-                # Add managed SA subject if missing
-                if ! grep -q "managed_sa_name" "$TENANT_ROLEBINDING"; then
-                  # shellcheck disable=SC2016
-                  SUBJ_PATTERN='/^subjects:/a\  - kind: ServiceAccount\n'
-                  SUBJ_PATTERN="${SUBJ_PATTERN}    name: \${managed_sa_name}\n"
-                  SUBJ_PATTERN="${SUBJ_PATTERN}    namespace: \${managed_namespace}"
-                  sed -i "${SUBJ_PATTERN}" "$TENANT_ROLEBINDING"
-                fi
-                echo "Updated tenant RoleBinding"
-              fi
-              
-              if [ -f "$MANAGED_ROLEBINDING" ]; then
-                echo "Replacing managed RoleBinding with correct ClusterRole..."
-                sed -i \
-                  's/name: release-service-account-managed$/name: release-pipeline-resource-role/' \
-                  "$MANAGED_ROLEBINDING"
-                # shellcheck disable=SC2016
-                MANAGED_NAME_PATTERN='s/name: release-service-account-\${managed_sa_name}/'
-                # shellcheck disable=SC2016
-                MANAGED_NAME_REPLACE='name: release-pipeline-resource-role-binding-for-\${managed_sa_name}/'
-                sed -i "${MANAGED_NAME_PATTERN}${MANAGED_NAME_REPLACE}" "$MANAGED_ROLEBINDING"
-                # Add namespace after the name field in subjects if missing
-                if ! grep -q "namespace:" "$MANAGED_ROLEBINDING"; then
-                  # shellcheck disable=SC2016
-                  sed -i '/^    name: \${managed_sa_name}/a\    namespace: ${managed_namespace}' \
-                    "$MANAGED_ROLEBINDING"
-                fi
-                echo "Updated managed RoleBinding"
-              fi
-              
-              # Fix ServiceAccount to include trusted artifacts secrets
-              # (container image has old sa.yaml without secrets)
-              MANAGED_SA="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa.yaml"
-              if [ -f "$MANAGED_SA" ]; then
-                # Check if sa.yaml is missing secrets (old version)
-                if ! grep -q "secrets:" "$MANAGED_SA"; then
-                  echo "Patching managed ServiceAccount to add secrets..."
-                  # shellcheck disable=SC2016
-                  TRUSTED_ARTIFACTS_SECRET='konflux-ci-konflux-release-trusted-artifacts-pull-secret-${component_name}'
-                  # shellcheck disable=SC2016
-                  {
-                    echo 'secrets:'
-                    echo "  - name: ${TRUSTED_ARTIFACTS_SECRET}"
-                    echo '  - name: push-${component_name}'
-                    echo '  - name: registry-redhat-io-quay-token-secret-${component_name}'
-                    echo 'imagePullSecrets:'
-                    echo '  - name: push-${component_name}'
-                    echo "  - name: ${TRUSTED_ARTIFACTS_SECRET}"
-                  } >> "$MANAGED_SA"
-                  echo "Updated managed ServiceAccount"
-                else
-                  echo "Managed ServiceAccount already has secrets"
-                fi
-              fi
-              
-              # Fix ReleasePlanAdmission mapping to include all components explicitly
-              # (container image has old rpa.yaml with wildcard that doesn't work)
-              MANAGED_RPA="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/rpa.yaml"
-              if [ -f "$MANAGED_RPA" ]; then
-                # Check if rpa.yaml still has wildcard mapping (old version)
-                # shellcheck disable=SC2016
-                if grep -q 'name: \x27\*\x27' "$MANAGED_RPA" || grep -q 'name: "\*"' "$MANAGED_RPA"; then
-                  echo "Patching managed RPA to replace wildcard with explicit component mappings..."
-                  
-                  # Extract everything before the wildcard component
-                  sed -n '1,/^      components:$/p' "$MANAGED_RPA" > "${MANAGED_RPA}.new"
-                  
-                  # Generate all 200 component mappings
-                  for i in $(seq -f "%03g" 1 200); do
-                    {
-                      echo "        - name: component-${i}"
-                      echo "          repositories:"
-                      echo "            - url: quay.io/redhat-pending/rhtap----rh-advisories-large-test"
-                    } >> "${MANAGED_RPA}.new"
-                  done
-                  
-                  # Append everything after the wildcard component section
-                  sed -n '/^    fileUpdates:$/,$p' "$MANAGED_RPA" >> "${MANAGED_RPA}.new"
-                  
-                  mv "${MANAGED_RPA}.new" "$MANAGED_RPA"
-                  echo "Updated managed RPA with 200 explicit component mappings"
-                else
-                  echo "Managed RPA already has explicit component mappings"
-                fi
+              # Conditional validation: Only validate existing images if we're reusing (not rebuilding)
+              # If SKIP_BUILD=false, we'll build fresh images, so validation happens AFTER build
+              if [ "${SKIP_BUILD}" = "true" ]; then
+                # Validate existing components and collect images (no building)
+                # IMPORTANT: This runs immediately before test execution to ensure
+                # all images still exist on Quay.io (validates manifests, not just metadata)
+                FRESH_BUILDS_FILE="/tmp/validated-images-pool-$(date +%s).txt"
+                export FRESH_BUILDS_FILE
+                export CI=true  # Skip interactive prompts in test.sh
+                MIN_IMAGES=50  # Minimum required images to run test
+                
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "Validating Existing Components (REUSE mode - no building)"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  NOTE: Verifying image manifests exist on Quay.io"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+                
+                # Script will fail if < 50 images found (also verifies manifests exist)
+                "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/validate-and-collect-images.sh" \
+                  "dev-release-team-tenant" \
+                  "${FRESH_BUILDS_FILE}" \
+                  "${MIN_IMAGES}"
+                
+                COMPONENT_COUNT=$(wc -l < "${FRESH_BUILDS_FILE}")
+                export COMPONENT_COUNT
+                export LARGE_SNAPSHOT_COMPONENT_COUNT="${COMPONENT_COUNT}"  # Tell test to expect this count
+                echo ""
+                echo "✅ Validated ${COMPONENT_COUNT} images ready for testing"
+                echo ""
+              else
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "Skipping Pre-Build Validation (BUILD mode enabled)"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  Images will be built/validated by build-images.sh"
+                echo "  Validation happens AFTER build completes"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+                export CI=true  # Skip interactive prompts in test.sh
               fi
               
               # Run test and capture result
@@ -408,6 +301,7 @@ spec:
         - get-snapshot-data
   finally:
     - name: cleanup-resources
+      timeout: "1h0m0s"
       params:
         - name: PIPELINE_TEST_SUITE
           value: $(params.PIPELINE_TEST_SUITE)
@@ -450,7 +344,7 @@ spec:
               
               set +e
               
-              # Fix test.env to use an existing branch (same as in run-test)
+              # test.env uses an existing branch (same as in run-test)
               TEST_ENV_FILE="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
               if grep -q 'component_base_branch=.*-base' "$TEST_ENV_FILE"; then
                 sed -i \
@@ -458,7 +352,7 @@ spec:
                   "$TEST_ENV_FILE"
               fi
               
-              # Fix RoleBinding files (same as in run-test)
+              # RoleBinding files (same as in run-test)
               # Note: SC2016 disabled where needed - we want literal ${var} in files for envsubst
               TENANT_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant/sa-rolebinding.yaml"
               MANAGED_ROLEBINDING="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed/sa-rolebinding.yaml"
@@ -516,14 +410,10 @@ spec:
               # Setup vault
               VAULT_PASSWORD_FILE=$(mktemp)
               export VAULT_PASSWORD_FILE
-              set +x
               echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
-              set -x
               
               KUBECONFIG_FILE=$(mktemp)
-              set +x
               echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
-              set -x
               KUBECONFIG="${KUBECONFIG_FILE}"
               export KUBECONFIG
               

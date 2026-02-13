@@ -1,22 +1,52 @@
 # rh-advisories-large-snapshot test
 
-## Setup
+## Overview
+This test simulates an OpenShift release workflow with 200 large, multi-architecture components:
+- **Image sizes**: Random 300 MB - 1.5 GB per architecture
+- **Architectures**: 4 platforms (amd64, arm64, s390x, ppc64le)
+- **Total digests**: ~800 (200 components × 4 archs)
+- **Expected duration**: 11-14 hours (build + signing)
+- **Total data**: ~720 GB of image data
 
+Each component gets a unique branch with custom Dockerfile - all fully automated.
+
+## Image Size Limitations
+
+**Important**: Image sizes are constrained to 300 MB - 1.5 GB per architecture due to build resource limitations.
+
+### Why this limit exists:
+- **Memory constraints**: The Konflux build pods have limited memory available during image builds
+- **Buildah commit phase**: When `buildah` commits an image, it needs substantial memory to:
+  - Process all image layers
+  - Compress the final image
+  - Push to the registry
+- **OOM kills observed**: Images larger than 1.5 GB consistently trigger Out-Of-Memory (OOM) kills during the commit phase
+
+### What we tested:
+- ❌ **1-5 GB images**: Build process killed during commit (`exit status 1`, process terminated by kernel)
+- ❌ **500 MB - 5 GB images**: Larger images (>2 GB) still hit OOM during commit
+- ✅ **300 MB - 1.5 GB images**: Stable builds, no OOM kills, adequate stress testing
+
+### Why this is still effective:
+- **Total data volume**: ~720 GB across 800 images (100 components × 4 archs × ~900 MB avg)
+- **Realistic scale**: Matches production OpenShift release scenarios
+- **Multi-arch complexity**: 4 architectures per component provides adequate stress on signing/advisory services
+- **Signing performance**: The constraint is signing time, not image size—more smaller images is equivalent
+
+### Increasing the limit:
+To use larger images, you would need to:
+1. Increase memory limits in `.tekton/` PipelineRun definitions (currently uses default limits)
+2. Request larger build nodes from cluster admins
+3. Or optimize the Dockerfile to reduce peak memory usage during build
+
+## Setup
 ### Dependencies
 * GitHub repo: https://github.com/hacbs-release-tests/e2e-base
 * GitHub personal access token (classic) for above repo with **admin:repo_hook**, **delete_repo**, **repo** scopes.
 * The password to the vault files. (Contact a member of the Release team should you want to run this
   test suite.)
 * Access to the target cluster and tenant and managed namespaces
-  * **Cluster:** stg-rh01 (staging cluster)
-  * **PaC Runs:** Execute in `rhtap-release-2-tenant` (triggered by `/test-large-snapshot` comment)
-  * **Local Runs:** Default to `dev-release-team-tenant` (can be overridden via `tenant_namespace` variable)
-  * **Managed Namespace:** Both use `managed-release-team-tenant` for release pipelines
-
-**IMPORTANT:** The namespace difference between PaC and local runs is intentional:
-- PaC runs in `rhtap-release-2-tenant` where the PipelineRun is created
-- Local test runs default to `dev-release-team-tenant` for isolation
-- Both namespaces must have the required secrets configured
+  * This test uses stg-rh01 and the dev-release-team-tenant and managed-release-team-tenant namespaces.
 
 ### Required Environment Variables
 - GITHUB_TOKEN
@@ -35,23 +65,13 @@
 - KUBECONFIG
   - The KUBECONFIG file to used to login to the target cluster
   - This is provided when testing PRs
-- DEFAULT_CONSOLE_URL
-  - Default OpenShift console URL (defaults to stg-rh01 staging cluster)
-  - Override to use a different cluster console for PipelineRun links
-  - Default: `https://console-openshift-console.apps.stone-stg-rh01.l2vh.p1.openshiftapps.com`
-- CONSOLE_URL
-  - OpenShift console URL for generating PipelineRun links
-  - Auto-detected from PaC ConfigMap, falls back to DEFAULT_CONSOLE_URL
-  - Override for custom cluster console URLs
-
 ### Test Properties
 #### [test.env](test.env)
 - This file contains resource names and configuration values needed for testing.
-- This test creates a large snapshot with pre-built components to test advisory creation at scale.
-- The component count is configurable via `LARGE_SNAPSHOT_COMPONENT_COUNT` (default: 200).
+- Since this test requires internal services, the tenant and managed namespaces
+  should remain as-is.
 #### [test.sh](test.sh)
 - This file contains specific variables and functions needed for the test.
-- Overrides standard functions to skip builds and use pre-built images.
 ### Test Functions
 #### [lib/test-functions.sh](../lib/test-functions.sh)
 - This file contains re-usable functions for tests
@@ -60,105 +80,13 @@
   - [vault/managed-secrets.yaml](vault/managed-secrets.yaml)
   - [vault/tenant-secrets.yaml](vault/tenant-secrets.yaml)
 - The secrets required are contained in the files above.
-
 ### Running the test
 
-This test can be triggered manually via PR comment:
-
-```
-/test-large-snapshot
-```
-
-Comment on any PR. The PaC configuration ([.tekton/rh-advisories-large-snapshot.yaml](../../.tekton/rh-advisories-large-snapshot.yaml)) 
-will trigger the Tekton pipeline automatically.
-
-The pipeline runs in the cluster and uses existing Kubernetes secrets (vault-password-secret, github-token-secret, kubeconfig-secret).
-
-For local testing:
-
 ```shell
 ../run-test.sh rh-advisories-large-snapshot
 ```
-
-**Note:** This test takes 4-8 hours to complete due to processing a large number of components (default: 200).
-
-#### Namespace Configuration for Local Runs
-
-By default, local test runs use `dev-release-team-tenant` as the tenant namespace (see [test.env](test.env)).
-
-To override the tenant namespace for local testing (e.g., to match PaC behavior):
-
-```shell
-export tenant_namespace=rhtap-release-2-tenant
-../run-test.sh rh-advisories-large-snapshot
-```
-
-**Prerequisites for using a different tenant namespace:**
-- The namespace must exist on the target cluster
-- Required secrets must be configured: `vault-password-secret`, `github-token-secret`, `kubeconfig-secret`
-- Your ServiceAccount must have permissions to create resources in both tenant and managed namespaces
-- The ReleasePlanAdmission must be configured in the managed namespace
 
 ### Debugging
 
 There is a `--skip-cleanup` option to the script in the event that you want to examine the resources
 after a test has ended.
-
-#### Automatic Cleanup
-
-By default, the test automatically cleans up fresh build Applications and Components on completion (success or failure). To disable automatic cleanup for debugging:
-
-```bash
-CLEANUP_FRESH_BUILDS=false ../run-test.sh rh-advisories-large-snapshot
-```
-
-#### Manual Cleanup
-
-To manually clean up fresh build resources from previous test runs:
-
-```bash
-# Dry run - see what would be deleted
-./utils/cleanup-fresh-builds.sh dev-release-team-tenant --dry-run
-
-# Delete all fresh build applications and components
-./utils/cleanup-fresh-builds.sh dev-release-team-tenant
-
-# Delete only builds older than 24 hours
-./utils/cleanup-fresh-builds.sh dev-release-team-tenant --older-than 24
-
-# Delete specific test run by timestamp
-./utils/cleanup-fresh-builds.sh dev-release-team-tenant --app-prefix dummy-build-1770918239
-```
-
-The cleanup script safely deletes Applications (which cascade-deletes their Components) using label-based filtering to avoid affecting production resources.
-
-## Documentation
-
-Comprehensive documentation is available in the [../../solution-docs/](../../solution-docs/) folder at the repository root:
-
-- **Quick Start**: [../../solution-docs/QUICK_REFERENCE.md](../../solution-docs/QUICK_REFERENCE.md) - One-page cheat sheet
-- **Complete Guide**: [../../solution-docs/USAGE_GUIDE.md](../../solution-docs/USAGE_GUIDE.md) - Detailed usage instructions
-- **Strategy Analysis**: [../../solution-docs/STRATEGY_COMPARISON.md](../../solution-docs/STRATEGY_COMPARISON.md) - Why Strategy C?
-- **Architecture**: [../../solution-docs/MULTI-VERSION-APPROACH.md](../../solution-docs/MULTI-VERSION-APPROACH.md) - Multi-version design
-- **Complete Solution**: [../../solution-docs/RELEASE-2157-SOLUTION.md](../../solution-docs/RELEASE-2157-SOLUTION.md) - Full documentation
-
-See [../../solution-docs/README.md](../../solution-docs/README.md) for a complete documentation index.
-
-## Maintenance
-
-- Should you require to add or update a secret, follow these steps:
-```shell
-ansible-vault decrypt vault/tenant-secrets.yaml --output "/tmp/tenant-secrets.yaml" --vault-password-file <vault password file>
-```
-
-```shell
-vi /tmp/tenant-secrets.yaml
-```
-
-```shell
-ansible-vault encrypt /tmp/tenant-secrets.yaml --output "vault/tenant-secrets.yaml" --vault-password-file <vault password file>
-```
-
-```shell
-rm /tmp/tenant-secrets.yaml
-```

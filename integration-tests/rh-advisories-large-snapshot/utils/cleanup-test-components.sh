@@ -2,30 +2,30 @@
 set -euo pipefail
 
 # ============================================================================
-# cleanup-fresh-builds.sh - Safely clean up fresh build test resources
+# cleanup-test-components.sh - Safely clean up test components and applications
 # ============================================================================
 #
 # PURPOSE:
-#   Clean up Applications and Components created by build-fresh-images.sh
+#   Clean up all test Applications and Components (both fresh builds and reused)
 #
 # USAGE:
-#   ./cleanup-fresh-builds.sh [namespace] [options]
+#   ./cleanup-test-components.sh [namespace] [options]
 #
 # OPTIONS:
 #   --dry-run           : Show what would be deleted without deleting
 #   --force             : Skip confirmation prompt
 #   --older-than HOURS  : Only delete resources older than N hours (default: 0 = all)
-#   --app-prefix PREFIX : Only delete apps matching prefix (default: dummy-build)
+#   --app-prefix PREFIX : Only delete apps matching prefix (default: large-snapshot-build)
 #
 # EXAMPLES:
 #   # Dry run to see what would be deleted
-#   ./cleanup-fresh-builds.sh dev-release-team-tenant --dry-run
+#   ./cleanup-test-components.sh dev-release-team-tenant --dry-run
 #
-#   # Delete all test builds older than 24 hours
-#   ./cleanup-fresh-builds.sh dev-release-team-tenant --older-than 24
+#   # Delete all test components older than 24 hours
+#   ./cleanup-test-components.sh dev-release-team-tenant --older-than 24
 #
-#   # Delete specific test run by timestamp
-#   ./cleanup-fresh-builds.sh dev-release-team-tenant --app-prefix dummy-build-1770918239
+#   # Delete specific test run by application prefix
+#   ./cleanup-test-components.sh dev-release-team-tenant --app-prefix large-snapshot-build-v4-15
 #
 # ============================================================================
 
@@ -104,7 +104,7 @@ log_section() {
 # Main
 # ============================================================================
 
-log_section "🧹 Fresh Build Cleanup"
+log_section "🧹 Test Components Cleanup"
 log_info "Namespace: ${NAMESPACE}"
 if [ -n "${APP_PREFIX}" ]; then
     log_info "App prefix: ${APP_PREFIX}-*"

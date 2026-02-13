@@ -57,15 +57,9 @@ spec:
     # GitHub repository for pre-flight check and notifications
     - name: REPO_FULL_NAME
       value: 'konflux-ci/release-service-catalog'
-    # IMPORTANT: Hardcoded secret names (must exist in rhtap-release-2-tenant)
-    # These secrets are pre-created and managed by the Release Service team
-    # Using the actual secret names that exist in the namespace
-    - name: VAULT_PASSWORD_SECRET_NAME
-      value: 'e2e-test-vault-password'
-    - name: GITHUB_TOKEN_SECRET_NAME
-      value: 'e2e-test-github-token'
-    - name: KUBECONFIG_SECRET_NAME
-      value: 'e2e-test-service-account-kubeconfig'
+    # Secret names are inherited from pipeline defaults
+    # Can be overridden here if needed for different namespaces/environments
+    # Defaults defined in: integration-tests/pipelines/rh-advisories-large-snapshot-pipeline.yaml
   
   pipelineRef:
     resolver: git
@@ -88,8 +82,94 @@ spec:
               storage: 2Gi
   
   # Extended timeout for large snapshot tests
-  # First run: 3-4 hours build + 4-5 hours test = 7-9 hours (9h for safety)
-  # Subsequent runs: 3 min reuse + 4-5 hours test = 4-5 hours
+  # NOTE: Build phase is SKIPPED (SKIP_BUILD=true)
+  #       Images must be pre-built using /build-large-snapshot
+  # Test verifies existing images and runs release pipeline
+  # Expected duration: 4-5 hours (signing + advisory + verification)
   timeouts:
     pipeline: 9h0m0s
     tasks: 9h0m0s  # Set task timeout to match pipeline timeout
+---
+# Build Creation PipelineRun - triggered by /build-large-snapshot
+# This creates PipelineRuns manually for components, bypassing PAC
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  annotations:
+    build.appstudio.openshift.io/repo: https://github.com/konflux-ci/release-service-catalog?rev={{revision}}
+    build.appstudio.redhat.com/commit_sha: '{{revision}}'
+    build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
+    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
+    pipelinesascode.tekton.dev/max-keep-runs: "2"
+    # Trigger ONLY on explicit /build-large-snapshot comment
+    pipelinesascode.tekton.dev/on-event: "[]"
+    pipelinesascode.tekton.dev/on-comment: "^/build-large-snapshot$"
+    pipelinesascode.tekton.dev/on-cel-expression: |
+      target_branch == "development" &&
+      has(body.comment) &&
+      body.comment.body.contains("/build-large-snapshot")
+    pac.test.appstudio.openshift.io/branch: '{{source_branch}}'
+  creationTimestamp:
+  labels:
+    appstudio.openshift.io/application: release-service-catalog
+    appstudio.openshift.io/component: release-service-catalog
+    pipelines.appstudio.openshift.io/type: test
+    pac.test.appstudio.openshift.io/pull-request: '{{pull_request_number}}'
+    test.appstudio.openshift.io/scenario: build-large-snapshot
+    test.appstudio.openshift.io/type: build
+  name: build-large-snapshot
+  namespace: rhtap-release-2-tenant
+spec:
+  params:
+    - name: SNAPSHOT
+      value: |
+        {
+          "application": "release-service-catalog",
+          "artifacts": {},
+          "components": [
+            {
+              "containerImage": "quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-catalog:on-pr-{{revision}}",
+              "name": "release-service-catalog",
+              "source": {
+                "git": {
+                  "revision": "{{revision}}",
+                  "url": "https://github.com/konflux-ci/release-service-catalog"
+                }
+              }
+            }
+          ]
+        }
+    - name: PIPELINE_TEST_SUITE
+      value: "rh-advisories-large-snapshot"
+    - name: TARGET_COMPONENTS
+      value: "200"
+    - name: FORCE_REBUILD
+      value: "true"  # Force fresh builds, disable image reuse
+    # Secret names are inherited from pipeline defaults
+    # Can be overridden here if needed for different namespaces/environments
+    # Defaults defined in: integration-tests/pipelines/build-large-snapshot-pipeline.yaml
+  
+  pipelineRef:
+    resolver: git
+    params:
+      - name: url
+        value: https://github.com/konflux-ci/release-service-catalog
+      - name: revision
+        value: '{{revision}}'
+      - name: pathInRepo
+        value: integration-tests/pipelines/build-large-snapshot-pipeline.yaml
+  
+  workspaces:
+    - name: workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+  
+  # Build creation timeout
+  timeouts:
+    pipeline: 3h0m0s
+    tasks: 3h0m0s
