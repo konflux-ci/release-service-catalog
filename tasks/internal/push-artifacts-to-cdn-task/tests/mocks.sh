@@ -60,8 +60,8 @@ EOF
         mkdir -p temp_releases/releases
         
         # Create mock binary files based on the container image being pulled
-        # All files are .tar.gz since that's the expected source format
-        # Create actual tar.gz files with mock binary content inside
+        # Files can be .tar.gz (compressed) or .tar (uncompressed archive)
+        # Create actual tar files with mock binary content inside
         
         create_mock_tgz() {
             local filename="$1"
@@ -77,8 +77,28 @@ EOF
             tar -czf "temp_releases/releases/$filename" -C "$temp_bin_dir" "$binary_name"
             rm -rf "$temp_bin_dir"
         }
+
+        create_mock_tar() {
+            local filename="$1"
+            local binary_name="${filename%.tar}"
+            
+            # Create a temporary directory for this binary
+            local temp_bin_dir=$(mktemp -d)
+            # Create mock binary file
+            echo "Mock binary content for $binary_name" > "$temp_bin_dir/$binary_name"
+            chmod +x "$temp_bin_dir/$binary_name"
+            
+            # Create uncompressed tar file with the mock binary
+            tar -cf "temp_releases/releases/$filename" -C "$temp_bin_dir" "$binary_name"
+            rm -rf "$temp_bin_dir"
+        }
         
-        if [[ "$*" =~ ghijkl67890 ]]; then
+        if [[ "$*" =~ tarinput12345 ]]; then
+            # Test component with uncompressed .tar input files
+            create_mock_tar "tartest-binary-windows-amd64.tar"
+            create_mock_tar "tartest-binary-darwin-amd64.tar"
+            create_mock_tar "tartest-binary-linux-amd64.tar"
+        elif [[ "$*" =~ ghijkl67890 ]]; then
             # Second test component
             create_mock_tgz "testproduct2-binary-windows-amd64.tar.gz"
             create_mock_tgz "testproduct2-binary-darwin-amd64.tar.gz"
@@ -139,6 +159,13 @@ function oras() {
             touch testproduct3-binary-linux-amd64.tar.gz
         fi
 
+        if [[ "$4" =~ "tarinput12345" ]]; then
+            # For tar input test, create .zip for windows (output), and tar.gz for others (output)
+            touch tartest-binary-windows-amd64.zip
+            touch tartest-binary-darwin-amd64.tar.gz
+            touch tartest-binary-linux-amd64.tar.gz
+        fi
+
         touch testproduct-binary-windows-amd64.zip
         touch testproduct-binary-darwin-amd64.tar.gz
         touch testproduct-binary-linux-amd64.tar.gz
@@ -166,6 +193,11 @@ function oras() {
                 mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
                 touch "$output_dir/macos/amd64/testproduct3-binary-darwin-amd64"
                 touch "$output_dir/windows/amd64/testproduct3-binary-windows-amd64.exe"
+            elif [[ "$*" =~ tartest/signed ]]; then
+                # For tar input test component
+                mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
+                touch "$output_dir/macos/amd64/tartest-binary-darwin-amd64"
+                touch "$output_dir/windows/amd64/tartest-binary-windows-amd64.exe"
             else
                 mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
                 touch "$output_dir/macos/amd64/testproduct-binary-darwin-amd64"
@@ -184,6 +216,11 @@ function oras() {
             mkdir -p windows/amd64 macos/amd64
             touch windows/amd64/testproduct3-binary-windows-amd64.exe
             touch macos/amd64/testproduct3-binary-darwin-amd64
+        elif [[ "$*" =~ tartest/signed ]] || [[ "$*" =~ tartest/unsigned ]]; then
+            # For tar input test component
+            mkdir -p windows/amd64 macos/amd64
+            touch windows/amd64/tartest-binary-windows-amd64.exe
+            touch macos/amd64/tartest-binary-darwin-amd64
         else
             mkdir -p windows/amd64 macos/amd64
             touch windows/amd64/testproduct-binary-windows-amd64.exe
