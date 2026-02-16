@@ -7,13 +7,16 @@ kubectl create secret generic rhtl-pulp-credentials-secret \
   --from-literal=password=test-password
 
 # Add mocks to the upload step script
-# Note: step 0 uses StepAction ref, so we only inject into step 1 (upload)
+# Steps layout:
+#   [0] prepare-workdir (command - no mock needed)
+#   [1] use-trusted-artifact (StepAction ref - no mock needed)
+#   [2] upload (command - replace with mock script)
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# The upload step is step index 1 and uses command, not script
+# The upload step is step index 2 and uses command, not script
 # We need to replace the command with a script that includes mocks
 yq -i '
-  del(.spec.steps[1].command) |
-  .spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh")
+  del(.spec.steps[2].command) |
+  .spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh")
 ' "$TASK_PATH"
