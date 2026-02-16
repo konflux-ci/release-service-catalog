@@ -36,15 +36,16 @@ function curl() {
       echo '{"count": 0, "results": []}'
     fi
   elif [[ "$args" == *"repositories/rpm/rpm"* && "$args" == *"name="* ]]; then
-    if [[ "$args" == *"name=source"* ]]; then
+    # Handle both old-style arch names and new repository_id based names
+    if [[ "$args" == *"name=source"* ]] || [[ "$args" == *"name=rpm-source"* ]]; then
       echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/source-uuid/"}]}'
-    elif [[ "$args" == *"name=x86_64"* ]]; then
+    elif [[ "$args" == *"name=x86_64"* ]] || [[ "$args" == *"name=rpm-x86_64"* ]]; then
       echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/x86_64-uuid/"}]}'
-    elif [[ "$args" == *"name=aarch64"* ]]; then
+    elif [[ "$args" == *"name=aarch64"* ]] || [[ "$args" == *"name=rpm-aarch64"* ]]; then
       echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/aarch64-uuid/"}]}'
-    elif [[ "$args" == *"name=ppc64le"* ]]; then
+    elif [[ "$args" == *"name=ppc64le"* ]] || [[ "$args" == *"name=rpm-ppc64le"* ]]; then
       echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/ppc64le-uuid/"}]}'
-    elif [[ "$args" == *"name=s390x"* ]]; then
+    elif [[ "$args" == *"name=s390x"* ]] || [[ "$args" == *"name=rpm-s390x"* ]]; then
       echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/s390x-uuid/"}]}'
     else
       echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/default-uuid/"}]}'
@@ -99,6 +100,15 @@ function oras() {
         touch "${output_file_dir}/glibc-subpkg${i}-2.38-${i}.fc44.x86_64.rpm"
       done
       mkdir -p "${output_file_dir}/logs"
+      return 0
+    elif [[ "$args" == *"quay.io/test/noarchonly"* ]]; then
+      # Create ONLY noarch RPMs - no arch-specific RPMs
+      # This tests that DEFAULT_ARCHITECTURES is used for targeting
+      mkdir -p "${output_file_dir}"
+      touch "${output_file_dir}/hello-docs-2.12.1-6.fc44.noarch.rpm"
+      touch "${output_file_dir}/hello-man-2.12.1-6.fc44.noarch.rpm"
+      mkdir -p "${output_file_dir}/logs"
+      touch "${output_file_dir}/logs/hello-docs-2.12.1-6.fc44.noarch.rpm.log"
       return 0
     fi
 

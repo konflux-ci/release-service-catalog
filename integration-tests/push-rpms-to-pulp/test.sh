@@ -16,6 +16,7 @@ verify_release_contents() {
         log_error "Could not retrieve Release JSON for ${RELEASE_NAME}"
     fi
 
+    jq '.status' <<< "${release_json}"
     advisory_url=$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}")
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
 

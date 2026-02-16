@@ -2,10 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-already-released-advisory-rpms-basic
+  name: test-apply-mapping-rpm-content-type
 spec:
   description: |
-    Run filter-already-released-advisory-rpms where nothing exists in Pulp and verify rpmsToPublish is populated.
+    Run the apply-mapping task with a snapshot.spec json containing rpm component mapping
+    and verify that the contentType field is correctly preserved in the resulting json.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -40,76 +41,51 @@ spec:
             - mountPath: /var/workdir
               name: workdir
           env:
-            - name: HOME
-              value: /var/workdir
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
-            - name: ORAS_OPTIONS
+            - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: DEBUG
+            - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9  # yamllint disable-line rule:line-length
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
-              #!/usr/bin/env bash
+              #!/usr/bin/env sh
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              # Create data file with rpm-repositories mapping for all architectures
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_data.json" << EOF
               {
+                "intention": "staging",
+                "pulp": {
+                  "domain": "konflux-release-integration-tests",
+                  "secretName": "pulp-credentials-test"
+                },
                 "mapping": {
-                  "rpm-repositories": [
+                  "components": [
                     {
-                      "name": "rpm-x86_64",
-                      "arch": "x86_64",
-                      "repository_id": "rpm-x86_64",
-                      "repository_name": "x86_64",
-                      "distro": "testdistro"
-                    },
-                    {
-                      "name": "rpm-aarch64",
-                      "arch": "aarch64",
-                      "repository_id": "rpm-aarch64",
-                      "repository_name": "aarch64",
-                      "distro": "testdistro"
-                    },
-                    {
-                      "name": "rpm-ppc64le",
-                      "arch": "ppc64le",
-                      "repository_id": "rpm-ppc64le",
-                      "repository_name": "ppc64le",
-                      "distro": "testdistro"
-                    },
-                    {
-                      "name": "rpm-s390x",
-                      "arch": "s390x",
-                      "repository_id": "rpm-s390x",
-                      "repository_name": "s390x",
-                      "distro": "testdistro"
-                    },
-                    {
-                      "name": "rpm-source",
-                      "arch": "source",
-                      "repository_id": "rpm-source",
-                      "repository_name": "source",
-                      "distro": "testdistro"
+                      "name": "rpm-component",
+                      "contentType": "rpm"
                     }
                   ]
                 }
               }
               EOF
 
-              # Create snapshot file
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
               {
-                "application": "rpms",
-                "artifacts": {},
+                "application": "rpm-test-app",
                 "components": [
                   {
-                    "containerImage": "quay.io/test/happypath@sha256:12345",
-                    "name": "test"
+                    "name": "rpm-component",
+                    "containerImage": "quay.io/myorg/rpm-image@sha256:abc123def456",
+                    "source": {
+                      "git": {
+                        "revision": "abc123",
+                        "url": "https://github.com/myorg/rpm-component"
+                      }
+                    }
                   }
                 ]
               }
@@ -126,16 +102,12 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: filter-already-released-advisory-rpms
+        name: apply-mapping
       params:
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: $(context.pipelineRun.uid)/test_snapshot_spec.json
         - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
-        - name: PULP_DOMAIN
-          value: "mydomain"
-        - name: PULP_SECRET_NAME
-          value: "pulp-task-pulp-secret"
+          value: $(context.pipelineRun.uid)/test_data.json
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -158,6 +130,8 @@ spec:
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
+      runAfter:
+        - run-task
       taskSpec:
         params:
           - name: sourceDataArtifact
@@ -172,13 +146,11 @@ spec:
             - mountPath: /var/workdir
               name: workdir
           env:
-            - name: HOME
-              value: /var/workdir
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
-            - name: ORAS_OPTIONS
+            - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: DEBUG
+            - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: use-trusted-artifact
@@ -190,15 +162,26 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9  # yamllint disable-line rule:line-length
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              snap="$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json")"
-              echo "$snap" | jq .
-              # Should keep the component and attach rpmsToPublish with at least one entry
-              test "$(echo "$snap" | jq '.components | length')" = "1"
-              test "$(echo "$snap" | jq '.components[0].rpmsToPublish | length')" -gt 0
-      runAfter:
-        - run-task
+              SNAPSHOT_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+
+              echo "Test that SNAPSHOT contains exactly 1 component (mapped)"
+              test "$(jq '.components | length' < "${SNAPSHOT_FILE}")" -eq 1
+
+              echo "Test that rpm-component has contentType set to rpm"
+              test "$(
+                jq -r '.components[] | select(.name=="rpm-component") | .contentType' \
+                < "${SNAPSHOT_FILE}"
+              )" == "rpm"
+
+              echo "Test that rpm-component preserved its git revision"
+              test "$(
+                jq -r '.components[] | select(.name=="rpm-component") | .source.git.revision' \
+                < "${SNAPSHOT_FILE}"
+              )" == "abc123"
+
+              echo "All RPM content type mapping tests passed!"

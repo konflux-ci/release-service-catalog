@@ -2,10 +2,12 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-already-released-advisory-rpms-basic
+  name: test-filter-already-released-advisory-rpms-noarch
 spec:
   description: |
-    Run filter-already-released-advisory-rpms where nothing exists in Pulp and verify rpmsToPublish is populated.
+    Run filter-already-released-advisory-rpms with only noarch RPMs and verify that
+    DEFAULT_ARCHITECTURES is used to determine target repositories when no arch-specific
+    RPMs are present. Only architectures with matching rpm-repositories entries are used.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -56,7 +58,23 @@ spec:
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              # Create data file with rpm-repositories mapping for all architectures
+
+              # Create snapshot file
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "rpms",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/noarchonly@sha256:12345",
+                    "name": "noarch-test"
+                  }
+                ]
+              }
+              EOF
+
+              # Create data file with rpm-repositories mapping
+              # Only x86_64 and aarch64 have mappings - ppc64le and s390x should be ignored
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "mapping": {
@@ -76,20 +94,6 @@ spec:
                       "distro": "testdistro"
                     },
                     {
-                      "name": "rpm-ppc64le",
-                      "arch": "ppc64le",
-                      "repository_id": "rpm-ppc64le",
-                      "repository_name": "ppc64le",
-                      "distro": "testdistro"
-                    },
-                    {
-                      "name": "rpm-s390x",
-                      "arch": "s390x",
-                      "repository_id": "rpm-s390x",
-                      "repository_name": "s390x",
-                      "distro": "testdistro"
-                    },
-                    {
                       "name": "rpm-source",
                       "arch": "source",
                       "repository_id": "rpm-source",
@@ -98,20 +102,6 @@ spec:
                     }
                   ]
                 }
-              }
-              EOF
-
-              # Create snapshot file
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
-              {
-                "application": "rpms",
-                "artifacts": {},
-                "components": [
-                  {
-                    "containerImage": "quay.io/test/happypath@sha256:12345",
-                    "name": "test"
-                  }
-                ]
               }
               EOF
           - name: create-trusted-artifact
@@ -197,8 +187,50 @@ spec:
 
               snap="$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json")"
               echo "$snap" | jq .
-              # Should keep the component and attach rpmsToPublish with at least one entry
+
+              # Should keep the component with rpmsToPublish
               test "$(echo "$snap" | jq '.components | length')" = "1"
-              test "$(echo "$snap" | jq '.components[0].rpmsToPublish | length')" -gt 0
+
+              # Should have 2 noarch RPMs to publish
+              rpms_count=$(echo "$snap" | jq '.components[0].rpmsToPublish | length')
+              test "${rpms_count}" = "2"
+
+              # Verify each noarch RPM targets only the repos defined in rpm-repositories
+              # mapping (x86_64 and aarch64 only, NOT ppc64le or s390x)
+              noarch_count=0
+              while IFS= read -r noarch_rpm; do
+                # Verify arch is noarch
+                test "$(echo "$noarch_rpm" | jq -r '.arch')" = "noarch"
+
+                # Each noarch RPM should target only the 2 architectures with mappings
+                target_count=$(echo "$noarch_rpm" | jq '.targetRepos | length')
+                test "${target_count}" = "2"
+
+                # Verify targetRepos is array of objects with repository_id, repository_name, distro
+                # Check that each target has all fields
+                for i in 0 1; do
+                  repo_id=$(echo "$noarch_rpm" | jq -r ".targetRepos[${i}].repository_id")
+                  repo_name=$(echo "$noarch_rpm" | jq -r ".targetRepos[${i}].repository_name")
+                  repo_distro=$(echo "$noarch_rpm" | jq -r ".targetRepos[${i}].distro")
+                  test -n "${repo_id}" && test "${repo_id}" != "null"
+                  test -n "${repo_name}" && test "${repo_name}" != "null"
+                  test -n "${repo_distro}" && test "${repo_distro}" != "null"
+                done
+
+                # Verify the correct repository_ids are used (sorted for comparison)
+                repo_ids=$(echo "$noarch_rpm" | jq -r '[.targetRepos[].repository_id] | sort | join(",")')
+                test "${repo_ids}" = "rpm-aarch64,rpm-x86_64"
+
+                # Verify the correct repository_names are used (sorted for comparison)
+                repo_names=$(echo "$noarch_rpm" | jq -r '[.targetRepos[].repository_name] | sort | join(",")')
+                test "${repo_names}" = "aarch64,x86_64"
+
+                noarch_count=$((noarch_count + 1))
+              done < <(echo "$snap" | jq -c '.components[0].rpmsToPublish[]')
+
+              # Should have exactly 2 noarch RPMs
+              test "${noarch_count}" = "2"
+
+              echo "Noarch RPM test passed: targetRepos contains objects with repository_id and repository_name"
       runAfter:
         - run-task

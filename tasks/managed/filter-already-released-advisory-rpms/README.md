@@ -15,6 +15,7 @@ The task:
 | Name                    | Description                                                                                                                | Optional | Default value                |
 |-------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|------------------------------|
 | snapshotPath            | Path to the JSON Snapshot spec in the data workspace                                                                       | No       | -                            |
+| dataPath                | Path to the JSON data file containing rpm-repositories mapping in the data workspace                                       | No       | -                            |
 | PULP_DOMAIN             | The domain to use for Pulp operations                                                                                      | No       | -                            |
 | PULP_SECRET_NAME        | The name of the secret containing the Pulp cli.toml file. It must have the cli.toml key                                    | No       | -                            |
 | DEFAULT_EXCLUDES        | comma-delimited list of file patterns to exclude from consideration                                                        | Yes      | -debuginfo-, -debugsource-   |

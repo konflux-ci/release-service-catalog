@@ -321,7 +321,7 @@ spec:
                     arch=$(jq -r .platform.architecture <<< "${arch_json}")
                     digest=$(jq -r .digest <<< "${arch_json}")
                     containerImage="${deliveryRepo}@${digest}"
-        
+
                     # Determine the name part of the PURL
                     # If canonicalName is present, use it. Otherwise fallback to the last segment of the deliveryRepo
                     purl_path="${deliveryRepo##*/}"
@@ -409,24 +409,23 @@ spec:
             exit 1
         fi
 
-        # generate_purl_rpm name version release arch sha256 repository_id [vendor]
+        # generate_purl_rpm name version release arch distro repository_id [vendor]
         # Example:
-        #   generate_purl_rpm "zlib-devel" "1.2.11" "40.el9" "x86_64" \
-        #     "9775022716a2b6dd51d151a40aa4a6bcb466edeb01b747f48072703e509be097" \
+        #   generate_purl_rpm "zlib-devel" "1.2.11" "40.el9" "x86_64" "rhel"\
         #     "ubi-9-for-x86_64-appstream-rpms" "redhat"
         generate_purl_rpm() {
           local name="$1"
           local version="$2"
           local release="$3"
           local arch="$4"
-          local sha256="$5"
+          local distro="$5"
           local repository_id="$6"
           local vendor="${7:-redhat}"
 
           # Assemble purl:
-          # pkg:rpm/<vendor>/<name>@<version>-<release>?arch=<arch>&checksum=sha256:<sha256>&repository_id=<repo>
-          printf 'pkg:rpm/%s/%s@%s-%s?arch=%s&checksum=sha256:%s&repository_id=%s\n' \
-            "$vendor" "$name" "$version" "$release" "$arch" "$sha256" "$repository_id"
+          # pkg:rpm/<vendor>/<name>@<version>-<release>?arch=<arch>&distro=<distro>&repository_id=<repo>
+          printf 'pkg:rpm/%s/%s@%s-%s?arch=%s&distro=%s&repository_id=%s\n' \
+            "$vendor" "$name" "$version" "$release" "$arch" "$distro" "$repository_id"
         }
 
         append_artifact_entry() {
@@ -554,8 +553,6 @@ spec:
                 exit 1
               fi
 
-              pulp_domain="$(jq -r '.pulp.domain // ""' "${DATA_FILE}")"
-
               RPM_FILES_LENGTH=$(jq --arg name "$name" \
                 '[.components[]? | select(.name == $name) | .rpmsToPublish[]?] | length' "${SNAPSHOT_FILE}")
               for ((k = 0; k < RPM_FILES_LENGTH; k++)); do
@@ -565,28 +562,29 @@ spec:
                 arch=$(jq -r '.arch' <<< "$rpmfile")
                 version=$(jq -r '.version' <<< "$rpmfile")
                 release=$(jq -r '.release' <<< "$rpmfile")
-                sha256=$(jq -r '.sha256' <<< "$rpmfile")
+                distro=$(jq -r '.distro' <<< "$rpmfile")
 
                 # Expand per-target repo to keep repository_id accurate (noarch may target multiple repos).
+                # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
                 TARGET_REPOS_LEN=$(jq '.targetRepos | length' <<< "$rpmfile")
                 if [ "${TARGET_REPOS_LEN}" -eq 0 ]; then
                   # If no targetRepos is present, fall back to a best-effort purl without repository_id.
-                  purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$sha256" "")
+                  purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$distro" "")
                   echo "purl: $purl"
                   append_artifact_entry "$name" "$arch" "$os" "$purl"
                 else
                   for ((r = 0; r < TARGET_REPOS_LEN; r++)); do
-                    repo=$(jq -r --argjson r "$r" '.targetRepos[$r]' <<< "$rpmfile")
-                    pulprepo="${repo}"
-                    if [ -n "${pulp_domain}" ]; then
-                      pulprepo="${pulp_domain}/${repo}"
-                    fi
+                    repo_obj=$(jq -c --argjson r "$r" '.targetRepos[$r]' <<< "$rpmfile")
+                    repo_id=$(jq -r '.repository_id' <<< "$repo_obj")
+                    repo_name=$(jq -r '.repository_name' <<< "$repo_obj")
+                    repo_distro=$(jq -r '.distro // empty' <<< "$repo_obj")
                     arch_for_entry="${arch}"
-                    if [ "${repo}" = "source" ]; then
+                    if [ "${repo_name}" = "source" ]; then
                       arch_for_entry="source"
                     fi
+                    # Use repo_id directly for PURL repository_id (no domain prefix)
                     purl=$(generate_purl_rpm \
-                      "$rpm_name" "$version" "$release" "$arch_for_entry" "$sha256" "$pulprepo")
+                      "$rpm_name" "$version" "$release" "$arch_for_entry" "$repo_distro" "$repo_id")
                     echo "purl: $purl"
                     append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
                   done

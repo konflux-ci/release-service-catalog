@@ -21,6 +21,9 @@ spec:
     - name: snapshotPath
       type: string
       description: Path to the JSON Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: Path to the JSON data file containing rpm-repositories mapping in the data workspace
     - name: PULP_DOMAIN
       type: string
       description: The domain to use for Pulp operations
@@ -165,6 +168,32 @@ spec:
           echo "Error: No valid snapshot file was provided at ${SNAPSHOT_FILE}" >&2
           exit 1
         fi
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [[ ! -f "${DATA_FILE}" ]]; then
+          echo "Error: No valid data file was provided at ${DATA_FILE}" >&2
+          exit 1
+        fi
+
+        # Load rpm-repositories mapping from data file
+        RPM_REPOS_JSON="$(jq -c '.mapping["rpm-repositories"] // []' "${DATA_FILE}")"
+        if [[ "${RPM_REPOS_JSON}" == "[]" ]]; then
+          echo "Warning: No rpm-repositories mapping found in data file" >&2
+        fi
+
+        # Function to get repository info by arch from the rpm-repositories mapping
+        # Returns JSON object with repository_id, repository_name, and distro, or empty if not found
+        get_repo_info_for_arch() {
+          local arch="$1"
+          jq -c --arg arch "${arch}" \
+            '.[] | select(.arch == $arch) | {repository_id, repository_name, distro}' \
+            <<< "${RPM_REPOS_JSON}" | head -1
+        }
+
+        # Function to get all available architectures from rpm-repositories mapping
+        get_available_arches() {
+          jq -r '.[].arch // empty' <<< "${RPM_REPOS_JSON}" | sort -u
+        }
 
         CONFIG_FILE_CONTENT="$(cat /etc/secrets/cli.toml || true)"
         if [[ -z "${CONFIG_FILE_CONTENT}" ]]; then
@@ -450,18 +479,21 @@ spec:
           local -n files_ref=$1
           local arches=()
           local file arch
+          local arch_pattern='\.([^.]+)\.rpm$'
           for file in "${files_ref[@]}"; do
             if [[ "${file}" == *.src.rpm ]] || [[ "${file}" == *.noarch.rpm ]]; then
               continue
             fi
-            if [[ "${file}" =~ \\.([^.]+)\\.rpm$ ]]; then
+            if [[ "${file}" =~ ${arch_pattern} ]]; then
               arch="${BASH_REMATCH[1]}"
               if [[ " ${arches[*]} " != *" ${arch} "* ]]; then
                 arches+=("${arch}")
               fi
             fi
           done
-          printf '%s\n' "${arches[@]}"
+          if [[ ${#arches[@]} -gt 0 ]]; then
+            printf '%s\n' "${arches[@]}"
+          fi
         }
 
         echo "Filtering snapshot RPMs against Pulp..." >&2
@@ -498,14 +530,19 @@ spec:
             done
           )
 
-          # Determine arches used for noarch targeting
-          mapfile -t ARCHES < <(extract_arches_from_files files)
-          if [[ ${#ARCHES[@]} -eq 0 ]]; then
-            IFS=',' read -ra ARCHES <<< "$(params.DEFAULT_ARCHITECTURES)"
-            for i in "${!ARCHES[@]}"; do
-              ARCHES[i]=$(echo "${ARCHES[i]}" | xargs)
-            done
-          fi
+          # Determine repo info for noarch targeting from DEFAULT_ARCHITECTURES
+          # Filter to only include arches that have a matching rpm-repository entry
+          # Store as JSON array of {repository_id, repository_name} objects
+          NOARCH_TARGET_REPOS_JSON="[]"
+          IFS=',' read -ra DEFAULT_ARCHES <<< "$(params.DEFAULT_ARCHITECTURES)"
+          for default_arch in "${DEFAULT_ARCHES[@]}"; do
+            default_arch="$(echo "${default_arch}" | xargs)"
+            repo_info="$(get_repo_info_for_arch "${default_arch}")"
+            if [[ -n "${repo_info}" ]]; then
+              NOARCH_TARGET_REPOS_JSON="$(jq --argjson info "${repo_info}" \
+                '. + [$info]' <<< "${NOARCH_TARGET_REPOS_JSON}")"
+            fi
+          done
 
           rpms_to_publish="[]"
           for f in "${files[@]}"; do
@@ -514,40 +551,63 @@ spec:
             nevra="$(parse_nevra "${file_abs}")"
             IFS='|' read -r rpmname epoch version release arch <<< "${nevra}"
 
-            # Determine target repos
-            target_repos=()
+            # Determine target repos using rpm-repositories mapping
+            # target_repos_json is an array of {repository_id, repository_name} objects
+            target_repos_json="[]"
             if [[ "${f}" == *.src.rpm ]]; then
-              target_repos=("source")
+              # Source RPMs use arch="source" in the mapping
+              repo_info="$(get_repo_info_for_arch "source")"
+              if [[ -n "${repo_info}" ]]; then
+                target_repos_json="[${repo_info}]"
+              else
+                echo "Warning: No repository mapping for source arch, skipping ${f}" >&2
+                continue
+              fi
             elif [[ "${f}" == *.noarch.rpm ]]; then
-              target_repos=("${ARCHES[@]}")
+              # noarch RPMs target all repos from DEFAULT_ARCHITECTURES that exist in mapping
+              if [[ "$(jq 'length' <<< "${NOARCH_TARGET_REPOS_JSON}")" -eq 0 ]]; then
+                echo "Warning: No repository mappings for DEFAULT_ARCHITECTURES, skipping ${f}" >&2
+                continue
+              fi
+              target_repos_json="${NOARCH_TARGET_REPOS_JSON}"
             else
-              target_repos=("${arch}")
+              # Arch-specific RPMs look up their repository info by arch
+              repo_info="$(get_repo_info_for_arch "${arch}")"
+              if [[ -n "${repo_info}" ]]; then
+                target_repos_json="[${repo_info}]"
+              else
+                echo "Warning: No repository mapping for arch '${arch}', skipping ${f}" >&2
+                continue
+              fi
             fi
 
-            missing_repos=()
-            for repo in "${target_repos[@]}"; do
+            # Check each target repo and collect those where RPM is missing
+            # Use repository_name for Pulp lookups, repository_id is for PURL generation
+            missing_repos_json="[]"
+            while IFS= read -r repo_obj; do
+              repo_name="$(jq -r '.repository_name' <<< "${repo_obj}")"
               set +e
-              check_rpm_exists_with_digest "${repo}" "${file_abs}"
+              check_rpm_exists_with_digest "${repo_name}" "${file_abs}"
               status=$?
               set -e
               if [[ ${status} -eq 0 ]]; then
                 continue
               elif [[ ${status} -eq 2 ]]; then
-                missing_repos+=("${repo}")
+                missing_repos_json="$(jq --argjson obj "${repo_obj}" \
+                  '. + [$obj]' <<< "${missing_repos_json}")"
               elif [[ ${status} -eq 3 ]]; then
-                echo "Error: RPM exists with different digest in repo '${repo}': ${f}" >&2
+                echo "Error: RPM exists with different digest in repo '${repo_name}': ${f}" >&2
                 exit 1
               else
-                echo "Error: Failed to check existence/digest for ${f} in repo '${repo}' (rc=${status})" >&2
+                echo "Error: Failed to check existence/digest for ${f} in repo '${repo_name}' (rc=${status})" >&2
                 exit 1
               fi
-            done
+            done < <(jq -c '.[]' <<< "${target_repos_json}")
 
-            if [[ ${#missing_repos[@]} -eq 0 ]]; then
+            if [[ "$(jq 'length' <<< "${missing_repos_json}")" -eq 0 ]]; then
               continue
             fi
 
-            missing_repos_json="$(printf '%s\n' "${missing_repos[@]}" | jq -R . | jq -s .)"
             rpms_to_publish="$(jq \
               --arg rpm "${f}" \
               --arg rpmname "${rpmname}" \
