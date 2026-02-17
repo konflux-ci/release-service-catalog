@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Create a dummy cosignSecretName secret (and delete it first if it exists)
-kubectl delete secret test-cosign-secret test-cosign-secret-rekor --ignore-not-found
+kubectl delete secret test-cosign-secret test-cosign-secret-rekor test-cosign-secret-keyless --ignore-not-found
 
 kubectl create secret generic test-cosign-secret\
   --from-literal=AWS_DEFAULT_REGION=us-test-1\
@@ -19,6 +19,11 @@ kubectl create secret generic test-cosign-secret-rekor\
   --from-literal=REKOR_URL=https://fake-rekor-server\
   --from-literal=REKOR_PUBLIC_KEY=rekor_public_key\
   --from-literal=PUBLIC_KEY=public_key
+
+kubectl create secret generic test-cosign-secret-keyless\
+  --from-literal=REKOR_URL=https://fake-rekor-server\
+  --from-literal=FULCIO_URL=https://fake-fulcio-server\
+  --from-literal=REKOR_PUBLIC_KEY=rekor_public_key
 
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"

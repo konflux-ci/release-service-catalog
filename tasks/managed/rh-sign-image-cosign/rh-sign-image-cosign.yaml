@@ -31,6 +31,12 @@ spec:
         url field directly. This is useful for signing images released to external registries
         like quay.io/konflux-ci. When "false" (default), only sign images with rh-registry-repo
       default: "false"
+    - name: keyless
+      type: string
+      description: |
+        When set to "true", use keyless signing via Fulcio/Rekor with an OIDC identity token
+        instead of key-based signing with AWS KMS
+      default: "false"
     - name: retries
       description: Retry cosign N times
       type: string
@@ -96,6 +102,13 @@ spec:
           - key: $(params.caTrustConfigMapKey)
             path: ca-bundle.crt
         optional: true
+    - name: oidc-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              audience: sigstore
+              path: oidc-token
+              expirationSeconds: 3600
 
   stepTemplate:
     volumeMounts:
@@ -112,8 +125,7 @@ spec:
       - name: "DEBUG"
         value: "$(params.trustedArtifactsDebug)"
     securityContext:
-      runAsUser:
-        1001
+      runAsUser: 1001
   steps:
     - name: use-trusted-artifact
       computeResources:
@@ -142,29 +154,55 @@ spec:
       computeResources:
         limits:
           memory: 2.5Gi
-          cpu: '2'
+          cpu: "2"
         requests:
           memory: 2.5Gi
-          cpu: '2'
+          cpu: "2"
       volumeMounts:
         - name: secret-vol
           mountPath: "/etc/secrets"
+        - name: oidc-token
+          mountPath: "/var/run/secrets/tokens"
+          readOnly: true
       script: |
         #!/usr/bin/env bash
         set -eu
 
-        AWS_DEFAULT_REGION="$(cat /etc/secrets/AWS_DEFAULT_REGION)"
-        AWS_ACCESS_KEY_ID="$(cat /etc/secrets/AWS_ACCESS_KEY_ID)"
-        AWS_SECRET_ACCESS_KEY="$(cat /etc/secrets/AWS_SECRET_ACCESS_KEY)"
-        export AWS_DEFAULT_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+        KEYLESS="$(params.keyless)"
 
-        SIGN_KEY="$(cat /etc/secrets/SIGN_KEY)"
-        REKOR_URL_PATH="/etc/secrets/REKOR_URL"
-        if [ -f "${REKOR_URL_PATH}" ] && [ -s "${REKOR_URL_PATH}" ]; then
+        if [ "$KEYLESS" = "true" ]; then
+          # Keyless mode: use OIDC identity token with Fulcio/Rekor
+          if [ ! -s "/etc/secrets/REKOR_URL" ]; then
+            echo "ERROR: REKOR_URL is mandatory for keyless signing"
+            exit 1
+          fi
           REKOR_URL="$(cat /etc/secrets/REKOR_URL)"
+
+          if [ ! -s "/etc/secrets/FULCIO_URL" ]; then
+            echo "ERROR: FULCIO_URL is mandatory for keyless signing"
+            exit 1
+          fi
+          SIGSTORE_FULCIO_URL="$(cat /etc/secrets/FULCIO_URL)"
+          export SIGSTORE_FULCIO_URL
+
+          REKOR_PUBLIC_KEY="$(cat /etc/secrets/REKOR_PUBLIC_KEY)"
+          SIGSTORE_ID_TOKEN=$(cat /var/run/secrets/tokens/oidc-token)
+          export SIGSTORE_ID_TOKEN
+        else
+          # Key-based mode: use AWS KMS signing key
+          AWS_DEFAULT_REGION="$(cat /etc/secrets/AWS_DEFAULT_REGION)"
+          AWS_ACCESS_KEY_ID="$(cat /etc/secrets/AWS_ACCESS_KEY_ID)"
+          AWS_SECRET_ACCESS_KEY="$(cat /etc/secrets/AWS_SECRET_ACCESS_KEY)"
+          export AWS_DEFAULT_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+
+          SIGN_KEY="$(cat /etc/secrets/SIGN_KEY)"
+          REKOR_URL_PATH="/etc/secrets/REKOR_URL"
+          if [ -f "${REKOR_URL_PATH}" ] && [ -s "${REKOR_URL_PATH}" ]; then
+            REKOR_URL="$(cat /etc/secrets/REKOR_URL)"
+          fi
+          PUBLIC_KEY="$(cat /etc/secrets/PUBLIC_KEY)"
+          REKOR_PUBLIC_KEY="$(cat /etc/secrets/REKOR_PUBLIC_KEY)"
         fi
-        PUBLIC_KEY="$(cat /etc/secrets/PUBLIC_KEY)"
-        REKOR_PUBLIC_KEY="$(cat /etc/secrets/REKOR_PUBLIC_KEY)"
 
         set -x
 
@@ -183,12 +221,14 @@ spec:
                 exit 1
             fi
         fi
-        PUBLIC_KEY_FILE=$(mktemp)
+        if [ "$KEYLESS" != "true" ]; then
+          PUBLIC_KEY_FILE=$(mktemp)
+          echo -n "${PUBLIC_KEY:?}" > "$PUBLIC_KEY_FILE"
+          ls -ld "$PUBLIC_KEY_FILE"
+        fi
         id
         pwd
         ls -ld /tekton/home
-        echo -n "${PUBLIC_KEY:?}" > "$PUBLIC_KEY_FILE"
-        ls -ld "$PUBLIC_KEY_FILE"
 
         # Initialize memory throttling
         # This file is located at utils/memory-throttle.sh in the release-service-utils image
@@ -241,7 +281,14 @@ spec:
           else
               COSIGN_REKOR_ARGS+=("--insecure-ignore-tlog=true")
           fi
-          verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
+          if [ "$KEYLESS" = "true" ]; then
+              # TODO: check how we want to verify the certificate identity
+              COSIGN_REKOR_ARGS+=("--certificate-identity-regexp=.*"
+                "--certificate-oidc-issuer-regexp=.*")
+          else
+              COSIGN_REKOR_ARGS+=("--key" "$PUBLIC_KEY_FILE")
+          fi
+          verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" "$reference")
           found_signatures=$(echo "$verify_output" | jq -j '['\
         '.[]|select(.critical.image."docker-manifest-digest"| contains("'"$digest"'"))'\
         '|select(.critical.identity."docker-reference" == "'"$identity"'")'\
@@ -276,8 +323,12 @@ spec:
           fi
 
           if [ "$found_signatures" -eq 0 ]; then
+            if [ "$KEYLESS" = "true" ]; then
+              COSIGN_REKOR_ARGS+=("--identity-token" "$SIGSTORE_ID_TOKEN")
+            else
+              COSIGN_REKOR_ARGS+=("--key" "$SIGN_KEY")
+            fi
             run_cosign -t 3m0s sign "${COSIGN_REKOR_ARGS[@]}" \
-              --key "$SIGN_KEY" \
               --sign-container-identity "$identity" "$reference@$digest"
           else
             echopid "Skip signing ${identity} (${digest})"
