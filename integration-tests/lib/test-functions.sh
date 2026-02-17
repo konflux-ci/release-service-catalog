@@ -171,6 +171,131 @@ cleanup_resources() {
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
 
+    # Clean up InternalRequests associated with this test run
+    # InternalRequests can accumulate and contribute to quota issues
+    # SAFETY: Only delete InternalRequests from our specific PipelineRuns to avoid affecting other tests
+    if [ -n "${component_push_plr_name}" ] || [ -n "${component2_push_plr_name}" ] || [ "${#ALL_PIPELINERUN_UIDS[@]:-0}" -gt 0 ]; then
+        echo "🧹 Cleaning up InternalRequests from test PipelineRuns..." | tee -a "${cleanup_log_file}"
+        # Check if InternalRequest CRD exists
+        if kubectl api-resources | grep -q "^internalrequests"; then
+            for ns in "${tenant_namespace}" "${managed_namespace}"; do
+                if [ -n "$ns" ]; then
+                    echo "  Checking InternalRequests in namespace: $ns" >> "${cleanup_log_file}"
+                    
+                    # Collect all PipelineRun UIDs from multiple sources
+                    local plr_uids=""
+                    
+                    # Source 1: component_push_plr_name (single test)
+                    if [ -n "${component_push_plr_name}" ]; then
+                        local uid=$(kubectl get pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+                        if [ -n "$uid" ]; then
+                            plr_uids="$uid"
+                        fi
+                    fi
+                    
+                    # Source 2: component2_push_plr_name (dual component test)
+                    if [ -n "${component2_push_plr_name}" ]; then
+                        local uid=$(kubectl get pipelinerun "${component2_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
+                        if [ -n "$uid" ]; then
+                            plr_uids="$plr_uids $uid"
+                        fi
+                    fi
+                    
+                    # Source 3: ALL_PIPELINERUN_UIDS array (multi-release test suite)
+                    # This captures UIDs from ALL releases in the suite, not just the last one
+                    # SAFETY: Check if array exists to avoid breaking other test suites
+                    if [ -n "${ALL_PIPELINERUN_UIDS+x}" ] && [ ${#ALL_PIPELINERUN_UIDS[@]} -gt 0 ]; then
+                        echo "  Found ${#ALL_PIPELINERUN_UIDS[@]} tracked PipelineRun UIDs from test suite" >> "${cleanup_log_file}"
+                        for tracked_uid in "${ALL_PIPELINERUN_UIDS[@]}"; do
+                            if [ -n "$tracked_uid" ]; then
+                                plr_uids="$plr_uids $tracked_uid"
+                            fi
+                        done
+                    fi
+                    
+                    # Delete InternalRequests associated with ALL collected PipelineRun UIDs
+                    local total_cleaned=0
+                    for plr_uid in $plr_uids; do
+                        if [ -n "$plr_uid" ]; then
+                            echo "    Deleting InternalRequests for PipelineRun UID: $plr_uid" >> "${cleanup_log_file}"
+                            local deleted_count=$(kubectl delete internalrequest -n "$ns" \
+                                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$plr_uid" \
+                                --timeout=30s 2>&1 | grep -c "deleted" || echo "0")
+                            total_cleaned=$((total_cleaned + deleted_count))
+                        fi
+                    done
+                    
+                    if [ $total_cleaned -gt 0 ]; then
+                        echo "  ✅ Cleaned $total_cleaned InternalRequests from $ns" | tee -a "${cleanup_log_file}"
+                    fi
+                fi
+            done
+        else
+            echo "  InternalRequest CRD not found, skipping" >> "${cleanup_log_file}"
+        fi
+    fi
+
+    # Clean up PipelineRuns from this test run
+    if [ -n "${component_push_plr_name}" ] && [ -n "${tenant_namespace}" ]; then
+        echo "🧹 Cleaning up PipelineRuns from test run..." | tee -a "${cleanup_log_file}"
+        echo "  Deleting PipelineRun ${component_push_plr_name}" >> "${cleanup_log_file}"
+        kubectl delete pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" --timeout=30s >> "${cleanup_log_file}" 2>&1 || true
+        
+        # Also clean up component2 PipelineRun if it exists
+        if [ -n "${component2_push_plr_name}" ]; then
+            echo "  Deleting PipelineRun ${component2_push_plr_name}" >> "${cleanup_log_file}"
+            kubectl delete pipelinerun "${component2_push_plr_name}" -n "${tenant_namespace}" --timeout=30s >> "${cleanup_log_file}" 2>&1 || true
+        fi
+        
+        # Clean up any other PipelineRuns associated with the application
+        if [ -n "${application_name}" ]; then
+            echo "  Deleting other PipelineRuns for application ${application_name}" >> "${cleanup_log_file}"
+            kubectl delete pipelinerun -n "${tenant_namespace}" -l "appstudio.openshift.io/application=${application_name}" --timeout=30s >> "${cleanup_log_file}" 2>&1 || true
+        fi
+    fi
+
+    # Clean up Releases from this test run
+    if [ -n "${application_name}" ] && [ -n "${tenant_namespace}" ]; then
+        echo "🧹 Cleaning up Releases for application ${application_name}..." | tee -a "${cleanup_log_file}"
+        kubectl delete release -n "${tenant_namespace}" -l "appstudio.openshift.io/application=${application_name}" --timeout=30s >> "${cleanup_log_file}" 2>&1 || true
+    fi
+
+    # Clean up ImageRepositories from this test run
+    # SAFETY: Delete ImageRepositories that match our test's Component names
+    # This prevents image-controller from being overwhelmed by accumulating ImageRepositories
+    if [ -n "${application_name}" ] && [ -n "${tenant_namespace}" ]; then
+        echo "🧹 Cleaning up ImageRepositories for application ${application_name}..." | tee -a "${cleanup_log_file}"
+        
+        # Get all Components from our Application
+        local component_names=$(kubectl get component -n "${tenant_namespace}" \
+            -l "appstudio.openshift.io/application=${application_name}" \
+            -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+        
+        if [ -n "$component_names" ]; then
+            echo "  Found components: $component_names" >> "${cleanup_log_file}"
+            
+            # Get ALL ImageRepositories in namespace and match them against our component names
+            local all_irs=$(kubectl get imagerepository -n "${tenant_namespace}" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+            
+            for comp_name in $component_names; do
+                echo "  Checking ImageRepositories for component: $comp_name" >> "${cleanup_log_file}"
+                
+                # Match ImageRepositories that contain the component name
+                for ir_name in $all_irs; do
+                    if [[ "$ir_name" == *"$comp_name"* ]] || [[ "$ir_name" == "$comp_name" ]]; then
+                        echo "    Deleting matched ImageRepository: $ir_name" >> "${cleanup_log_file}"
+                        kubectl delete imagerepository "$ir_name" -n "${tenant_namespace}" --timeout=30s >> "${cleanup_log_file}" 2>&1 || true
+                    fi
+                done
+            done
+        fi
+        
+        # Fallback: try application label (if ImageRepositories have it)
+        kubectl delete imagerepository -n "${tenant_namespace}" \
+            -l "appstudio.openshift.io/application=${application_name}" \
+            --timeout=30s >> "${cleanup_log_file}" 2>&1 || true
+    fi
+
     # Clean up component repository
     echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
     "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
@@ -184,10 +309,10 @@ cleanup_resources() {
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
         echo "Deleting test resources..." | tee -a "${cleanup_log_file}"
         if [ -f "$tmpDir/tenant-resources.yaml" ]; then
-            kubectl delete -f "$tmpDir/tenant-resources.yaml" >> "${cleanup_log_file}" 2>&1
+            kubectl delete -f "$tmpDir/tenant-resources.yaml" --timeout=30s >> "${cleanup_log_file}" 2>&1
         fi
         if [ -f "$tmpDir/managed-resources.yaml" ]; then
-            kubectl delete -f "$tmpDir/managed-resources.yaml" >> "${cleanup_log_file}" 2>&1
+            kubectl delete -f "$tmpDir/managed-resources.yaml" --timeout=30s >> "${cleanup_log_file}" 2>&1
         fi
         rm -rf "${tmpDir}"
     else
@@ -198,12 +323,14 @@ cleanup_resources() {
         echo "Removing advisory YAML directory..." | tee -a "${cleanup_log_file}"
         rm -rf "${advisory_yaml_dir}" >> "${cleanup_log_file}" 2>&1
     fi
+    
+    echo "✅ Cleanup completed" | tee -a "${cleanup_log_file}"
   else
     echo "Skipping cleanup as per --skip-cleanup flag."
   fi
 
-  echo "Killing any child processes..." >> "${cleanup_log_file}"
-  pkill -e  -P $$
+  echo "Killing any child processes..."
+  pkill -e  -P $$ 2>/dev/null || true
 
   if [ "$err" -ne 0 ]; then
     exit "$err"
@@ -577,8 +704,8 @@ cleanup_old_resources() {
     local age_minutes="${2:-1440}"
 
     if [ -z "$originating_tool" ]; then
-        echo "🔴 Error: originating_tool parameter is required"
-        return 1
+        echo "⚠️  Warning: originating_tool parameter not provided, skipping old resource cleanup"
+        return 0
     fi
 
     # disable exit on error to allow for cleanup of old resources
@@ -591,30 +718,121 @@ cleanup_old_resources() {
 
     echo "🔍 Searching for resources with originating-tool=${originating_tool}"
 
-    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component"
+    # NOTE: ClusterRole is intentionally EXCLUDED - it's cluster-wide and may be shared
+    # NOTE: Secret is intentionally EXCLUDED - may contain infrastructure secrets that persist
+    local kinds="enterprisecontractpolicy rp rpa rolebinding sa application component release"
     for kind in $kinds; do
         local namespaces="dev-release-team-tenant managed-release-team-tenant"
         for namespace in $namespaces; do
             echo "Checking for old resources of kind: $kind in namespace: $namespace"
-            kubectl get "$kind" -n "${namespace}" -l originating-tool="${originating_tool}" -o go-template='{{range .items}}{{.metadata.namespace}}{{"\t"}}{{.metadata.name}}{{"\t"}}{{.metadata.creationTimestamp}}{{"\n"}}{{end}}' | \
+            kubectl get "$kind" -n "${namespace}" -l originating-tool="${originating_tool}" -o go-template='{{range .items}}{{.metadata.namespace}}{{"\t"}}{{.metadata.name}}{{"\t"}}{{.metadata.creationTimestamp}}{{"\n"}}{{end}}' 2>/dev/null | \
             awk -v cutoff_time="$(date -d "${age_minutes} minutes ago" +%s)" -v kind=$kind '
             {
                 cmd = "date -d " $3 " +%s"
                 cmd | getline created_at
                 close(cmd)
                 if (created_at < cutoff_time) {
-                    print "kubectl delete " kind "/" $2 " -n " $1
+                    print "kubectl delete " kind "/" $2 " -n " $1 " --timeout=30s"
                 }
             }
             ' | tee -a "${old_resources_file}"
         done
     done
+    
+    # NOTE: ImageRepository backup cleanup is intentionally minimal
+    # Primary cleanup happens per-test in cleanup_resources() which matches ImageRepositories to Components
+    # ImageRepositories are created by image-controller (not our tests), so they lack originating-tool labels
+    # Aggressive backup cleanup risks deleting ImageRepositories from active/concurrent tests
+    echo "ℹ️  ImageRepository cleanup relies on per-test cleanup (see cleanup_resources function)"
+
+    # Clean up InternalRequests associated with old PipelineRuns
+    # SAFETY: Only delete InternalRequests linked to PipelineRuns we're already deleting
+    # InternalRequests can accumulate and contribute to quota issues
+    echo "🔍 Cleaning up InternalRequests from old PipelineRuns..."
+    local namespaces="dev-release-team-tenant managed-release-team-tenant"
+    if kubectl api-resources | grep -q "^internalrequests"; then
+        # First, collect UIDs of old COMPLETED PipelineRuns that we're going to delete
+        # SAFETY: Only collect UIDs from completed/failed/cancelled pipelines, not in-progress ones
+        local old_plr_uids=""
+        for namespace in $namespaces; do
+            echo "  Collecting old completed PipelineRun UIDs from namespace: $namespace"
+            old_plr_uids+=" $(kubectl get pipelinerun -n "${namespace}" -l originating-tool="${originating_tool}" \
+                -o json 2>/dev/null | \
+                jq -r --argjson cutoff_time "$(date -d "${age_minutes} minutes ago" +%s)" \
+                '.items[] | 
+                select(.metadata.creationTimestamp != null) |
+                select((.status.conditions[] | select(.type == "Succeeded")) != null) |
+                select(((.metadata.creationTimestamp | fromdateiso8601) < $cutoff_time)) |
+                .metadata.uid' | tr '\n' ' ')"
+        done
+        
+        # Now delete InternalRequests associated with those PipelineRun UIDs
+        for plr_uid in $old_plr_uids; do
+            if [ -n "$plr_uid" ]; then
+                for namespace in $namespaces; do
+                    echo "  Checking InternalRequests for PipelineRun UID: $plr_uid in $namespace"
+                    # Use label selector for safe, targeted deletion
+                    local ir_names=$(kubectl get internalrequest -n "${namespace}" \
+                        -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${plr_uid}" \
+                        -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)
+                    
+                    if [ -n "$ir_names" ]; then
+                        for ir_name in $ir_names; do
+                            echo "kubectl delete internalrequest/${ir_name} -n ${namespace} --timeout=30s" | tee -a "${old_resources_file}"
+                        done
+                    fi
+                done
+            fi
+        done
+    else
+        echo "InternalRequest CRD not found, skipping InternalRequest cleanup"
+    fi
+
+    # Clean up old PipelineRuns that may have accumulated
+    # PipelineRuns with originating-tool label
+    echo "🔍 Cleaning up old PipelineRuns..."
+    for namespace in $namespaces; do
+        echo "Checking for old PipelineRuns in namespace: $namespace"
+        kubectl get pipelinerun -n "${namespace}" -l originating-tool="${originating_tool}" -o go-template='{{range .items}}{{.metadata.namespace}}{{"\t"}}{{.metadata.name}}{{"\t"}}{{.metadata.creationTimestamp}}{{"\n"}}{{end}}' 2>/dev/null | \
+        awk -v cutoff_time="$(date -d "${age_minutes} minutes ago" +%s)" '
+        {
+            cmd = "date -d " $3 " +%s"
+            cmd | getline created_at
+            close(cmd)
+            if (created_at < cutoff_time) {
+                print "kubectl delete pipelinerun/" $2 " -n " $1 " --timeout=30s"
+            }
+        }
+        ' | tee -a "${old_resources_file}"
+    done
+    
+    # Clean up old TaskRuns (child resources of PipelineRuns)
+    # TaskRuns accumulate and should be cleaned with their parent PipelineRuns
+    echo "🔍 Cleaning up old TaskRuns..."
+    for namespace in $namespaces; do
+        echo "Checking for old TaskRuns in namespace: $namespace"
+        kubectl get taskrun -n "${namespace}" -l originating-tool="${originating_tool}" -o go-template='{{range .items}}{{.metadata.namespace}}{{"\t"}}{{.metadata.name}}{{"\t"}}{{.metadata.creationTimestamp}}{{"\n"}}{{end}}' 2>/dev/null | \
+        awk -v cutoff_time="$(date -d "${age_minutes} minutes ago" +%s)" '
+        {
+            cmd = "date -d " $3 " +%s"
+            cmd | getline created_at
+            close(cmd)
+            if (created_at < cutoff_time) {
+                print "kubectl delete taskrun/" $2 " -n " $1 " --timeout=30s"
+            }
+        }
+        ' | tee -a "${old_resources_file}"
+    done
+    
+    # NOTE: Snapshots are NOT cleaned up automatically as they may be referenced by
+    # other tests or resources. They are immutable and lightweight, so accumulation
+    # is not a significant concern.
 
     if [ -s "${old_resources_file}" ]; then
-        echo "Executing cleanup commands from ${old_resources_file}"
-        sh "${old_resources_file}"
+        echo "🧹 Executing cleanup commands from ${old_resources_file}"
+        sh "${old_resources_file}" || echo "⚠️  Some cleanup commands failed, continuing..."
     else
-        echo "No old resources found to clean up"
+        echo "✅ No old resources found to clean up"
     fi
     # re-enable exit on error
     set -e

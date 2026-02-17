@@ -2,9 +2,12 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-add-fbc-contribution-adaptive-256mi
+  name: test-add-fbc-contribution-adaptive-8gi
 spec:
-  description: Test adaptive parallelism with 256Mi memory limit (expects 1 worker)
+  description: >-
+    Test adaptive parallelism with 8Gi memory limit (expects 24 workers at cap).
+    This validates maximum safe parallelism with high memory and ensures
+    the cap prevents IIB overload even when memory allows more workers.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -81,14 +84,39 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
 
-              # Create snapshot with 3 OCP versions
+              # Create snapshot with 9 OCP versions to test max parallelism with excess memory
+              # This ensures no OOM even when memory is abundant
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
-                "application": "test-adaptive-256mi-app",
+                "application": "test-adaptive-8gi-app",
                 "components": [
                   {
+                    "name": "comp-4.12",
+                    "containerImage": "registry.io/image-4.12@sha256:000000",
+                    "repository": "prod-registry.io/prod-location-4.12",
+                    "ocpVersion": "4.12",
+                    "updatedFromIndex": "quay.io/test/index:v4.12",
+                    "targetIndex": "quay.io/test/target:v4.12"
+                  },
+                  {
+                    "name": "comp-4.13",
+                    "containerImage": "registry.io/image-4.13@sha256:aaa111",
+                    "repository": "prod-registry.io/prod-location-4.13",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp-4.14",
+                    "containerImage": "registry.io/image-4.14@sha256:bbb222",
+                    "repository": "prod-registry.io/prod-location-4.14",
+                    "ocpVersion": "4.14",
+                    "updatedFromIndex": "quay.io/test/index:v4.14",
+                    "targetIndex": "quay.io/test/target:v4.14"
+                  },
+                  {
                     "name": "comp-4.15",
-                    "containerImage": "registry.io/image-4.15@sha256:aaa111",
+                    "containerImage": "registry.io/image-4.15@sha256:ccc333",
                     "repository": "prod-registry.io/prod-location-4.15",
                     "ocpVersion": "4.15",
                     "updatedFromIndex": "quay.io/test/index:v4.15",
@@ -96,7 +124,7 @@ spec:
                   },
                   {
                     "name": "comp-4.16",
-                    "containerImage": "registry.io/image-4.16@sha256:bbb222",
+                    "containerImage": "registry.io/image-4.16@sha256:ddd444",
                     "repository": "prod-registry.io/prod-location-4.16",
                     "ocpVersion": "4.16",
                     "updatedFromIndex": "quay.io/test/index:v4.16",
@@ -104,11 +132,35 @@ spec:
                   },
                   {
                     "name": "comp-4.17",
-                    "containerImage": "registry.io/image-4.17@sha256:ccc333",
+                    "containerImage": "registry.io/image-4.17@sha256:eee555",
                     "repository": "prod-registry.io/prod-location-4.17",
                     "ocpVersion": "4.17",
                     "updatedFromIndex": "quay.io/test/index:v4.17",
                     "targetIndex": "quay.io/test/target:v4.17"
+                  },
+                  {
+                    "name": "comp-4.18",
+                    "containerImage": "registry.io/image-4.18@sha256:fff666",
+                    "repository": "prod-registry.io/prod-location-4.18",
+                    "ocpVersion": "4.18",
+                    "updatedFromIndex": "quay.io/test/index:v4.18",
+                    "targetIndex": "quay.io/test/target:v4.18"
+                  },
+                  {
+                    "name": "comp-4.19",
+                    "containerImage": "registry.io/image-4.19@sha256:ggg777",
+                    "repository": "prod-registry.io/prod-location-4.19",
+                    "ocpVersion": "4.19",
+                    "updatedFromIndex": "quay.io/test/index:v4.19",
+                    "targetIndex": "quay.io/test/target:v4.19"
+                  },
+                  {
+                    "name": "comp-4.20",
+                    "containerImage": "registry.io/image-4.20@sha256:hhh888",
+                    "repository": "prod-registry.io/prod-location-4.20",
+                    "ocpVersion": "4.20",
+                    "updatedFromIndex": "quay.io/test/index:v4.20",
+                    "targetIndex": "quay.io/test/target:v4.20"
                   }
                 ]
               }
@@ -126,7 +178,7 @@ spec:
               }
               EOF
 
-              echo "Test setup complete for 256Mi adaptive test"
+              echo "Test setup complete for 8Gi OOM prevention test"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -173,11 +225,11 @@ spec:
         - name: iibServiceAccountSecret
           value: "test-iib-secret"
         - name: overrideMemoryLimitMi
-          value: "256"
+          value: "8192"
       runAfter:
         - setup
 
-    - name: verify-adaptive-256mi
+    - name: verify-adaptive-8gi
       params:
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
@@ -225,24 +277,26 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              echo "=== ADAPTIVE 256Mi VERIFICATION ==="
+              echo "=== ADAPTIVE 8Gi OOM PREVENTION VERIFICATION ==="
+              echo "Expected: floor((8192Mi - 400Mi) / 274Mi) = floor(7792 / 274) = 28 → 24 workers (capped)"
+              echo "Purpose: Validate no OOM with high memory and confirm 24 worker cap for IIB protection"
 
               RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
               
-              # Verify results exist
+              # Verify results exist (confirms no OOM crash)
               if [[ ! -f "$RESULTS_FILE" ]]; then
-                echo "❌ Results file not found"
+                echo "❌ Results file not found - possible OOM crash"
                 exit 1
               fi
-              echo "✅ Results file exists"
+              echo "✅ Results file exists (no OOM crash)"
 
-              # Verify all 3 components processed
+              # Verify all 9 components processed successfully
               component_count=$(jq '.components | length' "$RESULTS_FILE")
-              if [[ "$component_count" -ne 3 ]]; then
-                echo "❌ Expected 3 components, found: $component_count"
+              if [[ "$component_count" -ne 9 ]]; then
+                echo "❌ Expected 9 components, found: $component_count (possible partial failure)"
                 exit 1
               fi
-              echo "✅ All 3 components processed"
+              echo "✅ All 9 components processed successfully (no OOM during processing)"
 
               # Get task logs to verify adaptive calculation
               TASK_POD=$(kubectl get pods \
@@ -253,32 +307,62 @@ spec:
                 TASK_LOGS=$(kubectl logs "$TASK_POD" -c step-add-contribution 2>/dev/null || echo "")
                 
                 # Verify test override was used
-                if echo "$TASK_LOGS" | grep -q "Using test override memory limit: 256Mi"; then
-                  echo "✅ Test override (256Mi) was applied"
+                if echo "$TASK_LOGS" | grep -q "Using test override memory limit: 8192Mi"; then
+                  echo "✅ Test override (8Gi) was applied"
                 else
                   echo "❌ Test override log not found"
                   exit 1
                 fi
                 
-                # Verify calculated 1 worker
-                if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers: 1"; then
-                  echo "✅ Correctly calculated 1 worker for 256Mi"
+                # Verify calculated 24 workers (capped despite excess memory)
+                if echo "$TASK_LOGS" | grep -q "Calculated optimal parallel workers: 24"; then
+                  echo "✅ Correctly calculated 24 workers for 8Gi (cap persists with high memory)"
                 else
-                  echo "❌ Did not calculate 1 worker for 256Mi"
+                  echo "❌ Did not calculate 24 workers for 8Gi"
                   exit 1
                 fi
                 
-                # Verify sequential processing (1 worker at a time)
-                if echo "$TASK_LOGS" | grep -q "Processing 3 OCP groups with maximum 1 parallel workers"; then
-                  echo "✅ Confirmed sequential processing with 1 worker"
+                # Verify cap was applied (not memory-limited)
+                if echo "$TASK_LOGS" | grep -q "capping at 24 to avoid IIB overload"; then
+                  echo "✅ Cap message found: 'capping at 24 to avoid IIB overload'"
+                  echo "   This confirms the limit is intentional IIB protection, not memory constraint"
+                else
+                  echo "ℹ️  Note: Cap message expected when calculated workers > 24"
+                fi
+                
+                # Verify max parallelism
+                if echo "$TASK_LOGS" | grep -q "Processing 9 OCP groups with maximum 24 parallel workers"; then
+                  echo "✅ Confirmed 9 OCP groups with 24 worker capacity (all launched simultaneously)"
                 else
                   echo "⚠️  Worker limit log not found"
+                fi
+                
+                # Check for any OOM indicators in logs
+                if echo "$TASK_LOGS" | grep -qi "out of memory\|oom\|killed\|cannot allocate"; then
+                  echo "❌ OOM indicators found in logs!"
+                  echo "$TASK_LOGS" | grep -i "out of memory\|oom\|killed\|cannot allocate"
+                  exit 1
+                else
+                  echo "✅ No OOM indicators in logs (stable with high memory)"
+                fi
+                
+                # With 9 OCP versions and 24 worker limit, all should run simultaneously
+                if echo "$TASK_LOGS" | grep -q "At parallel limit"; then
+                  echo "⚠️  Unexpected: hit parallel limit with 9 OCP versions and 24 worker capacity"
+                else
+                  echo "✅ All 9 OCP versions ran without hitting worker limit (9 < 24, all launched together)"
                 fi
               else
                 echo "⚠️  Could not verify logs (pod not found)"
               fi
 
-              echo "=== 256Mi ADAPTIVE TEST PASSED ==="
+              echo ""
+              echo "=== 8Gi ADAPTIVE TEST PASSED ==="
+              echo "Key Validations:"
+              echo "  ✅ No OOM crash with 8Gi memory"
+              echo "  ✅ All components processed successfully"
+              echo "  ✅ Cap at 24 workers enforced (not memory-limited)"
+              echo "  ✅ Validates production safety with higher memory limits"
       runAfter:
         - run-task
 
@@ -295,4 +379,4 @@ spec:
               kubectl delete internalrequests -l \
                 "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
 
-              echo "256Mi adaptive test cleanup completed"
+              echo "8Gi OOM prevention test cleanup completed"

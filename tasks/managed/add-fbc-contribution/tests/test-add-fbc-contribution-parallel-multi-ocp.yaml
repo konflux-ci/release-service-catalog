@@ -3,8 +3,18 @@ apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
   name: test-add-fbc-contribution-parallel-multi-ocp
+  annotations:
+    description: |
+      Test parallel processing of multiple OCP version groups with race condition detection.
+      Validates:
+      - Parallel execution of multiple OCP versions
+      - Exact N IRs created for N OCP versions (no duplicates)
+      - No IRs left without status (stuck IRs)
+      - No duplicate OCP version processing
+      - IR naming uniqueness in parallel execution
 spec:
-  description: Test parallel processing of multiple OCP version groups
+  description: |
+    Test parallel processing of multiple OCP version groups with comprehensive race condition detection
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -26,7 +36,34 @@ spec:
       description: The location where data will be stored
       type: string
   tasks:
+    - name: cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: cleanup
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Pre-test cleanup ==="
+              echo "Cleaning up old InternalRequests from previous test runs..."
+              kubectl get internalrequests 2>/dev/null || echo "None found"
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/group-id \
+                --timeout=30s 2>/dev/null || true
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/pipelinerun-uid \
+                --timeout=30s 2>/dev/null || true
+              kubectl get internalrequests -o name 2>/dev/null | \
+                grep "update-fbc-catalog" | \
+                xargs -r kubectl delete --timeout=30s 2>/dev/null || true
+              sleep 5
+              echo "Cleanup completed"
+    
     - name: setup
+      runAfter:
+        - cleanup-previous-runs
       taskSpec:
         results:
           - name: sourceDataArtifact
@@ -54,7 +91,9 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
 
-              # Create snapshot with 3 different OCP versions for parallel processing
+              # Create snapshot with 4 different OCP versions for parallel processing
+              # Using 4 instead of 3 to better detect race conditions
+              # (more opportunities for collisions)
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
                 "application": "test-parallel-app",
@@ -82,6 +121,14 @@ spec:
                     "ocpVersion": "4.14",
                     "updatedFromIndex": "quay.io/test/index:v4.14",
                     "targetIndex": "quay.io/test/target:v4.14"
+                  },
+                  {
+                    "name": "comp-4.15",
+                    "containerImage": "registry.io/image-4.15@sha256:jkl012",
+                    "repository": "prod-registry.io/prod-location-4.15",
+                    "ocpVersion": "4.15",
+                    "updatedFromIndex": "quay.io/test/index:v4.15",
+                    "targetIndex": "quay.io/test/target:v4.15"
                   }
                 ]
               }
@@ -100,7 +147,7 @@ spec:
               }
               EOF
 
-              echo "Test setup complete for parallel multi-OCP test"
+              echo "Test setup complete for parallel multi-OCP test (4 OCP versions)"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -198,58 +245,133 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              echo "=== PARALLEL EXECUTION VERIFICATION ==="
+              echo "=== PARALLEL EXECUTION & RACE CONDITION VERIFICATION ==="
 
               RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
               PIPELINE_UID="$(params.pipelineRunUid)"
+              EXPECTED_OCP_COUNT=4
               
-              # 1. Verify results file was created
+              # 1. Verify results file exists
               if [[ ! -f "$RESULTS_FILE" ]]; then
                 echo "❌ Results file not found: $RESULTS_FILE"
                 exit 1
               fi
               echo "✅ Results file exists"
 
-              # 2. Verify all 3 OCP versions are present in results
+              # 2. CRITICAL: Verify exact IR count (race condition check)
+              echo ""
+              echo "=== IR COUNT VERIFICATION (RACE DETECTION) ==="
+              ir_count=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers | wc -l)
+              
+              echo "Expected IRs: $EXPECTED_OCP_COUNT"
+              echo "Actual IRs:   $ir_count"
+              
+              if [[ "$ir_count" -ne "$EXPECTED_OCP_COUNT" ]]; then
+                echo ""
+                echo "❌❌❌ RACE CONDITION DETECTED ❌❌❌"
+                echo "Expected $EXPECTED_OCP_COUNT InternalRequests, found: $ir_count"
+                echo ""
+                echo "All InternalRequests for this pipeline:"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                  -o wide
+                echo ""
+                echo "Detailed status of each IR:"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                  -o json | jq -r '.items[] | "\(.metadata.name): \(.status.conditions[0].status 
+                  // "NO_STATUS") - \(.status.conditions[0].reason // "NO_REASON")"'
+                exit 1
+              fi
+              echo "✅ Correct number of IRs created (parallel execution confirmed)"
+
+              # 3. CRITICAL: Check for IRs without status (stuck IRs)
+              echo ""
+              echo "=== STUCK IR DETECTION ==="
+              stuck_irs=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[] | select(.status.conditions == null 
+                or .status.conditions == [] or .status.conditions[0].status == "") 
+                | .metadata.name')
+              
+              if [[ -n "$stuck_irs" ]]; then
+                echo ""
+                echo "❌❌❌ STUCK IRs DETECTED ❌❌❌"
+                echo "The following IRs have no status (likely race condition in status patching):"
+                echo "$stuck_irs"
+                echo ""
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                  -o yaml
+                exit 1
+              fi
+              echo "✅ No stuck IRs detected"
+
+              # 4. Verify all expected OCP versions present
+              echo ""
+              echo "=== OCP VERSION VERIFICATION ==="
               component_count=$(jq '.components | length' "$RESULTS_FILE")
-              if [[ "$component_count" -ne 3 ]]; then
-                echo "❌ Expected 3 components, found: $component_count"
+              if [[ "$component_count" -ne "$EXPECTED_OCP_COUNT" ]]; then
+                echo "❌ Expected $EXPECTED_OCP_COUNT components, found: $component_count"
                 jq . "$RESULTS_FILE"
                 exit 1
               fi
-              echo "✅ All 3 components present in results"
+              echo "✅ Correct component count in results"
 
-              # 3. Verify OCP versions are correct
               ocp_versions=$(jq -r '.components[].ocp_version' "$RESULTS_FILE" | sort -u | tr '\n' ' ' | sed 's/ $//')
-              expected="4.12 4.13 4.14"
+              expected="4.12 4.13 4.14 4.15"
               if [[ "$ocp_versions" != "$expected" ]]; then
                 echo "❌ OCP versions mismatch. Expected: $expected, Got: $ocp_versions"
                 exit 1
               fi
               echo "✅ OCP versions correct: $ocp_versions"
 
-              # 4. Verify 3 InternalRequests were created (one per OCP version)
-              ir_count=$(kubectl get internalrequests \
+              # 5. Verify IR name uniqueness
+              echo ""
+              echo "=== IR NAME UNIQUENESS CHECK ==="
+              ir_names=$(kubectl get internalrequests \
                 -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
-                --no-headers | wc -l)
-              if [[ "$ir_count" -ne 3 ]]; then
-                echo "❌ Expected 3 InternalRequests, found: $ir_count"
-                kubectl get internalrequests \
-                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+                --no-headers -o custom-columns=":metadata.name")
+              unique_ir_names=$(echo "$ir_names" | sort -u)
+              
+              ir_count_total=$(echo "$ir_names" | wc -l)
+              ir_count_unique=$(echo "$unique_ir_names" | wc -l)
+              
+              if [[ "$ir_count_total" -ne "$ir_count_unique" ]]; then
+                echo "❌ Duplicate IR names detected!"
+                echo "Total IRs: $ir_count_total"
+                echo "Unique names: $ir_count_unique"
+                echo "All IR names:"
+                echo "$ir_names"
                 exit 1
               fi
-              echo "✅ 3 InternalRequests created (parallel execution confirmed)"
+              echo "✅ All IR names are unique"
 
-              # 5. Verify parallel tracking directory was created
+              # 6. Verify no duplicate OCP processing
+              echo ""
+              echo "=== DUPLICATE OCP PROCESSING CHECK ==="
+              ocp_in_results=$(jq -r '.components[].ocp_version' "$RESULTS_FILE" | sort)
+              ocp_unique=$(echo "$ocp_in_results" | sort -u)
+              
+              if [[ "$ocp_in_results" != "$ocp_unique" ]]; then
+                echo "❌ Duplicate OCP versions in results (same OCP processed twice):"
+                echo "$ocp_in_results"
+                exit 1
+              fi
+              echo "✅ No duplicate OCP processing detected"
+
+              # 7. Verify parallel tracking directory structure
+              echo ""
+              echo "=== PARALLEL TRACKING VERIFICATION ==="
               parallel_dir="$(params.dataDir)/parallel-tracking"
               if [[ ! -d "$parallel_dir" ]]; then
                 echo "❌ Parallel tracking directory not found: $parallel_dir"
                 exit 1
               fi
-              echo "✅ Parallel tracking directory exists"
-
-              # 6. Verify status files for each OCP version
-              for ocp in "4.12" "4.13" "4.14"; do
+              
+              for ocp in "4.12" "4.13" "4.14" "4.15"; do
                 status_file="${parallel_dir}/${ocp}.status"
                 if [[ ! -f "$status_file" ]]; then
                   echo "❌ Status file missing for OCP $ocp: $status_file"
@@ -260,11 +382,13 @@ spec:
                   echo "❌ Status file for OCP $ocp has unexpected content: $status"
                   exit 1
                 fi
-                echo "✅ OCP $ocp status file valid"
               done
+              echo "✅ Parallel tracking structure correct"
 
-              # 7. Verify each component has correct target_index
-              for i in 0 1 2; do
+              # 8. Verify each component has correct target_index
+              echo ""
+              echo "=== TARGET INDEX VERIFICATION ==="
+              for i in 0 1 2 3; do
                 target=$(jq -r ".components[$i].target_index" "$RESULTS_FILE")
                 ocp=$(jq -r ".components[$i].ocp_version" "$RESULTS_FILE")
                 expected_target="quay.io/test/target:v${ocp}"
@@ -275,8 +399,31 @@ spec:
                 echo "✅ Component $i target_index correct: $target"
               done
 
-              # 8. Verify adaptive parallelism logs (confirms adaptive calculation ran)
-              echo "=== Verifying Adaptive Parallelism Logs ==="
+              # 9. Performance metrics
+              echo ""
+              echo "=== PERFORMANCE METRICS ==="
+              
+              # Get IR creation timestamps
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[] | "\(.metadata.name): created at \(.metadata.creationTimestamp)"'
+              
+              # Calculate time span
+              first_created=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[].metadata.creationTimestamp' | sort | head -1)
+              last_created=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[].metadata.creationTimestamp' | sort | tail -1)
+              
+              echo ""
+              echo "First IR created: $first_created"
+              echo "Last IR created:  $last_created"
+              echo "Time span: $(($(date -d "$last_created" +%s) - $(date -d "$first_created" +%s))) seconds"
+
+              # 10. Verify adaptive parallelism logs (confirms adaptive calculation ran)
+              echo ""
+              echo "=== ADAPTIVE PARALLELISM VERIFICATION ==="
               
               # Get task pod logs
               TASK_POD=$(kubectl get pods \
@@ -309,8 +456,18 @@ spec:
                   echo "⚠️  Could not retrieve task logs (non-critical)"
                 fi
               fi
-
-              echo "=== ALL PARALLEL EXECUTION CHECKS PASSED ==="
+              
+              echo ""
+              echo "=== ALL CHECKS PASSED ==="
+              echo "✅ Exact IR count: $ir_count == $EXPECTED_OCP_COUNT"
+              echo "✅ No stuck IRs"
+              echo "✅ All OCP versions present"
+              echo "✅ No duplicate IR names"
+              echo "✅ No duplicate OCP processing"
+              echo "✅ Parallel tracking correct"
+              echo "✅ Target indexes correct"
+              echo ""
+              echo "🎉 NO RACE CONDITIONS DETECTED 🎉"
       runAfter:
         - run-task
 
@@ -327,4 +484,4 @@ spec:
               kubectl delete internalrequests -l \
                 "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
 
-              echo "Parallel multi-OCP test cleanup completed"
+              echo "Parallel multi-OCP test cleanup completed (4 OCP versions)"

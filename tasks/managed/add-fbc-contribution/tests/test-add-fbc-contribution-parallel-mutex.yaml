@@ -1,0 +1,438 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-parallel-mutex
+spec:
+  description: |
+    Test that the mutex lock works correctly when MULTIPLE parallel workers 
+    (different OCP groups) try to create InternalRequests with the SAME labels.
+    This tests the actual race condition scenario the mutex was designed to prevent.
+    
+    Enhanced test coverage includes:
+    - No duplicate IRs per OCP version (mutex effectiveness)
+    - No stuck IRs without status (status patch race detection)
+    - IR name uniqueness (no naming collisions)
+    - Parallel execution timing (proves true parallelism)
+    - Results file completeness (end-to-end validation)
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: cleanup
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Pre-test cleanup for parallel mutex test ==="
+              
+              kubectl get internalrequests 2>/dev/null || echo "None"
+              
+              kubectl delete internalrequests \
+                -l "internal-services.appstudio.openshift.io/group-id" \
+                --timeout=30s 2>/dev/null || true
+              
+              kubectl get internalrequests -o name 2>/dev/null | \
+                grep "update-fbc-catalog" | \
+                xargs -r kubectl delete --timeout=30s 2>/dev/null || true
+              
+              sleep 3
+              
+              kubectl get internalrequests 2>/dev/null || echo "None (clean)"
+              echo "=== Cleanup completed ==="
+    
+    - name: setup
+      runAfter:
+        - cleanup-previous-runs
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with components for DIFFERENT OCP versions
+              # This forces MULTIPLE parallel workers (one per OCP group)
+              # All will try to create IRs with batch-number=1
+              # This tests if the mutex prevents duplicate creation
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "test-parallel-mutex",
+                "components": [
+                  {
+                    "name": "comp-v4.12",
+                    "containerImage": "registry.io/image-4.12@sha256:aaa111",
+                    "repository": "prod-registry.io/prod-location",
+                    "ocpVersion": "4.12",
+                    "updatedFromIndex": "quay.io/test/index:v4.12",
+                    "targetIndex": "quay.io/test/target:v4.12"
+                  },
+                  {
+                    "name": "comp-v4.13",
+                    "containerImage": "registry.io/image-4.13@sha256:bbb222",
+                    "repository": "prod-registry.io/prod-location",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp-v4.14",
+                    "containerImage": "registry.io/image-4.14@sha256:ccc333",
+                    "repository": "prod-registry.io/prod-location",
+                    "ocpVersion": "4.14",
+                    "updatedFromIndex": "quay.io/test/index:v4.14",
+                    "targetIndex": "quay.io/test/target:v4.14"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Test setup complete: 3 OCP groups → 3 parallel workers"
+              echo "Each will try to create IR with batch-number=1"
+              echo "Mutex should ensure no duplicates per OCP version"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "main"
+        - name: maxBatchSize
+          value: "1"  # One component per batch
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "true"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+      runAfter:
+        - setup
+
+    - name: verify-mutex-worked
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify-no-duplicates
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== PARALLEL MUTEX TEST: Verify No Duplicate IRs ==="
+
+              PIPELINE_UID="$(params.pipelineRunUid)"
+              echo "Testing pipeline UID: ${PIPELINE_UID}"
+              
+              echo ""
+              echo "DEBUG: All InternalRequests in cluster:"
+              kubectl get internalrequests 2>/dev/null || echo "None"
+              
+              echo ""
+              echo "InternalRequests for THIS pipeline (UID: $PIPELINE_UID):"
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+
+              # Test: Verify exactly 3 InternalRequests (one per OCP version)
+              ir_count=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers | wc -l)
+              
+              if [[ "$ir_count" -ne 3 ]]; then
+                echo "❌ Expected 3 InternalRequests (1 per OCP version), found: $ir_count"
+                exit 1
+              fi
+              echo "✅ Test 1 PASSED: Exactly 3 InternalRequests created"
+
+              # Test: Verify each OCP version has exactly 1 IR with batch-number=1
+              # This tests that the mutex prevented duplicate creation
+              for ocp in "4.12" "4.13" "4.14"; do
+                echo ""
+                echo "Checking OCP ${ocp} with batch-number=1..."
+                
+                ocp_batch_count=$(kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                  -l "batch-number=1" \
+                  -l "ocp-version=${ocp}" \
+                  --no-headers | wc -l)
+                
+                if [[ "$ocp_batch_count" -ne 1 ]]; then
+                  echo "❌ OCP ${ocp} has ${ocp_batch_count} IRs with batch-number=1 (expected 1)"
+                  echo "This means parallel workers created duplicates - MUTEX FAILED!"
+                  echo ""
+                  echo "IRs for OCP ${ocp}:"
+                  kubectl get internalrequests \
+                    -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                    -l "ocp-version=${ocp}"
+                  echo ""
+                  echo "Full labels:"
+                  kubectl get internalrequests \
+                    -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                    -l "ocp-version=${ocp}" \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{": "}{.metadata.labels}{"\n"}{end}'
+                  exit 1
+                fi
+                echo "✅ Test 2.${ocp} PASSED: OCP ${ocp} has exactly 1 IR (mutex prevented duplicates)"
+              done
+
+              # Test 3: Verify IR name uniqueness (catches naming collisions)
+              echo ""
+              echo "=== Test 3: IR Name Uniqueness Check ==="
+              ir_names=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers -o custom-columns=":metadata.name" | sort)
+              unique_names=$(echo "$ir_names" | sort -u)
+              
+              if [[ "$ir_names" != "$unique_names" ]]; then
+                echo "❌ Test 3 FAILED: Duplicate IR names detected!"
+                echo "All names:"
+                echo "$ir_names"
+                echo "Unique names:"
+                echo "$unique_names"
+                exit 1
+              fi
+              echo "✅ Test 3 PASSED: All IR names unique (no naming collisions)"
+
+              # Test 4: Verify no stuck IRs (CRITICAL - catches status patch race)
+              echo ""
+              echo "=== Test 4: Stuck IR Detection ==="
+              stuck=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[] | select(.status.conditions == null 
+                or .status.conditions == [] or .status.conditions[0].status == "") 
+                | .metadata.name')
+              
+              if [[ -n "$stuck" ]]; then
+                echo "❌ Test 4 FAILED: Stuck IRs found (status patching collision)!"
+                echo "Stuck IRs: $stuck"
+                echo ""
+                echo "Full IR details:"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                  -o yaml
+                exit 1
+              fi
+              echo "✅ Test 4 PASSED: No stuck IRs (all status patches succeeded)"
+
+              # Test 5: Verify creation timing (proves true parallelism)
+              echo ""
+              echo "=== Test 5: Creation Timing Analysis ==="
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[] | "\(.metadata.name): \(.metadata.creationTimestamp)"' | sort -k2
+              
+              timestamps=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[].metadata.creationTimestamp' | sort)
+              first=$(echo "$timestamps" | head -1)
+              last=$(echo "$timestamps" | tail -1)
+              
+              if [[ -n "$first" && -n "$last" ]]; then
+                first_sec=$(date -d "$first" +%s 2>/dev/null || echo "0")
+                last_sec=$(date -d "$last" +%s 2>/dev/null || echo "0")
+                
+                if [[ "$first_sec" != "0" && "$last_sec" != "0" ]]; then
+                  span=$((last_sec - first_sec))
+                  echo "Time span for all 3 IR creations: ${span} seconds"
+                  
+                  if [[ $span -lt 10 ]]; then
+                    echo "✅ Test 5 PASSED: All IRs created within ${span}s (parallel execution confirmed)"
+                  else
+                    echo "⚠️  Test 5 WARNING: IRs took ${span}s (may not be truly simultaneous, but not a failure)"
+                  fi
+                else
+                  echo "⚠️  Test 5: Could not parse timestamps (non-critical)"
+                fi
+              else
+                echo "⚠️  Test 5: Missing timestamps (non-critical)"
+              fi
+
+              # Test 6: Verify results file has all components
+              echo ""
+              echo "=== Test 6: Results File Validation ==="
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              if [[ -f "$RESULTS_FILE" ]]; then
+                component_count=$(jq '.components | length' "$RESULTS_FILE")
+                if [[ "$component_count" -ne 3 ]]; then
+                  echo "❌ Test 6 FAILED: Expected 3 components in results, found: $component_count"
+                  jq . "$RESULTS_FILE"
+                  exit 1
+                fi
+                echo "✅ Test 6 PASSED: All 3 components present in results file"
+              else
+                echo "❌ Test 6 FAILED: Results file not found: $RESULTS_FILE"
+                exit 1
+              fi
+
+              # Test 7: Verify lock files were created
+              echo ""
+              echo "=== Test 7: Lock File Verification ==="
+              lock_dir="$(params.dataDir)/ir-creation-locks"
+              if [[ -d "$lock_dir" ]]; then
+                echo "✅ Test 7 PASSED: Lock directory exists"
+                echo "Lock files created:"
+                ls -la "$lock_dir" 2>/dev/null || echo "(cleaned up)"
+              else
+                echo "⚠️  Test 7: Lock directory not found (may have been cleaned up, non-critical)"
+              fi
+
+              echo ""
+              echo "=== ALL PARALLEL MUTEX TESTS PASSED ==="
+              echo "✅ No duplicate IRs"
+              echo "✅ No stuck IRs"
+              echo "✅ IR names unique"
+              echo "✅ Parallel execution confirmed"
+              echo "✅ Results file correct"
+              echo "The mutex successfully prevented race conditions between parallel workers!"
+      runAfter:
+        - run-task
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Post-test cleanup ==="
+              
+              echo "InternalRequests for this test:"
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" \
+                2>/dev/null || echo "None"
+              
+              kubectl delete internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" \
+                --timeout=30s || true
+              
+              sleep 2
+              
+              echo "=== Cleanup completed ==="

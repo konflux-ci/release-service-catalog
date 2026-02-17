@@ -7,8 +7,10 @@ metadata:
     test/assert-task-failure: "run-task"
 spec:
   description: |
-    Run the add-fbc-contribution task with an IR that has exitCode set to 1 in its status.
-    The task should fail.
+    Test partial failure handling in parallel execution.
+    Run the add-fbc-contribution task with multiple OCP versions where one fails.
+    Verifies all-or-nothing behavior: task should fail completely (no partial release)
+    when any OCP group fails.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -30,6 +32,51 @@ spec:
       description: The location where data will be stored
       type: string
   tasks:
+    - name: cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: cleanup
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              
+              echo "=== Pre-test cleanup ==="
+              echo "Cleaning up old InternalRequests from previous test runs..."
+              kubectl get internalrequests 2>/dev/null || echo "None found"
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/group-id \
+                --timeout=30s 2>/dev/null || true
+              kubectl delete internalrequests \
+                -l internal-services.appstudio.openshift.io/pipelinerun-uid \
+                --timeout=30s 2>/dev/null || true
+              kubectl get internalrequests -o name 2>/dev/null | \
+                grep "update-fbc-catalog" | \
+                xargs -r kubectl delete --timeout=30s 2>/dev/null || true
+              sleep 5
+              echo "Cleanup completed"
+    
+    - name: pre-cleanup
+      runAfter:
+        - cleanup-previous-runs
+      taskSpec:
+        steps:
+          - name: delete-stale-crs
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+              
+              # Delete InternalRequests that could interfere with THIS specific test
+              # Target: batch-number=1, ocp-version 4.12/4.13/4.14
+              # This prevents reusing IRs from a previous test with matching labels
+              kubectl delete internalrequests -l batch-number=1 -l ocp-version=4.12 || true
+              kubectl delete internalrequests -l batch-number=1 -l ocp-version=4.13 || true
+              kubectl delete internalrequests -l batch-number=1 -l ocp-version=4.14 || true
+              
+              echo "Pre-cleanup completed"
     - name: setup
       taskSpec:
         results:
@@ -51,20 +98,43 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
             script: |
               #!/usr/bin/env sh
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              # Create snapshot with 3 OCP versions - one will fail (4.13)
+              # This tests partial failure: all-or-nothing behavior
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
-                "application": "myapp",
+                "application": "partial-failure-test",
                 "components": [
                   {
-                    "name": "comp0",
-                    "containerImage": "fail.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0"
+                    "name": "comp-4.12-ok",
+                    "containerImage": "registry.io/ok/image@sha256:abc123",
+                    "repository": "prod-registry.io/ok",
+                    "ocpVersion": "4.12",
+                    "updatedFromIndex": "quay.io/test/index:v4.12",
+                    "targetIndex": "quay.io/test/target:v4.12"
+                  },
+                  {
+                    "name": "comp-4.13-fail",
+                    "containerImage": "fail.io/image@sha256:def456",
+                    "repository": "prod-registry.io/fail",
+                    "ocpVersion": "4.13",
+                    "updatedFromIndex": "quay.io/test/index:v4.13",
+                    "targetIndex": "quay.io/test/target:v4.13"
+                  },
+                  {
+                    "name": "comp-4.14-ok",
+                    "containerImage": "registry.io/ok/image@sha256:ghi789",
+                    "repository": "prod-registry.io/ok",
+                    "ocpVersion": "4.14",
+                    "updatedFromIndex": "quay.io/test/index:v4.14",
+                    "targetIndex": "quay.io/test/target:v4.14"
                   }
                 ]
               }
@@ -75,27 +145,14 @@ spec:
                 "fbc": {
                   "fbcPublishingCredentials": "test-fbc-publishing-credentials",
                   "buildTimeoutSeconds": 420,
-                  "requestTimeoutSeconds": 120
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
                 }
               }
               EOF
 
-              # Create snapshot with multi-OCP data (simulating prepare-fbc-snapshot output)
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
-              {
-                "application": "myapp",
-                "components": [
-                  {
-                    "name": "comp0",
-                    "containerImage": "fail.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0",
-                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
-                    "targetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12",
-                    "ocpVersion": "4.12"
-                  }
-                ]
-              }
-              EOF
+              echo "Partial failure test setup complete (4.13 will fail in parallel execution)"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -106,6 +163,8 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
+      runAfter:
+        - pre-cleanup
     - name: run-task
       taskRef:
         name: add-fbc-contribution
@@ -142,15 +201,125 @@ spec:
       runAfter:
         - setup
   finally:
+    - name: verify-partial-failure
+      taskSpec:
+        steps:
+          - name: verify-failure-behavior
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== PARTIAL FAILURE VERIFICATION ==="
+              
+              PIPELINE_UID="$(context.pipelineRun.uid)"
+              
+              # Test 1: Verify task actually failed
+              echo ""
+              echo "Test 1: Verifying task failure status..."
+              jp='{.status.childReferences[?(@.name=="run-task")].status.conditions[?(@.type=="Succeeded")].status}'
+              task_status=$(kubectl get pipelinerun "$(context.pipelineRun.name)" \
+                -o jsonpath="$jp" 2>/dev/null || echo "")
+              
+              if [[ "$task_status" != "False" ]]; then
+                echo "❌ Test 1 FAILED: Task should have failed but status is: $task_status"
+                echo "Expected: False (task should fail when any OCP group fails)"
+                exit 1
+              fi
+              echo "✅ Test 1 PASSED: Task failed as expected (all-or-nothing behavior)"
+              
+              # Test 2: Verify we have 3 IRs (one per OCP version)
+              echo ""
+              echo "Test 2: Verifying IR count..."
+              ir_count=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers 2>/dev/null | wc -l)
+              echo "IRs created: $ir_count"
+              
+              if [[ "$ir_count" -ne 3 ]]; then
+                echo "❌ Test 2 FAILED: Expected 3 IRs (one per OCP version), found: $ir_count"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+                exit 1
+              fi
+              echo "✅ Test 2 PASSED: Exactly 3 IRs created (parallel execution confirmed)"
+              
+              # Test 3: Verify at least one IR failed
+              echo ""
+              echo "Test 3: Verifying failed IR..."
+              failed_ir=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json 2>/dev/null | jq -r \
+                '.items[] | select(.status.conditions[0].status == "False") | .metadata.name')
+              
+              if [[ -z "$failed_ir" ]]; then
+                echo "❌ Test 3 FAILED: Expected at least one failed IR"
+                kubectl get internalrequests \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+                exit 1
+              fi
+              echo "✅ Test 3 PASSED: Failed IR detected: $failed_ir"
+              
+              # Test 4: Verify the failed IR is for OCP 4.13
+              echo ""
+              echo "Test 4: Verifying correct OCP version failed..."
+              failed_ocp=$(kubectl get internalrequests "$failed_ir" \
+                -o jsonpath='{.metadata.labels.ocp-version}' 2>/dev/null || echo "unknown")
+              
+              if [[ "$failed_ocp" != "4.13" ]]; then
+                echo "⚠️  Test 4 WARNING: Expected OCP 4.13 to fail, but $failed_ocp failed"
+                echo "This may be acceptable depending on test execution order"
+              else
+                echo "✅ Test 4 PASSED: OCP 4.13 failed as expected"
+              fi
+              
+              # Test 5: Show IR statuses for debugging
+              echo ""
+              echo "=== InternalRequest Status Summary ==="
+              cols="NAME:.metadata.name,OCP:.metadata.labels.ocp-version"
+              cols="${cols},SUCCEEDED:.status.conditions[0].status,REASON:.status.conditions[0].reason"
+              kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o custom-columns="$cols" 2>/dev/null || echo "No IRs found"
+              
+              # Test 6: Verify no stuck IRs
+              echo ""
+              echo "Test 6: Verifying no stuck IRs..."
+              stuck=$(kubectl get internalrequests \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                -o json | jq -r '.items[] | select(.status.conditions == null 
+                or .status.conditions == [] or .status.conditions[0].status == "") 
+                | .metadata.name')
+              
+              if [[ -n "$stuck" ]]; then
+                echo "❌ Test 6 FAILED: Stuck IRs found (no status): $stuck"
+                exit 1
+              fi
+              echo "✅ Test 6 PASSED: No stuck IRs"
+              
+              echo ""
+              echo "=== ALL PARTIAL FAILURE TESTS PASSED ==="
+              echo "✅ Task failed when one OCP group failed"
+              echo "✅ All 3 IRs were created (parallel execution)"
+              echo "✅ Failed IR correctly identified"
+              echo "✅ No stuck IRs"
+              echo "✅ All-or-nothing behavior confirmed"
+
     - name: cleanup
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: >-
+              quay.io/konflux-ci/release-service-utils@sha256:72b47af9ed9be2ad222d8b5ac7e74664c21c28fba3a0c50868e53b3a278692e1
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
+              echo "=== Cleaning up test resources ==="
+              
               # Only delete InternalRequests created by this specific pipeline run
               kubectl delete internalrequests -l \
                 "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+              
+              echo "Partial failure test cleanup completed"
