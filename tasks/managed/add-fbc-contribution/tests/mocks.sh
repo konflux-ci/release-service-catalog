@@ -20,43 +20,17 @@ function internal-request() {
   # Use a unique temp file for each internal-request call to avoid race conditions in parallel execution
   local ir_output_file
   ir_output_file="$WORKDIR/ir-output-${PIPELINE_UID:-default}-$$.tmp"
-  
-  # Count existing IRs before creating new one to track which one we created
-  local ir_count_before=0
-  if [ -n "$PIPELINE_UID" ]; then
-    ir_count_before=$(kubectl get internalrequest \
-      -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
-      --no-headers 2>/dev/null | wc -l)
-  fi
-  
   /home/utils/internal-request "$@" -s false | tee "$ir_output_file"
+
+  sleep 1
   
-  # Extract the IR name from the captured output
+  # Extract the IR name from the captured output specific to this pipeline
   IR_NAME=$(awk -F"'" '/created/ { print $2 }' "$ir_output_file")
   
   if [ -z "$IR_NAME" ]; then
-      # Poll for the new IR to appear (wait up to 10 seconds)
+      # Fallback: try to find IR with matching pipeline UID label
       if [ -n "$PIPELINE_UID" ]; then
-        echo "Waiting for InternalRequest to be created for pipeline UID: ${PIPELINE_UID}..."
-        for attempt in {1..20}; do
-          sleep 0.5
-          local ir_count_after
-          ir_count_after=$(kubectl get internalrequest \
-            -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
-            --no-headers 2>/dev/null | wc -l)
-          
-          if [ "$ir_count_after" -gt "$ir_count_before" ]; then
-            # New IR appeared, get the most recent one for this pipeline
-            IR_NAME=$(kubectl get internalrequest \
-              -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
-              --no-headers -o custom-columns=":metadata.name" \
-              --sort-by=.metadata.creationTimestamp 2>/dev/null | tail -1)
-            if [ -n "$IR_NAME" ]; then
-              echo "Found InternalRequest: $IR_NAME (attempt $attempt)"
-              break
-            fi
-          fi
-        done
+        IR_NAME=$(kubectl get internalrequest -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" --no-headers -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp | tail -1)
       fi
       
       # Final fallback to the original method
@@ -78,9 +52,9 @@ function internal-request() {
   # The parameter comes in format: -p fbcFragments=["fail.io/image0@sha256:0000"]
   # Any image with "fail.io" in the registry/path will trigger a failure
   if [[ "$*" =~ fbcFragments=.*fail\.io ]]; then
-      set_ir_status "$IR_NAME" 1
+      set_ir_status $IR_NAME 1
   else
-      set_ir_status "$IR_NAME" 0
+      set_ir_status $IR_NAME 0
   fi
 }
 
@@ -89,21 +63,6 @@ function set_ir_status() {
     EXITCODE=$2
     local WORKDIR="${WORKDIR:-/var/workdir/release}"
     PATCH_FILE="$WORKDIR/${NAME}-patch.json"
-    
-    # Wait for the IR to actually exist before trying to patch it
-    echo "Waiting for InternalRequest $NAME to be created..."
-    for wait_attempt in {1..30}; do
-      if kubectl get internalrequest "$NAME" &>/dev/null; then
-        echo "InternalRequest $NAME found (attempt $wait_attempt)"
-        break
-      fi
-      if [ $wait_attempt -eq 30 ]; then
-        echo "ERROR: InternalRequest $NAME not found after 15 seconds"
-        kubectl get internalrequest --no-headers
-        return 1
-      fi
-      sleep 0.5
-    done
 
     # Determine condition status based on exit code - matches internal-services behavior
     if [ "${EXITCODE}" -eq 0 ]; then

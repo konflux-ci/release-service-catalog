@@ -454,35 +454,28 @@ spec:
                     pids=("${new_pids[@]}")
                 done
                 
-                # Capture loop variable in local variable to avoid race condition in background process
-                local current_ocp_version="$ocp_version"
-                local group_file="${groups_dir}/${current_ocp_version}.json"
-                
-                # Validate group file exists and is readable before launching worker
-                if [ ! -r "$group_file" ]; then
-                    echo "ERROR: Group file not found or not readable for OCP $current_ocp_version: $group_file"
-                    exit 1
-                fi
-                
+                local group_file="${groups_dir}/${ocp_version}.json"
                 launched_count=$((launched_count + 1))
-                echo "INFO: Launching worker $launched_count/$total_groups for OCP group: $current_ocp_version"
+                echo "INFO: Launching worker $launched_count/$total_groups for OCP group: $ocp_version"
+
+                local group_components
+                group_components=$(cat "$group_file")
 
                 (
-                    set -euo pipefail
+                    set -e
                     
-                    echo "INFO: [Parallel Worker $current_ocp_version] Starting processing"
+                    echo "INFO: [Parallel Worker $ocp_version] Starting processing"
                     
-                    # Pass file path instead of content to avoid word-splitting issues
-                    process_ocp_group "$current_ocp_version" "$group_file"
+                    process_ocp_group "$ocp_version" "$group_components"
                     
-                    echo "SUCCESS" > "${parallel_dir}/${current_ocp_version}.status"
-                    echo "INFO: [Parallel Worker $current_ocp_version] Completed successfully"
+                    echo "SUCCESS" > "${parallel_dir}/${ocp_version}.status"
+                    echo "INFO: [Parallel Worker $ocp_version] Completed successfully"
                 ) &
                 
                 local pid=$!
                 pids+=("$pid")
-                pid_to_ocp+=("$pid:$current_ocp_version")
-                echo "INFO: Launched worker for OCP $current_ocp_version (PID: $pid)" \
+                pid_to_ocp+=("$pid:$ocp_version")
+                echo "INFO: Launched worker for OCP $ocp_version (PID: $pid)" \
                      "[Active workers: ${#pids[@]}/$max_parallel_workers]"
             done
 
@@ -549,16 +542,9 @@ spec:
         # Process OCP group
         process_ocp_group() {
             local group_ocp_version="$1"
-            local group_file="$2"
+            local group_components="$2"
 
             echo "INFO: Processing OCP group $group_ocp_version"
-
-            # Read and validate group components JSON file
-            local group_components
-            if ! group_components=$(jq -c '.' "$group_file"); then
-                echo "ERROR: Failed to parse JSON from group file: $group_file"
-                exit 1
-            fi
 
             # Create per-worker results file to avoid concurrent write conflicts
             local worker_results_file="${parallel_dir}/${group_ocp_version}-results.json"
@@ -653,11 +639,6 @@ spec:
                 echo "Executing group batch $((batch_num + 1)): fromIndex=${from_index}" \
                     "(OCP: $group_ocp_version)"
 
-                # Define batch file paths
-                local batch_file_prefix
-                batch_file_prefix="$(params.dataDir)/ir-$(context.taskRun.uid)"
-                batch_file_prefix="${batch_file_prefix}-${group_ocp_version}-batch-$((batch_num + 1))"
-
                 # Get batch fragments
                 local batch_fragments
                 batch_fragments=$(get_batch_fragments "$batch_num")
@@ -681,12 +662,12 @@ spec:
                     --pipeline-timeout "${pipeline_timeout}" \
                     --task-timeout "${task_timeout}" \
                     -t "${request_timeout_seconds}" \
-                    | tee "${batch_file_prefix}-output.log"
+                    | tee "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log"
 
                 # Extract request name
                 local internalRequest
                 internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-                    "${batch_file_prefix}-output.log")
+                    "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log")
 
                 # Validate internal request succeeded
                 local request_status
@@ -716,7 +697,7 @@ spec:
                 fi
 
                 # Store results for this batch
-                echo "${results}" > "${batch_file_prefix}-result.json"
+                echo "${results}" > "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-result.json"
 
                 # Process results for each fragment in this batch
                 local decompressed_json_build_info
@@ -776,8 +757,7 @@ spec:
 
                     # Extract latest IIB index image for next batch (only when not overwriting)
                     if [ "${mustOverwriteFromIndexImage}" = "false" ]; then
-                        result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-${group_ocp_version}"
-                        result_file="${result_file}-batch-$((batch_num + 1))-result.json"
+                        result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-result.json"
                         batch_results=$(cat "${result_file}")
                         group_latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
                             base64 -d | gunzip | jq -r '.index_image')
@@ -817,7 +797,7 @@ spec:
                         # Add to successful batches and extract latest IIB index image (only when not overwriting)
                         group_successful_batches+=("$batch_num")
                         if [ "${mustOverwriteFromIndexImage}" = "false" ]; then
-                            result_file="$(params.dataDir)/ir-$(context.taskRun.uid)-${group_ocp_version}"
+                            result_file="$(params.dataDir)/ir-$(context.taskRun.uid)"
                             result_file+="-batch-$((batch_num + 1))-result.json"
                             batch_results=$(cat "${result_file}")
                             group_latest_iib_index_image=$(jq -r '.jsonBuildInfo' <<< "${batch_results}" | \
@@ -893,26 +873,15 @@ spec:
         fi
 
         # Get the final batch result for legacy compatibility (use last successful batch from any group)
-        # Find the most recent batch result file from current task run only
-        task_run_uid="$(context.taskRun.uid)"
-        latest_result_file=$(find "$(params.dataDir)" \
-            -name "ir-${task_run_uid}-*-batch-*-result.json" \
+        # Find the most recent batch result file
+        latest_result_file=$(find "$(params.dataDir)" -name "ir-*-batch-*-result.json" \
             -type f -exec ls -t {} + 2>/dev/null | head -1)
         if [[ -n "$latest_result_file" ]]; then
             results=$(cat "$latest_result_file")
-            # Extract OCP version and batch number from filename with validation
-            # Expected format: ir-<uid>-v4.12-batch-1-result.json or ir-<uid>-4.12-batch-1-result.json
-            result_filename=$(basename "$latest_result_file")
-            if [[ "$result_filename" =~ ^ir-(.+)-(v?[0-9]+\.[0-9]+)-batch-([0-9]+)-result\.json$ ]]; then
-                result_ocp_version="${BASH_REMATCH[2]}"
-                result_batch_number="${BASH_REMATCH[3]}"
-                internalRequest=$(awk -F"'" '/created/ { print $2 }' \
-                    "$(params.dataDir)/ir-${task_run_uid}-${result_ocp_version}-batch-${result_batch_number}-output.log")
-            else
-                echo "ERROR: Result filename does not match expected format: $result_filename"
-                echo "Expected format: ir-<uid>-[v]<X.Y>-batch-<N>-result.json"
-                exit 1
-            fi
+            # Extract batch number from filename for output log
+            batch_number=$(basename "$latest_result_file" | sed 's/.*-batch-\([0-9]*\)-result.json/\1/')
+            internalRequest=$(awk -F"'" '/created/ { print $2 }' \
+                "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-${batch_number}-output.log")
         else
             echo "ERROR: No batch result files found"
             exit 1
