@@ -757,18 +757,28 @@ spec:
           # Copy the script to the Mac host
           scp "${SSH_OPTS[@]}" "$mac_signing_script" "${MAC_USER}@${MAC_HOST}:${mac_signing_script}"
 
-          # Execute the script on the Mac host
+          # Execute the script on the Mac host, capture exit code
+          ssh_exit=0
+          failed_operation=""
           # shellcheck disable=SC2029
-          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash "${mac_signing_script}"
+          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash "${mac_signing_script}" \
+              || { ssh_exit=$?; failed_operation="signing"; }
 
-          # Copy the signed digest back to the shared volume for this component
-          scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:${TEMP_DIR}/push_digest.txt" \
-              "$COMPONENT_DIR/signed_mac_digest.txt"
+          # Copy the signed digest back if signing succeeded
+          if [ $ssh_exit -eq 0 ]; then
+            scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:${TEMP_DIR}/push_digest.txt" \
+                "$COMPONENT_DIR/signed_mac_digest.txt" || { ssh_exit=$?; failed_operation="scp of signed digest"; }
+          fi
 
-          # Clean up the Mac host now that we are done with this component
-          # shell check complains the variables evaluate on the client side, but we want that here
+          # Always clean up the Mac host (on success or failure)
           # shellcheck disable=SC2029
-          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf ${TEMP_DIR} ${mac_signing_script}"
+          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf ${TEMP_DIR} ${mac_signing_script}" || true
+
+          # Fail the step if signing or scp failed
+          if [ $ssh_exit -ne 0 ]; then
+            echo "Mac ${failed_operation} failed for component: $COMPONENT_NAME (exit code: $ssh_exit)"
+            exit $ssh_exit
+          fi
         done
     - name: sign-windows-binaries
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
