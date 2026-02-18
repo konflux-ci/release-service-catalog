@@ -22,3 +22,4 @@ A task to push rpm packages from an OCI artifact to a Pulp repository.
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                            |
 | caTrustConfigMapName    | The name of the ConfigMap to read CA bundle data from                                                                      | Yes      | trusted-ca                   |
 | caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt                |
+| pulpUploadChunkSize     | The chunk size to use when uploading RPMs to Pulp                                                                          | Yes      | 100MB                        |
