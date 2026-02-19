@@ -1,0 +1,163 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-already-released-advisory-rpms-many-rpms
+spec:
+  description: |
+    Run filter-already-released-advisory-rpms with many RPMs to verify the fix for
+    "Argument list too long" errors. The mock generates 600 RPM files (~144KB JSON),
+    exceeding Linux MAX_ARG_STRLEN (128KB) which would fail without the fix.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: HOME
+              value: /var/workdir
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: "$(params.orasOptions)"
+            - name: DEBUG
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9  # yamllint disable-line rule:line-length
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "rpms",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/manyrpms@sha256:12345",
+                    "name": "glibc-large"
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: filter-already-released-advisory-rpms
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: PULP_DOMAIN
+          value: "mydomain"
+        - name: PULP_SECRET_NAME
+          value: "pulp-task-pulp-secret"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: HOME
+              value: /var/workdir
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: "$(params.orasOptions)"
+            - name: DEBUG
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9  # yamllint disable-line rule:line-length
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              snap="$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json")"
+
+              # Verify the component is kept and has rpmsToPublish
+              test "$(echo "$snap" | jq '.components | length')" = "1"
+
+              rpm_count="$(echo "$snap" | jq '.components[0].rpmsToPublish | length')"
+              echo "rpmsToPublish count: ${rpm_count}"
+
+              # Should have 600 RPMs to publish (generated by mock)
+              test "${rpm_count}" -eq 600
+      runAfter:
+        - run-task

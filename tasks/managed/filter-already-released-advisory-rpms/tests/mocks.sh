@@ -90,6 +90,16 @@ function oras() {
       mkdir -p "${output_file_dir}/logs"
       touch "${output_file_dir}/logs/hello-2.12.1-6.fc44.x86_64.rpm.log"
       return 0
+    elif [[ "$args" == *"quay.io/test/manyrpms"* ]]; then
+      # Generate many RPMs to test "arg list too long" fix.
+      # Linux MAX_ARG_STRLEN is 128KB per argument. With 600 RPMs (~144KB JSON),
+      # the old --argjson approach fails; the --slurpfile fix handles this.
+      mkdir -p "${output_file_dir}"
+      for i in $(seq 1 600); do
+        touch "${output_file_dir}/glibc-subpkg${i}-2.38-${i}.fc44.x86_64.rpm"
+      done
+      mkdir -p "${output_file_dir}/logs"
+      return 0
     fi
 
     # Default: create empty RPM files
