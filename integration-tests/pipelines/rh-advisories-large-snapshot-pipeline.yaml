@@ -10,6 +10,18 @@ spec:
     - name: PIPELINE_TEST_SUITE
       type: string
       description: 'The name of the test corresponding to a defined Konflux integration test.'
+    - name: SKIP_BUILD
+      type: string
+      default: 'false'
+      description: 'Skip build phase (true = test with existing images, false = build images first)'
+    - name: FORCE_REBUILD
+      type: string
+      default: 'false'
+      description: 'Force fresh rebuild of components (true = worst-case stress, false = reuse mode)'
+    - name: USE_STATIC_IMAGE_POOL
+      type: string
+      default: 'false'
+      description: 'Use repo-tracked static image pool (:latest) and skip build phase'
     - name: VAULT_PASSWORD_SECRET_NAME
       default: 'e2e-test-vault-password'
       type: string
@@ -18,6 +30,12 @@ spec:
       type: string
     - name: KUBECONFIG_SECRET_NAME
       default: 'e2e-test-service-account-kubeconfig'
+      type: string
+    - name: QUAY_TOKEN_SECRET_NAME
+      default: 'hacbs-release-tests-token'
+      type: string
+    - name: QUAY_TOKEN_SECRET_KEY
+      default: 'token'
       type: string
   tasks:
     - name: get-snapshot-data
@@ -65,6 +83,14 @@ spec:
           value: $(params.GITHUB_TOKEN_SECRET_NAME)
         - name: KUBECONFIG_SECRET_NAME
           value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: QUAY_TOKEN_SECRET_NAME
+          value: $(params.QUAY_TOKEN_SECRET_NAME)
+        - name: QUAY_TOKEN_SECRET_KEY
+          value: $(params.QUAY_TOKEN_SECRET_KEY)
+        - name: FORCE_REBUILD
+          value: $(params.FORCE_REBUILD)
+        - name: USE_STATIC_IMAGE_POOL
+          value: $(params.USE_STATIC_IMAGE_POOL)
 
       taskSpec:
         params:
@@ -75,6 +101,10 @@ spec:
           - name: VAULT_PASSWORD_SECRET_NAME
           - name: GITHUB_TOKEN_SECRET_NAME
           - name: KUBECONFIG_SECRET_NAME
+          - name: QUAY_TOKEN_SECRET_NAME
+          - name: QUAY_TOKEN_SECRET_KEY
+          - name: FORCE_REBUILD
+          - name: USE_STATIC_IMAGE_POOL
         results:
           - name: TEST_OUTPUT
             description: Test output
@@ -87,11 +117,13 @@ spec:
               - name: SKIP_BUILD
                 # "false" = Enable build phase (can rebuild components)
                 # "true" = Skip build phase entirely (reuse existing)
-                value: "false"
+                value: $(params.SKIP_BUILD)
               - name: FORCE_REBUILD
                 # "true" = Force rebuild ALL components (creates new digests, worst-case signing)
                 # "false" = Reuse existing successful builds (fast but may have existing signatures)
-                value: "false"
+                value: $(params.FORCE_REBUILD)
+              - name: USE_STATIC_IMAGE_POOL
+                value: $(params.USE_STATIC_IMAGE_POOL)
               - name: COMPONENT_COUNT
                 # Number of components to build/test (default: 100)
                 # Build times scale with component count:
@@ -115,6 +147,12 @@ spec:
                   secretKeyRef:
                     name: $(params.GITHUB_TOKEN_SECRET_NAME)
                     key: token
+              - name: QUAY_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.QUAY_TOKEN_SECRET_NAME)
+                    key: $(params.QUAY_TOKEN_SECRET_KEY)
+                    optional: true
               - name: KUBECONFIG
                 valueFrom:
                   secretKeyRef:
@@ -229,44 +267,89 @@ spec:
               # Skip the affected pipelines check that other tests use
               echo "Manual trigger: Running test unconditionally"
               
-              # Conditional validation: Only validate existing images if we're reusing (not rebuilding)
-              # If SKIP_BUILD=false, we'll build fresh images, so validation happens AFTER build
-              if [ "${SKIP_BUILD}" = "true" ]; then
-                # Validate existing components and collect images (no building)
-                # IMPORTANT: This runs immediately before test execution to ensure
-                # all images still exist on Quay.io (validates manifests, not just metadata)
-                FRESH_BUILDS_FILE="/tmp/validated-images-pool-$(date +%s).txt"
+              # Pre-test preparation:
+              # - USE_STATIC_IMAGE_POOL=true: use repo-tracked image list
+              #   (no build, no recovery, no Quay validation here)
+              # - SKIP_BUILD=true: legacy recovery path
+              #   (uses build-images.sh to reconstruct components from registry)
+              # - otherwise: run the test as-is
+              #   (image creation is handled by /build-large-snapshot in a separate PipelineRun)
+              if [ "${USE_STATIC_IMAGE_POOL}" = "true" ]; then
+                export CI=true  # Skip interactive prompts
+                FRESH_BUILDS_FILE="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/static-image-pool-latest.txt"
                 export FRESH_BUILDS_FILE
-                export CI=true  # Skip interactive prompts in test.sh
-                MIN_IMAGES=50  # Minimum required images to run test
-                
+
+                # Count non-empty, non-comment entries (the generate script supports comments/blanks).
+                COMPONENT_COUNT="$(awk '{
+                  line=$0
+                  sub(/#.*/, "", line)
+                  gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+                  if (length(line) > 0) c++
+                } END { print c+0 }' "${FRESH_BUILDS_FILE}")"
+                export COMPONENT_COUNT
+                export LARGE_SNAPSHOT_COMPONENT_COUNT="${COMPONENT_COUNT}"  # Tell test to expect this count
+
                 echo ""
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "Validating Existing Components (REUSE mode - no building)"
+                echo "🧪 TEST-ONLY MODE (static image list)"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "  NOTE: Verifying image manifests exist on Quay.io"
+                echo "  Using: ${FRESH_BUILDS_FILE}"
+                echo "  Entries: ${COMPONENT_COUNT}"
+                echo "  Skipping: build-images.sh (no Quay validation/recovery/build)"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo ""
-                
-                # Script will fail if < 50 images found (also verifies manifests exist)
-                "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/validate-and-collect-images.sh" \
+              elif [ "${SKIP_BUILD}" = "true" ]; then
+                # Recovery mode: Recreate components from existing Quay images (no building)
+                # IMPORTANT: Images persist on Quay even after components are deleted
+                # This recovers all components by checking Quay and creating components for found images
+                FRESH_BUILDS_FILE="/tmp/recovered-images-pool-$(date +%s).txt"
+                export FRESH_BUILDS_FILE
+                export CI=true  # Skip interactive prompts
+                TARGET_COMPONENTS=200  # Target to recover
+
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "🔄 Component Recovery (REUSE mode - no building)"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "  NOTE: Recovering components from existing Quay images"
+                echo "  Will scan Quay.io and create components for all found images"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+
+                # Run build-images.sh in recovery mode (SKIP_BUILD=true)
+                "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/build-images.sh" \
+                  "${TARGET_COMPONENTS}" \
                   "dev-release-team-tenant" \
                   "${FRESH_BUILDS_FILE}" \
-                  "${MIN_IMAGES}"
-                
+                  "false" \
+                  "true"
+
                 COMPONENT_COUNT=$(wc -l < "${FRESH_BUILDS_FILE}")
                 export COMPONENT_COUNT
                 export LARGE_SNAPSHOT_COMPONENT_COUNT="${COMPONENT_COUNT}"  # Tell test to expect this count
+
+                # Fail if we didn't recover enough images
+                MIN_IMAGES=50
+                if [ "${COMPONENT_COUNT}" -lt "${MIN_IMAGES}" ]; then
+                  echo ""
+                  echo "❌ ERROR: Not enough images recovered!"
+                  echo "   Found: ${COMPONENT_COUNT} images"
+                  echo "   Required: At least ${MIN_IMAGES} images"
+                  echo ""
+                  echo "   Run /build-large-snapshot to build more images"
+                  exit 1
+                fi
+
                 echo ""
-                echo "✅ Validated ${COMPONENT_COUNT} images ready for testing"
+                echo "✅ Recovered ${COMPONENT_COUNT} components with images ready for testing"
                 echo ""
               else
                 echo ""
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "Skipping Pre-Build Validation (BUILD mode enabled)"
+                echo "Proceeding Without Pre-Build Step"
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "  Images will be built/validated by build-images.sh"
-                echo "  Validation happens AFTER build completes"
+                echo "  This PipelineRun is test-only and does not build images."
+                echo "  To create/update the image set, run /build-large-snapshot first."
                 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                 echo ""
                 export CI=true  # Skip interactive prompts in test.sh
@@ -425,7 +508,12 @@ spec:
               echo "Cleaning up tenant resources..."
               kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant" \
                 | envsubst > "$tmpDir/tenant-resources.yaml" || true
-              kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found=true || true
+              # Intentionally avoid deleting Component/Application during cleanup.
+              # Only remove supporting tenant resources by label.
+              kubectl delete rolebinding,serviceaccount,releaseplan \
+                -n "${tenant_namespace:-dev-release-team-tenant}" \
+                -l "originating-tool=${originating_tool:-rh-advisories-large-snapshot-test}" \
+                --ignore-not-found=true || true
               
               echo "Cleaning up managed resources..."
               kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed" \

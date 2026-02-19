@@ -44,28 +44,15 @@ if ! [[ "${COMPONENT_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 # ============================================================================
-# IMAGE STRATEGY: Fresh Konflux Builds Only
+# IMAGE STRATEGY: Consume an Image List Only
 # ============================================================================
-# 
-# This test uses ONLY fresh Konflux builds to test worst-case signing performance:
 #
-# Why fresh builds?
-# - Zero existing Red Hat signatures
-# - Multi-arch builds: 4 architectures (amd64, arm64, s390x, ppc64le)
-# - Signing tasks must sign ALL ~800 digests (200 images × 4 architectures)
-# - Tests signing service capacity and bottlenecks
-# - Maximum worst-case scenario
+# This generator consumes an image list file and produces a Snapshot manifest.
+# It does not build images or validate them against the registry.
 #
-# Build images:
-#   ./utils/build-images.sh 200 dev-release-team-tenant
-#
-# Or use the wrapper script:
-#   ./test.sh
-#
-# Expected performance:
-# - Build time: 15-30 minutes (200 Konflux builds)
-# - Signing time: 1-2 hours (ALL digests need signing)
-# - Total pipeline: 5.5-7.5 hours
+# Typical inputs:
+# - component names (resolved to `:latest` in the target namespace)
+# - full image refs with tags or digests
 #
 # ============================================================================
 
@@ -76,13 +63,7 @@ FRESH_BUILDS_FILE="${FRESH_BUILDS_FILE:-/tmp/fresh-images-pool.txt}"
 if [ -z "${FRESH_BUILDS_FILE}" ]; then
     echo "❌ Error: FRESH_BUILDS_FILE environment variable not set" >&2
     echo "" >&2
-    echo "This test requires fresh Konflux builds for worst-case signing performance." >&2
-    echo "" >&2
-    echo "To build images:" >&2
-    echo "  ./utils/build-images.sh 200" >&2
-    echo "" >&2
-    echo "Or use the wrapper script:" >&2
-    echo "  ./test.sh" >&2
+    echo "Provide a file containing component names or image references." >&2
     echo "" >&2
     exit 1
 fi
@@ -90,18 +71,21 @@ fi
 if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
     echo "❌ Error: Fresh builds file not found: ${FRESH_BUILDS_FILE}" >&2
     echo "" >&2
-    echo "Run utils/build-images.sh to build components first:" >&2
-    echo "  ./utils/build-images.sh 200 dev-release-team-tenant" >&2
-    echo "" >&2
-    echo "Or use the wrapper script:" >&2
-    echo "  ./test.sh" >&2
+    echo "Provide a valid file path in FRESH_BUILDS_FILE." >&2
     echo "" >&2
     exit 1
 fi
 
 # Read image pool from fresh builds file
 declare -a IMAGE_POOL=()
-mapfile -t IMAGE_POOL < "${FRESH_BUILDS_FILE}"
+while IFS= read -r line; do
+    # Allow comments/blank lines in static lists
+    line="${line%%#*}"
+    line="$(echo "${line}" | xargs)"
+    [ -z "${line}" ] && continue
+
+    IMAGE_POOL+=("${line}")
+done < "${FRESH_BUILDS_FILE}"
 
 POOL_SIZE=${#IMAGE_POOL[@]}
 
@@ -112,9 +96,9 @@ if [ ${POOL_SIZE} -eq 0 ]; then
     exit 1
 fi
 
-echo "🏗️  Using fresh Konflux builds (unsigned images)" >&2
+echo "📦 Using image pool file" >&2
 echo "   Source: ${FRESH_BUILDS_FILE}" >&2
-echo "   Images: ${POOL_SIZE}" >&2
+echo "   Entries: ${POOL_SIZE}" >&2
 
 # Limit COMPONENT_COUNT to available images in pool
 if [ ${COMPONENT_COUNT} -gt ${POOL_SIZE} ]; then
@@ -133,6 +117,39 @@ fi
 
 echo "Generating large snapshot with ${COMPONENT_COUNT} components..." >&2
 echo "" >&2
+
+# Convert one entry from the pool into a concrete container image reference.
+# Supported formats:
+# - component name: v4-15-apiserver-watcher-01
+# - repo path: quay.io/.../component  (tagless)
+# - full image ref: quay.io/.../component:tag or quay.io/.../component@sha256:...
+resolve_container_image() {
+    local entry="$1"
+
+    # If entry is a bare component name, build the target image ref in the test namespace.
+    if [[ "${entry}" != *"/"* ]]; then
+        echo "quay.io/redhat-user-workloads-stage/${NAMESPACE}/${entry}:latest"
+        return 0
+    fi
+
+    # If entry already contains a digest or tag, use it as-is.
+    if [[ "${entry}" == *"@sha256:"* ]] || [[ "${entry}" == *":"* ]]; then
+        echo "${entry}"
+        return 0
+    fi
+
+    # Otherwise treat it as a repo path and default to :latest.
+    echo "${entry}:latest"
+    return 0
+}
+
+extract_component_name() {
+    local image_ref="$1"
+    local name="${image_ref##*/}"   # after last /
+    name="${name%%@*}"              # strip @sha256...
+    name="${name%%:*}"              # strip :tag
+    echo "${name}"
+}
 
 cat <<EOF
 ---
@@ -165,12 +182,10 @@ EOF
 for (( i=1; i<=COMPONENT_COUNT; i++ )); do
     # Use different images from the pool for variety
     IMAGE_INDEX=$(((i - 1) % ${#IMAGE_POOL[@]}))
-    CONTAINER_IMAGE="${IMAGE_POOL[$IMAGE_INDEX]}"
+    CONTAINER_IMAGE="$(resolve_container_image "${IMAGE_POOL[$IMAGE_INDEX]}")"
     
     # Extract actual component name from image URL
-    # Format: quay.io/.../COMPONENT_NAME@sha256:...
-    COMPONENT_NAME="${CONTAINER_IMAGE##*/}"  # Get everything after last /
-    COMPONENT_NAME="${COMPONENT_NAME%%@*}"    # Remove everything after @
+    COMPONENT_NAME="$(extract_component_name "${CONTAINER_IMAGE}")"
     
     # Use the actual source repository that components were built from
     # This matches the attestations created during PAC builds

@@ -13,14 +13,17 @@ spec:
       type: string
     - name: PIPELINE_TEST_SUITE
       type: string
-    - name: VAULT_PASSWORD_SECRET_NAME
-      default: 'e2e-test-vault-password'
-      type: string
     - name: GITHUB_TOKEN_SECRET_NAME
       default: 'hacbs-release-tests-token'
       type: string
     - name: KUBECONFIG_SECRET_NAME
       default: 'e2e-test-service-account-kubeconfig'
+      type: string
+    - name: QUAY_TOKEN_SECRET_NAME
+      default: 'hacbs-release-tests-token'
+      type: string
+    - name: QUAY_TOKEN_SECRET_KEY
+      default: 'token'
       type: string
     - name: TARGET_COMPONENTS
       default: '100'
@@ -29,6 +32,10 @@ spec:
     - name: FORCE_REBUILD
       default: 'false'
       description: 'Force fresh builds, disable image reuse (true/false)'
+      type: string
+    - name: SKIP_BUILD
+      default: 'false'
+      description: 'Repair-only mode: fix existing, do not build new (true/false)'
       type: string
   tasks:
     - name: get-snapshot-data
@@ -59,7 +66,7 @@ spec:
               echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
 
     - name: create-builds
-      timeout: "3h0m0s"
+      timeout: "11h0m0s"
       params:
         - name: PIPELINE_TEST_SUITE
           value: $(params.PIPELINE_TEST_SUITE)
@@ -71,6 +78,14 @@ spec:
           value: $(params.GITHUB_TOKEN_SECRET_NAME)
         - name: TARGET_COMPONENTS
           value: $(params.TARGET_COMPONENTS)
+        - name: QUAY_TOKEN_SECRET_NAME
+          value: $(params.QUAY_TOKEN_SECRET_NAME)
+        - name: QUAY_TOKEN_SECRET_KEY
+          value: $(params.QUAY_TOKEN_SECRET_KEY)
+        - name: FORCE_REBUILD
+          value: $(params.FORCE_REBUILD)
+        - name: SKIP_BUILD
+          value: $(params.SKIP_BUILD)
       taskSpec:
         params:
           - name: PIPELINE_TEST_SUITE
@@ -78,6 +93,10 @@ spec:
           - name: KUBECONFIG_SECRET_NAME
           - name: GITHUB_TOKEN_SECRET_NAME
           - name: TARGET_COMPONENTS
+          - name: QUAY_TOKEN_SECRET_NAME
+          - name: QUAY_TOKEN_SECRET_KEY
+          - name: FORCE_REBUILD
+          - name: SKIP_BUILD
         results:
           - name: BUILD_OUTPUT
             description: Build creation output
@@ -96,6 +115,12 @@ spec:
                   secretKeyRef:
                     name: $(params.GITHUB_TOKEN_SECRET_NAME)
                     key: token
+              - name: QUAY_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.QUAY_TOKEN_SECRET_NAME)
+                    key: $(params.QUAY_TOKEN_SECRET_KEY)
+                    optional: true
             script: |
               #!/usr/bin/env bash
               set -o errexit
@@ -107,7 +132,9 @@ spec:
               KUBECONFIG="${KUBECONFIG_FILE}"
               export KUBECONFIG
 
-              echo "Starting component and build creation for large snapshot test..."
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "🚀 Creating Components and Builds"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
               echo "  Target components: $(params.TARGET_COMPONENTS)"
               echo "  Namespace: dev-release-team-tenant"
               echo ""
@@ -129,15 +156,22 @@ spec:
               # Set environment variables for the build script
               COMPONENT_COUNT="$(params.TARGET_COMPONENTS)"
               FORCE_REBUILD="$(params.FORCE_REBUILD)"
+              SKIP_BUILD="$(params.SKIP_BUILD)"
               
               export COMPONENT_COUNT
               export NAMESPACE="dev-release-team-tenant"
-              # Override template branch (exists in repo)
+              # Explicitly disable registry/Quay reuse lookups for this run.
+              # We only want to create/build missing components, not salvage from existing images.
+              export LOOKUP_EXISTING_IMAGES="false"
+              # Use our own template branch (complete independence from other automation)
+              # Template provides multi-arch PAC config; build-images.sh then customizes:
+              #   - Branch name, component name, Dockerfile size
               export PAC_TEMPLATE_BRANCH="konflux-v4-15-apiserver-watcher-01"
               # GITHUB_TOKEN is already set from env above
               
-              # Run the build script (4th param controls force_rebuild)
-              "${BUILD_SCRIPT}" "${COMPONENT_COUNT}" "${NAMESPACE}" "/tmp/fresh-builds-$$.txt" "${FORCE_REBUILD}"
+              # Run the build script (5th param controls skip_build for repair-only mode)
+              "${BUILD_SCRIPT}" "${COMPONENT_COUNT}" "${NAMESPACE}" \
+                "/tmp/fresh-builds-$$.txt" "${FORCE_REBUILD}" "${SKIP_BUILD}"
 
               # Return summary
               echo -n "Components and builds created successfully" | tee "$(results.BUILD_OUTPUT.path)"
