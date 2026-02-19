@@ -44,8 +44,8 @@ set -euo pipefail
 #   PARALLEL_BUILDS     : Max parallel builds (default: 50)
 #   BUILD_TIMEOUT       : Total timeout in seconds (default: 5400 = 90 min, use 10800 for 300-1.5GB images)
 #   CHECK_INTERVAL      : Status check interval in seconds (default: 30)
-#   BASE_REPO           : GitHub repository for component source (default: hacbs-release-tests/e2e-base)
-#   PAC_TEMPLATE_BRANCH : Branch with PAC config to copy (default: konflux-v4-15-apiserver-watcher-01)
+#   BASE_REPO           : GitHub repository for template source (default: hacbs-release-tests/e2e-base)
+#   PAC_TEMPLATE_BRANCH : Branch with PAC config to copy to each component repo (default: konflux-v4-15-apiserver-watcher-01)
 #   BASE_BRANCH         : Fallback branch (deprecated, use PAC_TEMPLATE_BRANCH)
 #
 # OUTPUT:
@@ -146,13 +146,19 @@ VERSION_VARIANCE="${VERSION_VARIANCE:-3}"      # +/- variance in component count
 # Use stable naming (no timestamp) to enable image reuse across test runs
 APP_PREFIX="large-snapshot-build"
 
-# Base repository (known-good repo with working Dockerfile)
-BASE_REPO="${BASE_REPO:-hacbs-release-tests/e2e-base}"
-# Use a branch with proper PAC configuration as template
-# This branch has .tekton/ directory with EC-compliant pipeline
-PAC_TEMPLATE_BRANCH="${PAC_TEMPLATE_BRANCH:-konflux-v4-15-apiserver-watcher-01}"
+# Base repository (template source - has PAC config and Dockerfile)
+# Using dedicated template repo: rh-adv-large-v4-15-apiserver-watcher-01
+# main branch contains .tekton/template-push.yaml + Dockerfile for push-only multi-arch builds
+BASE_REPO="${BASE_REPO:-hacbs-release-tests/rh-adv-large-v4-15-apiserver-watcher-01}"
+PAC_TEMPLATE_BRANCH="${PAC_TEMPLATE_BRANCH:-main}"
 BASE_BRANCH="${BASE_BRANCH:-push-to-external-registry-base}"
 BASE_GITHUB_URL="https://github.com/${BASE_REPO}"
+
+# One repo per component (OCP-style, like existing Konflux tests)
+# Each component gets its own repo: hacbs-release-tests/rh-adv-large-{component_name}
+COMPONENT_REPO_ORG="${COMPONENT_REPO_ORG:-hacbs-release-tests}"
+COMPONENT_REPO_PREFIX="${COMPONENT_REPO_PREFIX:-rh-adv-large}"
+COMPONENT_BRANCH="${COMPONENT_BRANCH:-main}"  # All component repos use main branch
 
 # Build orchestration settings
 PARALLEL_BUILDS="${PARALLEL_BUILDS:-50}"      # Max concurrent builds
@@ -385,106 +391,219 @@ force_delete_component() {
 }
 
 # Create GitHub branch with PAC configuration for a component
-# Usage: create_github_branch_for_component <component_name>
-# Returns: 0 if branch exists/created, 1 if failed
-# Branch naming: konflux-ls-{component_name} (rh-advisories-large-snapshot)
-create_github_branch_for_component() {
+# Usage: ensure_component_repo <component_name>
+# Returns: 0 if repo exists/created and PAC config updated, 1 if failed
+# One repo per component (OCP-style): hacbs-release-tests/rh-adv-large-{component_name}
+ensure_component_repo() {
     local component_name="$1"
-    local branch_name="konflux-ls-${component_name}"
+    local component_repo_name="${COMPONENT_REPO_PREFIX}-${component_name}"
+    local full_repo="${COMPONENT_REPO_ORG}/${component_repo_name}"
     
-    # Check if branch already exists (use cached list from batch query)
-    local branch_exists=false
-    if echo "${ALL_GITHUB_BRANCHES}" | grep -q "^${branch_name}$"; then
-        branch_exists=true
-        log_info "      ✓ Branch already exists: ${branch_name}"
+    # Extract version from component name (e.g., v4-15-apiserver-watcher-01 → v4-15)
+    local version=$(echo "$component_name" | grep -oE "v4-[0-9]+" | head -1)
+    local app_name="large-snapshot-build-${version}"
+    
+    # Check if component repo already exists (use cached list from batch query)
+    local repo_exists=false
+    if echo "${ALL_COMPONENT_REPOS}" | grep -q "^${component_repo_name}$"; then
+        repo_exists=true
+        log_info "      ✓ Component repo already exists: ${full_repo}"
     fi
     
-    # Create branch if it doesn't exist
-    if [ "$branch_exists" = false ]; then
-        log_info "      Creating GitHub branch with PAC config: ${branch_name}"
+    # Create repo and push template if it doesn't exist
+    if [ "$repo_exists" = false ]; then
+        log_info "      Creating component repo with PAC config: ${full_repo}"
         
-        # Find the script directory (relative to this script)
         local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        local template_dir="${LOCAL_TEMPLATE_DIR:-${script_dir}/../template}"
         local copy_script="${script_dir}/../../scripts/copy-branch-to-repo-git.sh"
+        local create_repo_script="${script_dir}/../../scripts/create-github-repo.sh"
         
-        if [ ! -f "$copy_script" ]; then
-            log_error "copy-branch-to-repo-git.sh not found at: $copy_script"
-            return 1
-        fi
-        
-        # Copy the PAC template branch to a new component-specific branch
-        # This creates a branch with .tekton/ directory containing EC-compliant PAC pipeline
-        # Retry up to 3 times with exponential backoff for rate limit errors
-        local retry_count=0
-        local max_retries=3
-        local retry_delay=10
-    
-    while [ $retry_count -lt $max_retries ]; do
-        local error_output=$(mktemp)
-        if "${copy_script}" "${BASE_REPO}" "${PAC_TEMPLATE_BRANCH}" "${BASE_REPO}" "${branch_name}" 2>"${error_output}"; then
-            rm -f "${error_output}"
-            break
+        # Prefer local template (self-contained, no e2e-base dependency)
+        if [ -d "$template_dir" ] && [ -f "${template_dir}/.tekton/template-push.yaml" ] && [ -f "${template_dir}/Dockerfile" ]; then
+            log_info "      Using local template: ${template_dir}"
+            # Create repo via API if it doesn't exist
+            if ! curl -sf -H "Authorization: token ${GITHUB_TOKEN}" \
+                "https://api.github.com/repos/${full_repo}" | grep -q '"full_name"'; then
+                [ -f "$create_repo_script" ] && "${create_repo_script}" "${full_repo}" 2>/dev/null || true
+            fi
+            local tmp_push="${TEMP_DIR}/push-${component_name}"
+            rm -rf "$tmp_push"
+            cp -r "$template_dir" "$tmp_push"
+            cd "$tmp_push"
+            git init -q
+            git config user.name "Large Snapshot Test Bot"
+            git config user.email "release-team@redhat.com"
+            git add .
+            git commit -q -m "feat: Initial template for ${component_name}"
+            git remote add origin "https://${GITHUB_TOKEN}@github.com/${full_repo}.git"
+            git push -q -f origin "HEAD:${COMPONENT_BRANCH}" 2>/dev/null || {
+                log_warning "      ⚠️  Failed to push template to ${full_repo}"
+                return 1
+            }
+            cd - >/dev/null
         else
-            retry_count=$((retry_count + 1))
-            local error_msg=$(cat "${error_output}")
-            rm -f "${error_output}"
-            
-            # Check if it's a rate limit error
-            if echo "$error_msg" | grep -qi "rate limit\|abuse\|403"; then
-                if [ $retry_count -lt $max_retries ]; then
-                    log_warning "      ⚠️  Rate limit detected, waiting ${retry_delay}s before retry ${retry_count}/${max_retries}..."
-                    sleep $retry_delay
-                    retry_delay=$((retry_delay * 2))  # Exponential backoff
-                    continue
+            # Fallback: copy from e2e-base branch
+            if [ ! -f "$copy_script" ]; then
+                log_error "No local template at ${template_dir} and copy-branch-to-repo-git.sh not found"
+                return 1
+            fi
+            local retry_count=0
+            local max_retries=3
+            local retry_delay=10
+            while [ $retry_count -lt $max_retries ]; do
+                local error_output=$(mktemp)
+                if "${copy_script}" "${BASE_REPO}" "${PAC_TEMPLATE_BRANCH}" "${full_repo}" "${COMPONENT_BRANCH}" "true" 2>"${error_output}"; then
+                    rm -f "${error_output}"
+                    break
+                else
+                    retry_count=$((retry_count + 1))
+                    local error_msg=$(cat "${error_output}")
+                    rm -f "${error_output}"
+                    if echo "$error_msg" | grep -qi "rate limit\|abuse\|403"; then
+                        [ $retry_count -lt $max_retries ] && sleep $retry_delay && retry_delay=$((retry_delay * 2)) && continue
+                    fi
+                    log_warning "      ⚠️  Failed to create repo: ${full_repo}"
+                    [ -n "$error_msg" ] && log_warning "      Error: ${error_msg}"
+                    return 1
                 fi
-            fi
-            
-            # Not a rate limit or max retries reached
-            log_warning "      ⚠️  Failed to create branch: ${branch_name}"
-            if [ -n "$error_msg" ]; then
-                log_warning "      Error: ${error_msg}"
-            fi
-            return 1
+            done
+            [ $retry_count -ge $max_retries ] && log_warning "      ⚠️  Failed after ${max_retries} retries" && return 1
         fi
-    done
+        log_info "      ✓ Component repo created successfully"
+    fi
     
-        if [ $retry_count -ge $max_retries ]; then
-            log_warning "      ⚠️  Failed to create branch after ${max_retries} retries: ${branch_name}"
-            return 1
-        fi
-        
-        log_info "      ✓ Branch created successfully"
-    fi  # End of branch creation
-    
-    # Update PAC configuration for ALL branches (new and existing)
-    # CRITICAL: This must run for existing branches too, not just new ones!
+    # Update PAC configuration for ALL component repos (new and existing)
     log_info "      Updating PAC configuration for component: ${component_name}"
     local temp_repo="${TEMP_DIR}/repo-${component_name}"
-    if git clone -q --depth 1 --branch "${branch_name}" \
-        "https://${GITHUB_TOKEN}@github.com/${BASE_REPO}.git" "${temp_repo}" 2>/dev/null; then
+    if git clone -q --depth 1 --branch "${COMPONENT_BRANCH}" \
+        "https://${GITHUB_TOKEN}@github.com/${full_repo}.git" "${temp_repo}" 2>/dev/null; then
         
         cd "${temp_repo}"
         
-        # Update PAC configuration in all .tekton/*.yaml files
-        # CRITICAL: Update both branch trigger AND component name to prevent PAC repository conflicts
+        # CRITICAL: Delete pull-request PAC files to ensure ONLY -on-push triggers
+        # This test requires push-only builds, no PR-based builds
         local pac_updated=false
+        if [ -d ".tekton" ]; then
+            for pr_file in .tekton/*pull-request*.yaml .tekton/*pull-request*.yml; do
+                if [ -f "$pr_file" ]; then
+                    git rm -f "$pr_file" &>/dev/null || rm -f "$pr_file"
+                    log_info "      ✓ Deleted pull-request trigger: $(basename "$pr_file")"
+                    pac_updated=true
+                fi
+            done
+        fi
+        
+        # CRITICAL: Rename PAC file from template-push.yaml to {component}-push.yaml
+        # This ensures PAC recognizes it as component-specific configuration
+        if [ -d ".tekton" ]; then
+            for template_file in .tekton/template-push.yaml .tekton/template-push.yml; do
+                if [ -f "$template_file" ]; then
+                    local new_pac_file=".tekton/${component_name}-push.yaml"
+                    mv "$template_file" "$new_pac_file" 2>/dev/null || cp "$template_file" "$new_pac_file"
+                    log_info "      ✓ Renamed PAC file: $(basename "$new_pac_file")"
+                    pac_updated=true
+                fi
+            done
+        fi
+        
+        # Update PAC configuration in all .tekton/*.yaml files
+        # CRITICAL: Update branch trigger, component name, and PipelineRun name
         if [ -d ".tekton" ]; then
             for pac_file in .tekton/*.yaml .tekton/*.yml; do
                 [ -f "$pac_file" ] || continue
                 
-                # Update target_branch trigger (handle multi-line YAML)
-                if sed -i "s|\"push-to-external-registry-base\"|\"${branch_name}\"|g" "$pac_file" 2>/dev/null; then
+                # Update target_branch trigger (main branch for one-repo-per-component)
+                if sed -i "s|\"push-to-external-registry-base\"|\"${COMPONENT_BRANCH}\"|g" "$pac_file" 2>/dev/null; then
+                    pac_updated=true
+                fi
+                if sed -i "s|\"large-snapshot-template\"|\"${COMPONENT_BRANCH}\"|g" "$pac_file" 2>/dev/null; then
                     pac_updated=true
                 fi
                 
-                # Update component name references
-                # CRITICAL: Use regex pattern to match ANY version (v4-15, v4-16, v4-17, etc.)
-                # This handles branches created with different template versions
-                # Pattern: v4-{version}-{name}-{number} where version and number are 1-2 digits
-                # Examples: v4-15-apiserver-watcher-01, v4-16-image-service-02, v4-17-installer-03
-                # Using portable regex: [0-9][0-9]* = one or more digits
+                # Update PipelineRun name: template-component-on-push → {component}-on-push
+                if sed -i "s|name: template-component-on-push|name: ${component_name}-on-push|g" "$pac_file" 2>/dev/null; then
+                    pac_updated=true
+                fi
+                
+                # Update component labels: template-component → {component}
+                if sed -i "s|appstudio.openshift.io/component: template-component|appstudio.openshift.io/component: ${component_name}|g" "$pac_file" 2>/dev/null; then
+                    pac_updated=true
+                fi
+                
+                # Update application label if needed
+                if sed -i "s|appstudio.openshift.io/application: large-snapshot-build-template|appstudio.openshift.io/application: ${app_name}|g" "$pac_file" 2>/dev/null; then
+                    pac_updated=true
+                fi
+                
+                # Replace template-component in output-image and other fields
+                if sed -i "s|template-component|${component_name}|g" "$pac_file" 2>/dev/null; then
+                    pac_updated=true
+                fi
+                # Fallback: v4-{version}-{name}-{number} pattern
                 if sed -i -E "s|v4-[0-9][0-9]*-[a-z-]+-[0-9][0-9]*|${component_name}|g" "$pac_file" 2>/dev/null; then
                     pac_updated=true
+                fi
+                
+                # Multi-arch configuration: Add build-platforms, build-image-index, and Kueue annotations
+                # This enables true multi-platform builds with manifest lists
+                if command -v yq &>/dev/null; then
+                    # Set/append build-platforms with all required architectures
+                    if yq -e '.spec.params[] | select(.name == "build-platforms")' "$pac_file" >/dev/null 2>&1; then
+                        if yq -i \
+                            '(.spec.params[] | select(.name == "build-platforms") | .value) = ["linux/amd64","linux/arm64","linux/s390x","linux/ppc64le"]' \
+                            "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    else
+                        if yq -i \
+                            '.spec.params += [{"name":"build-platforms","value":["linux/amd64","linux/arm64","linux/s390x","linux/ppc64le"]}]' \
+                            "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    fi
+
+                    # Set/append build-source-image=true
+                    if yq -e '.spec.params[] | select(.name == "build-source-image")' "$pac_file" >/dev/null 2>&1; then
+                        if yq -i \
+                            '(.spec.params[] | select(.name == "build-source-image") | .value) = "true"' \
+                            "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    else
+                        if yq -i \
+                            '.spec.params += [{"name":"build-source-image","value":"true"}]' \
+                            "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    fi
+
+                    # CRITICAL: Set/append build-image-index=true to create multi-arch manifest lists
+                    if yq -e '.spec.params[] | select(.name == "build-image-index")' "$pac_file" >/dev/null 2>&1; then
+                        if yq -i \
+                            '(.spec.params[] | select(.name == "build-image-index") | .value) = "true"' \
+                            "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    else
+                        if yq -i \
+                            '.spec.params += [{"name":"build-image-index","value":"true"}]' \
+                            "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    fi
+
+                    # CRITICAL: Add Kueue annotations for multi-platform resource management
+                    if ! yq -e '.metadata.annotations["kueue.konflux-ci.dev/resource-linux/amd64"]' "$pac_file" >/dev/null 2>&1; then
+                        if yq -i '
+                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/amd64"] = "true" |
+                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/arm64"] = "true" |
+                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/s390x"] = "true" |
+                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/ppc64le"] = "true"
+                        ' "$pac_file" 2>/dev/null; then
+                            pac_updated=true
+                        fi
+                    fi
                 fi
             done
         fi
@@ -530,18 +649,28 @@ DOCKERFILE_EOF
             dockerfile_updated=true
         fi
         
-        # Commit and push if changes were made
-        if [ "$pac_updated" = true ] || [ "$dockerfile_updated" = true ]; then
-            git config user.name "Large Snapshot Test Bot" 2>/dev/null
-            git config user.email "release-team@redhat.com" 2>/dev/null
-            git add .tekton/ Dockerfile &>/dev/null
-            
-            # Check if there are actual changes to commit
-            if git diff --cached --quiet; then
-                # No changes to commit (branch already has correct config)
-                log_info "      ✓ PAC config and Dockerfile already correct: component=${component_name}"
-            elif git commit -q -m "feat: Update PAC config and Dockerfile (${size_mb}MB) for ${component_name}" 2>/dev/null && \
-                 git push -q origin "${branch_name}" 2>/dev/null; then
+        # CRITICAL: ALWAYS force a git push to trigger real push events for PAC
+        # Without a real git push, PAC won't see a "push" event, only annotation triggers
+        # This is essential for push-only builds (no pull requests)
+        git config user.name "Large Snapshot Test Bot" 2>/dev/null
+        git config user.email "release-team@redhat.com" 2>/dev/null
+        git add .tekton/ Dockerfile &>/dev/null
+        
+        # Check if there are actual changes to commit
+        if git diff --cached --quiet; then
+            # No changes detected - force a dummy commit to trigger push event
+            echo "# Build triggered at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .trigger-timestamp
+            git add .trigger-timestamp
+            if git commit -q -m "feat: Trigger build for ${component_name} (${size_mb}MB)" 2>/dev/null && \
+               git push -q origin "${COMPONENT_BRANCH}" 2>/dev/null; then
+                log_info "      ✓ Forced push to trigger PAC build: ${component_name}"
+            else
+                log_warning "      ⚠️  Failed to push trigger for: ${component_name}"
+            fi
+        else
+            # Real changes exist - commit and push them
+            if git commit -q -m "feat: Update PAC config and Dockerfile (${size_mb}MB) for ${component_name}" 2>/dev/null && \
+               git push -q origin "${COMPONENT_BRANCH}" 2>/dev/null; then
                 log_info "      ✓ PAC config and Dockerfile (${size_mb}MB) pushed: ${component_name}"
             else
                 log_warning "      ⚠️  Failed to push updates for: ${component_name}"
@@ -551,7 +680,7 @@ DOCKERFILE_EOF
         cd - >/dev/null
         rm -rf "${temp_repo}"
     else
-        log_warning "      ⚠️  Could not clone branch to fix PAC config"
+        log_warning "      ⚠️  Could not clone component repo to update PAC config"
     fi
     
     return 0
@@ -671,27 +800,23 @@ ALL_PIPELINERUNS_JSON=$(kubectl get pipelinerun -n "${NAMESPACE}" \
 
 EXISTING_COMPONENT_COUNT=$(echo "${ALL_COMPONENTS_JSON}" | jq '.items | length')
 
-# OPTIMIZATION: Fetch all GitHub branches once (paginated, max 3 pages = 300 branches)
-log_info "Fetching existing GitHub branches (batch query to reduce API calls)..."
-ALL_GITHUB_BRANCHES=""
-for page in 1 2 3; do
-    page_branches=$(curl -s \
+# OPTIMIZATION: Fetch all component repos once (one repo per component, OCP-style)
+log_info "Fetching existing component repos (batch query to reduce API calls)..."
+ALL_COMPONENT_REPOS=""
+for page in 1 2 3 4 5; do
+    page_raw=$(curl -s \
         -H "Authorization: token ${GITHUB_TOKEN}" \
-        "https://api.github.com/repos/${BASE_REPO}/branches?per_page=100&page=${page}" 2>/dev/null | \
+        "https://api.github.com/orgs/${COMPONENT_REPO_ORG}/repos?per_page=100&page=${page}&type=all" 2>/dev/null | \
         jq -r '.[].name' 2>/dev/null || echo "")
+    page_repos=$(echo "${page_raw}" | grep "^${COMPONENT_REPO_PREFIX}-" 2>/dev/null || true)
+    ALL_COMPONENT_REPOS="${ALL_COMPONENT_REPOS}${page_repos}"$'\n'
     
-    if [ -z "$page_branches" ]; then
-        break  # No more branches
-    fi
-    ALL_GITHUB_BRANCHES="${ALL_GITHUB_BRANCHES}${page_branches}"$'\n'
-    
-    # If we got less than 100, no more pages
-    branch_count=$(echo "$page_branches" | wc -l)
-    if [ $branch_count -lt 100 ]; then
+    raw_count=$(echo "${page_raw}" | grep -c . 2>/dev/null || echo 0)
+    if [ "${raw_count}" -lt 100 ]; then
         break
     fi
 done
-log_info "  Found $(echo "$ALL_GITHUB_BRANCHES" | grep -c "^konflux-ls-") rh-advisories-large-snapshot test branches"
+log_info "  Found $(echo "$ALL_COMPONENT_REPOS" | grep -c "^${COMPONENT_REPO_PREFIX}-" 2>/dev/null || echo 0) component repos"
 
 # Count components with successful builds (reusable images) - using in-memory data
 EXISTING_WITH_BUILDS=0
@@ -1056,7 +1181,7 @@ while IFS=: read -r app_name component_count; do
                 force_delete_component "${component_name}" "${NAMESPACE}"
                 
                 # Create GitHub branch for consistency (required for PipelineRuns)
-                if ! create_github_branch_for_component "${component_name}"; then
+                if ! ensure_component_repo "${component_name}"; then
                     log_error "   ❌ Failed to create GitHub branch for salvaged zombie: ${component_name}, skipping..."
                     continue
                 fi
@@ -1082,10 +1207,10 @@ spec:
   containerImage: "${QUAY_IMAGE_DIGEST}"
   source:
     git:
-      url: https://github.com/${BASE_REPO}
-      revision: konflux-ls-${component_name}
+      url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
+      revision: ${COMPONENT_BRANCH}
 EOF
-                
+
                 # Wait for PAC to create the service account (even though we're reusing image, PAC may trigger builds)
                 service_account_name="build-pipeline-${component_name}"
                 wait_time=0
@@ -1112,7 +1237,7 @@ EOF
                 log_warning "      Skipping deletion to avoid removing valid component"
                 
                 # Without branch, component cannot trigger PipelineRuns
-                if ! create_github_branch_for_component "${component_name}"; then
+                if ! ensure_component_repo "${component_name}"; then
                     log_error "   ❌ Failed to create GitHub branch for unverifiable component: ${component_name}, skipping..."
                     continue
                 fi
@@ -1164,10 +1289,10 @@ spec:
   containerImage: "${QUAY_IMAGE_DIGEST}"
   source:
     git:
-      url: https://github.com/${BASE_REPO}
-      revision: konflux-ls-${component_name}
+      url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
+      revision: ${COMPONENT_BRANCH}
 EOF
-                
+
                 # Wait for PAC to create the service account
                 service_account_name="build-pipeline-${component_name}"
                 wait_time=0
@@ -1181,7 +1306,7 @@ EOF
                 done
                 
                 # Step 2: Create GitHub branch now that component exists
-                if ! create_github_branch_for_component "${component_name}"; then
+                if ! ensure_component_repo "${component_name}"; then
                     log_error "   ❌ Failed to create GitHub branch for Quay-discovered component: ${component_name}"
                 fi
                 
@@ -1220,7 +1345,7 @@ metadata:
     ${BUILD_ANNOTATION}
     image.redhat.com/generate: "{\"visibility\": \"public\"}"
     test.appstudio.openshift.io/fresh-build: "true"
-    test.appstudio.openshift.io/pac-branch: "konflux-ls-${component_name}"
+    test.appstudio.openshift.io/pac-branch: "${COMPONENT_BRANCH}"
     # Multi-architecture build configuration (4 architectures)
     build.appstudio.openshift.io/multi-platform-required: "true"
     build.appstudio.openshift.io/request-platforms: "linux/amd64,linux/arm64,linux/s390x,linux/ppc64le"
@@ -1233,10 +1358,10 @@ spec:
     git:
       context: ./
       dockerfileUrl: Dockerfile
-      revision: konflux-ls-${component_name}
-      url: ${BASE_GITHUB_URL}
+      revision: ${COMPONENT_BRANCH}
+      url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
 EOF
-        
+
         created_count=$((created_count + 1))
         total_components=$((total_components + 1))
         actual_new_count=$((actual_new_count + 1))  # Count this as "new" (we built it)
@@ -1261,16 +1386,20 @@ EOF
         
         # Step 2: Create GitHub branch with PAC configuration
         # Now that component exists, create the branch (PAC webhook will fire but component exists)
-        if ! create_github_branch_for_component "${component_name}"; then
+        if ! ensure_component_repo "${component_name}"; then
             log_error "   ❌ Failed to create/update GitHub branch for ${component_name}, skipping build trigger..."
         else
             log_info "   ✓ GitHub branch ready"
             
-            # Step 3: Trigger PAC build now that both component and branch exist
-            # Update annotation to trigger-pac-build to start the build
+            # Step 3: Trigger PAC build with annotation (backup to git push trigger)
+            # DUAL TRIGGER MECHANISM:
+            #   1. Git push (above) creates real "push" event for PAC
+            #   2. Annotation (below) provides explicit trigger signal
+            # Both together ensure reliable build triggering
             kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
-                "build.appstudio.openshift.io/request=trigger-pac-build" --overwrite
-            log_info "   ✓ PAC build triggered for ${component_name}"
+                "build.appstudio.openshift.io/request=trigger-pac-build" --overwrite &>/dev/null || \
+                log_warning "   ⚠️  Failed to annotate component (continuing...)"
+            log_info "   ✓ PAC build triggered (git push + annotation): ${component_name}"
             
             echo "${component_name}:${app_name}" >> "${COMPONENT_LIST}"
             echo "${component_name}:${app_name}" >> "${COMPONENTS_TO_BUILD}"  # Track for build monitoring
@@ -1648,7 +1777,7 @@ metadata:
     image.redhat.com/generate: "{\"visibility\": \"public\"}"
     test.appstudio.openshift.io/fresh-build: "true"
     test.appstudio.openshift.io/retry-attempt: "1"
-    test.appstudio.openshift.io/pac-branch: "konflux-ls-${component_name}"
+    test.appstudio.openshift.io/pac-branch: "${COMPONENT_BRANCH}"
 spec:
   application: ${app_name}
   componentName: ${component_name}
@@ -1658,8 +1787,8 @@ spec:
     git:
       context: ./
       dockerfileUrl: Dockerfile
-      revision: konflux-ls-${component_name}
-      url: ${BASE_GITHUB_URL}
+      revision: ${COMPONENT_BRANCH}
+      url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
 EOF
                 RETRY_COUNT=$((RETRY_COUNT + 1))
                 
@@ -1675,9 +1804,9 @@ EOF
                     wait_time=$((wait_time + 2))
                 done
                 
-                # Trigger PAC build now that component and service account exist
+                # Trigger PAC build with annotation (after git push already happened)
                 kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
-                    "build.appstudio.openshift.io/request=trigger-pac-build" --overwrite
+                    "build.appstudio.openshift.io/request=trigger-pac-build" --overwrite &>/dev/null || true
                 
                 sleep 3  # Small delay between creations
             done < "${FAILED_COMPONENTS_FILE}"

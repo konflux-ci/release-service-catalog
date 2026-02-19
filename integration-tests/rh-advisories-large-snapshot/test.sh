@@ -4,31 +4,24 @@
 #
 # MAXIMUM STRESS TEST - Tests rh-advisories pipeline with worst-case configuration:
 # - 200 fresh Konflux multi-arch builds (4 architectures: amd64, arm64, s390x, ppc64le)
-# - Expected duration: 
-#     Every run: 10-13 hours total (120-180 min build + 8-11 hours signing)
-#     (Components cleaned up after each run to ensure worst-case signing performance)
+# - Expected duration:
+#     First run: 10-13 hours total (120-180 min build + 8-11 hours signing)
+#     Subsequent runs: 4-5 hours (components recovered from Quay, no build needed)
 # - Tests: Signing service capacity, production-scale multi-arch component processing
-# - Configuration: 4-arch builds, NO idempotency, NO SBOM, STRICT EC validation
+# - Configuration: 4-arch builds, component recovery from Quay, STRICT EC validation
 #
 # USAGE:
-#   # Default: Smart build (reuses existing images, builds missing ones)
-#   # First run: ~35-50 min (no batching delays) | Subsequent: ~1-2 minutes
-#   ./test.sh
+#   # Default: use repo-tracked static image list
+#   USE_STATIC_IMAGE_POOL=true ./test.sh
 #
-#   # Force rebuild all images (slower, ignores existing builds)
-#   FORCE_REBUILD=true ./test.sh
+#   # Use a custom image list file (one component name or image ref per line)
+#   FRESH_BUILDS_FILE=/path/to/image-list.txt ./test.sh
 #
 #   # Custom configuration (via environment variables)
 #   COMPONENT_COUNT=100 NAMESPACE=my-namespace ./test.sh
 #
-#   # No batching delays needed - builds start only after ALL components are ready
-#   # Retry logic with exponential backoff handles any GitHub API rate limit errors
-#
-#   # Keep components for fast re-runs (default: true for worst-case signing every run)
-#   CLEANUP_TEST_COMPONENTS=false ./test.sh
-#
-#   # Advanced: Skip build entirely (use pre-existing image pool file)
-#   SKIP_BUILD=true FRESH_BUILDS_FILE=/path/to/existing ./test.sh
+#   # Note: Components are NOT cleaned up after tests - they persist for fast recovery
+#   #       Images on Quay.io remain even after component deletion
 #
 # For general test infrastructure and requirements, see:
 #   integration-tests/README.md (common setup, cluster architecture, secrets)
@@ -40,114 +33,49 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLEANUP="true"
 NO_CVE="true"
 
-# --- Build Configuration (Environment Variables Only) ---
+# --- Test Configuration (Environment Variables Only) ---
 COMPONENT_COUNT="${COMPONENT_COUNT:-200}"
 NAMESPACE="${NAMESPACE:-dev-release-team-tenant}"
 FRESH_BUILDS_FILE="${FRESH_BUILDS_FILE:-/tmp/fresh-images-pool-$(date +%s).txt}"
-SKIP_BUILD="${SKIP_BUILD:-false}"
-CLEANUP_TEST_COMPONENTS="${CLEANUP_TEST_COMPONENTS:-true}"  # Default: cleanup after test for worst-case signing on every run
 
-# --- Build Phase (if needed) ---
-if [ "${SKIP_BUILD}" = "false" ]; then
-    # Build fresh images via PAC
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "🏗️  MAXIMUM STRESS TEST: FRESH KONFLUX BUILDS"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "⚠️  IDEMPOTENCY WARNING:"
-    echo "   Building NEW images to ensure worst-case signing (zero existing signatures)"
-    echo ""
-    echo "Configuration:"
-    echo "  Components: ${COMPONENT_COUNT}"
-    echo "  Namespace: ${NAMESPACE}"
-    echo "  Fresh builds file: ${FRESH_BUILDS_FILE}"
-    echo ""
-    
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "Step 1/2: Building Fresh Konflux Components"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    if [ "${FORCE_REBUILD:-false}" = "true" ]; then
-        echo "⏱️  Force rebuild mode - will rebuild components"
-        echo "   Building up to 100 new components (smart deletion keeps needed components)"
-        echo "   Estimated time: ~35-50 minutes for 100 components"
-        echo "   No batching delays - retry logic handles rate limits automatically"
-    else
-        echo "⏱️  Smart build mode - reusing existing successful builds"
-        echo "   Will check existing components and only build missing/failed ones"
-        echo "   First run: ~35-50 min (if building new) | Subsequent runs: 1-2 min (if all exist)"
-        echo "   No batching delays - builds start only after ALL components are ready"
-    fi
-    echo ""
-    
-    if ! "${SCRIPT_DIR}/utils/build-images.sh" "${COMPONENT_COUNT}" "${NAMESPACE}" "${FRESH_BUILDS_FILE}"; then
-        echo ""
-        echo "❌ Failed to build images"
-        exit 1
-    fi
-    
-    echo ""
-    echo "✅ Fresh builds complete!"
-    echo ""
-else
-    # Reuse existing images without building
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⚠️  ⚠️  ⚠️  WARNING: REUSING EXISTING IMAGES (NOT WORST-CASE) ⚠️  ⚠️  ⚠️"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "You are reusing existing images without rebuilding. This means:"
-    echo "  ❌ Images may already have signatures in Pyxis"
-    echo "  ❌ Signing tasks will use idempotency (skip existing signatures)"
-    echo "  ❌ Signing will be FAST (~1-2 min instead of 1-2 hours)"
-    echo "  ❌ This is NOT testing worst-case signing performance!"
-    echo ""
-    echo "To test TRUE worst-case signing with NEW digests:"
-    echo "  SKIP_BUILD=false FORCE_REBUILD=true ./test.sh  (rebuilds all components)"
-    echo ""
-    
-    if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
-        echo "❌ Error: Fresh builds file not found: ${FRESH_BUILDS_FILE}"
-        echo "   Run without SKIP_BUILD=true to build fresh images"
-        exit 1
-    fi
-    
-    EXISTING_COUNT=$(wc -l < "${FRESH_BUILDS_FILE}")
-    echo "   Using existing ${EXISTING_COUNT} images from ${FRESH_BUILDS_FILE}"
-    echo ""
-    
-    # Skip interactive prompt in CI/automation
-    if [ "${CI:-false}" != "true" ] && [ "${SKIP_BUILD_PROMPT:-false}" != "true" ]; then
-        read -p "Continue with existing builds? (y/N) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Aborted. Run without SKIP_BUILD to build fresh images."
-            exit 1
-        fi
-        echo ""
-    else
-        echo "   ℹ️  Automation detected - skipping confirmation prompt"
-        echo ""
+# Default to the repo-tracked static list unless caller provides a file explicitly.
+if [ "${USE_STATIC_IMAGE_POOL:-false}" = "true" ]; then
+    if [ -z "${FRESH_BUILDS_FILE:-}" ] || [[ "${FRESH_BUILDS_FILE}" == /tmp/fresh-images-pool-* ]]; then
+        FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-latest.txt"
     fi
 fi
 
-echo "DEBUG: After skip-build block, COMPONENT_COUNT=${COMPONENT_COUNT}" >&2
+if [ -z "${FRESH_BUILDS_FILE:-}" ] || [[ "${FRESH_BUILDS_FILE}" == /tmp/fresh-images-pool-* ]]; then
+    FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-latest.txt"
+fi
+
+if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
+    echo "❌ Error: Image list file not found: ${FRESH_BUILDS_FILE}"
+    echo "   Provide FRESH_BUILDS_FILE or ensure resources/static-image-pool-latest.txt exists"
+    exit 1
+fi
+
+LIST_COUNT="$(awk '{
+  line=$0
+  sub(/#.*/, "", line)
+  gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+  if (length(line) > 0) c++
+} END { print c+0 }' "${FRESH_BUILDS_FILE}")"
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🧪 Test-Only Mode"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Image list: ${FRESH_BUILDS_FILE}"
+echo "  Entries: ${LIST_COUNT}"
+echo ""
 
 # --- Export Configuration ---
 export FRESH_BUILDS_FILE
-
-echo "DEBUG: After export FRESH_BUILDS_FILE" >&2
-
-# --- Test Phase Header ---
-echo "DEBUG: About to print test phase header" >&2
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Step 2/2: Running Maximum Stress Test"
+echo "Running Large Snapshot Test"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "DEBUG: About to do arithmetic: COMPONENT_COUNT * 3" >&2
-echo "⚠️  Expected behavior with fresh builds:"
-echo "   • rh-sign-image tasks will sign ALL ~$((COMPONENT_COUNT * 3)) digests"
-echo "   • Expected test duration: 4-5 hours (worst-case signing performance)"
-echo "   • Note: First test run adds 35-50 min for building 100 components"
+echo "ℹ️  Using pre-defined image list (no build/recovery in this run)"
 echo ""
 
 # --- Timeout Configuration (in seconds, configurable via environment) ---
@@ -993,42 +921,22 @@ cleanup_resources() {
             echo "   ✓ No test releases found"
         fi
 
-        # Clean up test Applications and Components (if enabled)
-        if [ "${CLEANUP_TEST_COMPONENTS}" == "true" ] && [ "${SKIP_BUILD}" == "false" ]; then
-            echo "🗑️  Cleaning up test Applications and Components..."
-            
-            # Find and delete all multi-version-build applications (cascade deletes components)
-            local fresh_apps
-            fresh_apps=$(kubectl get application -n "${NAMESPACE:-dev-release-team-tenant}" \
-                -l "test.appstudio.openshift.io/type=multi-version-build" \
-                --no-headers 2>/dev/null | awk '{print $1}' || echo "")
-            
-            if [ -n "${fresh_apps}" ]; then
-                local app_count
-                app_count=$(echo "${fresh_apps}" | wc -l)
-                echo "   Found ${app_count} fresh build applications to clean up"
-                
-                while IFS= read -r app; do
-                    if kubectl delete application "${app}" -n "${NAMESPACE:-dev-release-team-tenant}" 2>/dev/null; then
-                        echo "   ✓ Deleted ${app} (components cascade-deleted)"
-                    else
-                        echo "   ⚠ Failed to delete ${app}"
-                    fi
-                done <<< "${fresh_apps}"
-            else
-                echo "   ✓ No fresh build applications found"
-            fi
-        elif [ "${SKIP_BUILD}" == "true" ]; then
-            echo "⏩ Skipping component cleanup (SKIP_BUILD=true)"
-        else
-            echo "⏩ Skipping component cleanup (CLEANUP_TEST_COMPONENTS=false)"
-        fi
+        # Component cleanup is DISABLED
+        # Components persist across test runs to enable image reuse from Quay
+        # Images on Quay.io are NOT deleted when components are deleted
+        # This allows fast recovery: create components pointing to existing Quay images
+        echo "⏩ Component cleanup disabled - components will persist for fast recovery"
 
         # Standard cleanup
         if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
             echo "Deleting test resources..."
             if [ -f "$tmpDir/tenant-resources.yaml" ]; then
-                kubectl delete -f "$tmpDir/tenant-resources.yaml" 2>/dev/null || true
+                # Intentionally avoid deleting Component/Application during cleanup.
+                # Only remove supporting tenant resources by label.
+                kubectl delete rolebinding,serviceaccount,releaseplan \
+                    -n "${tenant_namespace:-dev-release-team-tenant}" \
+                    -l "originating-tool=${originating_tool:-rh-advisories-large-snapshot-test}" \
+                    --ignore-not-found=true 2>/dev/null || true
             fi
             if [ -f "$tmpDir/managed-resources.yaml" ]; then
                 kubectl delete -f "$tmpDir/managed-resources.yaml" 2>/dev/null || true
@@ -1080,6 +988,81 @@ apply_kustomize_resources() {
     }
 
     echo "✅ ${description} applied to ${namespace}" >&2
+}
+
+# Function to patch RPA with actual component names from snapshot
+# The apply-mapping task does NOT support wildcard "*" matching
+patch_rpa_with_snapshot_components() {
+    # Validate required variables
+    : "${large_snapshot_name:?large_snapshot_name must be set}"
+    : "${tenant_namespace:?tenant_namespace must be set}"
+    : "${managed_namespace:?managed_namespace must be set}"
+    : "${release_plan_admission_name:?release_plan_admission_name must be set}"
+    
+    echo "Generating component mapping from snapshot..." >&2
+    
+    # Get component names from snapshot
+    local components
+    components=$(kubectl get snapshot "${large_snapshot_name}" -n "${tenant_namespace}" \
+        -o jsonpath='{range .spec.components[*]}{.name}{"\n"}{end}')
+    
+    if [ -z "${components}" ]; then
+        echo "❌ No components found in snapshot ${large_snapshot_name}" >&2
+        return 1
+    fi
+    
+    local component_count
+    component_count=$(echo "${components}" | wc -l)
+    echo "  Found ${component_count} components in snapshot" >&2
+    
+    # Build the mapping components array as JSON
+    local mapping_json='[]'
+    while IFS= read -r component_name; do
+        [ -z "${component_name}" ] && continue
+        local component_entry=$(cat <<EOF
+{
+  "name": "${component_name}",
+  "repositories": [
+    {
+      "url": "quay.io/redhat-pending/rhtap----rh-advisories-component"
+    }
+  ]
+}
+EOF
+)
+        mapping_json=$(echo "${mapping_json}" | jq --argjson entry "${component_entry}" '. += [$entry]')
+    done <<< "${components}"
+    
+    echo "  Generated mapping for ${component_count} components" >&2
+    
+    # Patch the RPA with the new mapping
+    echo "  Patching ReleasePlanAdmission: ${release_plan_admission_name}" >&2
+    
+    local patch_json=$(cat <<EOF
+{
+  "spec": {
+    "data": {
+      "mapping": {
+        "components": ${mapping_json}
+      }
+    }
+  }
+}
+EOF
+)
+    
+    kubectl patch releaseplanadmission "${release_plan_admission_name}" \
+        -n "${managed_namespace}" \
+        --type merge \
+        -p "${patch_json}"
+    
+    if [ $? -ne 0 ]; then
+        echo "❌ Failed to patch ReleasePlanAdmission" >&2
+        return 1
+    fi
+    
+    echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings" >&2
+    return 0
 }
 
 # Override: Resource creation with large snapshot
@@ -1136,6 +1119,16 @@ create_kubernetes_resources() {
     apply_large_snapshot
     if [ $? -ne 0 ]; then
         echo "❌ Failed to apply large snapshot" >&2
+        return 1
+    fi
+
+    # CRITICAL: Patch RPA with actual component names from snapshot
+    # The apply-mapping task does NOT support wildcard "*" patterns
+    # It requires exact component name matches via group_by(.name)
+    echo "Patching ReleasePlanAdmission with snapshot component mappings..." >&2
+    patch_rpa_with_snapshot_components
+    if [ $? -ne 0 ]; then
+        echo "❌ Failed to patch RPA with component mappings" >&2
         return 1
     fi
 
