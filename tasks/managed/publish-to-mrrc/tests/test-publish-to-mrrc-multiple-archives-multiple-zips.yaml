@@ -1,0 +1,208 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-publish-to-mrrc-multiple-archives-multiple-zips
+spec:
+  description: |
+    Run the publish-to-mrrc task with multiple OCI archives, each containing multiple .zip files.
+    This is the most complex scenario - tests merging all zips from all archives.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              # Multiple OCI registries separated by %, each with multi-zips marker
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)"/charon.env << EOF
+              export CHARON_OCI_REGISTRY=quay.io/testorg/test-multi-zips-1.zip@sha256:1111111111111\
+              %quay.io/testorg/test-multi-zips-2.zip@sha256:2222222222222
+              export CHARON_TARGET=dev-maven-ga
+              export CHARON_PRODUCT_NAME="Test Product Complex"
+              export CHARON_PRODUCT_VERSION=0.0.3
+              export CHARON_SIGN_KEY=testkey
+              export CHARON_AUTHOR=testuser
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)"/charon-config.yaml << EOF
+              charon-config
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: publish-to-mrrc
+      params:
+        - name: charonParamFilePath
+          value: $(context.pipelineRun.uid)/charon.env
+        - name: charonConfigFilePath
+          value: $(context.pipelineRun.uid)/charon-config.yaml
+        - name: charonAWSSecret
+          value: test-charon-aws-credentials
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: charonSignCASecret
+          value: test-ca
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              echo "Checking mock calls for multiple archives with multiple zips scenario"
+
+              # Expect 4 oras calls:
+              # 1-2. pull (one for each archive)
+              # 3. push (upload merged result to registry)
+              # 4. resolve (get digest of pushed merged result)
+              if [ "$(< "$(params.dataDir)"/mock_oras.txt wc -l)" != 4 ]; then
+                echo Error: oras was expected to be called 4 times. Actual calls:
+                cat "$(params.dataDir)"/mock_oras.txt
+                exit 1
+              fi
+
+              # Verify we have 2 pull calls
+              pull_count=$(grep -c "^pull " "$(params.dataDir)"/mock_oras.txt || true)
+              if [ "$pull_count" != 2 ]; then
+                echo Error: Expected 2 oras pull calls. Actual: "$pull_count"
+                cat "$(params.dataDir)"/mock_oras.txt
+                exit 1
+              fi
+
+              # Verify we have 1 push call
+              if ! grep -q "^push " "$(params.dataDir)"/mock_oras.txt; then
+                echo Error: Expected oras push call for merged result. Actual calls:
+                cat "$(params.dataDir)"/mock_oras.txt
+                exit 1
+              fi
+
+              # Verify we have 1 resolve call
+              if ! grep -q "^resolve " "$(params.dataDir)"/mock_oras.txt; then
+                echo Error: Expected oras resolve call for merged result. Actual calls:
+                cat "$(params.dataDir)"/mock_oras.txt
+                exit 1
+              fi
+
+              # Expect 3 charon calls:
+              # 1. merge (for combining all zips from both archives)
+              # 2. sign (for the merged result)
+              # 3. upload (for the merged result)
+              if [ "$(< "$(params.dataDir)"/mock_charon.txt wc -l)" != 3 ]; then
+                echo Error: charon was expected to be called 3 times. Actual calls:
+                cat "$(params.dataDir)"/mock_charon.txt
+                exit 1
+              fi
+
+              # Verify the first charon call was a merge
+              if ! grep -q "^merge " "$(params.dataDir)"/mock_charon.txt; then
+                echo Error: Expected first charon call to be merge. Actual calls:
+                cat "$(params.dataDir)"/mock_charon.txt
+                exit 1
+              fi
+
+              echo "Test passed: Multiple archives with multiple zips correctly triggered merge path"
+      runAfter:
+        - run-task
