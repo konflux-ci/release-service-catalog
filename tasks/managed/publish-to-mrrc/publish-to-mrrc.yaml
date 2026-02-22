@@ -177,7 +177,7 @@ spec:
       volumeMounts:
         - name: mrrc-workdir
           mountPath: "/workdir"
-    - name: upload-single-maven-repo
+    - name: upload-single-maven-zip
       image: quay.io/konflux-ci/charon@sha256:2b11516e682a2c985612fc64a3b833e05d9f3efb35793db6c29f4a81545c74bc
       computeResources:
         limits:
@@ -200,31 +200,38 @@ spec:
 
         IFS='%' read -ra ADDR <<< "$CHARON_OCI_REGISTRY"
         if [ ${#ADDR[@]} -eq 1 ]; then
-          echo "Only single archive found, no need to merge"
-
-          target="$CHARON_TARGET"
-          productName="$CHARON_PRODUCT_NAME"
-          productVersion="$CHARON_PRODUCT_VERSION"
           registry="${ADDR[0]}"
-          echo "Release $registry with $productName-$productVersion into $target"
           hash=${registry##*@sha256:}
           short_hash=${hash:0:6}
           repodir="/workdir/mrrc/$short_hash"
 
-          # start signing of the maven artifacts in maven zip
-          charon sign -r "$CHARON_AUTHOR" -p "$repodir" -k "$CHARON_SIGN_KEY" "$registry"
-
+          # Check if there are multiple zips in this single archive
           repo_zips=("$repodir"/*.zip)
-          repo_zip=${repo_zips[0]}
-          if [[ "$repo_zip" == "$repodir/*.zip" ]]
-          then
+          if [[ "${repo_zips[0]}" == "$repodir/*.zip" ]]; then
             echo "No maven repository zip file found, will not publish"
             exit 1
           fi
+
+          if [ ${#repo_zips[@]} -gt 1 ]; then
+            echo "Multiple zips found in single archive (${#repo_zips[@]} zips), will be handled by merge step"
+            exit 0
+          fi
+
+          # Only handle single archive with single zip case
+          echo "Single archive with single zip found, no need to merge"
+
+          target="$CHARON_TARGET"
+          productName="$CHARON_PRODUCT_NAME"
+          productVersion="$CHARON_PRODUCT_VERSION"
+          echo "Release $registry with $productName-$productVersion into $target"
+
+          # start signing of the maven artifacts in maven zip
+          charon sign -r "$CHARON_AUTHOR" -p "$repodir" -k "$CHARON_SIGN_KEY" "$registry"
+
+          repo_zip=${repo_zips[0]}
           sign_files=("$repodir"/*.json)
           sign_file=${sign_files[0]}
-          if [[ "$sign_file" == "$repodir/*.json" ]]
-          then
+          if [[ "$sign_file" == "$repodir/*.json" ]]; then
             echo "No signature result received from radas, will not publish"
             exit 1
           fi
@@ -242,7 +249,7 @@ spec:
           mountPath: /etc/ssl/certs/ca-custom-bundle.crt
           subPath: ca-bundle.crt
           readOnly: true
-    - name: merge-multiple-maven-repos
+    - name: merge-multiple-maven-zips
       image: quay.io/konflux-ci/charon@sha256:2b11516e682a2c985612fc64a3b833e05d9f3efb35793db6c29f4a81545c74bc
       computeResources:
         limits:
@@ -264,30 +271,43 @@ spec:
         . "$CHARON_FILE"
 
         IFS='%' read -ra ADDR <<< "$CHARON_OCI_REGISTRY"
-        # Check if have more than one archive to merge
-        if [ ${#ADDR[@]} -gt 1 ]; then
-          echo "More than one archives found, will merge"
 
-          productName="$CHARON_PRODUCT_NAME"
-          productVersion="$CHARON_PRODUCT_VERSION"
+        productName="$CHARON_PRODUCT_NAME"
+        productVersion="$CHARON_PRODUCT_VERSION"
+
+        # Collect all zips from all archives
+        repodir_arr=()
+        total_zip_count=0
+        for registry in "${ADDR[@]}"
+        do
+          hash=${registry##*@sha256:}
+          short_hash=${hash:0:6}
+          repodir="/workdir/mrrc/$short_hash"
+          repo_zips=("$repodir"/*.zip)
+
+          # Check if any zips found in this archive
+          if [[ "${repo_zips[0]}" == "$repodir/*.zip" ]]; then
+            echo "No maven repository zip file found in $repodir, will not merge"
+            exit 1
+          fi
+
+          # Add all zips from this archive to the merge list
+          for zip in "${repo_zips[@]}"; do
+            repodir_arr+=("$zip")
+            total_zip_count=$((total_zip_count + 1))
+          done
+          echo "Found ${#repo_zips[@]} zip(s) in archive $short_hash"
+        done
+
+        # Check if we need to merge (either multiple archives OR single archive with multiple zips)
+        if [ ${#ADDR[@]} -gt 1 ] || [ $total_zip_count -gt 1 ]; then
+          echo "Total $total_zip_count zip(s) found across ${#ADDR[@]} archive(s), will merge"
+
           mergedir="/workdir/mrrc/merged"
           mkdir -p "$mergedir"
-
-          for registry in "${ADDR[@]}"
-          do
-            hash=${registry##*@sha256:}
-            short_hash=${hash:0:6}
-            repodir="/workdir/mrrc/$short_hash"
-            repo_zips=("$repodir"/*.zip)
-            repo_zip=${repo_zips[0]}
-            if [[ "$repo_zip" == "$repodir/*.zip" ]]
-            then
-              echo "No maven repository zip file found, will not merge"
-              exit 1
-            fi
-            repodir_arr+=("$repo_zip")
-          done
           charon merge -p "$productName" -v "$productVersion" -m "${mergedir}/merged.zip" "${repodir_arr[@]}"
+        else
+          echo "Just single zip is found, the merge step is not needed and skipped!"
         fi
       volumeMounts:
         - name: "charon-aws-vol"
@@ -336,7 +356,7 @@ spec:
       volumeMounts:
         - name: mrrc-workdir
           mountPath: "/workdir"
-    - name: upload-merged-maven-repo
+    - name: upload-merged-maven-zip
       image: quay.io/konflux-ci/charon@sha256:2b11516e682a2c985612fc64a3b833e05d9f3efb35793db6c29f4a81545c74bc
       computeResources:
         limits:
