@@ -17,13 +17,18 @@ spec:
   data:
     # Skip idempotency filtering for test releases
     skipFilter: true
-    # Atlas configuration: ENABLED for SBOM processing and submission
+    # Atlas configuration: enabled when mutation is disabled (test.sh removes this block
+    # when ENABLE_DIGEST_MUTATION=true because mobster cannot verify attestations for
+    # mutated digests — Tekton Chains key is inaccessible, so subject mismatch is unfixable)
     atlas:
       server: stage
       atlas-sso-secret-name: atlas-staging-sso-secret-${component_name}
       atlas-retry-aws-secret-name: atlas-retry-s3-staging-secret-${component_name}
     releaseNotes:
       # Advisory metadata - all fields required by schema
+      # PYXIS IDEMPOTENCY PREVENTION: timestamp in synopsis ensures new advisory per run
+      # Without unique values, Pyxis returns existing advisory preventing re-testing
+      # Only synopsis needs timestamp (Pyxis uses it as primary advisory identifier)
       product_id:
         - 999
       product_name: "rh-advisories-large-test"
@@ -31,7 +36,9 @@ spec:
       product_stream: "rh-advisories-large-test-1.0"
       cpe: "cpe:/a:redhat:rh_advisories_large_test:1.0::el9"
       type: "RHBA"
-      synopsis: "rh-advisories-large-test 1.0 release for large snapshot testing"
+      # Dynamic timestamp added by test.sh to ensure unique advisory per run
+      # Format: YYYYMMDD-HHMMSS (e.g., 20260226-153045)
+      synopsis: "rh-advisories-large-test 1.0 release for large snapshot testing __TIMESTAMP__"
       topic: "Large snapshot test with 200 components"
       description: "Test release for rh-advisories pipeline with large snapshot (200 components)"
       solution: "Update to rh-advisories-large-test 1.0"
@@ -44,7 +51,18 @@ spec:
     mapping:
       defaults:
         tags:
-          - latest
+          # SIGNING IDEMPOTENCY WORKAROUND: Use timestamp-based unique tag per run
+          # This forces rh-sign-image to sign even if digest already has signatures
+          # Pyxis check: "reference:tag + digest + key" - unique tag = no existing signature
+          # Replaced by test.sh: latest-__TIMESTAMP__ → latest-20260226-153045
+          - latest-__TIMESTAMP__
+          # Extra tags to simulate a realistic multi-tag product release.
+          # Each tag multiplies: push-snapshot (copy), rh-sign-image (UMB/Pyxis),
+          # and rh-sign-image-cosign (cosign sign) work linearly.
+          # With 200 components × 5 tags = 1000 signing operations (vs 400 with 2 tags).
+          - v1.0
+          - v1.0.0
+          - stable
         pushSourceContainer: false
         # Using staging/pending repository (quay.io/redhat-pending) for safe testing
         # This causes environment="stage" which skips close-advisory-issues task

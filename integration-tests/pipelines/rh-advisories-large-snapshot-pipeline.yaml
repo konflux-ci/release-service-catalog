@@ -10,18 +10,6 @@ spec:
     - name: PIPELINE_TEST_SUITE
       type: string
       description: 'The name of the test corresponding to a defined Konflux integration test.'
-    - name: SKIP_BUILD
-      type: string
-      default: 'false'
-      description: 'Skip build phase (true = test with existing images, false = build images first)'
-    - name: FORCE_REBUILD
-      type: string
-      default: 'false'
-      description: 'Force fresh rebuild of components (true = worst-case stress, false = reuse mode)'
-    - name: USE_STATIC_IMAGE_POOL
-      type: string
-      default: 'false'
-      description: 'Use repo-tracked static image pool (:latest) and skip build phase'
     - name: VAULT_PASSWORD_SECRET_NAME
       default: 'e2e-test-vault-password'
       type: string
@@ -31,12 +19,22 @@ spec:
     - name: KUBECONFIG_SECRET_NAME
       default: 'e2e-test-service-account-kubeconfig'
       type: string
-    - name: QUAY_TOKEN_SECRET_NAME
-      default: 'hacbs-release-tests-token'
+    - name: ENABLE_DIGEST_MUTATION
+      default: 'true'
       type: string
-    - name: QUAY_TOKEN_SECRET_KEY
-      default: 'token'
+      description: 'Enable digest mutation to avoid Pyxis signature caching (true = worst-case every run)'
+    - name: GIT_URL
       type: string
+      default: 'https://github.com/konflux-ci/release-service-catalog'
+      description: 'Git repository URL for resolving tasks'
+    - name: GIT_REVISION
+      type: string
+      default: 'main'
+      description: 'Git revision/branch for resolving tasks'
+    - name: COMPONENT_COUNT
+      type: string
+      default: '0'
+      description: 'Number of components to test (0 = use all available in static pool)'
   tasks:
     - name: get-snapshot-data
       params:
@@ -67,7 +65,9 @@ spec:
               echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
 
     - name: run-test
-      timeout: "7h0m0s"
+      timeout: "10h0m0s"
+      runAfter:
+        - get-snapshot-data
       params:
         - name: PIPELINE_TEST_SUITE
           value: $(params.PIPELINE_TEST_SUITE)
@@ -83,14 +83,8 @@ spec:
           value: $(params.GITHUB_TOKEN_SECRET_NAME)
         - name: KUBECONFIG_SECRET_NAME
           value: $(params.KUBECONFIG_SECRET_NAME)
-        - name: QUAY_TOKEN_SECRET_NAME
-          value: $(params.QUAY_TOKEN_SECRET_NAME)
-        - name: QUAY_TOKEN_SECRET_KEY
-          value: $(params.QUAY_TOKEN_SECRET_KEY)
-        - name: FORCE_REBUILD
-          value: $(params.FORCE_REBUILD)
-        - name: USE_STATIC_IMAGE_POOL
-          value: $(params.USE_STATIC_IMAGE_POOL)
+        - name: ENABLE_DIGEST_MUTATION
+          value: $(params.ENABLE_DIGEST_MUTATION)
 
       taskSpec:
         params:
@@ -101,10 +95,10 @@ spec:
           - name: VAULT_PASSWORD_SECRET_NAME
           - name: GITHUB_TOKEN_SECRET_NAME
           - name: KUBECONFIG_SECRET_NAME
-          - name: QUAY_TOKEN_SECRET_NAME
-          - name: QUAY_TOKEN_SECRET_KEY
-          - name: FORCE_REBUILD
-          - name: USE_STATIC_IMAGE_POOL
+          - name: ENABLE_DIGEST_MUTATION
+        stepTemplate:
+          securityContext:
+            runAsUser: 1001
         results:
           - name: TEST_OUTPUT
             description: Test output
@@ -114,28 +108,9 @@ spec:
             env:
               - name: SNAPSHOT
                 value: $(params.SNAPSHOT)
-              - name: SKIP_BUILD
-                # "false" = Enable build phase (can rebuild components)
-                # "true" = Skip build phase entirely (reuse existing)
-                value: $(params.SKIP_BUILD)
-              - name: FORCE_REBUILD
-                # "true" = Force rebuild ALL components (creates new digests, worst-case signing)
-                # "false" = Reuse existing successful builds (fast but may have existing signatures)
-                value: $(params.FORCE_REBUILD)
-              - name: USE_STATIC_IMAGE_POOL
-                value: $(params.USE_STATIC_IMAGE_POOL)
               - name: COMPONENT_COUNT
-                # Number of components to build/test (default: 100)
-                # Build times scale with component count:
-                #   50 = ~18-25 min builds (no batching delays) + 2-3 hours test = 2.5-3.5 hours
-                #   100 = ~35-50 min builds (no batching delays) + 4-5 hours test = 4.5-5.5 hours
-                #   200 = ~70-100 min builds (no batching delays) + 8-10 hours test = 9-11 hours
-                # No batching delays - builds start only after ALL components are ready
-                value: "200"
+                value: $(params.COMPONENT_COUNT)
               - name: BASE_REPO
-                # GitHub repository with PAC template branch (must be accessible by GITHUB_TOKEN)
-                # Default: hacbs-release-tests/e2e-base
-                # Alternative: konflux-ci/integration-examples or another accessible repo
                 value: "hacbs-release-tests/e2e-base"
               - name: VAULT_PASSWORD
                 valueFrom:
@@ -147,17 +122,13 @@ spec:
                   secretKeyRef:
                     name: $(params.GITHUB_TOKEN_SECRET_NAME)
                     key: token
-              - name: QUAY_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: $(params.QUAY_TOKEN_SECRET_NAME)
-                    key: $(params.QUAY_TOKEN_SECRET_KEY)
-                    optional: true
               - name: KUBECONFIG
                 valueFrom:
                   secretKeyRef:
                     name: $(params.KUBECONFIG_SECRET_NAME)
                     key: kubeconfig
+              - name: ENABLE_DIGEST_MUTATION
+                value: $(params.ENABLE_DIGEST_MUTATION)
               - name: PR_NUMBER
                 valueFrom:
                   fieldRef:
@@ -267,93 +238,10 @@ spec:
               # Skip the affected pipelines check that other tests use
               echo "Manual trigger: Running test unconditionally"
               
-              # Pre-test preparation:
-              # - USE_STATIC_IMAGE_POOL=true: use repo-tracked image list
-              #   (no build, no recovery, no Quay validation here)
-              # - SKIP_BUILD=true: legacy recovery path
-              #   (uses build-images.sh to reconstruct components from registry)
-              # - otherwise: run the test as-is
-              #   (image creation is handled by /build-large-snapshot in a separate PipelineRun)
-              if [ "${USE_STATIC_IMAGE_POOL}" = "true" ]; then
-                export CI=true  # Skip interactive prompts
-                FRESH_BUILDS_FILE="/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/static-image-pool-latest.txt"
-                export FRESH_BUILDS_FILE
-
-                # Count non-empty, non-comment entries (the generate script supports comments/blanks).
-                COMPONENT_COUNT="$(awk '{
-                  line=$0
-                  sub(/#.*/, "", line)
-                  gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-                  if (length(line) > 0) c++
-                } END { print c+0 }' "${FRESH_BUILDS_FILE}")"
-                export COMPONENT_COUNT
-                export LARGE_SNAPSHOT_COMPONENT_COUNT="${COMPONENT_COUNT}"  # Tell test to expect this count
-
-                echo ""
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "🧪 TEST-ONLY MODE (static image list)"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "  Using: ${FRESH_BUILDS_FILE}"
-                echo "  Entries: ${COMPONENT_COUNT}"
-                echo "  Skipping: build-images.sh (no Quay validation/recovery/build)"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo ""
-              elif [ "${SKIP_BUILD}" = "true" ]; then
-                # Recovery mode: Recreate components from existing Quay images (no building)
-                # IMPORTANT: Images persist on Quay even after components are deleted
-                # This recovers all components by checking Quay and creating components for found images
-                FRESH_BUILDS_FILE="/tmp/recovered-images-pool-$(date +%s).txt"
-                export FRESH_BUILDS_FILE
-                export CI=true  # Skip interactive prompts
-                TARGET_COMPONENTS=200  # Target to recover
-
-                echo ""
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "🔄 Component Recovery (REUSE mode - no building)"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "  NOTE: Recovering components from existing Quay images"
-                echo "  Will scan Quay.io and create components for all found images"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo ""
-
-                # Run build-images.sh in recovery mode (SKIP_BUILD=true)
-                "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/utils/build-images.sh" \
-                  "${TARGET_COMPONENTS}" \
-                  "dev-release-team-tenant" \
-                  "${FRESH_BUILDS_FILE}" \
-                  "false" \
-                  "true"
-
-                COMPONENT_COUNT=$(wc -l < "${FRESH_BUILDS_FILE}")
-                export COMPONENT_COUNT
-                export LARGE_SNAPSHOT_COMPONENT_COUNT="${COMPONENT_COUNT}"  # Tell test to expect this count
-
-                # Fail if we didn't recover enough images
-                MIN_IMAGES=50
-                if [ "${COMPONENT_COUNT}" -lt "${MIN_IMAGES}" ]; then
-                  echo ""
-                  echo "❌ ERROR: Not enough images recovered!"
-                  echo "   Found: ${COMPONENT_COUNT} images"
-                  echo "   Required: At least ${MIN_IMAGES} images"
-                  echo ""
-                  echo "   Run /build-large-snapshot to build more images"
-                  exit 1
-                fi
-
-                echo ""
-                echo "✅ Recovered ${COMPONENT_COUNT} components with images ready for testing"
-                echo ""
-              else
-                echo ""
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "Proceeding Without Pre-Build Step"
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo "  This PipelineRun is test-only and does not build images."
-                echo "  To create/update the image set, run /build-large-snapshot first."
-                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-                echo ""
-                export CI=true  # Skip interactive prompts in test.sh
-              fi
+              # test.sh resolves FRESH_BUILDS_FILE, counts entries, caps COMPONENT_COUNT,
+              # and exports LARGE_SNAPSHOT_COMPONENT_COUNT — no file path needed here.
+              export CI=true
+              export COMPONENT_COUNT
               
               # Run test and capture result
               set +e
@@ -376,12 +264,72 @@ spec:
               else
                 echo "⚠️  Could not find Release to debug"
               fi
-              
+
+              # ── Task Retry Summary ─────────────────────────────────────────
+              # Reads Release.status.managedProcessing.pipelineRun (namespace/name),
+              # then fetches each TaskRun to report retry counts and failure reasons.
+              # Wrapped in || true — never affects test result.
+              {
+                echo ""
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo "📊 Task Retry Summary (managed release pipeline)"
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+                MANAGED_PR_REF=""
+                if [ -n "${RELEASE_NAME}" ]; then
+                  MANAGED_PR_REF=$(kubectl get release "${RELEASE_NAME}" \
+                    -n dev-release-team-tenant \
+                    -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || echo "")
+                fi
+
+                if [ -z "${MANAGED_PR_REF}" ]; then
+                  echo "  ⚠️  No managed PipelineRun found — skipping"
+                else
+                  # Field is "namespace/name" — split on /
+                  MANAGED_NS="${MANAGED_PR_REF%%/*}"
+                  MANAGED_PR="${MANAGED_PR_REF##*/}"
+                  echo "  PipelineRun: ${MANAGED_PR}  (ns: ${MANAGED_NS})"
+                  echo ""
+
+                  RETRY_COUNT=0
+                  while IFS= read -r TR; do
+                    [ -z "${TR}" ] && continue
+
+                    # Single kubectl call per TaskRun — extract everything with jq
+                    TR_JSON=$(kubectl get taskrun "${TR}" -n "${MANAGED_NS}" \
+                      -o json 2>/dev/null || echo "{}")
+                    RETRIES_LEN=$(echo "${TR_JSON}" \
+                      | jq '[.status.retriesStatus // []] | flatten | length' 2>/dev/null || echo 0)
+
+                    if [ "${RETRIES_LEN:-0}" -gt 0 ]; then
+                      TASK_LABEL=$(echo "${TR_JSON}" | jq -r \
+                        '.metadata.labels["tekton.dev/pipelineTask"] // .metadata.name' \
+                        2>/dev/null || echo "${TR}")
+
+                      echo "  🔁 ${TASK_LABEL}  — ${RETRIES_LEN} retry(ies)"
+                      # Print failure message for every attempt
+                      echo "${TR_JSON}" | jq -r '
+                        .status.retriesStatus // [] | to_entries[] |
+                        "     Attempt \(.key + 1): \(.value.conditions[0].message // "(no message)")"
+                      ' 2>/dev/null || true
+                      RETRY_COUNT=$((RETRY_COUNT + 1))
+                    fi
+                  done < <(kubectl get pipelinerun "${MANAGED_PR}" -n "${MANAGED_NS}" \
+                    -o jsonpath='{.status.childReferences[*].name}' 2>/dev/null \
+                    | tr ' ' '\n')
+
+                  if [ "${RETRY_COUNT}" -eq 0 ]; then
+                    echo "  ✅ No task retries detected"
+                  fi
+                fi
+
+                echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                echo ""
+              } || true
+
               # Exit with test result
               exit ${TEST_RESULT}
 
-      runAfter:
-        - get-snapshot-data
   finally:
     - name: cleanup-resources
       timeout: "1h0m0s"

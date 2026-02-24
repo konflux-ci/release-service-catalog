@@ -88,21 +88,21 @@ DEST_REPO_CHECK=$(echo "${DEST_REPO_RESPONSE}" | jq -r '.full_name // ""')
 if [ -z "${DEST_REPO_CHECK}" ]; then
   echo "⚠️  Destination repository ${dest_repo} not found"
   echo "   Attempting to create it automatically..."
-
+  
   # Pass the full repository path to the create script (it now handles org/repo format)
   if [ -n "${DEBUG}" ]; then
     echo "🐛 Full dest_repo: ${dest_repo}"
   fi
-
+  
   # Get the directory where this script is located to find the helper script
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   "${SCRIPT_DIR}/create-github-repo.sh" "${dest_repo}" "Automatically created for branch copy from ${source_repo}" false
-
+  
   if [ $? -ne 0 ]; then
     echo "🔴 error: failed to create destination repository ${dest_repo}"
     exit 1
   fi
-
+  
   # Verify the repository was created successfully
   echo "Re-verifying destination repository ${dest_repo}..."
   DEST_REPO_RECHECK_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null)
@@ -117,7 +117,7 @@ if [ -z "${DEST_REPO_CHECK}" ]; then
     fi
     exit 1
   fi
-
+  
   echo "✅ Repository ${dest_repo} created successfully"
 fi
 

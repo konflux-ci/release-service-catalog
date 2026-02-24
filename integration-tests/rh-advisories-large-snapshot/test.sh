@@ -38,20 +38,33 @@ COMPONENT_COUNT="${COMPONENT_COUNT:-200}"
 NAMESPACE="${NAMESPACE:-dev-release-team-tenant}"
 FRESH_BUILDS_FILE="${FRESH_BUILDS_FILE:-/tmp/fresh-images-pool-$(date +%s).txt}"
 
-# Default to the repo-tracked static list unless caller provides a file explicitly.
-if [ "${USE_STATIC_IMAGE_POOL:-false}" = "true" ]; then
-    if [ -z "${FRESH_BUILDS_FILE:-}" ] || [[ "${FRESH_BUILDS_FILE}" == /tmp/fresh-images-pool-* ]]; then
-        FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-latest.txt"
-    fi
-fi
+# Feature #1: Unique Mapping Tag Per Run
+# When enabled, each run patches RPA mapping.defaults.tags with a unique timestamp-based tag.
+# This is useful for tag testing and avoiding conflicts, but does NOT break Pyxis idempotency.
+ENABLE_RUN_UNIQUE_MAPPING_TAG="${ENABLE_RUN_UNIQUE_MAPPING_TAG:-true}"
+RUN_UNIQUE_TAG_PREFIX="${RUN_UNIQUE_TAG_PREFIX:-worstcase}"
+RELEASE_MAPPING_TAG="${RELEASE_MAPPING_TAG:-}"
 
+# Feature #2: Digest Mutation (DOES break Pyxis signature idempotency)
+# When enabled, mutates image digests by adding a unique label before snapshot generation.
+# This forces Pyxis to sign every image (worst-case performance) on every run.
+# NOTE: Disabled by default until signature verification is tested
+ENABLE_DIGEST_MUTATION="${ENABLE_DIGEST_MUTATION:-false}"
+DIGEST_MUTATION_RUN_ID="${DIGEST_MUTATION_RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+
+# Signing configuration
+SIGNING_CONFIGMAP_NAME="${SIGNING_CONFIGMAP_NAME:-hacbs-signing-pipeline-config-staging-redhatbeta2}"
+
+# Image list selection priority:
+# 1. FRESH_BUILDS_FILE (explicit override)
+# 2. Static pool (default)
 if [ -z "${FRESH_BUILDS_FILE:-}" ] || [[ "${FRESH_BUILDS_FILE}" == /tmp/fresh-images-pool-* ]]; then
-    FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-latest.txt"
+    FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-stable.txt"
 fi
 
 if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
     echo "❌ Error: Image list file not found: ${FRESH_BUILDS_FILE}"
-    echo "   Provide FRESH_BUILDS_FILE or ensure resources/static-image-pool-latest.txt exists"
+    echo "   Provide FRESH_BUILDS_FILE or ensure resources/static-image-pool-stable.txt exists"
     exit 1
 fi
 
@@ -62,18 +75,45 @@ LIST_COUNT="$(awk '{
   if (length(line) > 0) c++
 } END { print c+0 }' "${FRESH_BUILDS_FILE}")"
 
+# Cap COMPONENT_COUNT to available entries (0 = use all)
+if [ "${COMPONENT_COUNT}" -le 0 ] || [ "${COMPONENT_COUNT}" -ge "${LIST_COUNT}" ]; then
+    COMPONENT_COUNT="${LIST_COUNT}"
+fi
+export COMPONENT_COUNT
+export LARGE_SNAPSHOT_COMPONENT_COUNT="${COMPONENT_COUNT}"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "🧪 Test-Only Mode"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Image list: ${FRESH_BUILDS_FILE}"
-echo "  Entries: ${LIST_COUNT}"
+echo "  Entries (pool): ${LIST_COUNT}"
+echo "  Components:     ${COMPONENT_COUNT}"
 echo ""
 
 # --- Export Configuration ---
 export FRESH_BUILDS_FILE
+export ENABLE_DIGEST_MUTATION
+export DIGEST_MUTATION_RUN_ID
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Running Large Snapshot Test"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "🔧 Configuration:"
+echo "  Unique mapping tag: ${ENABLE_RUN_UNIQUE_MAPPING_TAG}"
+if [ "${ENABLE_RUN_UNIQUE_MAPPING_TAG}" = "true" ]; then
+    if [ -n "${RELEASE_MAPPING_TAG}" ]; then
+        echo "    Tag: ${RELEASE_MAPPING_TAG} (explicit override)"
+    else
+        echo "    Tag prefix: ${RUN_UNIQUE_TAG_PREFIX}"
+    fi
+fi
+echo "  Digest mutation: ${ENABLE_DIGEST_MUTATION}"
+if [ "${ENABLE_DIGEST_MUTATION}" = "true" ]; then
+    echo "    Run ID: ${DIGEST_MUTATION_RUN_ID}"
+    echo "    ⚠️  This will create NEW digests for all images (worst-case signing)"
+fi
+echo "  Signing ConfigMap: ${SIGNING_CONFIGMAP_NAME}"
 echo ""
 echo "ℹ️  Using pre-defined image list (no build/recovery in this run)"
 echo ""
@@ -146,7 +186,7 @@ fi
 #   2. Add them to this list
 #   3. Update the comment above with the variable category
 #   4. Document in test.env if needed
-readonly ENVSUBST_ALLOWLIST='$application_name $component_branch $component_git_url $component_name $managed_namespace $managed_sa_name $originating_tool $release_plan_admission_name $release_plan_name $tenant_namespace $tenant_sa_name $RELEASE_CATALOG_GIT_REVISION $RELEASE_CATALOG_GIT_URL $LARGE_SNAPSHOT_TIMEOUT'
+readonly ENVSUBST_ALLOWLIST='$application_name $component_branch $component_git_url $component_name $ec_public_key_ref $managed_namespace $managed_sa_name $originating_tool $release_plan_admission_name $release_plan_name $tenant_namespace $tenant_sa_name $RELEASE_CATALOG_GIT_REVISION $RELEASE_CATALOG_GIT_URL $LARGE_SNAPSHOT_TIMEOUT'
 
 # Cleanup function for temporary directory
 cleanup_tmpdir() {
@@ -264,6 +304,11 @@ create_large_snapshot() {
 
     local snapshot_file="${tmpDir}/large-snapshot.yaml"
 
+    # MANAGED_NAMESPACE: where generate-large-snapshot.sh stores the self-generated EC public key
+    # (as secret EC_PUBKEY_SECRET_NAME); ec-policy.yaml references it via ec_public_key_ref.
+    # Push credentials are read automatically from imagerepository push secrets in the tenant namespace.
+    MANAGED_NAMESPACE="${managed_namespace}" \
+    EC_PUBKEY_SECRET_NAME="${EC_PUBKEY_SECRET_NAME:-test-ec-pubkey-${component_name}}" \
     "${SUITE_DIR}/utils/generate-large-snapshot.sh" \
         "${large_snapshot_name}" \
         "${application_name}" \
@@ -941,6 +986,14 @@ cleanup_resources() {
             if [ -f "$tmpDir/managed-resources.yaml" ]; then
                 kubectl delete -f "$tmpDir/managed-resources.yaml" 2>/dev/null || true
             fi
+            # Clean up self-generated EC public key secret (created by generate-large-snapshot.sh
+            # when ENABLE_DIGEST_MUTATION=true; safe to ignore if it doesn't exist).
+            # The secret name is per-run to avoid collisions with concurrent test runs.
+            local _ec_secret="${EC_PUBKEY_SECRET_NAME:-test-ec-pubkey-${component_name}}"
+            kubectl delete secret "${_ec_secret}" \
+                -n "${managed_namespace:-managed-release-team-tenant}" \
+                --ignore-not-found=true 2>/dev/null || true
+            
             rm -rf "${tmpDir}" || echo "   ⚠ Failed to remove tmpDir"
         fi
     else
@@ -981,6 +1034,25 @@ apply_kustomize_resources() {
         return 1
     }
 
+    # When digest mutation is enabled, remove atlas config from RPA so process-component-sbom
+    # is skipped. Mobster cannot verify attestations for mutated digests (Tekton Chains key
+    # is inaccessible; copied attestations have subject=original digest → mismatch).
+    if [ "${ENABLE_DIGEST_MUTATION}" = "true" ] && grep -q "atlas:" "${output_file}"; then
+        yq eval 'select(.kind == "ReleasePlanAdmission").spec.data |= del(.atlas)' \
+            -i "${output_file}" 2>/dev/null || true
+        echo "  ℹ️  Atlas disabled (digest mutation enabled — SBOM attestation incompatible)" >&2
+    fi
+
+    # PYXIS IDEMPOTENCY PREVENTION: Replace __TIMESTAMP__ with current timestamp
+    # This ensures unique advisory per test run, preventing Pyxis from returning existing advisory
+    # Format: YYYYMMDD-HHMMSS (e.g., 20260226-153045)
+    if grep -q "__TIMESTAMP__" "${output_file}"; then
+        local timestamp
+        timestamp=$(date -u +%Y%m%d-%H%M%S)
+        sed -i "s/__TIMESTAMP__/${timestamp}/g" "${output_file}"
+        echo "  Applied timestamp for Pyxis idempotency: ${timestamp}" >&2
+    fi
+
     # Apply to cluster with explicit namespace and error handling
     kubectl apply -f "${output_file}" -n "${namespace}" || {
         log_error "Failed to apply ${description} to namespace ${namespace}"
@@ -990,6 +1062,7 @@ apply_kustomize_resources() {
     echo "✅ ${description} applied to ${namespace}" >&2
 }
 
+# Function to prepare signing ConfigMap override (Feature #2: Signing Key Rotation)
 # Function to patch RPA with actual component names from snapshot
 # The apply-mapping task does NOT support wildcard "*" matching
 patch_rpa_with_snapshot_components() {
@@ -1035,21 +1108,62 @@ EOF
     
     echo "  Generated mapping for ${component_count} components" >&2
     
+    # Feature #1: Generate unique mapping tag (if enabled)
+    local mapping_tag=""
+    if [ "${ENABLE_RUN_UNIQUE_MAPPING_TAG}" = "true" ]; then
+        if [ -n "${RELEASE_MAPPING_TAG}" ]; then
+            # Use explicit override if provided
+            mapping_tag="${RELEASE_MAPPING_TAG}"
+        else
+            # Auto-generate: prefix-YYYYMMDD-HHMMSS
+            mapping_tag="${RUN_UNIQUE_TAG_PREFIX}-$(date +%Y%m%d-%H%M%S)"
+        fi
+        echo "  Using run-unique mapping tag: ${mapping_tag}" >&2
+    fi
+    
     # Patch the RPA with the new mapping
     echo "  Patching ReleasePlanAdmission: ${release_plan_admission_name}" >&2
     
-    local patch_json=$(cat <<EOF
-{
-  "spec": {
-    "data": {
-      "mapping": {
-        "components": ${mapping_json}
-      }
-    }
-  }
-}
-EOF
-)
+    # Build patch JSON with conditional tag and signing config
+    local patch_json
+    if [ -n "${mapping_tag}" ]; then
+        patch_json=$(jq -n \
+            --argjson components "${mapping_json}" \
+            --arg tag "${mapping_tag}" \
+            --arg sign_cm "${SIGNING_CONFIGMAP_NAME}" \
+            '{
+                spec: {
+                    data: {
+                        sign: {
+                            configMapName: $sign_cm
+                        },
+                        mapping: {
+                            components: $components,
+                            defaults: {
+                                tags: [$tag]
+                            }
+                        }
+                    }
+                }
+            }')
+    else
+        # Patch without tag override (uses RPA defaults)
+        patch_json=$(jq -n \
+            --argjson components "${mapping_json}" \
+            --arg sign_cm "${SIGNING_CONFIGMAP_NAME}" \
+            '{
+                spec: {
+                    data: {
+                        sign: {
+                            configMapName: $sign_cm
+                        },
+                        mapping: {
+                            components: $components
+                        }
+                    }
+                }
+            }')
+    fi
     
     kubectl patch releaseplanadmission "${release_plan_admission_name}" \
         -n "${managed_namespace}" \
@@ -1061,7 +1175,11 @@ EOF
         return 1
     fi
     
-    echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings" >&2
+    if [ -n "${mapping_tag}" ]; then
+        echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings and tag '${mapping_tag}'" >&2
+    else
+        echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings" >&2
+    fi
     return 0
 }
 
@@ -1104,6 +1222,22 @@ create_kubernetes_resources() {
     : "${RELEASE_CATALOG_GIT_URL:?RELEASE_CATALOG_GIT_URL must be set (required for ReleasePlanAdmission)}"
     : "${RELEASE_CATALOG_GIT_REVISION:?RELEASE_CATALOG_GIT_REVISION must be set (required for ReleasePlanAdmission)}"
 
+    # Set EC policy public key reference based on mutation mode:
+    # - Mutation enabled:  a fresh self-generated cosign key pair; its public half is stored in
+    #                      a K8s secret by generate-large-snapshot.sh before verify-conforma runs.
+    # - Mutation disabled: original Tekton Chains public key (pool images are already signed by it).
+    #
+    # The secret name is per-run (includes component_name suffix) to avoid race conditions when
+    # multiple test runs overlap: a previous run's cleanup must not delete the current run's key.
+    if [ "${ENABLE_DIGEST_MUTATION}" = "true" ]; then
+        export EC_PUBKEY_SECRET_NAME="test-ec-pubkey-${component_name}"
+        export ec_public_key_ref="k8s://${managed_namespace}/${EC_PUBKEY_SECRET_NAME}"
+    else
+        export EC_PUBKEY_SECRET_NAME=""
+        export ec_public_key_ref="k8s://openshift-pipelines/public-key"
+    fi
+    echo "  EC public key ref: ${ec_public_key_ref}" >&2
+
     # Build and apply managed resources (RPA, EC Policy, etc.)
     apply_kustomize_resources \
         "managed resources" \
@@ -1122,6 +1256,7 @@ create_kubernetes_resources() {
         return 1
     fi
 
+    # Prepare signing ConfigMap override if key rotation is enabled (Feature #2)
     # CRITICAL: Patch RPA with actual component names from snapshot
     # The apply-mapping task does NOT support wildcard "*" patterns
     # It requires exact component name matches via group_by(.name)

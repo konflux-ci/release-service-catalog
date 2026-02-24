@@ -39,6 +39,25 @@ To use larger images, you would need to:
 2. Request larger build nodes from cluster admins
 3. Or optimize the Dockerfile to reduce peak memory usage during build
 
+## Digest Mutation (Worst-Case Signing)
+
+The test supports digest mutation to force worst-case Pyxis signing performance on every run.
+
+### How it works:
+- When `ENABLE_DIGEST_MUTATION=true`, the `utils/generate-large-snapshot.sh` script mutates images during snapshot generation
+- Each image is mutated with a unique label (`io.konflux.test.digest-mutation=konflux-test-mutation-${RUN_ID}`)
+- New digests are generated and pushed to Quay with tag `mutated-${RUN_ID}`
+- The snapshot uses these mutated references, forcing Pyxis to sign every image (no cached signatures)
+
+### Requirements:
+- `crane` tool (auto-installed if not available)
+- Quay credentials configured (automatic in CI, or `~/.docker/config.json` for local runs)
+
+### Usage:
+```bash
+ENABLE_DIGEST_MUTATION=true ./test.sh
+```
+
 ## Setup
 ### Dependencies
 * GitHub repo: https://github.com/hacbs-release-tests/e2e-base

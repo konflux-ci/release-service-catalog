@@ -1,4 +1,32 @@
 ---
+# Large Snapshot Test PipelineRun
+#
+# Trigger: comment "/test-large-snapshot" on a PR targeting "development".
+# Runs the full rh-advisories release pipeline with 200 mutated multi-arch images.
+#
+# Default behaviour (this file):
+#   - ENABLE_DIGEST_MUTATION=true  (forces re-signing every run via new digests)
+#   - COMPONENT_COUNT=0            (0 = all images in the static pool, ~200)
+#   - always reads from static-image-pool-stable.txt (no build step)
+#
+# Custom runs (not supported via PAC comment flags in a single .tekton file):
+#   Run test.sh directly on the cluster or override PipelineRun params with kubectl.
+#
+#   Examples — run with no mutation (Atlas/SBOM enabled):
+#     ENABLE_DIGEST_MUTATION=false \
+#       ./integration-tests/rh-advisories-large-snapshot/test.sh
+#
+#   Examples — run with a smaller component count (faster feedback):
+#     LARGE_SNAPSHOT_COMPONENT_COUNT=10 \
+#       ./integration-tests/rh-advisories-large-snapshot/test.sh
+#
+#   Examples — override via kubectl after creating a PipelineRun:
+#     kubectl create -f .tekton/rh-advisories-large-snapshot.yaml \
+#       -n rhtap-release-2-tenant \
+#       --dry-run=client -o yaml \
+#     | yq eval '(.spec.params[] | select(.name == "ENABLE_DIGEST_MUTATION") | .value) = "false"' - \
+#     | kubectl apply -f -
+#
 apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
@@ -10,7 +38,6 @@ metadata:
     pipelinesascode.tekton.dev/max-keep-runs: "2"
     # Trigger ONLY on explicit /test-large-snapshot comment (NOT /retest, NOT /test, NOT push)
     # This prevents interference with hotfix workflows and automatic test runs
-    # Using empty on-event to disable automatic triggers
     pipelinesascode.tekton.dev/on-event: "[]"
     pipelinesascode.tekton.dev/on-comment: "^/test-large-snapshot$"
     pipelinesascode.tekton.dev/on-cel-expression: |
@@ -54,23 +81,20 @@ spec:
         }
     - name: PIPELINE_TEST_SUITE
       value: "rh-advisories-large-snapshot"
-    - name: SKIP_BUILD
+    # Enable digest mutation for unlimited worst-case signing tests
+    - name: ENABLE_DIGEST_MUTATION
       value: "true"
-    - name: FORCE_REBUILD
-      value: "false"
-    - name: USE_STATIC_IMAGE_POOL
-      value: "true"
+    # Git repository for task resolution
+    - name: GIT_URL
+      value: "https://github.com/konflux-ci/release-service-catalog"
+    - name: GIT_REVISION
+      value: "{{revision}}"
     # GitHub repository for pre-flight check and notifications
     - name: REPO_FULL_NAME
       value: 'konflux-ci/release-service-catalog'
-    - name: QUAY_TOKEN_SECRET_NAME
-      value: "hacbs-release-tests-token"
-    - name: QUAY_TOKEN_SECRET_KEY
-      value: "token"
-    # Secret names are inherited from pipeline defaults
-    # Can be overridden here if needed for different namespaces/environments
-    # Defaults defined in: integration-tests/pipelines/rh-advisories-large-snapshot-pipeline.yaml
-  
+
+  serviceAccountName: build-pipeline-release-service-catalog
+
   pipelineRef:
     resolver: git
     params:
@@ -80,112 +104,7 @@ spec:
         value: '{{revision}}'
       - name: pathInRepo
         value: integration-tests/pipelines/rh-advisories-large-snapshot-pipeline.yaml
-  
-  workspaces:
-    - name: workspace
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 2Gi
-  
-  # Extended timeout for large snapshot tests
-  # NOTE: Build phase is ENABLED by default (SKIP_BUILD defaults to "false")
-  #       Test builds/fixes components and then runs release pipeline
-  #       Use SKIP_BUILD=true only for explicit reuse-only troubleshooting
-  # Expected duration: longer when builds are triggered
+
   timeouts:
     pipeline: 9h0m0s
-    tasks: 9h0m0s  # Set task timeout to match pipeline timeout
----
-# Build Creation PipelineRun - triggered by /build-large-snapshot
-# This creates PipelineRuns manually for components, bypassing PAC
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  annotations:
-    build.appstudio.openshift.io/repo: https://github.com/konflux-ci/release-service-catalog?rev={{revision}}
-    build.appstudio.redhat.com/commit_sha: '{{revision}}'
-    build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
-    build.appstudio.redhat.com/target_branch: '{{target_branch}}'
-    pipelinesascode.tekton.dev/max-keep-runs: "2"
-    # Trigger ONLY on explicit /build-large-snapshot comment
-    pipelinesascode.tekton.dev/on-event: "[]"
-    pipelinesascode.tekton.dev/on-comment: "^/build-large-snapshot$"
-    pipelinesascode.tekton.dev/on-cel-expression: |
-      target_branch == "development" &&
-      has(body.comment) &&
-      body.comment.body.contains("/build-large-snapshot")
-    pac.test.appstudio.openshift.io/branch: '{{source_branch}}'
-  creationTimestamp:
-  labels:
-    appstudio.openshift.io/application: release-service-catalog
-    appstudio.openshift.io/component: release-service-catalog
-    pipelines.appstudio.openshift.io/type: test
-    pac.test.appstudio.openshift.io/pull-request: '{{pull_request_number}}'
-    test.appstudio.openshift.io/scenario: build-large-snapshot
-    test.appstudio.openshift.io/type: build
-  name: build-large-snapshot
-  namespace: rhtap-release-2-tenant
-spec:
-  params:
-    - name: SNAPSHOT
-      value: |
-        {
-          "application": "release-service-catalog",
-          "artifacts": {},
-          "components": [
-            {
-              "containerImage": "quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-catalog:on-pr-{{revision}}",
-              "name": "release-service-catalog",
-              "source": {
-                "git": {
-                  "revision": "{{revision}}",
-                  "url": "https://github.com/konflux-ci/release-service-catalog"
-                }
-              }
-            }
-          ]
-        }
-    - name: PIPELINE_TEST_SUITE
-      value: "rh-advisories-large-snapshot"
-    - name: SKIP_BUILD
-      value: "false"  # Enable build phase for /build-large-snapshot
-    - name: TARGET_COMPONENTS
-      value: "200"
-    - name: FORCE_REBUILD
-      value: "true"  # Force rebuild to update PAC config with build-image-index=true
-    - name: QUAY_TOKEN_SECRET_NAME
-      value: "hacbs-release-tests-token"
-    - name: QUAY_TOKEN_SECRET_KEY
-      value: "token"
-    # Secret names are inherited from pipeline defaults
-    # Can be overridden here if needed for different namespaces/environments
-    # Defaults defined in: integration-tests/pipelines/build-large-snapshot-pipeline.yaml
-  
-  pipelineRef:
-    resolver: git
-    params:
-      - name: url
-        value: https://github.com/konflux-ci/release-service-catalog
-      - name: revision
-        value: '{{revision}}'
-      - name: pathInRepo
-        value: integration-tests/pipelines/build-large-snapshot-pipeline.yaml
-  
-  workspaces:
-    - name: workspace
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 1Gi
-  
-  # Build creation timeout
-  timeouts:
-    pipeline: 11h0m0s
-    tasks: 11h0m0s
+    tasks: 9h0m0s
