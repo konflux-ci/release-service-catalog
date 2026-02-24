@@ -147,9 +147,9 @@ VERSION_VARIANCE="${VERSION_VARIANCE:-3}"      # +/- variance in component count
 APP_PREFIX="large-snapshot-build"
 
 # Base repository (template source - has PAC config and Dockerfile)
-# Using dedicated template repo: rh-adv-large-v4-15-apiserver-watcher-01
+# Using dedicated template repo with 'template' in name to avoid component collision
 # main branch contains .tekton/template-push.yaml + Dockerfile for push-only multi-arch builds
-BASE_REPO="${BASE_REPO:-hacbs-release-tests/rh-adv-large-v4-15-apiserver-watcher-01}"
+BASE_REPO="${BASE_REPO:-hacbs-release-tests/rh-adv-large-snapshot-template}"
 PAC_TEMPLATE_BRANCH="${PAC_TEMPLATE_BRANCH:-main}"
 BASE_BRANCH="${BASE_BRANCH:-push-to-external-registry-base}"
 BASE_GITHUB_URL="https://github.com/${BASE_REPO}"
