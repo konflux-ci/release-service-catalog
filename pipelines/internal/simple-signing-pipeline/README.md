@@ -7,7 +7,6 @@ pipeline.
 
 | Name                   | Description                                                                                                           | Optional | Default value                                             |
 |------------------------|-----------------------------------------------------------------------------------------------------------------------|----------|-----------------------------------------------------------|
-| pipeline_image         | An image with CLI tools needed for the signing                                                                        | Yes      | quay.io/redhat-isv/operator-pipelines-images:released     |
 | manifest_digests       | Space separated manifest digest for the signed content, usually in the format sha256:xxx                              | No       | -                                                         |
 | references             | Space separated docker reference for the signed content, e.g. registry.redhat.io/redhat/community-operator-index:v4.9 | No       | -                                                         |
 | requester              | Name of the user that requested the signing, for auditing purposes                                                    | No       | -                                                         |
