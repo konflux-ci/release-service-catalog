@@ -10,7 +10,11 @@ spec:
   description: |-
     Tekton task to filter out images from a snapshot that have already been released.
     This task verifies:
-    - Pyxis metadata (always required)
+    - Pyxis metadata (always required): the image IS in Pyxis — found via image_id
+      (the manifest digest stored by create-pyxis-image). The query uses the Pyxis REST
+      API field `image_id`, NOT `docker_image_digest` (which does not exist in Pyxis records).
+      Additionally, rpm_manifest.rpms must be non-empty (populated by push-rpm-data-to-pyxis).
+      A record with no rpm_manifest or empty rpms does not count as a complete release.
     - fileUpdates completion (only when `.fileUpdates` is configured in the merged data file)
 
     The fileUpdates completion check is performed via an InternalRequest (internal GitLab access),
@@ -19,8 +23,13 @@ spec:
     The task overwrites the original snapshot file in place with a filtered version
     containing only components that still need release work.
 
-    This task expects a mapped snapshot (repositories/tags already resolved) from
-    trusted artifacts.
+    This task supports both Trusted Artifacts and PVC-based workflows (compliance):
+
+    - **Trusted Artifacts**: Leave workspace `data` unbound; set `sourceDataArtifact` and use default
+      `dataDir` (/var/workdir/release). Snapshot/data are pulled into an emptyDir and results pushed to OCI.
+    - **PVC-based**: Bind the optional workspace `data` to a PVC that already contains snapshot/data; set
+      `dataDir` to the workspace path (e.g. `/workspace/data/release`). Leave `sourceDataArtifact` empty;
+      `use-trusted-artifact` and `create-trusted-artifact` steps are skipped.
 
     Fail-safe behavior: The task fails only if Pyxis credentials are missing or
     pyxisServer is invalid. For all other issues (API errors, missing data, internal
@@ -41,10 +50,6 @@ spec:
       type: string
       default: "300"
       description: InternalRequest timeout (seconds) for the fileUpdates completion check
-    - name: synchronously
-      type: string
-      description: Whether to run internal requests synchronously or not
-      default: "true"
     - name: pipelineRunUid
       type: string
       description: The uid of the current PipelineRun. Used as a label value when creating internal requests
@@ -103,7 +108,9 @@ spec:
       description: Location of trusted artifacts to be used to populate data directory
       default: ""
     - name: dataDir
-      description: The location where data will be stored
+      description: |-
+        The location where data will be stored. In Trusted Artifacts mode use default;
+        in PVC mode set to the workspace path (e.g. /workspace/data/release)
       type: string
       default: /var/workdir/release
     - name: taskGitUrl
@@ -117,7 +124,13 @@ spec:
     - name: skip_release
       description: Whether to skip release tasks (true if all components are already released)
     - name: sourceDataArtifact
-      description: The location of the source data artifact in the OCI repository
+      description: The location of the source data artifact in the OCI repository (empty in PVC mode)
+  workspaces:
+    - name: data
+      optional: true
+      description: |
+        Optional. When bound (PVC-based workflow), snapshot/data are read from this workspace.
+        dataDir should point to the workspace path (e.g. /workspace/data/release).
   volumes:
     - name: workdir
       emptyDir: {}
@@ -150,6 +163,10 @@ spec:
       runAsUser: 1001
   steps:
     - name: use-trusted-artifact
+      when:
+        - input: $(params.sourceDataArtifact)
+          operator: notin
+          values: [""]
       computeResources:
         limits:
           cpu: 30m
@@ -215,7 +232,7 @@ spec:
           local cert_path="$3"
           local key_path="$4"
           local http_code
-          http_code=$(curl-with-retry --retry "${API_RETRY_COUNT}" --retry-all-errors \
+          http_code=$(curl --retry "${API_RETRY_COUNT}" --retry-all-errors \
             --connect-timeout "${API_CONNECT_TIMEOUT}" --max-time "${API_MAX_TIME}" -sS \
             "${CA_BUNDLE_ARGS[@]}" \
             --cert "${cert_path}" --key "${key_path}" \
@@ -351,7 +368,7 @@ spec:
                       -p file_updates_secret="${file_updates_secret}" \
                       -p taskGitUrl="$(params.taskGitUrl)" \
                       -p taskGitRevision="$(params.taskGitRevision)" \
-                      -s "$(params.synchronously)" \
+                      -s "true" \
                       -t "$(params.requestTimeout)" \
                       -l "${TASK_LABEL}=${TASK_ID}" \
                       -l "${REQUEST_LABEL}=${requestId}" \
@@ -495,11 +512,14 @@ spec:
               continue
             fi
             
-            # Encode the entire filter parameter value (including == operator)
-            FILTER_VALUE="docker_image_digest==${DIGEST}"
-            FILTER_ENCODED=$(jq -sRr @uri <<< "${FILTER_VALUE}")
+            # Query Pyxis by image_id (the manifest digest stored by create-pyxis-image).
+            # docker_image_digest is not a filterable field in the Pyxis API.
+            FILTER_VALUE="image_id==${DIGEST}"
+            FILTER_ENCODED=$(printf '%s' "${FILTER_VALUE}" | jq -sRr @uri)
             PYXIS_QUERY_URL="${PYXIS_URL}v1/images?filter=${FILTER_ENCODED}"
             echo "Querying Pyxis for ${COMPONENT_NAME}..."
+            echo "  Filter: ${FILTER_VALUE}"
+            echo "  Encoded: ${FILTER_ENCODED}"
             # Reuse temp file for this API call (overwrites previous content)
             PYXIS_HTTP_CODE=$(http_get_pyxis "${PYXIS_QUERY_URL}" "${PYXIS_RESPONSE}" \
               /etc/pyxis-secrets/cert /etc/pyxis-secrets/key)
@@ -511,6 +531,7 @@ spec:
               PYXIS_COMPLETE="false"
             else
               IMAGE_COUNT=$(jq -r '.data | length' "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
+              echo "  Pyxis response: IMAGE_COUNT=${IMAGE_COUNT}"
               if [ "${IMAGE_COUNT}" -eq 0 ] 2>/dev/null; then
                 echo "No Pyxis entries found for ${COMPONENT_NAME}"
                 PYXIS_COMPLETE="false"
@@ -518,53 +539,36 @@ spec:
                 echo "WARNING: Invalid Pyxis response for ${COMPONENT_NAME}"
                 PYXIS_COMPLETE="false"
               else
-                # Extract expected tags as JSON array (normalize objects to strings)
-                EXPECTED_TAGS_JSON=$(jq -c \
-                  '[.repositories[]?.tags[]? | if type == "object" then .name else . end] | 
-                   sort | unique' \
-                  <<< "${COMPONENT}" 2>/dev/null || echo "[]")
-                EXPECTED_TAG_COUNT=$(jq 'length' <<< "${EXPECTED_TAGS_JSON}")
-                
-                if [ "${EXPECTED_TAG_COUNT}" -eq 0 ] 2>/dev/null; then
-                  echo "WARNING: No expected tags found for ${COMPONENT_NAME}"
-                  PYXIS_COMPLETE="false"
+                # Require evidence of full release:
+                # rpm_manifest.rpms must be non-empty (populated by push-rpm-data-to-pyxis).
+                # A record with no rpm_manifest or empty rpms means push-rpm-data-to-pyxis
+                # has not yet completed, so keep the component for reprocessing.
+                HAS_RPM_DATA=$(jq -r \
+                  '(.data[0].rpm_manifest.rpms // []) | length' \
+                  "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
+                if [ "${HAS_RPM_DATA}" -gt 0 ] 2>/dev/null; then
+                  echo "Image found in Pyxis for ${COMPONENT_NAME} with RPM data (${HAS_RPM_DATA} rpms)"
+                  PYXIS_COMPLETE="true"
                 else
-                  # Extract Pyxis tags as JSON array (normalize objects to strings)
-                  PYXIS_TAGS_JSON=$(jq -c \
-                    '[.data[]?.repositories[]?.tags[]? | if type == "object" then .name else . end] | 
-                     sort | unique' \
-                    "${PYXIS_RESPONSE}" 2>/dev/null || echo "[]")
-                  
-                  # Compute missing tags: expected - pyxis (set difference)
-                  MISSING_TAGS_JSON=$(jq -c --argjson expected "${EXPECTED_TAGS_JSON}" \
-                    --argjson pyxis "${PYXIS_TAGS_JSON}" \
-                    -n '$expected - $pyxis' 2>/dev/null || echo "[]")
-                  MISSING_TAG_COUNT=$(jq 'length' <<< "${MISSING_TAGS_JSON}" 2>/dev/null || echo "1")
-                  
-                  if [ "${MISSING_TAG_COUNT}" -gt 0 ] 2>/dev/null; then
-                    echo "Pyxis missing tags for ${COMPONENT_NAME}: $(jq -r 'join(", ")' <<< "${MISSING_TAGS_JSON}")"
-                    PYXIS_COMPLETE="false"
-                  else
-                    # All tags present, check for RPM data
-                    HAS_RPM_DATA=$(jq -r '[.data[]?.repositories[]?.content_sets // [] | length] | max // 0' \
-                      "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
-                    if [ "${HAS_RPM_DATA}" -gt 0 ] 2>/dev/null; then
-                      PYXIS_COMPLETE="true"
-                    else
-                      PYXIS_COMPLETE="false"
-                    fi
-                  fi
+                  echo "Pyxis record for ${COMPONENT_NAME} has no RPM data (push-rpm-data-to-pyxis incomplete)"
+                  PYXIS_COMPLETE="false"
                 fi
               fi
+              echo "  PYXIS_COMPLETE=${PYXIS_COMPLETE}"
             fi
 
             ALL_CHECKS_PASSED="true"
             if [ "${PYXIS_COMPLETE}" != "true" ]; then
               ALL_CHECKS_PASSED="false"
+              echo "  → Check failed: PYXIS_COMPLETE=${PYXIS_COMPLETE}"
             fi
             if [ "${FILE_UPDATES_REQUIRED}" = "true" ] && [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
               ALL_CHECKS_PASSED="false"
+              echo "  → Check failed: FILE_UPDATES_REQUIRED=${FILE_UPDATES_REQUIRED}," \
+                "FILE_UPDATES_COMPLETE=${FILE_UPDATES_COMPLETE}"
             fi
+            
+            echo "  Decision: ALL_CHECKS_PASSED=${ALL_CHECKS_PASSED}"
 
             if [ "${ALL_CHECKS_PASSED}" == "true" ]; then
                 echo "Component ${COMPONENT_NAME}: FILTERED (Pyxis + fileUpdates complete)"
@@ -631,6 +635,10 @@ spec:
             echo -n "false" > "$(results.skip_release.path)"
         fi
     - name: create-trusted-artifact
+      when:
+        - input: $(params.sourceDataArtifact)
+          operator: notin
+          values: [""]
       computeResources:
         limits:
           cpu: 250m

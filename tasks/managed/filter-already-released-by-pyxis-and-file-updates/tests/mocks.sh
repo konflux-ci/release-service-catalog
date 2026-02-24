@@ -2,6 +2,12 @@
 set -euo pipefail
 
 # mocks to be injected into task step scripts
+#
+# Pyxis query strategy (confirmed against real Pyxis stage API, March 2026):
+# - The image IS in Pyxis — found via image_id (the manifest digest stored by create-pyxis-image).
+# - Query field: image_id == sha256:...  (NOT docker_image_digest — that field does not exist)
+# - Completeness signal: rpm_manifest.rpms must be non-empty (populated by push-rpm-data-to-pyxis)
+# - URL-encoded filter: image_id%3D%3Dsha256%3A...
 
 function select-oci-auth() {
   # Return empty auth config (all registries are accessible in tests)
@@ -40,11 +46,21 @@ function curl() {
   done
 
   local json_response="[]"
+  # Pyxis API: query by image_id (the manifest digest). Completeness check uses rpm_manifest.rpms.
   case "$url" in
-    *"pyxis.api.redhat.com/v1/images?filter=docker_image_digest%3D%3Dsha256%3Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"*)
-      json_response='{"data":[{"repositories":[{"tags":["latest","v1"],"content_sets":["rhel-9-for-x86_64-appstream-rpms"]}]}]}'
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"*)
+      # Full release: image_id found AND rpm_manifest.rpms non-empty → component filtered out
+      json_response='{"data":[{"image_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rpm_manifest":{"rpms":[{"name":"bash"}]},"repositories":[{"tags":[{"name":"latest"},{"name":"v1"}]}]}]}'
       ;;
-    *"pyxis.api.redhat.com/v1/images?filter=docker_image_digest%3D%3D"*)
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Ab"*)
+      # Partial: image found but rpm_manifest.rpms empty → push-rpm-data-to-pyxis incomplete → keep
+      json_response='{"data":[{"image_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rpm_manifest":{"rpms":[]},"repositories":[{"tags":[{"name":"latest"}]}]}]}'
+      ;;
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Ac"*)
+      # Partial: image found but no rpm_manifest at all → push-rpm-data-to-pyxis never ran → keep
+      json_response='{"data":[{"image_id":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","repositories":[{"tags":[{"name":"latest"}]}]}]}'
+      ;;
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3D"*)
       json_response='{"data":[]}'
       ;;
   esac
@@ -74,6 +90,14 @@ function oras() {
   case "$image_ref" in
     *"@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
       echo "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      return 0
+      ;;
+    *"@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+      echo "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      return 0
+      ;;
+    *"@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"*)
+      echo "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
       return 0
       ;;
     *)

@@ -4,7 +4,9 @@ Tekton pipeline to release content to registry.redhat.io registry.
 
 This pipeline is idempotent: components that have already been fully released are
 automatically filtered out by verifying:
-- Pyxis metadata (container image entries with tags and RPM data)
+- Pyxis metadata: image record must have at least one repository with non-empty tags
+  and non-empty content_sets (RPM data). A digest-only or partial record does not
+  count as released, so reruns will still run push-rpm-data-to-pyxis if needed.
 - fileUpdates completion (merged GitLab merge requests), checked via InternalRequest
 
 When all components are filtered, downstream release tasks are skipped (skip_release=true).

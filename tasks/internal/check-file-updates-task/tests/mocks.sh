@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# mocks to be injected into task step scripts
+# Mocks for the check-file-updates-task test. Sourced via BASH_ENV from the mounted
+# ConfigMap (file-updates-task-mocks); see pre-apply-task-hook.sh.
 
 function curl() {
   # Mock curl for GitLab API query
