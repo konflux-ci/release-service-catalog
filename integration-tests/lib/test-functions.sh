@@ -156,6 +156,8 @@ cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
   local command=${3:-"N/A"}
+  local cleanup_log_file
+  cleanup_log_file=$(mktemp) # Always set so later echo >> "${cleanup_log_file}" is valid (e.g. when CLEANUP != true)
 
   if [ "$err" -ne 0 ] ; then
     echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
@@ -166,7 +168,6 @@ cleanup_resources() {
     # cleanup...so we can ignore errors
     set +eo pipefail
 
-    local cleanup_log_file
     cleanup_log_file=$(mktemp)
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
@@ -203,7 +204,7 @@ cleanup_resources() {
   fi
 
   echo "Killing any child processes..." >> "${cleanup_log_file}"
-  pkill -e  -P $$
+  pkill -e -P $$ || true
 
   if [ "$err" -ne 0 ]; then
     exit "$err"
@@ -245,22 +246,29 @@ create_github_repository() {
 }
 
 # Function to set up Kubernetes namespaces
+# Creates managed_namespace and tenant_namespace if they do not exist (for local/dev runs).
 # Relies on global variables: managed_namespace, tenant_namespace
 setup_namespaces() {
     echo "Setting up namespaces..."
-    set +eo pipefail # Temporarily disable exit on error for checks
+    set +e
     echo "Checking managed namespace: ${managed_namespace}"
-    kubectl get ns "${managed_namespace}" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      log_error "Managed namespace ${managed_namespace} does not exist." 2
+    if ! kubectl get ns "${managed_namespace}" > /dev/null 2>&1; then
+        echo "Creating managed namespace: ${managed_namespace}"
+        if ! kubectl create namespace "${managed_namespace}"; then
+            set -e
+            log_error "Managed namespace ${managed_namespace} does not exist and could not be created. Create it with: kubectl create namespace ${managed_namespace}" 2
+        fi
     fi
 
     echo "Checking tenant namespace: ${tenant_namespace}"
-    kubectl get ns "${tenant_namespace}" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      log_error "Tenant namespace ${tenant_namespace} does not exist." 2
+    if ! kubectl get ns "${tenant_namespace}" > /dev/null 2>&1; then
+        echo "Creating tenant namespace: ${tenant_namespace}"
+        if ! kubectl create namespace "${tenant_namespace}"; then
+            set -e
+            log_error "Tenant namespace ${tenant_namespace} does not exist and could not be created. Create it with: kubectl create namespace ${tenant_namespace}" 2
+        fi
     fi
-    set -eo pipefail # Re-enable exit on error
+    set -eo pipefail
     kubectl config set-context --current --namespace="$tenant_namespace"
     echo "Namespaces setup complete. Current namespace set to ${tenant_namespace}."
 }
@@ -438,7 +446,7 @@ merge_github_pr() {
 # Function to wait for a PipelineRun to appear
 # Sets global variable: component_push_plr_name
 wait_for_plr_to_appear() {
-    local timeout=300  # 5 minutes timeout
+    local timeout="${PLR_APPEAR_TIMEOUT:-600}"  # default 10 min; configurable for parallel load
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
@@ -490,8 +498,8 @@ wait_for_plr_to_complete() {
 
         sleep 5
 
-        # Check if the pipeline run is completed
-        completed=$(kubectl get pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null)
+        # Check if the pipeline run is completed (kubectl exits 1 if PipelineRun missing; avoid failing script)
+        completed=$(kubectl get pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null) || completed=""
 
         # If completed, check the status
         if [ -n "$completed" ]; then

@@ -17,8 +17,15 @@ if [ ! -f "${TASK_PATH}" ]; then
   exit 1
 fi
 
-# Add mocks to the beginning of the task step script (standard approach)
-yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' "$TASK_PATH"
+# Mount mocks via ConfigMap and source via BASH_ENV (avoids inlining mocks into the step script)
+MOCKS_CM_NAME="file-updates-task-mocks"
+MOCKS_MOUNT_PATH="/workspace/mocks"
+kubectl delete configmap "${MOCKS_CM_NAME}" --ignore-not-found
+kubectl create configmap "${MOCKS_CM_NAME}" --from-file=mocks.sh="${SCRIPT_DIR}/mocks.sh"
+
+yq -i '.spec.volumes += [{"name": "test-mocks", "configMap": {"name": "'"${MOCKS_CM_NAME}"'"}}]' "$TASK_PATH"
+yq -i '.spec.steps[0].volumeMounts += [{"name": "test-mocks", "mountPath": "'"${MOCKS_MOUNT_PATH}"'", "readOnly": true}]' "$TASK_PATH"
+yq -i '.spec.steps[0].env += [{"name": "BASH_ENV", "value": "'"${MOCKS_MOUNT_PATH}"'/mocks.sh"}]' "$TASK_PATH"
 
 # Create test secrets (delete first if they exist)
 kubectl delete secret file-updates-secret --ignore-not-found

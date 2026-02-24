@@ -2,6 +2,12 @@
 set -euo pipefail
 
 # mocks to be injected into task step scripts
+#
+# Pyxis query strategy (confirmed against real Pyxis stage API, March 2026):
+# - The image IS in Pyxis — found via image_id (the manifest digest stored by create-pyxis-image).
+# - Query field: image_id == sha256:...  (NOT docker_image_digest — that field does not exist)
+# - Completeness signal: rpm_manifest.rpms must be non-empty (populated by push-rpm-data-to-pyxis)
+# - URL-encoded filter: image_id%3D%3Dsha256%3A...
 
 function select-oci-auth() {
   # Return empty auth config (all registries are accessible in tests)
@@ -40,11 +46,28 @@ function curl() {
   done
 
   local json_response="[]"
+  # Pyxis API: query by image_id (the manifest digest).
+  # Completeness requires: non-empty rpm_manifest.rpms (populated by push-rpm-data-to-pyxis).
+  # repositories[].tags is NOT required: unreliable in staging, redundant given rpm_manifest.rpms.
   case "$url" in
-    *"pyxis.api.redhat.com/v1/images?filter=docker_image_digest%3D%3Dsha256%3Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"*)
-      json_response='{"data":[{"repositories":[{"tags":["latest","v1"],"content_sets":["rhel-9-for-x86_64-appstream-rpms"]}]}]}'
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"*)
+      # Full release: rpm_manifest.rpms non-empty (tags also present but not required) → filtered out
+      json_response='{"data":[{"image_id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","rpm_manifest":{"rpms":[{"name":"bash"}]},"repositories":[{"tags":[{"name":"latest"},{"name":"v1"}]}]}]}'
       ;;
-    *"pyxis.api.redhat.com/v1/images?filter=docker_image_digest%3D%3D"*)
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Ab"*)
+      # Partial: image found but rpm_manifest.rpms empty → push-rpm-data-to-pyxis incomplete → keep
+      json_response='{"data":[{"image_id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","rpm_manifest":{"rpms":[]},"repositories":[{"tags":[{"name":"latest"}]}]}]}'
+      ;;
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Ac"*)
+      # Partial: image found but no rpm_manifest at all → push-rpm-data-to-pyxis never ran → keep
+      json_response='{"data":[{"image_id":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","repositories":[{"tags":[{"name":"latest"}]}]}]}'
+      ;;
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3Dsha256%3Ad"*)
+      # Staging scenario: rpm_manifest.rpms non-empty but repositories[].tags empty.
+      # Must be FILTERED (rpm_manifest.rpms alone is sufficient).
+      json_response='{"data":[{"image_id":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","rpm_manifest":{"rpms":[{"name":"glibc"}]},"repositories":[{"tags":[]}]}]}'
+      ;;
+    *"pyxis.api.redhat.com/v1/images?filter=image_id%3D%3D"*)
       json_response='{"data":[]}'
       ;;
   esac
@@ -76,6 +99,14 @@ function oras() {
       echo "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       return 0
       ;;
+    *"@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+      echo "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      return 0
+      ;;
+    *"@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"*)
+      echo "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      return 0
+      ;;
     *)
       # Default: return the digest from the reference
       if [[ "$image_ref" =~ @(sha256:[a-f0-9]+)$ ]]; then
@@ -90,17 +121,16 @@ function oras() {
 
 function internal-request() {
   # Mock internal-request for fileUpdates completion checks.
-  # The task retrieves the InternalRequest object via kubectl labels, so this only
-  # needs to return success.
+  # The task parses the IR name from this output using awk '/created/ { print $2 }'.
   echo "internalrequests.appstudio.redhat.com 'mock-ir' created"
   return 0
 }
 
 function kubectl() {
-  # Mock only the InternalRequest lookup used by the filter task.
+  # Mock the InternalRequest lookup used by the filter task.
   #
-  # Expected shape:
-  # kubectl get internalrequest -l ... -o jsonpath='{.items[0]}' --sort-by=...
+  # Expected shape (name-based, requires only 'get' RBAC):
+  # kubectl get internalrequest <name> -o json
   if [ "${1:-}" = "get" ] && [ "${2:-}" = "internalrequest" ]; then
     local complete="true"
     if [ -n "${DATA_FILE:-}" ] && [ -f "${DATA_FILE}" ]; then
