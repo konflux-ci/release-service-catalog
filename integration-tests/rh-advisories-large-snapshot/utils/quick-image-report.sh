@@ -15,16 +15,38 @@ echo ""
 
 # Get components with relevant data in one query
 # Validation source of truth: status.lastPromotedImage (built/promoted image digest)
-COMPONENTS=$(kubectl get components -n ${NAMESPACE} \
+COMPONENTS_JSON=$(kubectl get components -n "${NAMESPACE}" \
   -l test.appstudio.openshift.io/type=multi-version-build \
-  -o jsonpath='{range .items[*]}{.metadata.name}{"|"}{.metadata.labels.test\.appstudio\.openshift\.io/version}{"|"}{.spec.containerImage}{"|"}{.status.lastPromotedImage}{"|"}{.spec.secret}{"|"}{.metadata.annotations.build\.appstudio\.openshift\.io/request-platforms}{"\n"}{end}')
+  -o json 2>/dev/null || echo '{"items":[]}')
 
-TOTAL=$(echo "${COMPONENTS}" | wc -l)
+COMPONENTS=$(echo "${COMPONENTS_JSON}" | jq -r '
+  .items[]? |
+  [
+    (.metadata.name // ""),
+    (.metadata.labels["test.appstudio.openshift.io/version"] // ""),
+    (.spec.containerImage // ""),
+    (.status.lastPromotedImage // ""),
+    (.spec.secret // ""),
+    (.metadata.annotations["build.appstudio.openshift.io/request-platforms"] // "")
+  ] | join("|")
+')
+
+TOTAL=$(echo "${COMPONENTS_JSON}" | jq -r '.items | length')
 VALID=0
 WITH_IMAGE=0
 NO_SECRET=0
 MULTI_ARCH=0
 SINGLE_ARCH=0
+
+pct() {
+    local part="${1:-0}"
+    local whole="${2:-0}"
+    if [ "${whole}" -eq 0 ]; then
+        echo "0"
+    else
+        echo $(( part * 100 / whole ))
+    fi
+}
 
 echo "Found ${TOTAL} components"
 echo ""
@@ -32,6 +54,8 @@ printf "%-50s %-8s %-12s %s\n" "COMPONENT" "VERSION" "STATUS" "IMAGE INFO"
 echo "───────────────────────────────────────────────────────────────"
 
 while IFS='|' read -r NAME VERSION SPEC_IMAGE STATUS_IMAGE SECRET PLATFORMS; do
+    [ -z "${NAME}" ] && continue
+
     # Check image (status.lastPromotedImage only)
     # NOTE: spec.containerImage may be tag-only or patched during recovery; it is NOT a build/promotion signal.
     IMAGE="${STATUS_IMAGE}"
@@ -85,11 +109,11 @@ echo "SUMMARY"
 echo "═══════════════════════════════════════════════════════════════"
 echo ""
 echo "Total Components:       ${TOTAL}"
-echo "Valid (all checks):     ${VALID} ($(( VALID * 100 / TOTAL ))%)"
-echo "With Images:            ${WITH_IMAGE} ($(( WITH_IMAGE * 100 / TOTAL ))%)"
+echo "Valid (all checks):     ${VALID} ($(pct "${VALID}" "${TOTAL}")%)"
+echo "With Images:            ${WITH_IMAGE} ($(pct "${WITH_IMAGE}" "${TOTAL}")%)"
 echo ""
 echo "Multi-Arch Distribution:"
-echo "  🌍 Multi-arch:         ${MULTI_ARCH} ($(( MULTI_ARCH * 100 / TOTAL ))%)"
+echo "  🌍 Multi-arch:         ${MULTI_ARCH} ($(pct "${MULTI_ARCH}" "${TOTAL}")%)"
 echo "  📱 Single-arch:        ${SINGLE_ARCH}"
 echo "  ❓ Not specified:      $(( TOTAL - MULTI_ARCH - SINGLE_ARCH ))"
 echo ""

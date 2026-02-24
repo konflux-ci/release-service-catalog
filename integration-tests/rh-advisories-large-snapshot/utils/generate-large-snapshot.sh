@@ -51,7 +51,7 @@ fi
 # It does not build images or validate them against the registry.
 #
 # Typical inputs:
-# - component names (resolved to `:latest` in the target namespace)
+# - component names (resolved to `:stable` in the target namespace)
 # - full image refs with tags or digests
 #
 # ============================================================================
@@ -128,7 +128,7 @@ resolve_container_image() {
 
     # If entry is a bare component name, build the target image ref in the test namespace.
     if [[ "${entry}" != *"/"* ]]; then
-        echo "quay.io/redhat-user-workloads-stage/${NAMESPACE}/${entry}:latest"
+        echo "quay.io/redhat-user-workloads-stage/${NAMESPACE}/${entry}:stable"
         return 0
     fi
 
@@ -138,8 +138,8 @@ resolve_container_image() {
         return 0
     fi
 
-    # Otherwise treat it as a repo path and default to :latest.
-    echo "${entry}:latest"
+    # Otherwise treat it as a repo path and default to :stable.
+    echo "${entry}:stable"
     return 0
 }
 
@@ -149,6 +149,42 @@ extract_component_name() {
     name="${name%%@*}"              # strip @sha256...
     name="${name%%:*}"              # strip :tag
     echo "${name}"
+}
+
+# Resolve a tag-based image reference to its digest
+# Input: quay.io/repo/image:stable
+# Output: quay.io/repo/image@sha256:abcd...
+resolve_tag_to_digest() {
+    local image_ref="$1"
+    
+    # If already a digest reference, return as-is
+    if [[ "${image_ref}" == *"@sha256:"* ]]; then
+        echo "${image_ref}"
+        return 0
+    fi
+    
+    # If it's a tag reference, resolve to digest using skopeo
+    if [[ "${image_ref}" == *":"* ]]; then
+        echo "   Resolving ${image_ref} to digest..." >&2
+        
+        local digest
+        digest=$(skopeo inspect "docker://${image_ref}" --format '{{.Digest}}' 2>&1)
+        
+        if [ $? -ne 0 ]; then
+            echo "❌ Error: Failed to resolve ${image_ref} to digest" >&2
+            echo "   ${digest}" >&2
+            return 1
+        fi
+        
+        # Convert tag reference to digest reference
+        local repo="${image_ref%:*}"  # Remove :tag
+        echo "${repo}@${digest}"
+        return 0
+    fi
+    
+    # No tag or digest, return as-is
+    echo "${image_ref}"
+    return 0
 }
 
 cat <<EOF
@@ -182,7 +218,14 @@ EOF
 for (( i=1; i<=COMPONENT_COUNT; i++ )); do
     # Use different images from the pool for variety
     IMAGE_INDEX=$(((i - 1) % ${#IMAGE_POOL[@]}))
-    CONTAINER_IMAGE="$(resolve_container_image "${IMAGE_POOL[$IMAGE_INDEX]}")"
+    TAGGED_IMAGE="$(resolve_container_image "${IMAGE_POOL[$IMAGE_INDEX]}")"
+    
+    # Resolve tag to digest (required by apply-mapping task)
+    CONTAINER_IMAGE="$(resolve_tag_to_digest "${TAGGED_IMAGE}")"
+    if [ $? -ne 0 ]; then
+        echo "❌ Failed to resolve image for component ${i}" >&2
+        exit 1
+    fi
     
     # Extract actual component name from image URL
     COMPONENT_NAME="$(extract_component_name "${CONTAINER_IMAGE}")"

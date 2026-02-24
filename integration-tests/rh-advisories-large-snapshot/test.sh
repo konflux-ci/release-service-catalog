@@ -37,21 +37,77 @@ NO_CVE="true"
 COMPONENT_COUNT="${COMPONENT_COUNT:-200}"
 NAMESPACE="${NAMESPACE:-dev-release-team-tenant}"
 FRESH_BUILDS_FILE="${FRESH_BUILDS_FILE:-/tmp/fresh-images-pool-$(date +%s).txt}"
+# Mapping tag behavior (for worst-case signing without image rebuilds)
+# When enabled, each run patches RPA mapping.defaults.tags with a unique tag.
+# This reduces signature familiarity from reusing ":latest" references.
+ENABLE_RUN_UNIQUE_MAPPING_TAG="${ENABLE_RUN_UNIQUE_MAPPING_TAG:-true}"
+RUN_UNIQUE_TAG_PREFIX="${RUN_UNIQUE_TAG_PREFIX:-worstcase}"
+RELEASE_MAPPING_TAG="${RELEASE_MAPPING_TAG:-}"
+# Optional signing-key override for worst-case runs without rebuild:
+# If SIGNING_KEY_NAME is set, test.sh clones SIGNING_CONFIGMAP_NAME into a run-specific
+# ConfigMap, rewrites SIG_KEY_NAME/SIG_KEY_NAMES, and points RPA sign.configMapName to it.
+SIGNING_CONFIGMAP_NAME="${SIGNING_CONFIGMAP_NAME:-hacbs-signing-pipeline-config-staging-redhatbeta2}"
+SIGNING_KEY_NAME="${SIGNING_KEY_NAME:-}"
+EFFECTIVE_SIGNING_CONFIGMAP_NAME="${SIGNING_CONFIGMAP_NAME}"
+# Automatic key rotation (optional):
+# - If ENABLE_RUN_UNIQUE_SIGNING_KEY=true and SIGNING_KEY_NAME is empty,
+#   choose one key from SIGNING_KEY_CANDIDATES (comma-separated).
+# - This only changes the key name used by the run; backend must support that key.
+ENABLE_RUN_UNIQUE_SIGNING_KEY="${ENABLE_RUN_UNIQUE_SIGNING_KEY:-false}"
+SIGNING_KEY_CANDIDATES="${SIGNING_KEY_CANDIDATES:-}"
+# Optional strict preflight: require selected key to already appear in source ConfigMap data.
+# Set true to fail fast when selected key is not listed there.
+SIGNING_KEY_PREFLIGHT_STRICT="${SIGNING_KEY_PREFLIGHT_STRICT:-false}"
+
+select_signing_key_for_run() {
+    # Explicit override always wins
+    if [ -n "${SIGNING_KEY_NAME}" ]; then
+        return 0
+    fi
+
+    if [ "${ENABLE_RUN_UNIQUE_SIGNING_KEY}" != "true" ]; then
+        return 0
+    fi
+
+    if [ -z "${SIGNING_KEY_CANDIDATES}" ]; then
+        echo "❌ ENABLE_RUN_UNIQUE_SIGNING_KEY=true but SIGNING_KEY_CANDIDATES is empty" >&2
+        echo "   Example: SIGNING_KEY_CANDIDATES=\"key-a,key-b,key-c\"" >&2
+        exit 1
+    fi
+
+    local parsed=()
+    local raw key
+    IFS=',' read -r -a raw <<< "${SIGNING_KEY_CANDIDATES}"
+    for key in "${raw[@]}"; do
+        key="$(echo "${key}" | xargs)"
+        [ -z "${key}" ] && continue
+        parsed+=("${key}")
+    done
+
+    if [ "${#parsed[@]}" -eq 0 ]; then
+        echo "❌ No valid keys parsed from SIGNING_KEY_CANDIDATES='${SIGNING_KEY_CANDIDATES}'" >&2
+        exit 1
+    fi
+
+    # Deterministic enough per run, simple and shell-safe
+    local idx=$(( $(date +%s) % ${#parsed[@]} ))
+    SIGNING_KEY_NAME="${parsed[$idx]}"
+}
 
 # Default to the repo-tracked static list unless caller provides a file explicitly.
 if [ "${USE_STATIC_IMAGE_POOL:-false}" = "true" ]; then
     if [ -z "${FRESH_BUILDS_FILE:-}" ] || [[ "${FRESH_BUILDS_FILE}" == /tmp/fresh-images-pool-* ]]; then
-        FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-latest.txt"
+        FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-stable.txt"
     fi
 fi
 
 if [ -z "${FRESH_BUILDS_FILE:-}" ] || [[ "${FRESH_BUILDS_FILE}" == /tmp/fresh-images-pool-* ]]; then
-    FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-latest.txt"
+    FRESH_BUILDS_FILE="${SCRIPT_DIR}/resources/static-image-pool-stable.txt"
 fi
 
 if [ ! -f "${FRESH_BUILDS_FILE}" ]; then
     echo "❌ Error: Image list file not found: ${FRESH_BUILDS_FILE}"
-    echo "   Provide FRESH_BUILDS_FILE or ensure resources/static-image-pool-latest.txt exists"
+    echo "   Provide FRESH_BUILDS_FILE or ensure resources/static-image-pool-stable.txt exists"
     exit 1
 fi
 
@@ -62,11 +118,21 @@ LIST_COUNT="$(awk '{
   if (length(line) > 0) c++
 } END { print c+0 }' "${FRESH_BUILDS_FILE}")"
 
+# Resolve optional automatic signing key rotation before printing config
+select_signing_key_for_run
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "🧪 Test-Only Mode"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Image list: ${FRESH_BUILDS_FILE}"
 echo "  Entries: ${LIST_COUNT}"
+echo "  Unique mapping tag mode: ${ENABLE_RUN_UNIQUE_MAPPING_TAG}"
+if [ -n "${SIGNING_KEY_NAME}" ]; then
+    echo "  Signing key override: ${SIGNING_KEY_NAME} (via cloned configmap)"
+else
+    echo "  Signing key override: <disabled> (using ${SIGNING_CONFIGMAP_NAME})"
+fi
+echo "  Auto signing key rotation: ${ENABLE_RUN_UNIQUE_SIGNING_KEY}"
 echo ""
 
 # --- Export Configuration ---
@@ -888,6 +954,7 @@ cleanup_resources() {
     local err=${1:-0}
     local line=${2:-"N/A"}
     local command=${3:-"N/A"}
+    : "${originating_tool:?originating_tool must be set for safe cleanup scoping}"
 
     if [ "$err" -ne 0 ] ; then
         echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
@@ -899,10 +966,10 @@ cleanup_resources() {
 
         # Clean up releases created by this test (using originating-tool label)
         # This is safe because it only affects resources created by this specific test
-        echo "🗑️  Cleaning up test releases (originating-tool=${originating_tool:-rh-advisories-large-snapshot-test})..."
+        echo "🗑️  Cleaning up test releases (originating-tool=${originating_tool})..."
         local old_releases
         old_releases=$(kubectl get release -n "${tenant_namespace:-dev-release-team-tenant}" \
-            -l "originating-tool=${originating_tool:-rh-advisories-large-snapshot-test}" \
+            -l "originating-tool=${originating_tool}" \
             --no-headers 2>/dev/null | awk '{print $1}' || echo "")
         
         if [ -n "${old_releases}" ]; then
@@ -935,7 +1002,7 @@ cleanup_resources() {
                 # Only remove supporting tenant resources by label.
                 kubectl delete rolebinding,serviceaccount,releaseplan \
                     -n "${tenant_namespace:-dev-release-team-tenant}" \
-                    -l "originating-tool=${originating_tool:-rh-advisories-large-snapshot-test}" \
+                    -l "originating-tool=${originating_tool}" \
                     --ignore-not-found=true 2>/dev/null || true
             fi
             if [ -f "$tmpDir/managed-resources.yaml" ]; then
@@ -990,6 +1057,76 @@ apply_kustomize_resources() {
     echo "✅ ${description} applied to ${namespace}" >&2
 }
 
+# Prepare a run-specific signing ConfigMap when SIGNING_KEY_NAME is requested.
+# This avoids mutating the shared signing ConfigMap used by other runs.
+prepare_signing_configmap_override() {
+    : "${managed_namespace:?managed_namespace must be set}"
+    : "${originating_tool:?originating_tool must be set}"
+    : "${SIGNING_CONFIGMAP_NAME:?SIGNING_CONFIGMAP_NAME must be set}"
+
+    EFFECTIVE_SIGNING_CONFIGMAP_NAME="${SIGNING_CONFIGMAP_NAME}"
+
+    if [ -z "${SIGNING_KEY_NAME}" ]; then
+        echo "Using default signing ConfigMap: ${EFFECTIVE_SIGNING_CONFIGMAP_NAME}" >&2
+        return 0
+    fi
+
+    local key_slug
+    key_slug=$(echo "${SIGNING_KEY_NAME}" | tr -cs '[:alnum:]-' '-' | sed 's/^-*//;s/-*$//' | tr '[:upper:]' '[:lower:]')
+    [ -z "${key_slug}" ] && key_slug="key"
+    local generated_cm="${SIGNING_CONFIGMAP_NAME}-${key_slug}-$(date +%Y%m%d-%H%M%S)"
+
+    echo "Preparing signing ConfigMap override: ${generated_cm}" >&2
+
+    local cm_json
+    cm_json=$(kubectl get configmap "${SIGNING_CONFIGMAP_NAME}" -n "${managed_namespace}" -o json 2>/dev/null) || {
+        echo "❌ Failed to read signing ConfigMap '${SIGNING_CONFIGMAP_NAME}' in namespace '${managed_namespace}'" >&2
+        return 1
+    }
+
+    if [ "${SIGNING_KEY_PREFLIGHT_STRICT}" = "true" ]; then
+        local allowed_keys
+        allowed_keys=$(echo "${cm_json}" | jq -r '
+          [
+            (.data.SIG_KEY_NAME // empty),
+            ((.data.SIG_KEY_NAMES // empty) | split(",")[]? | gsub("^\\s+|\\s+$";""))
+          ]
+          | map(select(length > 0))
+          | unique
+          | .[]
+        ')
+        if ! echo "${allowed_keys}" | rg -x --fixed-strings "${SIGNING_KEY_NAME}" >/dev/null 2>&1; then
+            echo "❌ SIGNING_KEY_PREFLIGHT_STRICT=true and key '${SIGNING_KEY_NAME}' is not listed in ${SIGNING_CONFIGMAP_NAME}" >&2
+            echo "   Allowed keys from ConfigMap:" >&2
+            echo "${allowed_keys}" >&2
+            return 1
+        fi
+    fi
+
+    echo "${cm_json}" | jq \
+        --arg new_name "${generated_cm}" \
+        --arg key_name "${SIGNING_KEY_NAME}" \
+        --arg tool "${originating_tool}" \
+        'del(.metadata.uid,
+             .metadata.resourceVersion,
+             .metadata.creationTimestamp,
+             .metadata.managedFields,
+             .metadata.ownerReferences,
+             .metadata.annotations."kubectl.kubernetes.io/last-applied-configuration")
+         | .metadata.name = $new_name
+         | .metadata.annotations["test.appstudio.openshift.io/generated-signing-config"] = "true"
+         | .metadata.labels["originating-tool"] = $tool
+         | .data.SIG_KEY_NAME = $key_name
+         | .data.SIG_KEY_NAMES = $key_name' \
+        | kubectl apply -n "${managed_namespace}" -f - >/dev/null || {
+            echo "❌ Failed to create signing ConfigMap override '${generated_cm}'" >&2
+            return 1
+        }
+
+    EFFECTIVE_SIGNING_CONFIGMAP_NAME="${generated_cm}"
+    echo "✅ Using signing ConfigMap override: ${EFFECTIVE_SIGNING_CONFIGMAP_NAME}" >&2
+}
+
 # Function to patch RPA with actual component names from snapshot
 # The apply-mapping task does NOT support wildcard "*" matching
 patch_rpa_with_snapshot_components() {
@@ -998,6 +1135,7 @@ patch_rpa_with_snapshot_components() {
     : "${tenant_namespace:?tenant_namespace must be set}"
     : "${managed_namespace:?managed_namespace must be set}"
     : "${release_plan_admission_name:?release_plan_admission_name must be set}"
+    : "${EFFECTIVE_SIGNING_CONFIGMAP_NAME:?EFFECTIVE_SIGNING_CONFIGMAP_NAME must be set}"
     
     echo "Generating component mapping from snapshot..." >&2
     
@@ -1014,6 +1152,17 @@ patch_rpa_with_snapshot_components() {
     local component_count
     component_count=$(echo "${components}" | wc -l)
     echo "  Found ${component_count} components in snapshot" >&2
+
+    # Optional: force run-unique destination tag to reduce idempotent signature reuse.
+    local mapping_tag=""
+    if [ "${ENABLE_RUN_UNIQUE_MAPPING_TAG}" = "true" ]; then
+        if [ -n "${RELEASE_MAPPING_TAG}" ]; then
+            mapping_tag="${RELEASE_MAPPING_TAG}"
+        else
+            mapping_tag="${RUN_UNIQUE_TAG_PREFIX}-$(date +%Y%m%d-%H%M%S)"
+        fi
+        echo "  Using run-unique mapping tag: ${mapping_tag}" >&2
+    fi
     
     # Build the mapping components array as JSON
     local mapping_json='[]'
@@ -1038,18 +1187,44 @@ EOF
     # Patch the RPA with the new mapping
     echo "  Patching ReleasePlanAdmission: ${release_plan_admission_name}" >&2
     
-    local patch_json=$(cat <<EOF
-{
-  "spec": {
-    "data": {
-      "mapping": {
-        "components": ${mapping_json}
-      }
-    }
-  }
-}
-EOF
-)
+    local patch_json
+    if [ -n "${mapping_tag}" ]; then
+        patch_json=$(jq -n \
+            --argjson components "${mapping_json}" \
+            --arg tag "${mapping_tag}" \
+            --arg sign_cm "${EFFECTIVE_SIGNING_CONFIGMAP_NAME}" \
+            '{
+                spec: {
+                    data: {
+                        sign: {
+                            configMapName: $sign_cm
+                        },
+                        mapping: {
+                            components: $components,
+                            defaults: {
+                                tags: [$tag]
+                            }
+                        }
+                    }
+                }
+            }')
+    else
+        patch_json=$(jq -n \
+            --argjson components "${mapping_json}" \
+            --arg sign_cm "${EFFECTIVE_SIGNING_CONFIGMAP_NAME}" \
+            '{
+                spec: {
+                    data: {
+                        sign: {
+                            configMapName: $sign_cm
+                        },
+                        mapping: {
+                            components: $components
+                        }
+                    }
+                }
+            }')
+    fi
     
     kubectl patch releaseplanadmission "${release_plan_admission_name}" \
         -n "${managed_namespace}" \
@@ -1061,7 +1236,11 @@ EOF
         return 1
     fi
     
-    echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings" >&2
+    if [ -n "${mapping_tag}" ]; then
+        echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings, signing config '${EFFECTIVE_SIGNING_CONFIGMAP_NAME}', and tag '${mapping_tag}'" >&2
+    else
+        echo "✅ ReleasePlanAdmission patched with ${component_count} component mappings and signing config '${EFFECTIVE_SIGNING_CONFIGMAP_NAME}'" >&2
+    fi
     return 0
 }
 
@@ -1112,6 +1291,13 @@ create_kubernetes_resources() {
         "${managed_namespace}"
     if [ $? -ne 0 ]; then
         echo "❌ Failed to create managed resources" >&2
+        return 1
+    fi
+
+    # Optional signing key override: create run-specific signing ConfigMap
+    prepare_signing_configmap_override
+    if [ $? -ne 0 ]; then
+        echo "❌ Failed to prepare signing ConfigMap override" >&2
         return 1
     fi
 

@@ -42,7 +42,7 @@ set -euo pipefail
 # ENVIRONMENT:
 #   GITHUB_TOKEN        : Required! GitHub PAT with 'repo' permissions for creating branches
 #   PARALLEL_BUILDS     : Max parallel builds (default: 50)
-#   BUILD_TIMEOUT       : Total timeout in seconds (default: 5400 = 90 min, use 10800 for 300-1.5GB images)
+#   BUILD_TIMEOUT       : Total timeout in seconds (default: 43200 = 12 hours for 200 components)
 #   CHECK_INTERVAL      : Status check interval in seconds (default: 30)
 #   BASE_REPO           : GitHub repository for template source (default: hacbs-release-tests/e2e-base)
 #   PAC_TEMPLATE_BRANCH : Branch with PAC config to copy to each component repo (default: konflux-v4-15-apiserver-watcher-01)
@@ -64,14 +64,16 @@ set -euo pipefail
 #     - Digest extraction: ~1-2 minutes (optimized batch queries)
 #   
 #   Batch processing (prevents PAC overload):
-#     - Creates components in unlimited quantity
-#     - Pauses 60s after every 30 components to let PAC process them
-#     - Prevents overwhelming PAC controller
+#     - Creates components in pairs (2 components = 1 pair)
+#     - Each component triggers 2 builds: on-pull (PAC PR) + on-push (PR merge)
+#     - Waits for builds to start running (up to 2 min)
+#     - Then waits 6 minutes before issuing next pair
+#     - Prevents overwhelming PAC controller and build infrastructure
 #   
-#   Examples:
-#     - 50 components: ~85-105 minutes (50 min creation + 120s batch pauses + 25 min builds)
-#     - 100 components: ~170-210 minutes (100 min creation + 240s batch pauses + 25 min builds)
-#     - 200 components: ~340-420 minutes (200 min creation + 420s batch pauses + 25 min builds)
+#   Examples (with pairs of 2 components + 6min delays):
+#     - 50 components: ~175 minutes (25 pairs × 6min = 150min pauses + 25min builds)
+#     - 100 components: ~325 minutes (50 pairs × 6min = 300min pauses + 25min builds)
+#     - 200 components: ~625 minutes (100 pairs × 6min = 600min pauses + 25min builds)
 #   
 #   Reuse runs (existing components and branches):
 #     - Prerequisite validation: ~5-10 seconds
@@ -84,7 +86,7 @@ set -euo pipefail
 #     - Batch queries minimize API load (2-4 calls instead of 1000+)
 #     - Progress updates every 30 seconds during build monitoring
 #     - 30s delays between creations prevent API rate limits
-#     - 60s pause after every 30 components prevents PAC overload
+#     - 6min pause after every 2 components (1 pair) prevents PAC overload
 #     - Waits for service accounts to be created (avoids race conditions)
 #     - GitHub branches contain EC-compliant PAC pipelines
 #
@@ -128,12 +130,8 @@ NAMESPACE="${2:-dev-release-team-tenant}"
 OUTPUT_FILE="${3:-/tmp/images-pool-$(date +%s).txt}"
 FORCE_REBUILD="${4:-false}"  # Force fresh builds, disable image reuse (default: false)
 
-# Set DISABLE_QUAY_REUSE based on FORCE_REBUILD parameter
-if [ "${FORCE_REBUILD}" = "true" ]; then
-    export DISABLE_QUAY_REUSE="true"
-else
-    export DISABLE_QUAY_REUSE="${DISABLE_QUAY_REUSE:-false}"
-fi
+# Allow Quay image discovery and reuse (set to "true" to force fresh builds)
+export DISABLE_QUAY_REUSE="false"
 
 # Multi-version simulation settings - realistic production scenario
 # Multiple product versions each with multiple components
@@ -157,12 +155,12 @@ BASE_GITHUB_URL="https://github.com/${BASE_REPO}"
 # One repo per component (OCP-style, like existing Konflux tests)
 # Each component gets its own repo: hacbs-release-tests/rh-adv-large-{component_name}
 COMPONENT_REPO_ORG="${COMPONENT_REPO_ORG:-hacbs-release-tests}"
-COMPONENT_REPO_PREFIX="${COMPONENT_REPO_PREFIX:-rh-adv-large}"
-COMPONENT_BRANCH="${COMPONENT_BRANCH:-main}"  # All component repos use main branch
+COMPONENT_REPO_PREFIX="${COMPONENT_REPO_PREFIX:-rh-adv}"
+COMPONENT_BRANCH_PREFIX="${COMPONENT_BRANCH_PREFIX:-component}"  # Each component uses its own branch: component-{name}
 
 # Build orchestration settings
 PARALLEL_BUILDS="${PARALLEL_BUILDS:-50}"      # Max concurrent builds
-BUILD_TIMEOUT="${BUILD_TIMEOUT:-5400}"        # 90 minutes total (increase to 10800 for 300-1.5GB images)
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-43200}"       # 12 hours total (for 200 components with 5-min batching = ~10-12h needed)
 CHECK_INTERVAL="${CHECK_INTERVAL:-30}"        # Status check every 30s
 
 # Retry settings
@@ -238,21 +236,13 @@ component_has_successful_build() {
     fi
     
     # Try to get image digest from component status (preferred)
-    local container_image
-    container_image=$(kubectl get component "${component_name}" -n "${namespace}" \
-        -o jsonpath='{.status.containerImage}' 2>/dev/null || echo "")
+    # CRITICAL: Konflux uses .status.lastPromotedImage (NOT .status.containerImage or spec.containerImage)
+    local promoted_image
+    promoted_image=$(kubectl get component "${component_name}" -n "${namespace}" \
+        -o jsonpath='{.status.lastPromotedImage}' 2>/dev/null || echo "")
     
     # If status has valid digest, component is ready to reuse
-    if [ -n "${container_image}" ] && [[ "${container_image}" == *"@sha256:"* ]]; then
-        return 0
-    fi
-    
-    # Check spec.containerImage (for Quay-discovered components)
-    local spec_image
-    spec_image=$(kubectl get component "${component_name}" -n "${namespace}" \
-        -o jsonpath='{.spec.containerImage}' 2>/dev/null || echo "")
-    
-    if [ -n "${spec_image}" ] && [[ "${spec_image}" == *"@sha256:"* ]]; then
+    if [ -n "${promoted_image}" ] && [[ "${promoted_image}" == *"@sha256:"* ]]; then
         return 0
     fi
     
@@ -390,16 +380,266 @@ force_delete_component() {
     return 0
 }
 
+# Wait for PAC to configure and auto-merge configuration PR if needed
+# Args: component_name, component_repo_name
+# Returns: 0 if PAC ready, 1 if timeout
+wait_for_pac_and_merge_pr() {
+    local component_name="$1"
+    local component_repo_name="$2"
+    local max_wait=120  # 2 minutes (increased for auto-recovery)
+    local wait_time=0
+    local closed_pr_retries=0
+    local max_closed_pr_retries=2
+    local last_seen_pr=""
+    
+    log_info "      ⏳ Waiting for PAC configuration (with auto-recovery)..."
+    
+    while [ $wait_time -lt $max_wait ]; do
+        # Check PAC state
+        local pac_state=$(kubectl get component "${component_name}" -n "${NAMESPACE}" \
+            -o jsonpath='{.metadata.annotations.build\.appstudio\.openshift\.io/status}' 2>/dev/null | \
+            jq -r '.pac.state // empty' 2>/dev/null)
+        
+        if [ "$pac_state" = "enabled" ]; then
+            log_info "      ✓ PAC configured (${wait_time}s)"
+            
+            # CRITICAL: Check for PAC configuration errors in events
+            # These indicate PAC is stuck and needs intervention
+            local pac_error=$(kubectl get events -n "${NAMESPACE}" \
+                --field-selector involvedObject.kind=Component,involvedObject.name="${component_name}" \
+                --sort-by='.lastTimestamp' 2>/dev/null | \
+                grep "ErrorConfiguringPaCForComponentRepository" | tail -1)
+            
+            if echo "$pac_error" | grep -q "no history in common"; then
+                log_warning "      ⚠️  PAC error detected: branches have no common history"
+                log_info "      🔧 Auto-recovery: Deleting conflicting branches and retriggering PAC..."
+                
+                # Delete konflux-* branches (they have no common history with component branch)
+                local deleted_count=0
+                while read -r branch_ref; do
+                    [ -z "$branch_ref" ] && continue
+                    local branch_name=$(echo "$branch_ref" | sed 's#refs/heads/##')
+                    if gh api -X DELETE "repos/hacbs-release-tests/${component_repo_name}/git/${branch_ref}" 2>/dev/null; then
+                        log_info "         ✓ Deleted branch: ${branch_name}"
+                        deleted_count=$((deleted_count + 1))
+                    fi
+                done < <(gh api "repos/hacbs-release-tests/${component_repo_name}/git/refs" --jq '.[].ref' 2>/dev/null | grep "heads/konflux-" || true)
+                
+                if [ $deleted_count -gt 0 ]; then
+                    log_info "      🔄 Retriggering PAC configuration..."
+                    kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
+                        "build.appstudio.openshift.io/request=configure-pac" --overwrite &>/dev/null || true
+                    
+                    # Wait for PAC to recreate PR
+                    sleep 10
+                    wait_time=$((wait_time + 10))
+                    continue
+                fi
+            fi
+            
+            # Check if PAC created a configuration PR that needs merging
+            local merge_url=$(kubectl get component "${component_name}" -n "${NAMESPACE}" \
+                -o jsonpath='{.metadata.annotations.build\.appstudio\.openshift\.io/status}' 2>/dev/null | \
+                jq -r '.pac."merge-url" // empty' 2>/dev/null)
+            
+            if [ -z "$merge_url" ]; then
+                # PAC is enabled but no PR yet - wait briefly (max 15s)
+                if [ $wait_time -lt 15 ]; then
+                    sleep 3
+                    wait_time=$((wait_time + 3))
+                    continue
+                else
+                    # No PR created after 15s - PAC likely won't create one
+                    log_warning "      ⚠️  PAC enabled but no PR created after 15s"
+                    return 0
+                fi
+            fi
+            
+            if [ -n "$merge_url" ]; then
+                # Extract PR number from URL
+                local pr_number=$(echo "$merge_url" | grep -oE '[0-9]+$')
+                if [ -n "$pr_number" ]; then
+                    # Check PR state (OPEN, CLOSED, MERGED)
+                    local pr_info=$(gh pr view "$pr_number" --repo "hacbs-release-tests/${component_repo_name}" \
+                        --json state,mergeable -q '{state: .state, mergeable: .mergeable}' 2>/dev/null || echo '{"state":"UNKNOWN","mergeable":"UNKNOWN"}')
+                    local pr_state=$(echo "$pr_info" | jq -r '.state')
+                    local pr_mergeable=$(echo "$pr_info" | jq -r '.mergeable')
+                    
+                    # Handle CLOSED PRs (failed/cancelled)
+                    if [ "$pr_state" = "CLOSED" ]; then
+                        # Check if we're seeing the same closed PR repeatedly
+                        if [ "$last_seen_pr" = "$pr_number" ]; then
+                            closed_pr_retries=$((closed_pr_retries + 1))
+                            if [ $closed_pr_retries -ge $max_closed_pr_retries ]; then
+                                log_warning "      ⚠️  PR #${pr_number} still CLOSED after ${max_closed_pr_retries} retries - giving up"
+                                log_warning "         PAC may be stuck or repo configuration incomplete"
+                                return 1
+                            fi
+                        else
+                            closed_pr_retries=1
+                        fi
+                        last_seen_pr="$pr_number"
+                        
+                        log_warning "      ⚠️  PR #${pr_number} is CLOSED (failed) - retriggering PAC (attempt ${closed_pr_retries}/${max_closed_pr_retries})"
+                        kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
+                            "build.appstudio.openshift.io/request=configure-pac" --overwrite &>/dev/null || true
+                        sleep 10
+                        wait_time=$((wait_time + 10))
+                        continue
+                    fi
+                    
+                    # Handle CONFLICTING PRs
+                    if [ "$pr_mergeable" = "CONFLICTING" ]; then
+                        log_warning "      ⚠️  PR #${pr_number} has conflicts - closing and retriggering"
+                        gh pr close "$pr_number" --repo "hacbs-release-tests/${component_repo_name}" \
+                            --delete-branch 2>/dev/null || true
+                        kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
+                            "build.appstudio.openshift.io/request=configure-pac" --overwrite &>/dev/null || true
+                        log_info "      ✓ Closed conflicting PR (PAC will regenerate)"
+                        sleep 10
+                        wait_time=$((wait_time + 10))
+                        continue
+                    fi
+                    
+                    # CRITICAL: Clean PR branch before merging
+                    # 1. Delete pull-request.yaml (prevents pull-request builds)
+                    # 2. Add multi-arch annotations to push.yaml (enables multi-arch builds)
+                    log_info "      🧹 Customizing PR #${pr_number} (push-only + multi-arch)..."
+                    local pr_head_branch=$(gh pr view "$pr_number" --repo "hacbs-release-tests/${component_repo_name}" \
+                        --json headRefName -q '.headRefName' 2>/dev/null)
+                    
+                    if [ -n "$pr_head_branch" ]; then
+                        local pr_cleanup="${TEMP_DIR}/pr-cleanup-${component_name}"
+                        rm -rf "$pr_cleanup"
+                        
+                        # Try to clone PR branch with retry (GitHub rate limiting / timing issues)
+                        local clone_success=false
+                        for clone_attempt in 1 2 3; do
+                            if git clone -q --depth 1 --branch "${pr_head_branch}" \
+                                "https://${GITHUB_TOKEN}@github.com/hacbs-release-tests/${component_repo_name}.git" \
+                                "$pr_cleanup" 2>/dev/null; then
+                                clone_success=true
+                                break
+                            fi
+                            [ $clone_attempt -lt 3 ] && sleep 5
+                        done
+                        
+                        if [ "$clone_success" = "true" ]; then
+                            cd "$pr_cleanup"
+                            local pr_modified=false
+                            
+                            # Delete pull-request files
+                            for pr_file in .tekton/*pull-request*.yaml .tekton/*pull-request*.yml; do
+                                if [ -f "$pr_file" ]; then
+                                    git rm -f "$pr_file" &>/dev/null
+                                    pr_modified=true
+                                fi
+                            done
+                            
+                            # Add multi-arch configuration to push.yaml using yq
+                            for push_file in .tekton/*push*.yaml; do
+                                if [ -f "$push_file" ]; then
+                                    local file_modified=false
+                                    
+                                    # 1. Add annotations to metadata (if not present)
+                                    if ! grep -q "multi-platform-required" "$push_file"; then
+                                        yq eval -i '.metadata.annotations."build.appstudio.openshift.io/multi-platform-required" = "true"' "$push_file"
+                                        yq eval -i '.metadata.annotations."build.appstudio.openshift.io/request-platforms" = "linux/amd64,linux/arm64,linux/s390x,linux/ppc64le"' "$push_file"
+                                        file_modified=true
+                                    fi
+                                    
+                                    # 2. Add parameters to spec.params (only if not already present)
+                                    # CRITICAL: Use ARRAY format for build-platforms (Kueue CEL requires iterable type)
+                                    if ! yq eval '.spec.params[] | select(.name == "build-platforms")' "$push_file" | grep -q "build-platforms"; then
+                                        yq eval -i '.spec.params += [{"name": "build-platforms", "value": ["linux/x86_64", "linux/arm64", "linux/s390x", "linux/ppc64le"]}]' "$push_file"
+                                        file_modified=true
+                                    fi
+                                    
+                                    if ! yq eval '.spec.params[] | select(.name == "build-image-index")' "$push_file" | grep -q "build-image-index"; then
+                                        yq eval -i '.spec.params += [{"name": "build-image-index", "value": "true"}]' "$push_file"
+                                        file_modified=true
+                                    fi
+                                    
+                                    # 3. Add parameter definitions to pipelineSpec.params (only if not already present)
+                                    # CRITICAL: Use ARRAY type for build-platforms (not string)
+                                    if ! yq eval '.spec.pipelineSpec.params[] | select(.name == "build-platforms")' "$push_file" | grep -q "build-platforms"; then
+                                        yq eval -i '.spec.pipelineSpec.params += [{"name": "build-platforms", "type": "array", "default": ["linux/x86_64"]}]' "$push_file"
+                                        file_modified=true
+                                    fi
+                                    
+                                    if ! yq eval '.spec.pipelineSpec.params[] | select(.name == "build-image-index")' "$push_file" | grep -q "build-image-index"; then
+                                        yq eval -i '.spec.pipelineSpec.params += [{"name": "build-image-index", "type": "string", "default": "true"}]' "$push_file"
+                                        file_modified=true
+                                    fi
+                                    
+                                    if [ "$file_modified" = "true" ]; then
+                                        git add "$push_file"
+                                        pr_modified=true
+                                    fi
+                                fi
+                            done
+                            
+                            if [ "$pr_modified" = "true" ]; then
+                                git config user.name "Large Snapshot Test Bot" 2>/dev/null
+                                git config user.email "release-team@redhat.com" 2>/dev/null
+                                git commit -q -m "chore: Configure push-only + multi-arch" 2>/dev/null
+                                git push -q origin "${pr_head_branch}" 2>/dev/null && \
+                                    log_info "      ✓ PR customized (push-only + multi-arch)" || \
+                                    log_warning "      ⚠️  Failed to push PR customization"
+                            fi
+                            
+                            cd - >/dev/null
+                            rm -rf "$pr_cleanup"
+                        else
+                            log_warning "      ⚠️  Failed to clone PR branch after 3 attempts - using default PAC config"
+                            log_warning "         (Build will use single-platform, not multi-arch)"
+                        fi
+                    fi
+                    
+                    log_info "      📝 Merging PAC configuration PR #${pr_number}..."
+                    
+                    # Merge immediately with --admin (bypasses checks)
+                    local merge_error=""
+                    if merge_error=$(gh pr merge "$pr_number" --repo "hacbs-release-tests/${component_repo_name}" \
+                        --merge --admin --delete-branch=false 2>&1); then
+                        log_info "      ✓ PR #${pr_number} merged (push-only config)"
+                    elif merge_error=$(gh pr merge "$pr_number" --repo "hacbs-release-tests/${component_repo_name}" \
+                        --merge --delete-branch=false 2>&1); then
+                        log_info "      ✓ PR #${pr_number} merged (without --admin)"
+                    else
+                        log_warning "      ⚠️  Could not merge PR #${pr_number}"
+                        log_warning "         Error: ${merge_error}"
+                        return 1
+                    fi
+                fi
+            fi
+            
+            return 0
+        fi
+        
+        sleep 3
+        wait_time=$((wait_time + 3))
+    done
+    
+    log_warning "      ⚠️  PAC not configured after ${max_wait}s"
+    return 1
+}
+
 # Create GitHub branch with PAC configuration for a component
-# Usage: ensure_component_repo <component_name>
+# Usage: ensure_component_repo <component_name> [cleanup_only]
+# Args:
+#   component_name: Name of the component
+#   cleanup_only: If "true", only clean up pull-request files (don't update Dockerfile)
 # Returns: 0 if repo exists/created and PAC config updated, 1 if failed
 # One repo per component (OCP-style): hacbs-release-tests/rh-adv-large-{component_name}
 ensure_component_repo() {
     local component_name="$1"
+    local cleanup_only="${2:-false}"
     local component_repo_name="${COMPONENT_REPO_PREFIX}-${component_name}"
     local full_repo="${COMPONENT_REPO_ORG}/${component_repo_name}"
+    local component_branch="${COMPONENT_BRANCH_PREFIX}-${component_name}"  # Component-specific branch
     
-    # Extract version from component name (e.g., v4-15-apiserver-watcher-01 → v4-15)
+    # Extract version from component name (e.g., ls-v4-15-apiserver-watcher-01 → v4-15)
     local version=$(echo "$component_name" | grep -oE "v4-[0-9]+" | head -1)
     local app_name="large-snapshot-build-${version}"
     
@@ -420,7 +660,8 @@ ensure_component_repo() {
         local create_repo_script="${script_dir}/../../scripts/create-github-repo.sh"
         
         # Prefer local template (self-contained, no e2e-base dependency)
-        if [ -d "$template_dir" ] && [ -f "${template_dir}/.tekton/template-push.yaml" ] && [ -f "${template_dir}/Dockerfile" ]; then
+        # CRITICAL: Push ONLY Dockerfile (no .tekton/) to avoid conflicts with PAC auto-generation
+        if [ -d "$template_dir" ] && [ -f "${template_dir}/Dockerfile" ]; then
             log_info "      Using local template: ${template_dir}"
             # Create repo via API if it doesn't exist
             if ! curl -sf -H "Authorization: token ${GITHUB_TOKEN}" \
@@ -429,16 +670,20 @@ ensure_component_repo() {
             fi
             local tmp_push="${TEMP_DIR}/push-${component_name}"
             rm -rf "$tmp_push"
-            cp -r "$template_dir" "$tmp_push"
+            
+            # Copy ONLY Dockerfile (not .tekton/) - let PAC generate .tekton files
+            mkdir -p "$tmp_push"
+            cp "${template_dir}/Dockerfile" "$tmp_push/"
+            
             cd "$tmp_push"
             git init -q
             git config user.name "Large Snapshot Test Bot"
             git config user.email "release-team@redhat.com"
-            git add .
-            git commit -q -m "feat: Initial template for ${component_name}"
+            git add Dockerfile
+            git commit -q -m "feat: Initial Dockerfile for ${component_name}"
             git remote add origin "https://${GITHUB_TOKEN}@github.com/${full_repo}.git"
-            git push -q -f origin "HEAD:${COMPONENT_BRANCH}" 2>/dev/null || {
-                log_warning "      ⚠️  Failed to push template to ${full_repo}"
+            git push -q -f origin "HEAD:${component_branch}" 2>/dev/null || {
+                log_warning "      ⚠️  Failed to push Dockerfile to ${full_repo}"
                 return 1
             }
             cd - >/dev/null
@@ -453,7 +698,7 @@ ensure_component_repo() {
             local retry_delay=10
             while [ $retry_count -lt $max_retries ]; do
                 local error_output=$(mktemp)
-                if "${copy_script}" "${BASE_REPO}" "${PAC_TEMPLATE_BRANCH}" "${full_repo}" "${COMPONENT_BRANCH}" "true" 2>"${error_output}"; then
+                if "${copy_script}" "${BASE_REPO}" "${PAC_TEMPLATE_BRANCH}" "${full_repo}" "${component_branch}" "true" 2>"${error_output}"; then
                     rm -f "${error_output}"
                     break
                 else
@@ -473,16 +718,19 @@ ensure_component_repo() {
         log_info "      ✓ Component repo created successfully"
     fi
     
-    # Update PAC configuration for ALL component repos (new and existing)
-    log_info "      Updating PAC configuration for component: ${component_name}"
+    # Update component repo: Only update Dockerfile (PAC handles .tekton generation)
+    log_info "      Updating component repository: ${component_name}"
     local temp_repo="${TEMP_DIR}/repo-${component_name}"
-    if git clone -q --depth 1 --branch "${COMPONENT_BRANCH}" \
+    
+    # Try to clone the component-specific branch; if it doesn't exist, create it from main
+    if git clone -q --depth 1 --branch "${component_branch}" \
         "https://${GITHUB_TOKEN}@github.com/${full_repo}.git" "${temp_repo}" 2>/dev/null; then
+        # Branch exists - update Dockerfile only (clean up pull-request files if PAC already configured)
         
         cd "${temp_repo}"
         
-        # CRITICAL: Delete pull-request PAC files to ensure ONLY -on-push triggers
-        # This test requires push-only builds, no PR-based builds
+        # If .tekton directory exists, PAC has already configured it
+        # Delete any pull-request files (we only want push builds)
         local pac_updated=false
         if [ -d ".tekton" ]; then
             for pr_file in .tekton/*pull-request*.yaml .tekton/*pull-request*.yml; do
@@ -494,129 +742,23 @@ ensure_component_repo() {
             done
         fi
         
-        # CRITICAL: Rename PAC file from template-push.yaml to {component}-push.yaml
-        # This ensures PAC recognizes it as component-specific configuration
-        if [ -d ".tekton" ]; then
-            for template_file in .tekton/template-push.yaml .tekton/template-push.yml; do
-                if [ -f "$template_file" ]; then
-                    local new_pac_file=".tekton/${component_name}-push.yaml"
-                    mv "$template_file" "$new_pac_file" 2>/dev/null || cp "$template_file" "$new_pac_file"
-                    log_info "      ✓ Renamed PAC file: $(basename "$new_pac_file")"
-                    pac_updated=true
-                fi
-            done
-        fi
+        # Generate custom Dockerfile with random size (only if not cleanup_only mode)
+        local dockerfile_updated=false
+        local size_mb=0
         
-        # Update PAC configuration in all .tekton/*.yaml files
-        # CRITICAL: Update branch trigger, component name, and PipelineRun name
-        if [ -d ".tekton" ]; then
-            for pac_file in .tekton/*.yaml .tekton/*.yml; do
-                [ -f "$pac_file" ] || continue
-                
-                # Update target_branch trigger (main branch for one-repo-per-component)
-                if sed -i "s|\"push-to-external-registry-base\"|\"${COMPONENT_BRANCH}\"|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                if sed -i "s|\"large-snapshot-template\"|\"${COMPONENT_BRANCH}\"|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                
-                # Update PipelineRun name: template-component-on-push → {component}-on-push
-                if sed -i "s|name: template-component-on-push|name: ${component_name}-on-push|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                
-                # Update component labels: template-component → {component}
-                if sed -i "s|appstudio.openshift.io/component: template-component|appstudio.openshift.io/component: ${component_name}|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                
-                # Update application label if needed
-                if sed -i "s|appstudio.openshift.io/application: large-snapshot-build-template|appstudio.openshift.io/application: ${app_name}|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                
-                # Replace template-component in output-image and other fields
-                if sed -i "s|template-component|${component_name}|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                # Fallback: v4-{version}-{name}-{number} pattern
-                if sed -i -E "s|v4-[0-9][0-9]*-[a-z-]+-[0-9][0-9]*|${component_name}|g" "$pac_file" 2>/dev/null; then
-                    pac_updated=true
-                fi
-                
-                # Multi-arch configuration: Add build-platforms, build-image-index, and Kueue annotations
-                # This enables true multi-platform builds with manifest lists
-                if command -v yq &>/dev/null; then
-                    # Set/append build-platforms with all required architectures
-                    if yq -e '.spec.params[] | select(.name == "build-platforms")' "$pac_file" >/dev/null 2>&1; then
-                        if yq -i \
-                            '(.spec.params[] | select(.name == "build-platforms") | .value) = ["linux/amd64","linux/arm64","linux/s390x","linux/ppc64le"]' \
-                            "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    else
-                        if yq -i \
-                            '.spec.params += [{"name":"build-platforms","value":["linux/amd64","linux/arm64","linux/s390x","linux/ppc64le"]}]' \
-                            "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    fi
-
-                    # Set/append build-source-image=true
-                    if yq -e '.spec.params[] | select(.name == "build-source-image")' "$pac_file" >/dev/null 2>&1; then
-                        if yq -i \
-                            '(.spec.params[] | select(.name == "build-source-image") | .value) = "true"' \
-                            "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    else
-                        if yq -i \
-                            '.spec.params += [{"name":"build-source-image","value":"true"}]' \
-                            "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    fi
-
-                    # CRITICAL: Set/append build-image-index=true to create multi-arch manifest lists
-                    if yq -e '.spec.params[] | select(.name == "build-image-index")' "$pac_file" >/dev/null 2>&1; then
-                        if yq -i \
-                            '(.spec.params[] | select(.name == "build-image-index") | .value) = "true"' \
-                            "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    else
-                        if yq -i \
-                            '.spec.params += [{"name":"build-image-index","value":"true"}]' \
-                            "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    fi
-
-                    # CRITICAL: Add Kueue annotations for multi-platform resource management
-                    if ! yq -e '.metadata.annotations["kueue.konflux-ci.dev/resource-linux/amd64"]' "$pac_file" >/dev/null 2>&1; then
-                        if yq -i '
-                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/amd64"] = "true" |
-                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/arm64"] = "true" |
-                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/s390x"] = "true" |
-                            .metadata.annotations["kueue.konflux-ci.dev/resource-linux/ppc64le"] = "true"
-                        ' "$pac_file" 2>/dev/null; then
-                            pac_updated=true
-                        fi
-                    fi
-                fi
-            done
-        fi
-        
-        # Generate custom Dockerfile with random size (300 MB - 1.5 GB)
-        # IMPORTANT: Size limit due to build pod memory constraints
-        # - Images >1.5 GB trigger OOM kills during buildah commit phase
-        # - Tested: 1-5 GB failed, 500 MB-5 GB failed, 300 MB-1.5 GB stable
-        # - See README.md "Image Size Limitations" for full explanation
-        local size_mb=$((300 + RANDOM % 1201))  # Random 300-1500 MB
-        log_info "      Generating Dockerfile with size: ${size_mb} MB"
-        
-        cat > Dockerfile << 'DOCKERFILE_EOF'
+        if [ "$cleanup_only" = "true" ]; then
+            # Cleanup mode: Don't touch Dockerfile (avoid triggering new builds)
+            log_info "      Cleanup mode: Skipping Dockerfile update"
+        else
+            # Generate custom Dockerfile with random size (300 MB - 1.5 GB)
+            # IMPORTANT: Size limit due to build pod memory constraints
+            # - Images >1.5 GB trigger OOM kills during buildah commit phase
+            # - Tested: 1-5 GB failed, 500 MB-5 GB failed, 300 MB-1.5 GB stable
+            # - See README.md "Image Size Limitations" for full explanation
+            size_mb=$((300 + RANDOM % 1201))  # Random 300-1500 MB
+            log_info "      Generating Dockerfile with size: ${size_mb} MB"
+            
+            cat > Dockerfile << 'DOCKERFILE_EOF'
 FROM registry.access.redhat.com/ubi9/ubi:latest
 
 RUN dnf install -y python3 python3-pip vim git wget && dnf clean all
@@ -639,48 +781,54 @@ LABEL test-type="large-snapshot" \
 
 CMD ["/bin/bash", "-c", "cat /opt/size.txt && tail -f /dev/null"]
 DOCKERFILE_EOF
-        
-        # Set the actual size in the Dockerfile
-        sed -i "s|ARG IMAGE_SIZE_MB=2000|ARG IMAGE_SIZE_MB=${size_mb}|g" Dockerfile
-        
-        git add Dockerfile &>/dev/null || true
-        local dockerfile_updated=false
-        if ! git diff --cached --quiet Dockerfile 2>/dev/null; then
-            dockerfile_updated=true
+            
+            # Set the actual size in the Dockerfile
+            sed -i "s|ARG IMAGE_SIZE_MB=2000|ARG IMAGE_SIZE_MB=${size_mb}|g" Dockerfile
+            
+            git add Dockerfile &>/dev/null || true
+            if ! git diff --cached --quiet Dockerfile 2>/dev/null; then
+                dockerfile_updated=true
+            fi
         fi
         
-        # CRITICAL: ALWAYS force a git push to trigger real push events for PAC
-        # Without a real git push, PAC won't see a "push" event, only annotation triggers
-        # This is essential for push-only builds (no pull requests)
-        git config user.name "Large Snapshot Test Bot" 2>/dev/null
-        git config user.email "release-team@redhat.com" 2>/dev/null
-        git add .tekton/ Dockerfile &>/dev/null
-        
-        # Check if there are actual changes to commit
-        if git diff --cached --quiet; then
-            # No changes detected - force a dummy commit to trigger push event
-            echo "# Build triggered at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .trigger-timestamp
-            git add .trigger-timestamp
-            if git commit -q -m "feat: Trigger build for ${component_name} (${size_mb}MB)" 2>/dev/null && \
-               git push -q origin "${COMPONENT_BRANCH}" 2>/dev/null; then
-                log_info "      ✓ Forced push to trigger PAC build: ${component_name}"
+        # Push changes if there were any (pac cleanup or dockerfile update)
+        if [ "$pac_updated" = "true" ] || [ "$dockerfile_updated" = "true" ]; then
+            git config user.name "Large Snapshot Test Bot" 2>/dev/null
+            git config user.email "release-team@redhat.com" 2>/dev/null
+            
+            # Add changes (Dockerfile or .tekton cleanup)
+            git add -A &>/dev/null
+            
+            # Check if there are actual changes to commit
+            if git diff --cached --quiet; then
+                log_info "      ✓ Branch already up to date: ${component_name}"
             else
-                log_warning "      ⚠️  Failed to push trigger for: ${component_name}"
+                # Commit and push
+                commit_msg="feat: Update Dockerfile (${size_mb}MB) for ${component_name}"
+                if [ "$pac_updated" = "true" ]; then
+                    commit_msg="feat: Update config and Dockerfile (${size_mb}MB) for ${component_name}"
+                fi
+                
+                if git commit -q -m "$commit_msg" 2>/dev/null && \
+                   git push -q origin "${component_branch}" 2>/dev/null; then
+                    log_info "      ✓ Pushed updates (${size_mb}MB): ${component_name}"
+                else
+                    log_warning "      ⚠️  Failed to push: ${component_name}"
+                fi
             fi
         else
-            # Real changes exist - commit and push them
-            if git commit -q -m "feat: Update PAC config and Dockerfile (${size_mb}MB) for ${component_name}" 2>/dev/null && \
-               git push -q origin "${COMPONENT_BRANCH}" 2>/dev/null; then
-                log_info "      ✓ PAC config and Dockerfile (${size_mb}MB) pushed: ${component_name}"
-            else
-                log_warning "      ⚠️  Failed to push updates for: ${component_name}"
-            fi
+            # No changes needed
+            log_info "      ✓ Branch already configured: ${component_name}"
         fi
-        
+
         cd - >/dev/null
         rm -rf "${temp_repo}"
+        log_info "      ✓ Repository ready: ${component_name}"
     else
-        log_warning "      ⚠️  Could not clone component repo to update PAC config"
+        # Branch doesn't exist - this shouldn't happen (initial push created it)
+        log_warning "      ⚠️  Branch doesn't exist (unexpected): ${component_branch}"
+        log_warning "      This should have been created during repo initialization"
+        return 1
     fi
     
     return 0
@@ -825,20 +973,15 @@ if [ ${EXISTING_COMPONENT_COUNT} -gt 0 ]; then
     log_info "Checking existing components for reusable builds..."
     while read -r comp_name; do
         # Check container image from in-memory component data
-        container_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
-            ".items[] | select(.metadata.name == \"${comp_name}\") | .status.containerImage // \"\"")
-        spec_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
-            ".items[] | select(.metadata.name == \"${comp_name}\") | .spec.containerImage // \"\"")
+        promoted_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
+            ".items[] | select(.metadata.name == \"${comp_name}\") | .status.lastPromotedImage // \"\"")
         
         has_build=false
-        # Check status.containerImage (set after successful build)
-        if [ -n "${container_image}" ] && [ "${container_image}" != "null" ] && [[ "${container_image}" == *"@sha256:"* ]]; then
-            has_build=true
-        # Check spec.containerImage (set for Quay-discovered components)
-        elif [ -n "${spec_image}" ] && [ "${spec_image}" != "null" ] && [[ "${spec_image}" == *"@sha256:"* ]]; then
+        # Check status.lastPromotedImage (Konflux integration-service sets this after build)
+        if [ -n "${promoted_image}" ] && [ "${promoted_image}" != "null" ] && [[ "${promoted_image}" == *"@sha256:"* ]]; then
             has_build=true
         else
-            # Check PipelineRuns from in-memory data
+            # Fallback: Check PipelineRuns from in-memory data (for builds not yet promoted)
             plr_success=$(echo "${ALL_PIPELINERUNS_JSON}" | jq -r --arg comp "${comp_name}" '
                 [
                     .items[]
@@ -885,8 +1028,8 @@ fi
 
 # Configuration limits
 MAX_TOTAL_COMPONENTS=${COMPONENT_COUNT}  # Target total components from argument
-BATCH_SIZE=30                            # Pause after every N component creations to avoid overwhelming PAC
-BATCH_DELAY=60                           # Seconds to wait between batches (let PAC process)
+BATCH_SIZE=2                             # Issue builds in pairs (2 components = 1 pair of builds)
+BATCH_DELAY=300                          # 5 minutes between pairs (300 seconds)
 
 # Calculate how many components to create this run
 # IMPORTANT: Only count components WITH builds toward target (zombies don't count)
@@ -1062,12 +1205,52 @@ while IFS=: read -r app_name component_count; do
     
     # Create components for this version (in batches)
     for (( i=1; i<=component_count; i++ )); do
+        # Refresh cache periodically to detect completed builds and avoid false zombie detection
+        # Refresh every 10 components to balance freshness vs API overhead
+        if [ $((i % 10)) -eq 0 ] && [ $i -gt 1 ]; then
+            log_info "   🔄 Refreshing cache (every 10 components) to detect completed builds..."
+            ALL_COMPONENTS_JSON=$(kubectl get components -n "${NAMESPACE}" \
+                -l test.appstudio.openshift.io/type=multi-version-build \
+                -o json 2>/dev/null || echo '{"items":[]}')
+            ALL_PIPELINERUNS_JSON=$(kubectl get pipelinerun -n "${NAMESPACE}" \
+                -l pipelines.appstudio.openshift.io/type=build \
+                -o json 2>/dev/null || echo '{"items":[]}')
+            
+            # Recount EXISTING_WITH_BUILDS with fresh data
+            EXISTING_WITH_BUILDS=0
+            while read -r comp_name; do
+                # Konflux uses .status.lastPromotedImage (NOT .status.containerImage)
+                promoted_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
+                    ".items[] | select(.metadata.name == \"${comp_name}\") | .status.lastPromotedImage // \"\"")
+                
+                # Check lastPromotedImage
+                if [ -n "${promoted_image}" ] && [ "${promoted_image}" != "null" ] && [[ "${promoted_image}" == *"@sha256:"* ]]; then
+                    EXISTING_WITH_BUILDS=$((EXISTING_WITH_BUILDS + 1))
+                else
+                    # Fallback: Check PipelineRuns (for builds not yet promoted)
+                    plr_success=$(echo "${ALL_PIPELINERUNS_JSON}" | jq -r --arg comp "${comp_name}" '
+                        [
+                            .items[]
+                            | select(.metadata.labels["appstudio.openshift.io/component"] == $comp)
+                            | select(.status.conditions[]? | select(.type == "Succeeded" and .status == "True"))
+                            | .metadata.name
+                        ][0] // ""')
+                    
+                    if [ -n "${plr_success}" ]; then
+                        EXISTING_WITH_BUILDS=$((EXISTING_WITH_BUILDS + 1))
+                    fi
+                fi
+            done < <(echo "${ALL_COMPONENTS_JSON}" | jq -r '.items[].metadata.name')
+            
+            log_info "   📊 Cache refreshed: ${EXISTING_WITH_BUILDS} components with successful builds"
+        fi
+        
         # Check if we've reached limits
-        # Priority 1: Stop if we've reached the target total (200 VALID components)
-        # Priority 2: Stop if we've triggered max new builds (50 builds to avoid resource exhaustion)
-        # IMPORTANT: Count only VALID components (with builds), not zombies!
-        # Track: existing valid + new this run + reused from Quay
-        VALID_COMPONENTS_COUNT=$((EXISTING_WITH_BUILDS + created_count + quay_reused_count))
+        # Priority 1: Stop if we've reached the target total (200 VALID components WITH successful builds)
+        # IMPORTANT: Count only components with SUCCESSFUL builds, not zombies or in-progress!
+        # EXISTING_WITH_BUILDS is refreshed after batch delays and includes newly completed builds
+        # Do NOT count created_count here - those might be zombies without builds yet
+        VALID_COMPONENTS_COUNT=$((EXISTING_WITH_BUILDS + quay_reused_count))
         
         if [ ${VALID_COMPONENTS_COUNT} -ge ${MAX_TOTAL_COMPONENTS} ]; then
             log_info "   ⏸️  Reached target total of ${MAX_TOTAL_COMPONENTS} valid components (current: ${VALID_COMPONENTS_COUNT}), stopping"
@@ -1079,19 +1262,22 @@ while IFS=: read -r app_name component_count; do
         base_component_name="${COMPONENT_PATTERNS[$pattern_idx]}"
         
         # Stable component name (no timestamp) for reuse across test runs
-        component_name="v${version}-${base_component_name}-$(printf '%02d' $i)"
+        # Add ls- prefix to differentiate from other tests
+        component_name="ls-v${version}-${base_component_name}-$(printf '%02d' $i)"
         quay_already_checked=false  # Track if we already checked Quay for this component
         
         # Check if component already exists with successful build
         # Use cached data from initial batch query for efficiency
-        container_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
-            ".items[] | select(.metadata.name == \"${component_name}\") | .status.containerImage // \"\"")
+        # CRITICAL: Konflux uses .status.lastPromotedImage (NOT .status.containerImage which is always null)
+        promoted_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
+            ".items[] | select(.metadata.name == \"${component_name}\") | .status.lastPromotedImage // \"\"")
         
         has_existing_build=false
-        if [ -n "${container_image}" ] && [ "${container_image}" != "null" ] && [[ "${container_image}" == *"@sha256:"* ]]; then
+        # Check status.lastPromotedImage (Konflux integration-service sets this after build)
+        if [ -n "${promoted_image}" ] && [ "${promoted_image}" != "null" ] && [[ "${promoted_image}" == *"@sha256:"* ]]; then
             has_existing_build=true
         else
-            # Check PipelineRuns from cached data
+            # Fallback: Check PipelineRuns from cached data (for builds that haven't been promoted yet)
             plr_success=$(echo "${ALL_PIPELINERUNS_JSON}" | jq -r --arg comp "${component_name}" '
                 [
                     .items[]
@@ -1101,12 +1287,43 @@ while IFS=: read -r app_name component_count; do
                 ][0] // ""')
             
             if [ -n "${plr_success}" ]; then
-                has_existing_build=true
+                # Found successful PipelineRun - but when DISABLE_QUAY_REUSE=true (force rebuild mode),
+                # verify the image actually exists before marking as "has build"
+                # This prevents reusing components where the image was garbage collected
+                if [ "${DISABLE_QUAY_REUSE:-false}" = "true" ]; then
+                    # In force rebuild mode: verify image exists on Quay
+                    QUAY_IMAGE_DIGEST=""
+                    if check_quay_image_exists "${component_name}" "${NAMESPACE}"; then
+                        has_existing_build=true
+                        quay_already_checked=true
+                    else
+                        # PipelineRun succeeded but image gone - treat as zombie
+                        has_existing_build=false
+                        quay_already_checked=true
+                    fi
+                else
+                    # Normal mode: trust PipelineRun success
+                    has_existing_build=true
+                fi
+            else
+                # Final fallback: Check Quay if integration-service and PipelineRuns both unavailable
+                # This handles cases where integration-service is broken and PAC garbage-collected old runs
+                if [ "${DISABLE_QUAY_REUSE:-false}" != "true" ]; then
+                    QUAY_IMAGE_DIGEST=""
+                    if check_quay_image_exists "${component_name}" "${NAMESPACE}"; then
+                        has_existing_build=true
+                        quay_already_checked=true  # Mark that we checked Quay for this component
+                    fi
+                fi
             fi
         fi
         
         if [ "${has_existing_build}" = "true" ]; then
             log_info "   ♻️  Reusing existing build: ${component_name}"
+            
+            # Cleanup only: Remove pull-request files without updating Dockerfile (avoid triggering new builds)
+            ensure_component_repo "${component_name}" "true" || log_warning "   ⚠️  Failed to clean up repo for ${component_name}"
+            
             echo "${component_name}:${app_name}" >> "${COMPONENT_LIST}"
             skipped_count=$((skipped_count + 1))
             total_components=$((total_components + 1))
@@ -1115,10 +1332,12 @@ while IFS=: read -r app_name component_count; do
         
         # Check if component exists
         if kubectl get component "${component_name}" -n "${NAMESPACE}" &>/dev/null; then
-            # Use jq to read spec.containerImage and spec.secret
+            # Use jq to read status.lastPromotedImage and spec.secret
             comp_json=$(kubectl get component "${component_name}" -n "${NAMESPACE}" -o json 2>/dev/null)
-            spec_image=$(echo "$comp_json" | jq -r '.spec.containerImage // ""')
+            promoted_image=$(echo "$comp_json" | jq -r '.status.lastPromotedImage // ""')
             spec_secret=$(echo "$comp_json" | jq -r '.spec.secret // ""')
+            
+            log_info "   🔍 Component ${component_name} - lastPromotedImage: ${promoted_image:-'<empty>'}, secret: ${spec_secret:-'<empty>'}"
             
             # Check if component is missing the secret field - if so, delete and recreate
             if [ -z "${spec_secret}" ]; then
@@ -1132,8 +1351,8 @@ while IFS=: read -r app_name component_count; do
             else
                 # Component has secret field - proceed with normal reuse/zombie checks
                 
-                # If has spec.containerImage with digest, component is valid - reuse it
-                if [ -n "${spec_image}" ] && [[ "${spec_image}" == *"@sha256:"* ]]; then
+                # If has status.lastPromotedImage with digest, component is valid - reuse it
+                if [ -n "${promoted_image}" ] && [[ "${promoted_image}" == *"@sha256:"* ]]; then
                 # Normal reuse path
                 discovered_annotation=$(echo "$comp_json" | jq -r '.metadata.annotations["test.appstudio.openshift.io/discovered-from-quay"] // ""')
                 if [ "${discovered_annotation}" != "true" ]; then
@@ -1146,6 +1365,9 @@ while IFS=: read -r app_name component_count; do
                 fi
                 
                 log_info "   ♻️  Reusing image from spec: ${component_name}"
+                
+                # Cleanup only: Remove pull-request files without updating Dockerfile
+                ensure_component_repo "${component_name}" "true" || log_warning "   ⚠️  Failed to clean up repo for ${component_name}"
                 
                 echo "${component_name}:${app_name}" >> "${COMPONENT_LIST}" || {
                     echo "❌ ERROR: Failed to write to COMPONENT_LIST" >&2
@@ -1176,6 +1398,9 @@ while IFS=: read -r app_name component_count; do
             if [ "$quay_check_result" -eq 0 ]; then
                 # Image exists on Quay! Delete and recreate with correct image
                 log_info "   🔄 Recreating zombie component with Quay image: ${component_name}"
+                
+                # Define component-specific branch
+                component_branch="${COMPONENT_BRANCH_PREFIX}-${component_name}"
                 
                 # Delete existing component (cleaner than patching)
                 force_delete_component "${component_name}" "${NAMESPACE}"
@@ -1208,7 +1433,7 @@ spec:
   source:
     git:
       url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
-      revision: ${COMPONENT_BRANCH}
+      revision: ${component_branch}
 EOF
 
                 # Wait for PAC to create the service account (even though we're reusing image, PAC may trigger builds)
@@ -1248,11 +1473,94 @@ EOF
                 total_components=$((total_components + 1))
                 continue
             else
-                # No image on Quay (got 200 but no tags) - delete the zombie component
-                log_warning "   🗑️  Deleting zombie component (no image anywhere): ${component_name}"
-                force_delete_component "${component_name}" "${NAMESPACE}"
-                # Don't check Quay again - we just checked and it wasn't there
-                # Fall through to build trigger (skip the redundant Quay check below)
+                # No image on Quay (got 200 but no tags) - but check if build is running first!
+                # Don't delete components with running builds
+                running_build=$(echo "${ALL_PIPELINERUNS_JSON}" | jq -r --arg comp "${component_name}" '
+                    [
+                        .items[]
+                        | select(.metadata.labels["appstudio.openshift.io/component"] == $comp)
+                        | select(.status.conditions[]? | select(.type == "Succeeded" and .status == "Unknown"))
+                        | .metadata.name
+                    ][0] // ""')
+                
+                if [ -n "${running_build}" ]; then
+                    log_info "   ⏳ Component has running build, keeping: ${component_name} (${running_build})"
+                    echo "${component_name}:${app_name}" >> "${COMPONENT_LIST}"
+                    skipped_count=$((skipped_count + 1))
+                    total_components=$((total_components + 1))
+                    continue
+                fi
+                
+            # No image on Quay (got 200 but no tags) - check if PAC is stuck before deleting
+            log_warning "   ⚠️  No image found for zombie: ${component_name}"
+            
+            # CRITICAL: Check if PAC has errors (no common history, failed PRs, etc.)
+            # If so, attempt auto-recovery before deleting component
+            pac_error=$(kubectl get events -n "${NAMESPACE}" \
+                --field-selector involvedObject.kind=Component,involvedObject.name="${component_name}" \
+                --sort-by='.lastTimestamp' 2>/dev/null | \
+                grep "ErrorConfiguringPaCForComponentRepository" | tail -1 || true)
+            
+            pac_status=$(kubectl get component "${component_name}" -n "${NAMESPACE}" \
+                -o jsonpath='{.metadata.annotations.build\.appstudio\.openshift\.io/status}' 2>/dev/null)
+            pac_state=$(echo "$pac_status" | jq -r '.pac.state // empty' 2>/dev/null)
+            merge_url=$(echo "$pac_status" | jq -r '.pac."merge-url" // empty' 2>/dev/null)
+            
+            # Auto-recovery for PAC errors
+            if [ -n "$pac_error" ] && echo "$pac_error" | grep -q "no history in common"; then
+                log_warning "   🔧 Auto-recovery: PAC 'no common history' error detected"
+                component_repo_name="${COMPONENT_REPO_PREFIX}-${component_name}"
+                
+                # Delete conflicting branches
+                deleted_count=0
+                while read -r branch_ref; do
+                    [ -z "$branch_ref" ] && continue
+                    branch_name=$(echo "$branch_ref" | sed 's#refs/heads/##')
+                    if gh api -X DELETE "repos/hacbs-release-tests/${component_repo_name}/git/${branch_ref}" 2>/dev/null; then
+                        log_info "      ✓ Deleted conflicting branch: ${branch_name}"
+                        deleted_count=$((deleted_count + 1))
+                    fi
+                done < <(gh api "repos/hacbs-release-tests/${component_repo_name}/git/refs" --jq '.[].ref' 2>/dev/null | grep "heads/konflux-" || true)
+                
+                if [ $deleted_count -gt 0 ]; then
+                    log_info "   🔄 Retriggering PAC configuration..."
+                    kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
+                        "build.appstudio.openshift.io/request=configure-pac" --overwrite &>/dev/null || true
+                    
+                    # Add to reprocess list (don't delete)
+                    log_info "   ♻️  Component will be reprocessed: ${component_name}"
+                    continue
+                fi
+            fi
+            
+            # Check for CLOSED/failed PAC PRs
+            if [ "$pac_state" = "enabled" ] && [ -n "$merge_url" ]; then
+                pr_number=$(echo "$merge_url" | grep -oE '[0-9]+$')
+                if [ -n "$pr_number" ]; then
+                    component_repo_name="${COMPONENT_REPO_PREFIX}-${component_name}"
+                    pr_state=$(gh pr view "$pr_number" --repo "hacbs-release-tests/${component_repo_name}" \
+                        --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+                    
+                    if [ "$pr_state" = "CLOSED" ]; then
+                        log_warning "   🔧 Auto-recovery: PR #${pr_number} is CLOSED (failed)"
+                        log_info "   🔄 Retriggering PAC configuration..."
+                        kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
+                            "build.appstudio.openshift.io/request=configure-pac" --overwrite &>/dev/null || true
+                        
+                        # Add to reprocess list (don't delete)
+                        log_info "   ♻️  Component will be reprocessed: ${component_name}"
+                        continue
+                    fi
+                fi
+            fi
+            
+            # No auto-recovery possible - delete the zombie component
+            log_warning "   🗑️  Deleting zombie component (no image, no recovery): ${component_name}"
+            force_delete_component "${component_name}" "${NAMESPACE}"
+            # Don't check Quay again - we just checked and it wasn't there
+            # Set flag to skip redundant Quay check and proceed directly to component creation
+            quay_already_checked=true
+            # Fall through to build trigger (will skip Quay check and create new component)
             fi
             fi  # End of "else" block for secret field check
         fi  # End of "if kubectl get component" block
@@ -1265,6 +1573,9 @@ EOF
             if check_quay_image_exists "${component_name}" "${NAMESPACE}"; then
                 # Image exists! Create component pointing to it (no build needed)
                 log_info "   ✨ Found existing image on Quay: ${component_name}"
+                
+                # Define component-specific branch
+                component_branch="${COMPONENT_BRANCH_PREFIX}-${component_name}"
                 
                 # Step 1: Create component first (without branch - avoids race condition)
                 echo "${component_name}:${app_name}" >> "${COMPONENT_LIST}"
@@ -1290,7 +1601,7 @@ spec:
   source:
     git:
       url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
-      revision: ${COMPONENT_BRANCH}
+      revision: ${component_branch}
 EOF
 
                 # Wait for PAC to create the service account
@@ -1321,12 +1632,16 @@ EOF
         fi
         
         # Image doesn't exist - create component FIRST, then branch, then trigger PAC
-        # Step 1: Create component with configure-pac (no build trigger yet)
-        # This ensures component exists before PAC webhook fires
+        # Step 1: Create component WITHOUT configure-pac (avoid Error 75)
+        # We'll trigger configure-pac manually right after creation
         # Add unique timestamp to force fresh build (no cache reuse)
         unique_id="$(date +%s)-${version}-${i}"
         
-        BUILD_ANNOTATION="build.appstudio.openshift.io/request: \"configure-pac\""
+        # Define component-specific branch
+        component_branch="${COMPONENT_BRANCH_PREFIX}-${component_name}"
+        
+        # No annotation initially - will add configure-pac after creation
+        BUILD_ANNOTATION=""
         
         kubectl create -f - <<EOF
 apiVersion: appstudio.redhat.com/v1alpha1
@@ -1342,10 +1657,9 @@ metadata:
     test.appstudio.openshift.io/component-type: "${base_component_name}"
   annotations:
     git-provider: github
-    ${BUILD_ANNOTATION}
     image.redhat.com/generate: "{\"visibility\": \"public\"}"
     test.appstudio.openshift.io/fresh-build: "true"
-    test.appstudio.openshift.io/pac-branch: "${COMPONENT_BRANCH}"
+    test.appstudio.openshift.io/pac-branch: "${component_branch}"
     # Multi-architecture build configuration (4 architectures)
     build.appstudio.openshift.io/multi-platform-required: "true"
     build.appstudio.openshift.io/request-platforms: "linux/amd64,linux/arm64,linux/s390x,linux/ppc64le"
@@ -1358,7 +1672,7 @@ spec:
     git:
       context: ./
       dockerfileUrl: Dockerfile
-      revision: ${COMPONENT_BRANCH}
+      revision: ${component_branch}
       url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
 EOF
 
@@ -1391,15 +1705,39 @@ EOF
         else
             log_info "   ✓ GitHub branch ready"
             
-            # Step 3: Trigger PAC build with annotation (backup to git push trigger)
-            # DUAL TRIGGER MECHANISM:
-            #   1. Git push (above) creates real "push" event for PAC
-            #   2. Annotation (below) provides explicit trigger signal
-            # Both together ensure reliable build triggering
+            # Step 3: Manually trigger PAC configuration (avoid Error 75 from initial annotation)
+            log_info "   📝 Triggering PAC configuration..."
             kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
-                "build.appstudio.openshift.io/request=trigger-pac-build" --overwrite &>/dev/null || \
-                log_warning "   ⚠️  Failed to annotate component (continuing...)"
-            log_info "   ✓ PAC build triggered (git push + annotation): ${component_name}"
+                "build.appstudio.openshift.io/request=configure-pac" --overwrite &>/dev/null || \
+                log_warning "   ⚠️  Failed to annotate with configure-pac"
+            
+            # Step 4: Wait for PAC and auto-merge configuration PR
+            component_repo_name="${COMPONENT_REPO_PREFIX}-${component_name}"
+            if wait_for_pac_and_merge_pr "${component_name}" "${component_repo_name}"; then
+                log_info "   ✓ PAC PR merged - waiting for push event to trigger build..."
+                
+                # Step 5: Smart fallback - wait for push event to trigger build
+                # If no build starts within 30s, manually trigger with annotation
+                build_started=false
+                for build_check_iter in {1..10}; do  # Wait up to 30s (10 * 3s)
+                    if kubectl get pipelinerun -n "${NAMESPACE}" --no-headers 2>/dev/null | grep -q "^${component_name}-on-push"; then
+                        log_info "   ✓ Build started from push event (${build_check_iter}*3s)"
+                        build_started=true
+                        break
+                    fi
+                    sleep 3
+                done
+                
+                if [ "$build_started" = "false" ]; then
+                    log_warning "   ⚠️  No build from push event after 30s - triggering manually..."
+                    kubectl annotate component "${component_name}" -n "${NAMESPACE}" \
+                        "build.appstudio.openshift.io/request=trigger-pac-build" --overwrite &>/dev/null || \
+                        log_warning "   ⚠️  Failed to annotate component"
+                    log_info "   ✓ Manual build trigger sent"
+                fi
+            else
+                log_warning "   ⚠️  PAC not configured, no build will trigger"
+            fi
             
             echo "${component_name}:${app_name}" >> "${COMPONENT_LIST}"
             echo "${component_name}:${app_name}" >> "${COMPONENTS_TO_BUILD}"  # Track for build monitoring
@@ -1410,20 +1748,58 @@ EOF
         # Spreads out API calls to reduce rate limit risk
         sleep 30
         
-        # Batch delay: pause after every BATCH_SIZE components to avoid overwhelming PAC
-        if [ $((actual_new_count % BATCH_SIZE)) -eq 0 ]; then
-            log_info "   ⏸️  Batch complete (${actual_new_count} new builds created)"
-            log_info "   ⏳ Waiting ${BATCH_DELAY}s for PAC to process before continuing..."
+        # Batch delay: pause after every BATCH_SIZE components (5 min to allow builds to complete)
+        if [ $((actual_new_count % BATCH_SIZE)) -eq 0 ] && [ $actual_new_count -gt 0 ]; then
+            log_info "   ⏸️  Pair complete (${actual_new_count} new components created)"
+            log_info "   ⏳ Waiting ${BATCH_DELAY}s (5 min) for builds to complete before next pair..."
             sleep ${BATCH_DELAY}
+            
+            # Refresh cached data after delay (builds may have completed)
+            log_info "   🔄 Refreshing component data (builds may have completed during wait)..."
+            ALL_COMPONENTS_JSON=$(kubectl get components -n "${NAMESPACE}" \
+                -l test.appstudio.openshift.io/type=multi-version-build \
+                -o json 2>/dev/null || echo '{"items":[]}')
+            ALL_PIPELINERUNS_JSON=$(kubectl get pipelinerun -n "${NAMESPACE}" \
+                -l pipelines.appstudio.openshift.io/type=build \
+                -o json 2>/dev/null || echo '{"items":[]}')
+            
+            # Recount valid components with fresh data
+            EXISTING_WITH_BUILDS=0
+            while read -r comp_name; do
+                # Konflux uses .status.lastPromotedImage (NOT .status.containerImage)
+                promoted_image=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
+                    ".items[] | select(.metadata.name == \"${comp_name}\") | .status.lastPromotedImage // \"\"")
+                
+                # Check lastPromotedImage
+                if [ -n "${promoted_image}" ] && [ "${promoted_image}" != "null" ] && [[ "${promoted_image}" == *"@sha256:"* ]]; then
+                    EXISTING_WITH_BUILDS=$((EXISTING_WITH_BUILDS + 1))
+                else
+                    # Fallback: Check PipelineRuns (for builds not yet promoted)
+                    plr_success=$(echo "${ALL_PIPELINERUNS_JSON}" | jq -r --arg comp "${comp_name}" '
+                        [
+                            .items[]
+                            | select(.metadata.labels["appstudio.openshift.io/component"] == $comp)
+                            | select(.status.conditions[]? | select(.type == "Succeeded" and .status == "True"))
+                            | .metadata.name
+                        ][0] // ""')
+                    
+                    if [ -n "${plr_success}" ]; then
+                        EXISTING_WITH_BUILDS=$((EXISTING_WITH_BUILDS + 1))
+                    fi
+                fi
+            done < <(echo "${ALL_COMPONENTS_JSON}" | jq -r '.items[].metadata.name')
+            
+            log_info "   📊 Updated count: ${EXISTING_WITH_BUILDS} components with successful builds"
         fi
     done
     
     log_success "  ✓ Processed version ${version}"
     
     # Check if we've hit the target across all versions
-    # IMPORTANT: Count only VALID components (with builds), not zombies!
-    # Zombies are deleted and rebuilt, so they shouldn't stop component creation
-    VALID_COMPONENTS_COUNT=$((EXISTING_WITH_BUILDS + created_count + quay_reused_count))
+    # IMPORTANT: Count only VALID components (WITH successful builds), not zombies!
+    # EXISTING_WITH_BUILDS is refreshed periodically and includes newly completed builds
+    # Do NOT count created_count - those might be zombies or in-progress builds
+    VALID_COMPONENTS_COUNT=$((EXISTING_WITH_BUILDS + quay_reused_count))
     if [ ${VALID_COMPONENTS_COUNT} -ge ${MAX_TOTAL_COMPONENTS} ]; then
         log_info "   ✅ Reached target of ${MAX_TOTAL_COMPONENTS} valid components (current: ${VALID_COMPONENTS_COUNT})"
         break
@@ -1458,43 +1834,8 @@ ACTUAL_CREATED_COUNT=${total_components}
 # Step 3: Wait for Builds to Start (or Create Manual PipelineRuns)
 # ============================================================================
 
-# Skip build monitoring if no new components were created this run
-if [ ${created_count} -eq 0 ]; then
-    log_section "♻️  Step 3/5: Skipping Build Wait (No New Builds)"
-    log_info "No new components created this run"
-    log_info "   Existing components: ${EXISTING_COMPONENT_COUNT} (${EXISTING_WITH_BUILDS} with builds, $((EXISTING_COMPONENT_COUNT - EXISTING_WITH_BUILDS)) zombies)"
-    log_info "   Reason: Already at target or build limit reached"
-    log_info "Proceeding to digest extraction for existing valid components..."
-    echo "" >&2
-else
-    log_section "⏳ Step 3/5: Waiting for PAC to Trigger Builds"
-    log_info "Waiting for Konflux PAC to detect components and trigger builds..."
-    log_info "Waiting 60 seconds (may add 30s more if no builds detected)..."
-    log_info "   New components: ${created_count}"
-    log_info "   Reused components: ${skipped_count}"
-
-    sleep 60
-
-    # Check how many builds have started by querying components
-    # Note: PAC doesn't propagate test labels to PipelineRuns, so we query by component name
-    initial_builds=0
-    while IFS=: read -r component_name app_name; do
-        [ -z "$component_name" ] && continue
-        # Only count ACTIVE builds (Running/Pending/Unknown), not historical Failed/Succeeded
-        plr_count=$(kubectl get pipelinerun -n "${NAMESPACE}" \
-            -l "appstudio.openshift.io/component=${component_name}" \
-            -l "pipelines.appstudio.openshift.io/type=build" \
-            --no-headers 2>/dev/null | grep -E "(Running|Pending|Unknown)" | wc -l || echo "0")
-        initial_builds=$((initial_builds + plr_count))
-    done < "${COMPONENTS_TO_BUILD}"
-
-    log_info "Detected ${initial_builds} PipelineRuns starting"
-
-    if [ "${initial_builds}" -eq 0 ]; then
-        log_warning "No builds detected yet. Waiting additional 30 seconds..."
-        sleep 30
-    fi
-fi
+# Note: Step 3 removed - builds are triggered immediately via trigger-pac-build annotation
+# No need to wait for PAC - annotation triggers builds instantly
 
 # ============================================================================
 # Step 4: Monitor Build Progress
@@ -1514,7 +1855,7 @@ if [ ${created_count} -eq 0 ]; then
         
         # Check if component has extractable digest
         image_ref=$(kubectl get component "${component_name}" -n "${NAMESPACE}" \
-            -o jsonpath='{.status.containerImage}' 2>/dev/null || echo "")
+            -o jsonpath='{.status.lastPromotedImage}' 2>/dev/null || echo "")
         
         if [ -z "$image_ref" ] || [[ "$image_ref" != *"@sha256:"* ]]; then
             # Try PipelineRun as fallback - get IMAGE_URL and IMAGE_DIGEST separately
@@ -1761,6 +2102,9 @@ else
                 
                 log_info "   🔄 Recreating: ${component_name}"
                 
+                # Define component-specific branch
+                component_branch="${COMPONENT_BRANCH_PREFIX}-${component_name}"
+                
                 # Component creation with configure-pac (no build trigger yet)
                 # This avoids race condition where PAC fires before component exists
                 kubectl create -f - <<EOF
@@ -1777,7 +2121,7 @@ metadata:
     image.redhat.com/generate: "{\"visibility\": \"public\"}"
     test.appstudio.openshift.io/fresh-build: "true"
     test.appstudio.openshift.io/retry-attempt: "1"
-    test.appstudio.openshift.io/pac-branch: "${COMPONENT_BRANCH}"
+    test.appstudio.openshift.io/pac-branch: "${component_branch}"
 spec:
   application: ${app_name}
   componentName: ${component_name}
@@ -1787,7 +2131,7 @@ spec:
     git:
       context: ./
       dockerfileUrl: Dockerfile
-      revision: ${COMPONENT_BRANCH}
+      revision: ${component_branch}
       url: https://github.com/${COMPONENT_REPO_ORG}/${COMPONENT_REPO_PREFIX}-${component_name}
 EOF
                 RETRY_COUNT=$((RETRY_COUNT + 1))
@@ -1963,17 +2307,11 @@ PROGRESS_INTERVAL=25
 while IFS=: read -r component_name app_name; do
     [ -z "$component_name" ] && continue
     
-    # Try 1: Get container image from cached component data (status.containerImage)
+    # Try 1: Get container image from cached component data (status.lastPromotedImage)
     image_ref=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
-        ".items[] | select(.metadata.name == \"${component_name}\") | .status.containerImage // \"\"")
+        ".items[] | select(.metadata.name == \"${component_name}\") | .status.lastPromotedImage // \"\"")
     
-    # Try 2: If status.containerImage is empty, check spec.containerImage
-    if [ -z "$image_ref" ] || [ "$image_ref" = "null" ] || [[ "$image_ref" != *"@sha256:"* ]]; then
-        image_ref=$(echo "${ALL_COMPONENTS_JSON}" | jq -r \
-            ".items[] | select(.metadata.name == \"${component_name}\") | .spec.containerImage // \"\"")
-    fi
-    
-    # Try 3: If still empty, get from PipelineRun results
+    # Try 2: If lastPromotedImage is empty, get from PipelineRun results
     if [ -z "$image_ref" ] || [ "$image_ref" = "null" ] || [[ "$image_ref" != *"@sha256:"* ]]; then
         # Get latest successful PipelineRun from cached data
         plr_data=$(echo "${ALL_PIPELINERUNS_JSON}" | jq -r --arg comp "${component_name}" '
