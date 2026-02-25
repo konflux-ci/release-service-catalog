@@ -1,0 +1,290 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-multi-batch
+spec:
+  description: Test add-fbc-contribution task with maxBatchSize=1 to verify batch
+    chaining logic where the output of batch 1 becomes the fromIndex of batch 2.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+    - name: sourceDataArtifact
+      description: Location of trusted artifacts to be used to populate data directory
+      type: string
+      default: ""
+  tasks:
+    - name: setup
+      params:
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+            description: Location of trusted artifacts to be used to populate data directory
+          - name: dataDir
+            type: string
+            description: The location where data will be stored
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Ensure data directory exists
+              mkdir -p "$(params.dataDir)"
+
+              # Create snapshot with 2 components in same OCP version to force 2 batches
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
+              {
+                "components": [
+                  {
+                    "name": "test-fbc-component-batch1",
+                    "containerImage": "quay.io/hacbs-release-tests/test-fbc-first@sha256:aaaa",
+                    "repository": "quay.io/test/test-fbc-component",
+                    "ocpVersion": ["v4.13"],
+                    "ocpVersionMetadata": [
+                      {
+                        "version": "v4.13",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.13",
+                        "targetIndex": "quay.io/redhat/redhat-operator-index:v4.13"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "test-fbc-component-batch2",
+                    "containerImage": "quay.io/hacbs-release-tests/test-fbc-second@sha256:bbbb",
+                    "repository": "quay.io/test/test-fbc-component",
+                    "ocpVersion": ["v4.13"],
+                    "ocpVersionMetadata": [
+                      {
+                        "version": "v4.13",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.13",
+                        "targetIndex": "quay.io/redhat/redhat-operator-index:v4.13"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              # Create FBC data configuration for non-staged release
+              cat > "$(params.dataDir)/data.json" << 'EOF'
+              {
+                "fbc": {
+                  "fromIndex": "quay.io/redhat/redhat-operator-index:v4.13",
+                  "targetIndex": "quay.io/redhat/redhat-operator-index:v4.13",
+                  "hotfix": false,
+                  "preGA": false,
+                  "stagedIndex": false,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              # Create mock results directory structure
+              mkdir -p "$(params.dataDir)/results"
+
+              echo "Multi-batch test data created"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: snapshotPath
+          value: snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: resultsDirPath
+          value: results
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "development"
+        - name: maxBatchSize
+          value: "1"
+        - name: mustPublishIndexImage
+          value: "false"
+        - name: mustOverwriteFromIndexImage
+          value: "false"
+        - name: iibServiceAccountSecret
+          value: "iib-services-config"
+      runAfter:
+        - setup
+
+    - name: verify-results
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+            description: Location of trusted artifacts to be used to populate data directory
+          - name: dataDir
+            type: string
+            description: The location where data will be stored
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: verify-multi-batch
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== MULTI-BATCH VERIFICATION ==="
+
+              RESULTS_FILE="$(params.dataDir)/results/internal-requests-results.json"
+              if [[ ! -f "$RESULTS_FILE" ]]; then
+                echo "❌ Results file missing at $RESULTS_FILE"
+                exit 1
+              fi
+              echo "✅ Results file exists"
+
+              # After deduplication, 2 components with the same target_index
+              # should be reduced to 1 (the last batch's result)
+              COMPONENTS_COUNT=$(jq '.components | length' "$RESULTS_FILE")
+              if [[ "$COMPONENTS_COUNT" -eq 1 ]]; then
+                echo "✅ Deduplication correct: 2 components reduced to $COMPONENTS_COUNT"
+              else
+                echo "❌ Expected 1 component after dedup, got: $COMPONENTS_COUNT"
+                jq . "$RESULTS_FILE"
+                exit 1
+              fi
+
+              # The surviving component should be from batch 2 (the second fragment)
+              SURVIVING_FRAGMENT=$(jq -r '.components[0].fbc_fragment' "$RESULTS_FILE")
+              if [[ "$SURVIVING_FRAGMENT" == *"test-fbc-second"* ]]; then
+                echo "✅ Correct fragment survived dedup (batch 2): $SURVIVING_FRAGMENT"
+              else
+                echo "❌ Wrong fragment survived dedup: $SURVIVING_FRAGMENT"
+                echo "Expected fragment from batch 2 (test-fbc-second)"
+                jq . "$RESULTS_FILE"
+                exit 1
+              fi
+
+              # Verify the index_image is from IIB (mock returns redhat.com/rh-stage/iib:01)
+              INDEX_IMAGE=$(jq -r '.components[0].index_image' "$RESULTS_FILE")
+              if [[ "$INDEX_IMAGE" == "redhat.com/rh-stage/iib:01" ]]; then
+                echo "✅ Index image is from IIB: $INDEX_IMAGE"
+              else
+                echo "❌ Unexpected index image: $INDEX_IMAGE"
+                exit 1
+              fi
+
+              # Verify two batch result files were created (proves 2 batches ran)
+              BATCH_FILES=$(find "$(params.dataDir)" -name "ir-*-batch-*-result.json" -type f | wc -l)
+              if [[ "$BATCH_FILES" -eq 2 ]]; then
+                echo "✅ Two batch result files found (2 batches executed)"
+              else
+                echo "❌ Expected 2 batch result files, found: $BATCH_FILES"
+                find "$(params.dataDir)" -name "ir-*-batch-*-result.json" -type f
+                exit 1
+              fi
+
+              # Verify config.json shows maxBatchSize=1
+              CONFIG_FILE="$(params.dataDir)/fbc-state/config.json"
+              BATCH_SIZE=$(jq -r '.max_batch_size' "$CONFIG_FILE")
+              if [[ "$BATCH_SIZE" == "1" ]]; then
+                echo "✅ Batch size was correctly set to 1"
+              else
+                echo "❌ Expected batch size 1, got: $BATCH_SIZE"
+                exit 1
+              fi
+
+              echo ""
+              echo "Final results:"
+              jq . "$RESULTS_FILE"
+
+              echo "=== MULTI-BATCH TEST PASSED ==="
+      runAfter:
+        - run-task

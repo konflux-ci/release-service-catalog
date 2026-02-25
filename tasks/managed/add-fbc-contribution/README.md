@@ -13,11 +13,16 @@ in series. For each OCP version, we chain together batches so that the final tar
 produced will have all fragments added. This means that the index_image from one internal
 request will be set as the fromIndex for the next request within that OCP version.
 
-Since we have seen flakiness in IIB requests in the past, we retry and failed batches
+Since we have seen flakiness in IIB requests in the past, we retry failed batches
 and internal requests can attach onto currently in progress IIB requests. We retry batches
 at the end to allow for timed out requests to finish so that we can just get the final
 result. This will slightly compress the time in which batches are entered into the IIB
 queue to reduce the effect of a full queue on a single release.
+
+The task is organized into three processing steps:
+  1. prepare-inputs: validates inputs, groups components by OCP version, writes config
+  2. process-ocp-groups: executes IIB requests per OCP group with batching and retries
+  3. collect-and-deduplicate: aggregates results, deduplicates, produces final output
 
 ## Parameters
 
