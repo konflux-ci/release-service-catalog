@@ -199,6 +199,7 @@ _find_and_process_pipelines() {
   fi
 
   ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "release-to-github" "push-to-external-registry" \
+  "push-to-external-registry-self-hosted-quay" \
   "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" "push-to-addons-registry" \
   "push-rpms-to-pulp")
 
@@ -211,6 +212,12 @@ _find_and_process_pipelines() {
         fi
     done
   done
+
+  # Self-hosted Quay test uses the same pipeline, so trigger it alongside
+  if [[ " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry " ]] && \
+     [[ ! " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry-self-hosted-quay " ]]; then
+    SELECTED_TESTCASES+=("push-to-external-registry-self-hosted-quay")
+  fi
   if (( ${#SELECTED_TESTCASES[@]} > 0 )); then
     echo -n "${SELECTED_TESTCASES[*]}"
   else
