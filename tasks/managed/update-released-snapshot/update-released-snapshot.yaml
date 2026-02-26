@@ -77,6 +77,14 @@ spec:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
+    - name: integrationSnapshotStatus
+      type: string
+      description: |
+        Status of integration snapshot sync. One of Created, Updated, Warning.
+        Warning means the target Application was not found in the integration namespace.
+    - name: integrationSnapshotMessage
+      type: string
+      description: Human-readable message for the status (e.g. warning details)
   volumes:
     - name: secret-volume
       secret:
@@ -173,7 +181,7 @@ spec:
         }
 
         # Get package collections for a component: koji tag from image annotation + mapping package-collections.
-        # After promote, tag is without -draft.
+        # After promote, tag is without -draft. Uses same fetch pattern as update-package-collection.
         get_package_collections() {
             local comp_name="$1"
             local container_image="$2"
@@ -181,8 +189,10 @@ spec:
             auth_file=$(mktemp)
             select-oci-auth "$container_image" > "$auth_file" 2>/dev/null || true
             local koji_target
-            koji_target=$(oras manifest fetch "$container_image" --registry-config "$auth_file" 2>/dev/null |
-                jq -r '.annotations."koji.build-target" // empty' 2>/dev/null || echo "")
+            koji_target=$(
+                oras manifest fetch "$container_image" --registry-config "$auth_file" 2>/dev/null |
+                    jq --exit-status -r '.annotations."koji.build-target"' 2>/dev/null
+            ) || koji_target=""
             rm -f "$auth_file"
             if [ -n "$koji_target" ]; then
                 echo "$koji_target"
@@ -195,6 +205,13 @@ spec:
         # Package collection name to application name: replace "." with "-" (e.g. rhel-10.1.z -> rhel-10-1-z)
         to_application_name() {
             echo "${1//./-}"
+        }
+
+        # From koji build_target e.g. rhel-x.y-draft -> application name rhel-x-y-z (replace -draft with -z, then . with -)
+        to_application_name_from_build_target() {
+            local bt="$1"
+            bt="${bt/-draft/-z}"
+            echo "${bt//./-}"
         }
 
         RELEASE_COMPONENTS=$(get_release_components)
@@ -218,10 +235,30 @@ spec:
             done < <(get_package_collections "$component_name" "$container_image")
         done
 
-        # If no application names from package-collections, use snapshot .application with "." -> "-"
+        # If no application names from package-collections, use snapshot .application or build_target
         if [ -z "$APPLICATION_NAMES" ]; then
-            SNAPSHOT_APP=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
-            APPLICATION_NAMES=$(to_application_name "${SNAPSHOT_APP}")
+            SNAPSHOT_APP=$(jq -r '.application // empty' "${SNAPSHOT_SPEC_FILE}")
+            if [ -n "$SNAPSHOT_APP" ]; then
+                APPLICATION_NAMES=$(to_application_name "${SNAPSHOT_APP}")
+            else
+                # Fallback: derive from first component's koji.build-target image annotation
+                for ((i = 0; i < NUM_COMPONENTS; i++)); do
+                    component_json=$(jq -c --argjson idx "$i" '.components[$idx]' "${SNAPSHOT_SPEC_FILE}")
+                    container_image=$(jq -r '.containerImage' <<< "$component_json")
+                    [ -z "$container_image" ] && continue
+                    auth_file=$(mktemp)
+                    select-oci-auth "$container_image" > "$auth_file" 2>/dev/null || true
+                    build_target=$(
+                        oras manifest fetch "$container_image" --registry-config "$auth_file" 2>/dev/null |
+                            jq --exit-status -r '.annotations."koji.build-target"' 2>/dev/null
+                    ) || build_target=""
+                    rm -f "$auth_file"
+                    if [ -n "$build_target" ]; then
+                        APPLICATION_NAMES=$(to_application_name_from_build_target "$build_target")
+                        break
+                    fi
+                done
+            fi
         fi
 
         # Get full Snapshot CR from dev namespace (metadata.annotations, metadata.labels, status)
@@ -236,14 +273,25 @@ spec:
         DEV_SPEC_COMPONENTS=$(jq -c '.spec.components // .components' "${SNAPSHOT_SPEC_FILE}")
         DEV_SPEC_APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
 
-        echo "$APPLICATION_NAMES" | while IFS= read -r APP_NAME; do
+        # If no application name to process, emit warning and exit 0 (pipeline warning, not failure)
+        if [ -z "$APPLICATION_NAMES" ] || [ "$APPLICATION_NAMES" = "null" ]; then
+            echo "WARNING: No application name derived from snapshot .application or koji.build-target."
+            echo -n "Warning" > "$(results.integrationSnapshotStatus.path)"
+            echo -n "No application name derived from snapshot or build_target" > "$(results.integrationSnapshotMessage.path)"
+            exit 0
+        fi
+
+        while IFS= read -r APP_NAME; do
             [ -z "$APP_NAME" ] && continue
+            [ "$APP_NAME" = "null" ] && continue
             echo "Processing application name: $APP_NAME"
 
-            # Check if Application exists in integration namespace
+            # Check if Application exists in integration namespace; if not, warning status and exit 0
             if ! kubectl get "application.appstudio.redhat.com/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" -o name &>/dev/null; then
-                echo "Application ${APP_NAME} not found in ${INTEGRATION_NAMESPACE}, skipping."
-                continue
+                echo "WARNING: Application ${APP_NAME} not found in ${INTEGRATION_NAMESPACE}. No snapshot created."
+                echo -n "Warning" > "$(results.integrationSnapshotStatus.path)"
+                echo -n "Application ${APP_NAME} not found in ${INTEGRATION_NAMESPACE}" > "$(results.integrationSnapshotMessage.path)"
+                exit 0
             fi
 
             # Build integration Snapshot: metadata from dev (override name and namespace), spec and status from dev
@@ -290,11 +338,15 @@ spec:
                 echo "$INTEGRATION_SNAPSHOT" | jq -c '{spec: .spec, status: .status}' | \
                     kubectl patch "snapshot/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" --type=merge -p @-
                 echo "Updated snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}"
+                echo -n "Updated" > "$(results.integrationSnapshotStatus.path)"
+                echo -n "Updated snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}" > "$(results.integrationSnapshotMessage.path)"
             else
                 echo "$INTEGRATION_SNAPSHOT" | kubectl apply -f -
                 echo "Created snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}"
+                echo -n "Created" > "$(results.integrationSnapshotStatus.path)"
+                echo -n "Created snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}" > "$(results.integrationSnapshotMessage.path)"
             fi
-        done
+        done <<< "$APPLICATION_NAMES"
 
         printf 'Completed "%s"\n' "$(context.task.name)"
     
