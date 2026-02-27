@@ -3,8 +3,7 @@
 Tekton task that collects the Atlas server option from the data file. Based on
 the value of the "atlas.server" field ("stage" or "production"), outputs results
 used to push SBOMs to Atlas. Also outputs results used to push SBOMs to an S3
-bucket. If no Atlas fields are present in the data file, it outputs empty
-strings as results, indicating that the Atlas push should be skipped.
+bucket. If no Atlas fields are present in the data file, the task fails
 
 ## Parameters
 

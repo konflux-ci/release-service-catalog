@@ -2,12 +2,15 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-collect-atlas-params-nonexistent
+  name: test-check-data-keys-fail-missing-atlas
   annotations:
     test/assert-task-failure: "run-task"
 spec:
   description: |
-    Run the collect-atlas-params task with a missing atlasServer key.
+    Run the check-data-keys task with the atlas key missing in the data json and
+    verify that the task fails as expected.
+  workspaces:
+    - name: tests-workspace
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -30,10 +33,15 @@ spec:
       type: string
   tasks:
     - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
         results:
           - name: sourceDataArtifact
             type: string
+        workspaces:
+          - name: data
         volumes:
           - name: workdir
             emptyDir: {}
@@ -49,14 +57,20 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup-values
+          - name: setup
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
-              #!/usr/bin/env bash
+              #!/usr/bin/env sh
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              echo "{}" > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "someOtherData": { # just dummy data to simulate no intention field
+                  "example": "value"
+                }
+              }
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -69,10 +83,17 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: collect-atlas-params
+        name: check-data-keys
       params:
         - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
+          value: $(context.pipelineRun.uid)/data.json
+        - name: systems
+          value: |
+            [
+              {"systemName": "atlas", "dynamic": false}
+            ]
+        - name: schema
+          value: "https://get-local-schema.com"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -87,5 +108,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       runAfter:
         - setup
