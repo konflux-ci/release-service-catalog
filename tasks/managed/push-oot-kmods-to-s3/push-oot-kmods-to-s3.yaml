@@ -51,7 +51,7 @@ spec:
         secretName: $(params.s3CredentialsSecret)
   stepTemplate:
     securityContext:
-      runAsUser: 1001 
+      runAsUser: 1001
     volumeMounts:
       - mountPath: /var/workdir
         name: workdir
@@ -130,9 +130,7 @@ spec:
         set -euo pipefail
 
         AWS_ACCESS_KEY_ID=$(cat /var/secrets/s3/aws_access_key_id)
-        export AWS_ACCESS_KEY_ID
         AWS_SECRET_ACCESS_KEY=$(cat /var/secrets/s3/aws_secret_access_key)
-        export AWS_SECRET_ACCESS_KEY
 
         set -x
 
@@ -156,8 +154,10 @@ spec:
 
             # Read envfile to get version information and ARCH override
             if [ -f "$source_dir/envfile" ]; then
+                set +x
                 # shellcheck source=/dev/null
                 . "$source_dir/envfile"
+                set -x
             else
                 echo "ERROR: envfile not found in $source_dir"
                 return 1
@@ -198,13 +198,23 @@ spec:
                     echo "  ... (showing first 10 files)"
                 fi
 
-                aws s3 cp \
+                set +x
+                AWS_LOG="/tmp/aws_s3_cp_kmods.log"
+                if ! AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" aws s3 cp \
                   "$source_dir" \
                   "s3://$(params.s3Bucket)/${S3_TARGET_PATH}" \
                   --endpoint-url "$(params.s3Endpoint)" \
                   --recursive \
                   --exclude "*" \
-                  --include "*.ko"
+                  --include "*.ko" > "$AWS_LOG" 2>&1; then
+                  echo "ERROR: S3 .ko files upload failed. Sanitized logs below:"
+                  sed -e "s/${AWS_SECRET_ACCESS_KEY}/[REDACTED]/g" \
+                      -e "s/${AWS_ACCESS_KEY_ID}/[REDACTED]/g" "$AWS_LOG"
+                  rm -f "$AWS_LOG"
+                  exit 1
+                fi
+                rm -f "$AWS_LOG"
+                set -x
             else
                 echo "WARNING: No .ko files found for architecture $arch_name"
                 return 1
@@ -213,19 +223,39 @@ spec:
             # Upload checksum file (always use arch-specific filename)
             if [ -f "$source_dir/signed_kmods_checksums_${arch_name}.txt" ]; then
                 echo "Uploading architecture-specific checksums for $arch_name"
-                aws s3 cp \
+                set +x
+                AWS_LOG="/tmp/aws_s3_cp_checksum.log"
+                if ! AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" aws s3 cp \
                   "$source_dir/signed_kmods_checksums_${arch_name}.txt" \
                   "s3://$(params.s3Bucket)/${S3_TARGET_PATH}signed_kmods_checksums_${arch_name}.txt" \
-                  --endpoint-url "$(params.s3Endpoint)"
+                  --endpoint-url "$(params.s3Endpoint)" > "$AWS_LOG" 2>&1; then
+                  echo "ERROR: S3 checksums upload failed. Sanitized logs below:"
+                  sed -e "s/${AWS_SECRET_ACCESS_KEY}/[REDACTED]/g" \
+                      -e "s/${AWS_ACCESS_KEY_ID}/[REDACTED]/g" "$AWS_LOG"
+                  rm -f "$AWS_LOG"
+                  exit 1
+                fi
+                rm -f "$AWS_LOG"
+                set -x
             fi
 
             # Upload envfile for reference
             if [ -f "$source_dir/envfile" ]; then
                 echo "Uploading envfile for $arch_name"
-                aws s3 cp \
+                set +x
+                AWS_LOG="/tmp/aws_s3_cp_envfile.log"
+                if ! AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" aws s3 cp \
                   "$source_dir/envfile" \
                   "s3://$(params.s3Bucket)/${S3_TARGET_PATH}envfile" \
-                  --endpoint-url "$(params.s3Endpoint)"
+                  --endpoint-url "$(params.s3Endpoint)" > "$AWS_LOG" 2>&1; then
+                  echo "ERROR: S3 envfile upload failed. Sanitized logs below:"
+                  sed -e "s/${AWS_SECRET_ACCESS_KEY}/[REDACTED]/g" \
+                      -e "s/${AWS_ACCESS_KEY_ID}/[REDACTED]/g" "$AWS_LOG"
+                  rm -f "$AWS_LOG"
+                  exit 1
+                fi
+                rm -f "$AWS_LOG"
+                set -x
             fi
 
             return 0
@@ -240,24 +270,57 @@ spec:
                 # Use first architecture's envfile for base path information
                 first_arch_dir=$(find "${SIGNED_KMODS_FULL_PATH}" -mindepth 1 -maxdepth 1 -type d | head -1)
                 if [ -n "$first_arch_dir" ] && [ -f "$first_arch_dir/envfile" ]; then
+                    set +x
                     # shellcheck source=/dev/null
                     . "$first_arch_dir/envfile"
+                    set -x
                     # Strip architecture suffix from KERNEL_VERSION
                     KERNEL_VERSION_CLEAN=$(echo "$KERNEL_VERSION" | \
                       sed -E 's/\.(x86_64|amd64|aarch64|arm64|ppc64le|s390x)(\+.*)?$//')
                     summary_s3_path="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION_CLEAN}/multi-arch-summary/"
 
+                    set +x
+                    AWS_LOG="/tmp/aws_s3_cp.log"
                     echo "Uploading multi-architecture summary to s3://$(params.s3Bucket)/${summary_s3_path}"
-                    aws s3 cp \
-                      "${SIGNED_KMODS_FULL_PATH}/signing_summary.txt" \
-                      "s3://$(params.s3Bucket)/${summary_s3_path}signing_summary.txt" \
-                      --endpoint-url "$(params.s3Endpoint)"
+                    if ! AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+                          AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+                          aws s3 cp \
+                        "${SIGNED_KMODS_FULL_PATH}/signing_summary.txt" \
+                        "s3://$(params.s3Bucket)/${summary_s3_path}signing_summary.txt" \
+                        --endpoint-url "$(params.s3Endpoint)" > "$AWS_LOG" 2>&1; then
+
+                        echo "ERROR: S3 upload failed. Sanitized logs below:"
+                        sed -e "s/${AWS_SECRET_ACCESS_KEY}/[REDACTED]/g" \
+                            -e "s/${AWS_ACCESS_KEY_ID}/[REDACTED]/g" "$AWS_LOG"
+                        rm -f "$AWS_LOG"
+                        exit 1
+                    fi
+                    rm -f "$AWS_LOG"
+                    echo "SUCCESS: Multi-architecture signing summary uploaded to S3."
+                    set -x
 
                     if [ -f "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" ]; then
-                        aws s3 cp \
-                          "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" \
+                      set +x
+                      AWS_LOG="/tmp/aws_s3_cp.log"
+
+                      echo "INFO: Uploading extraction_summary.txt to S3..."
+
+                      if ! AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+                          AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+                          aws s3 cp \                          "${SIGNED_KMODS_FULL_PATH}/extraction_summary.txt" \
                           "s3://$(params.s3Bucket)/${summary_s3_path}extraction_summary.txt" \
-                          --endpoint-url "$(params.s3Endpoint)"
+                          --endpoint-url "$(params.s3Endpoint)" > "$AWS_LOG" 2>&1; then
+    
+                          echo "ERROR: S3 upload failed. Sanitized logs below:"
+    
+                          sed -e "s/${AWS_SECRET_ACCESS_KEY}/[REDACTED]/g" \
+                              -e "s/${AWS_ACCESS_KEY_ID}/[REDACTED]/g" "$AWS_LOG"
+                          rm -f "$AWS_LOG"
+                          exit 1
+                      fi
+                      rm -f "$AWS_LOG"
+                      echo "SUCCESS: Extraction summary uploaded to S3."
+                      set -x
                     fi
                 fi
             fi
