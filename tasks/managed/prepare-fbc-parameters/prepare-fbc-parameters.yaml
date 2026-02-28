@@ -228,8 +228,13 @@ spec:
 
         RENDERED_CATALOG=/tmp/catalog.json
         bundle_images='[]'
+
+        # Track OCP version to components mapping for duplicate package detection
+        declare -A ocp_version_to_component_indices  # OCP version -> newline-separated component indices
+        declare -A component_to_packages              # component index -> newline-separated packages
+
         for ((i=0; i<component_count; i++)); do
-            fbc_fragment=$(jq -cr --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
+            fbc_fragment=$(jq -r --argjson i "$i" '.components[$i].containerImage' "${SNAPSHOT_PATH}")
             echo "INFO: Processing component $((i+1))/${component_count}: ${fbc_fragment}"
 
             # === PACKAGE VALIDATION ===
@@ -238,12 +243,15 @@ spec:
             echo "  INFO: Validating packages in fragment..."
             rm -f "${RENDERED_CATALOG}"
             opm render "${fbc_fragment}" > "${RENDERED_CATALOG}"
-            actual_packages=$(jq -r 'select(.schema=="olm.package") | .name' < "${RENDERED_CATALOG}" | uniq)
+            actual_packages=$(jq -r 'select(.schema=="olm.package") | .name' < "${RENDERED_CATALOG}" | sort -u)
             component_bundle_images=$(jq -r \
               'select(.schema == "olm.bundle") | "\(.image)" | split("@")[0]' \
-              < "${RENDERED_CATALOG}" | uniq | jq -R . | jq -s .)
+              < "${RENDERED_CATALOG}" | sort -u | jq -R . | jq -s .)
             bundle_images=$(jq --argjson component_bundle_images \
               "$component_bundle_images" '. += $component_bundle_images' <<< "$bundle_images")
+
+            # Store packages for duplicate detection
+            component_to_packages[$i]="$actual_packages"
 
             component_package_valid=true
             disallowed_packages='[]'
@@ -305,10 +313,82 @@ spec:
             else
                 echo "    SUCCESS: Found valid OCP version: ${ocp_version}"
                 target_versions=$(jq --arg version "$ocp_version" '. += [$version]' <<< "$target_versions")
+
+                # Group components by OCP version for duplicate package detection
+                if [ -z "${ocp_version_to_component_indices[$ocp_version]:-}" ]; then
+                    ocp_version_to_component_indices[$ocp_version]="$i"
+                else
+                    ocp_version_to_component_indices[$ocp_version]+=$'\n'"$i"
+                fi
             fi
         done
         # Ensure all bundle images are unique across fragments
         bundle_images=$(jq -c 'unique' <<< "$bundle_images")
+
+        # === DUPLICATE PACKAGE VALIDATION (PER OCP VERSION) ===
+        # Prevents composition conflicts by ensuring each package appears only once per OCP version.
+        # Multiple fragments targeting the same catalog index (same OCP version) cannot contain
+        # the same package, as this would create conflicting catalog entries during index composition
+        # causing data loss. This validation enforces package uniqueness within the scope of each
+        # target OCP version, while allowing the same package to exist across different versions.
+        echo "INFO: Validating no duplicate packages within FBCs for the same OCP version..."
+
+        # For each OCP version that has multiple components
+        for ocp_ver in "${!ocp_version_to_component_indices[@]}"; do
+            component_indices="${ocp_version_to_component_indices[$ocp_ver]}"
+
+            # Count components for this OCP version (count lines, filtering empty lines)
+            component_count_for_version=$(printf '%s\n' "$component_indices" \
+              | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+
+            # Skip if only one component for this OCP version
+            if [ "$component_count_for_version" -le 1 ]; then
+                echo "  INFO: OCP version ${ocp_ver}: ${component_count_for_version} component" \
+                  "(no duplicate check needed)"
+                continue
+            fi
+
+            echo "  INFO: OCP version ${ocp_ver}: ${component_count_for_version} components -" \
+              "checking for duplicate packages..."
+
+            # Track duplicates for this specific OCP version
+            ocp_version_has_duplicates=false
+
+            # Build package -> component mapping for this OCP version
+            declare -A package_to_component
+
+            while IFS= read -r comp_idx; do
+                packages="${component_to_packages[$comp_idx]}"
+                while IFS= read -r pkg; do
+                    [ -z "$pkg" ] && continue  # Skip empty lines
+                    if [ -n "${package_to_component[$pkg]:-}" ]; then
+                        # Duplicate found!
+                        first_component_idx="${package_to_component[$pkg]}"
+                        first_component_name=$(jq -r --argjson idx "$first_component_idx" \
+                            '.components[$idx].name' "${SNAPSHOT_PATH}")
+                        current_component_name=$(jq -r --argjson idx "$comp_idx" \
+                            '.components[$idx].name' "${SNAPSHOT_PATH}")
+
+                        echo "    ERROR: Duplicate package '${pkg}' found in OCP version ${ocp_ver}"
+                        echo "      - Component ${first_component_idx} (${first_component_name}):" \
+                          "contains package '${pkg}'"
+                        echo "      - Component ${comp_idx} (${current_component_name}):" \
+                          "also contains package '${pkg}'"
+                        ocp_version_has_duplicates=true
+                        validation_failed=true
+                    else
+                        package_to_component[$pkg]="$comp_idx"
+                    fi
+                done <<< "$packages"
+            done <<< "$component_indices"
+
+            # Clean up for next iteration
+            unset package_to_component
+
+            if [ "$ocp_version_has_duplicates" != "true" ]; then
+                echo "    SUCCESS: No duplicate packages found for OCP version ${ocp_ver}"
+            fi
+        done
 
         # === CHECK ALL BUNDLE IMAGES FOR OPT-IN ===
         # Select appropriate IIB service account based on environment (moved here to fix unbound variable)
