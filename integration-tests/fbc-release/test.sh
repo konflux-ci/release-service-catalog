@@ -132,16 +132,16 @@ configure_test_matrix() {
 # Always create both repositories for simplicity and reliability
 create_github_repository() {
     echo "🔨 Creating repositories (always dual for reliability)..."
-    
+
     # Always create component 1 repo
     "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
         "${component_base_repo_name}" "${component_base_branch}" \
         "${component_repo_name}" "${component_branch}"
-    
-    # Always create component 2 repo
+
+    # Always create component 2 repo (using different base branch to avoid duplicate packages)
     echo "  Creating component 2 repository..."
     "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
-        "${component_base_repo_name}" "${component_base_branch}" \
+        "${component_base_repo_name}" "${component2_base_branch}" \
         "${component2_repo_name}" "${component2_branch}"
 }
 
