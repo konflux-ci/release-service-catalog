@@ -1,9 +1,10 @@
-# extract-binaries-from-image
+# extract-checksums-from-image
 
-Tekton task that extracts binaries to be released on github.com from an image.
+Tekton task that extracts checksum files from container images for github.com releases.
 
-The path to the directory inside the provided workspace where the binaries were
-saved is provided as a result.
+Binary files are extracted but then removed to keep the Trusted Artifact chain small.
+Only SHA256SUMS files are retained in the output directory. The create-github-release
+task extracts the actual binaries directly from the image at upload time.
 
 The binaries must be stored at the same `image_binaries_path` for each component
 passed.

@@ -2,8 +2,8 @@
 
 Tekton task that creates a release in GitHub.com via the API.
 
-It assumes that a workspace is provided that includes `*.zip`, `*.json` and `*SHA256SUMS` files in
-a `release` dir.
+It extracts binary files from the container image and uploads them along with
+SHA256SUMS and signature files (from the TA chain) to the GitHub release.
 
 ## Parameters
 
@@ -12,7 +12,9 @@ a `release` dir.
 | repository              | The github repository where the release should be created                                                                  | No       | -                    |
 | release_version         | The version string of the new release                                                                                      | No       | -                    |
 | githubSecret            | The kube secret to use to authenticate to GitHub, containing one key: token                                                | No       | -                    |
-| content_directory       | The directory inside the workspace to find files for release                                                               | No       | -                    |
+| content_directory       | The directory inside the workspace to find SHA256SUMS and signature files                                                  | No       | -                    |
+| snapshotPath            | Path to the JSON string of the mapped Snapshot spec in the data workspace                                                  | No       | -                    |
+| imageBinariesPath       | Path inside the image where the binaries to extract are stored                                                             | Yes      | releases             |
 | resultsDirPath          | Path to the results directory in the data workspace                                                                        | No       | -                    |
 | ociStorage              | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
 | ociArtifactExpiresAfter | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                   |

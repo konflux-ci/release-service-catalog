@@ -2,16 +2,17 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: extract-binaries-from-image
+  name: extract-checksums-from-image
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task that extracts binaries to be released on github.com from an image.
+    Tekton task that extracts checksum files from container images for github.com releases.
 
-    The path to the directory inside the provided workspace where the binaries were
-    saved is provided as a result.
+    Binary files are extracted but then removed to keep the Trusted Artifact chain small.
+    Only SHA256SUMS files are retained in the output directory. The create-github-release
+    task extracts the actual binaries directly from the image at upload time.
 
     The binaries must be stored at the same `image_binaries_path` for each component
     passed.
@@ -104,6 +105,7 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
+          cpu: 30m
         requests:
           memory: 64Mi
           cpu: 30m
@@ -121,11 +123,12 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: extract-binaries-from-image
+    - name: extract-checksums-from-image
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
         limits:
           memory: 512Mi
+          cpu: 250m
         requests:
           memory: 512Mi
           cpu: 250m
@@ -188,6 +191,16 @@ spec:
           cp "$IMAGE_PATH"/* "$BINARIES_PATH"/
         done
 
+        # Remove binary files from dataDir to keep the TA chain small.
+        # Only SHA256SUMS files (a few KB) stay for downstream signing tasks.
+        shopt -s nullglob
+        for f in "$BINARIES_PATH"/*; do
+          if [[ "$(basename "$f")" != *SHA256SUMS ]]; then
+            rm "$f"
+          fi
+        done
+        shopt -u nullglob
+
         echo -n "$(dirname "$(params.snapshotPath)")/$BINARIES_DIR" | tee "$(results.binaries_path.path)"
       env:
         - name: "IMAGE_PATH"
@@ -196,6 +209,7 @@ spec:
       computeResources:
         limits:
           memory: 128Mi
+          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m
