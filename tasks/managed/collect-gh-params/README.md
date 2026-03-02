@@ -2,7 +2,7 @@
 
 Tekton task that collects the three parameters to pass to the `create-github-release` task. The `githubSecret` from
 the Data file, the `repository` from the snapshot file, and the `release_version` from the binaries of the
-`extract-binaries-from-image` task.
+`extract-checksums-from-image` task.
 
 ## Parameters
 

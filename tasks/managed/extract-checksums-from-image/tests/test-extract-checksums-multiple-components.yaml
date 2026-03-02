@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-extract-binaries-from-image
+  name: test-extract-binaries-multiple-components
 spec:
   description: |
-    Run the extract-binaries-from-image task
+    Run the extract-checksums-from-image task with three components in the snapshot
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -61,6 +61,14 @@ spec:
                   {
                     "name": "comp",
                     "containerImage": "registry.io/image:tag"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "registry.io/image2:tag"
+                  },
+                  {
+                    "name": "comp3",
+                    "containerImage": "registry.io/image3:tag"
                   }
                 ]
               }
@@ -82,11 +90,11 @@ spec:
               TAR_IN2=$(mktemp -d)
 
               mkdir -p "$TAR_IN1"/my-binaries-path
-              echo text1 > "$TAR_IN1"/my-binaries-path/file1.txt
+              echo binary1 > "$TAR_IN1"/my-binaries-path/comp_1.0_linux_amd64.zip
               tar czf 1111 -C "$TAR_IN1" my-binaries-path
 
               mkdir -p "$TAR_IN2"/my-binaries-path
-              echo text2 > "$TAR_IN2"/my-binaries-path/file2.txt
+              printf "checksum1  comp_1.0_linux_amd64.zip\n" > "$TAR_IN2"/my-binaries-path/comp_1.0_SHA256SUMS
               tar czf 2222 -C "$TAR_IN2" my-binaries-path
           - name: create-trusted-artifact
             ref:
@@ -100,7 +108,7 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: extract-binaries-from-image
+        name: extract-checksums-from-image
       params:
         - name: image_binaries_path
           value: my-binaries-path
@@ -173,20 +181,29 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              if [ "$(wc -l < "$(params.dataDir)"/mock_skopeo.txt)" != 1 ]; then
-                echo Error: skopeo was expected to be called 1 time. Actual calls:
-                cat "$(params.dataDir)"/mock_skopeo.txt
+              ACTUAL_CALLS="$(wc -l < "$(params.dataDir)/mock_skopeo.txt")"
+              EXPECTED_CALLS=3
+
+              if [ "$ACTUAL_CALLS" != "$EXPECTED_CALLS" ]; then
+                echo "Error: skopeo was expected to be called $EXPECTED_CALLS times. Actual calls: $ACTUAL_CALLS"
+                cat "$(params.dataDir)/mock_skopeo.txt"
                 exit 1
               fi
 
               if [ "$(params.binaries_path)" != "$(params.pipelineRunUid)/binaries" ]; then
-                  echo Error: Unexpected binaries_path result
+                  echo "Error: Unexpected binaries_path result"
                   exit 1
               fi
 
               cd "$(params.dataDir)/$(params.binaries_path)"
 
-              test "$(< file1.txt)" = "text1"
-              test "$(< file2.txt)" = "text2"
+              # SHA256SUMS should remain in the TA chain
+              test -f comp_1.0_SHA256SUMS
+
+              # Binary files should have been removed to keep the TA small
+              if [ -f comp_1.0_linux_amd64.zip ]; then
+                echo "Error: binary file should have been removed from dataDir"
+                exit 1
+              fi
       runAfter:
         - run-task

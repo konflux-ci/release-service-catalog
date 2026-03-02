@@ -10,8 +10,8 @@ spec:
   description: |-
     Tekton task that creates a release in GitHub.com via the API.
 
-    It assumes that a workspace is provided that includes `*.zip`, `*.json` and `*SHA256SUMS` files in
-    a `release` dir.
+    It extracts binary files from the container image and uploads them along with
+    SHA256SUMS and signature files (from the TA chain) to the GitHub release.
   params:
     - name: repository
       type: string
@@ -24,7 +24,14 @@ spec:
       description: "The kube secret to use to authenticate to GitHub, containing one key: token"
     - name: content_directory
       type: string
-      description: "The directory inside the workspace to find files for release"
+      description: "The directory inside the workspace to find SHA256SUMS and signature files"
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+    - name: imageBinariesPath
+      type: string
+      description: Path inside the image where the binaries to extract are stored
+      default: "releases"
     - name: resultsDirPath
       type: string
       description: Path to the results directory in the data workspace
@@ -131,10 +138,11 @@ spec:
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
         limits:
-          memory: 256Mi
+          memory: 512Mi
+          cpu: 250m
         requests:
-          memory: 256Mi
-          cpu: 150m
+          memory: 512Mi
+          cpu: 250m
       volumeMounts:
         - name: gh-token-secret-vol
           mountPath: "/etc/secrets"
@@ -149,10 +157,7 @@ spec:
         set -x
 
         RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/create-github-release-results.json"
-
-        cd "$(params.dataDir)/$CONTENT_DIRECTORY"
-        set -o pipefail
-        shopt -s failglob
+        CONTENT_DIR="$(params.dataDir)/$CONTENT_DIRECTORY"
 
         OWNER_REPO=${REPOSITORY#https://github.com/}
         RELEASE="$(gh api "repos/${OWNER_REPO}/releases" --jq ".[] | select(.tag_name == \"v${RELEASE_VERSION}\")")"
@@ -160,8 +165,51 @@ spec:
           echo "Release v${RELEASE_VERSION} exists"
           echo "$REPOSITORY/releases/tag/v${RELEASE_VERSION}" > "$(results.url.path)"
         else
-          gh release create "v${RELEASE_VERSION}" ./*.zip ./*.json ./*SHA256SUMS ./*.sig \
-          --repo "$REPOSITORY" --title "Release $RELEASE_VERSION" | tee "$(results.url.path)"
+          # Extract binary files from the container image to a temp directory.
+          # SHA256SUMS and .sig files are already in CONTENT_DIR via the TA chain.
+          # The pipeline enforces a single component via validate-single-component.
+          SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
+          BINARIES_TMP=$(mktemp -d)
+          IMAGE_URL="$(jq -r '.components[0].containerImage // ""' "$SNAPSHOT_SPEC_FILE")"
+          if [ -z "${IMAGE_URL}" ] ; then
+              echo "Error: Unable to get image url from snapshot."
+              exit 1
+          fi
+
+          TMP_DIR=$(mktemp -d)
+          skopeo copy --retry-times 3 docker://"$IMAGE_URL" dir:"$TMP_DIR"
+          cd "$TMP_DIR"
+
+          for DIGEST in $(jq -r ".layers[].digest" manifest.json); do
+            FILE=${DIGEST#sha256:}
+            if tar -tf "$FILE" | grep -q "^$IMAGE_PATH/"; then
+              tar -xzvf "$FILE" "$IMAGE_PATH"
+            fi
+          done
+
+          # Copy only binary files. SHA256SUMS and .sig come via the TA chain
+          # and must not be overwritten by files from the image.
+          if [ -d "$IMAGE_PATH" ]; then
+            shopt -s nullglob
+            for f in "$IMAGE_PATH"/*; do
+              BASENAME="$(basename "$f")"
+              if [[ "$BASENAME" != *SHA256SUMS ]] && [[ "$BASENAME" != *.sig ]]; then
+                cp "$f" "$BINARIES_TMP/"
+              fi
+            done
+            shopt -u nullglob
+          fi
+
+          cd "$CONTENT_DIR"
+          set -o pipefail
+          shopt -s failglob
+
+          gh release create "v${RELEASE_VERSION}" \
+            "$BINARIES_TMP"/*.zip "$BINARIES_TMP"/*.json \
+            ./*SHA256SUMS ./*.sig \
+            --repo "$REPOSITORY" --title "Release $RELEASE_VERSION" | tee "$(results.url.path)"
+
+          rm -rf "$BINARIES_TMP"
         fi
 
         jq -n --arg release "$(cat "$(results.url.path)")" '{"github-release": {"url": $release}}' | tee "$RESULTS_FILE"
@@ -172,6 +220,8 @@ spec:
           value: $(params.release_version)
         - name: CONTENT_DIRECTORY
           value: $(params.content_directory)
+        - name: IMAGE_PATH
+          value: $(params.imageBinariesPath)
     - name: create-trusted-artifact
       computeResources:
         limits:
