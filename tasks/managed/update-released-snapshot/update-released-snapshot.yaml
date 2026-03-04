@@ -217,19 +217,29 @@ spec:
         RELEASE_COMPONENTS=$(get_release_components)
         NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
 
-        # Collect unique application names (from package-collections) for this release
+        # Collect unique application names (from package-collections) for this release.
+        # Match snapshot component if it equals a release component or ends with "-<release_component>"
+        # (e.g. rhel-10-osci-internal-test-package matches rhel-osci-internal-test-package).
         APPLICATION_NAMES=""
         for ((i = 0; i < NUM_COMPONENTS; i++)); do
             component_json=$(jq -c --argjson idx "$i" '.components[$idx]' "${SNAPSHOT_SPEC_FILE}")
             component_name=$(jq -r '.name' <<< "$component_json")
             container_image=$(jq -r '.containerImage' <<< "$component_json")
-            if ! echo "$RELEASE_COMPONENTS" | grep -q -x "$component_name"; then
+            matched=
+            while IFS= read -r rc; do
+                [ -z "$rc" ] && continue
+                if [ "$component_name" = "$rc" ] || [[ "$component_name" == *"-${rc}" ]]; then
+                    matched=1
+                    break
+                fi
+            done <<< "$RELEASE_COMPONENTS"
+            if [ -z "$matched" ]; then
                 continue
             fi
             while IFS= read -r collection; do
                 [ -z "$collection" ] && continue
-                app_name=$(to_application_name "$collection")
-                if [ -n "$app_name" ] && ! echo "$APPLICATION_NAMES" | grep -q -x "$app_name"; then
+                app_name=$(to_application_name_from_build_target "$collection")
+                if [ -n "$app_name" ] && [ "$app_name" != "null" ] && ! echo "$APPLICATION_NAMES" | grep -q -x "$app_name"; then
                     APPLICATION_NAMES="${APPLICATION_NAMES:+$APPLICATION_NAMES$'\n'}$app_name"
                 fi
             done < <(get_package_collections "$component_name" "$container_image")
@@ -287,10 +297,11 @@ spec:
             echo "Processing application name: $APP_NAME"
 
             # Check if Application exists in integration namespace; if not, warning status and exit 0
-            if ! kubectl get "application/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" -o name &>/dev/null; then
-                echo "WARNING: Application ${APP_NAME} not found in ${INTEGRATION_NAMESPACE}. No snapshot created."
+            # Surface kubectl error in logs when it fails (e.g. Forbidden = RBAC, NotFound = missing app)
+            if ! kubectl get "application/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" -o name; then
+                echo "WARNING: Could not get Application ${APP_NAME} in ${INTEGRATION_NAMESPACE}. No snapshot created."
                 echo -n "Warning" > "$(results.integrationSnapshotStatus.path)"
-                echo -n "Application ${APP_NAME} not found in ${INTEGRATION_NAMESPACE}" > "$(results.integrationSnapshotMessage.path)"
+                echo -n "Application ${APP_NAME} not found or not accessible in ${INTEGRATION_NAMESPACE}" > "$(results.integrationSnapshotMessage.path)"
                 exit 0
             fi
 
