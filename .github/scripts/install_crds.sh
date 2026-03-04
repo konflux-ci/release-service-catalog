@@ -9,7 +9,9 @@
 install_appstudio_repo_crds () {
     git clone https://github.com/$1/$2
     pushd $2
-    kubectl create -f config/crd/bases
+    for crd in config/crd/bases/*.yaml; do
+        yq 'del(.. | .x-kubernetes-validations?)' "$crd" | kubectl create -f -
+    done
     popd
 }
 
