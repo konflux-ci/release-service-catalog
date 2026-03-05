@@ -5,6 +5,9 @@ Task to prepare FBC parameters from all fragments with comprehensive validation.
 Includes package validation, version consistency checking, opt-in status collection,
 and strategy-aware publishing decisions (hotfix, staging, etc.).
 
+Expects each component in the snapshot to have an ocpVersion field (e.g., "v4.14"),
+which is automatically attached by the filter-published-fbc-images task.
+
 ## Parameters
 
 | Name                    | Description                                                                                                                | Optional | Default value        |

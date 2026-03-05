@@ -3,6 +3,7 @@
 Filters snapshot to remove already-released FBC fragments by querying Pyxis index images.
 Queries for index images and checks if fragments are present in their bundles/related_images fields.
 Components already published are filtered out to prevent EC validation failures.
+Additionally, extracts and attaches ocpVersion field to each component for downstream tasks.
 
 ## Parameters
 
