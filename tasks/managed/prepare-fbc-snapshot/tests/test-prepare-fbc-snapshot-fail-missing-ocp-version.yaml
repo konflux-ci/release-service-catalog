@@ -2,11 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-prepare-fbc-parameters-multiple-modes
+  name: test-prepare-fbc-snapshot-fail-missing-ocp-version
   annotations:
     test/assert-task-failure: "run-task"
 spec:
-  description: Test that prepare-fbc-parameters task properly rejects multiple release modes.
+  description: |
+    Run the prepare-fbc-snapshot task with a component missing ocpVersion
+    and verify the task fails as expected. The ocpVersion field should be
+    attached by filter-published-fbc-images task before prepare-fbc-snapshot runs.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -31,15 +34,14 @@ spec:
     - name: setup
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot.json
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
       taskSpec:
         params:
           - name: snapshotPath
             type: string
-            description: Path to the JSON string of the mapped Snapshot spec in the data workspace
         results:
           - name: sourceDataArtifact
-            description: Location of trusted artifacts to be used to populate data directory
+            type: string
         volumes:
           - name: workdir
             emptyDir: {}
@@ -58,40 +60,44 @@ spec:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
-              #!/usr/bin/env bash
+              #!/usr/bin/env sh
+              set -eux
 
-              # Ensure data directory exists
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create test data with valid components
-              # Note: ocpVersion is now attached by filter-published-fbc-images task
-              cat > "$(params.dataDir)/$(params.snapshotPath)" << 'EOF'
-              {
-                "components": [
-                  {
-                    "name": "test-fbc-component",
-                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
-                    "ocpVersion": "v4.14"
-                  }
-                ]
-              }
-              EOF
-
-              # Create test data with MULTIPLE release modes active (should cause failure)
-              cat > "$(params.dataDir)/data.json" << 'EOF'
+              # Create data.json with valid FBC configuration
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "fbc": {
-                  "allowedPackages": [
-                    "test-operator", "example-operator", "test-package"
-                  ],
-                  "hotfix": true,
-                  "preGA": true,
-                  "stagedIndex": false
+                  "fromIndex": "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.12",
+                  "targetIndex": "quay.io/redhat/redhat----preview-operator-index:v4.12"
                 }
               }
               EOF
 
-              echo "Test data created for multiple modes validation test"
+              # Create snapshot WITHOUT ocpVersion field on component
+              # This should cause the task to fail since ocpVersion is required
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << EOF
+              {
+                  "application": "foo-app",
+                  "artifacts": {},
+                  "components": [
+                      {
+                          "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                          "name": "test-container-missing-ocp-version",
+                          "source": {
+                              "git": {
+                                  "context": "./",
+                                  "dockerfileUrl": "build/Dockerfile",
+                                  "revision": "foo",
+                                  "url": "https://github.com/foo/bar"
+                              }
+                          },
+                          "repository": "test/foo/bar"
+                      }
+                  ]
+              }
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -104,31 +110,25 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: prepare-fbc-parameters
+        name: prepare-fbc-snapshot
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot.json
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
         - name: dataPath
-          value: data.json
-        - name: pyxisSecret
-          value: test-pyxis-secret
-        - name: pyxisServer
-          value: production
-        - name: ociArtifactExpiresAfter
-          value: $(params.ociArtifactExpiresAfter)
-        - name: trustedArtifactsDebug
-          value: $(params.trustedArtifactsDebug)
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
         - name: orasOptions
           value: $(params.orasOptions)
         - name: sourceDataArtifact
           value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: https://github.com/konflux-ci/release-service-catalog.git
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
         - name: taskGitRevision
-          value: development
-        - name: pipelineRunUid
-          value: "test-pipeline-run-uid"
+          value: "development"
       runAfter:
         - setup
