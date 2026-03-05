@@ -38,7 +38,7 @@ function cosign() {
 
   if [[ "$*" == "copy -f private-registry.io/image:tag "*":"* ]]
   then
-    if [[ $(cat /etc/ssl/certs/ca-custom-bundle.crt) != "mycert" ]]
+    if [[ $(cat /etc/pki/tls/certs/ca-bundle.crt) != "mycert" ]]
     then
       echo Custom certificate not mounted
       return 1
