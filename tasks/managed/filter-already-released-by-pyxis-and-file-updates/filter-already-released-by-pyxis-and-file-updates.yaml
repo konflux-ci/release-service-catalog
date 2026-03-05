@@ -533,8 +533,56 @@ spec:
               IMAGE_COUNT=$(jq -r '.data | length' "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
               echo "  Pyxis response: IMAGE_COUNT=${IMAGE_COUNT}"
               if [ "${IMAGE_COUNT}" -eq 0 ] 2>/dev/null; then
-                echo "No Pyxis entries found for ${COMPONENT_NAME}"
-                PYXIS_COMPLETE="false"
+                echo "No direct Pyxis entry found for ${COMPONENT_NAME} — trying manifest list resolution"
+                # The containerImage may be a manifest list (multi-arch OCI index).
+                # Pyxis stores per-arch image records by their individual arch digest,
+                # not by the manifest list digest. Resolve the manifest and query each arch.
+                # Use oras (with registry credentials) instead of anonymous curl so that
+                # private registries (e.g. quay.io/redhat-user-workloads-stage) are accessible.
+                ML_IMAGE_REF="${CONTAINER_IMAGE%@*}@${DIGEST}"
+                if ! timeout 30 select-oci-auth "${ML_IMAGE_REF}" > "${COMPONENT_AUTH_FILE}" 2>/dev/null || \
+                   [ ! -s "${COMPONENT_AUTH_FILE}" ]; then
+                  echo '{}' > "${COMPONENT_AUTH_FILE}"
+                fi
+                ML_MANIFEST=$(timeout 30 oras manifest fetch \
+                  --registry-config "${COMPONENT_AUTH_FILE}" \
+                  "${ML_IMAGE_REF}" 2>/dev/null || echo "{}")
+                ARCH_DIGESTS=$(echo "${ML_MANIFEST}" \
+                  | jq -r '.manifests[]?.digest // empty' 2>/dev/null || echo "")
+                if [ -n "${ARCH_DIGESTS}" ]; then
+                  echo "Manifest list detected — checking per-arch digests in Pyxis..."
+                  FOUND_ARCH="false"
+                  while IFS= read -r ARCH_D; do
+                    [ -z "${ARCH_D}" ] && continue
+                    ARCH_FILTER=$(printf '%s' "image_id==${ARCH_D}" | jq -sRr @uri)
+                    ARCH_HTTP=$(http_get_pyxis "${PYXIS_URL}v1/images?filter=${ARCH_FILTER}" \
+                      "${PYXIS_RESPONSE}" /etc/pyxis-secrets/cert /etc/pyxis-secrets/key)
+                    if [ "${ARCH_HTTP}" = "200" ]; then
+                      ARCH_CNT=$(jq -r '.data | length' "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
+                      if [ "${ARCH_CNT}" -gt 0 ] 2>/dev/null; then
+                        HAS_RPM_DATA=$(jq -r \
+                          '(.data[0].rpm_manifest.rpms // []) | length' \
+                          "${PYXIS_RESPONSE}" 2>/dev/null || echo "0")
+                        if [ "${HAS_RPM_DATA}" -gt 0 ] 2>/dev/null; then
+                          echo "Arch ${ARCH_D}: found in Pyxis with ${HAS_RPM_DATA} rpms"
+                          FOUND_ARCH="true"
+                          break
+                        else
+                          echo "Arch ${ARCH_D}: found but rpm_manifest.rpms empty"
+                        fi
+                      fi
+                    fi
+                  done <<< "${ARCH_DIGESTS}"
+                  if [ "${FOUND_ARCH}" = "true" ]; then
+                    PYXIS_COMPLETE="true"
+                  else
+                    echo "No arch images found in Pyxis with RPM data for ${COMPONENT_NAME}"
+                    PYXIS_COMPLETE="false"
+                  fi
+                else
+                  echo "No Pyxis entries found for ${COMPONENT_NAME}"
+                  PYXIS_COMPLETE="false"
+                fi
               elif [ -z "${IMAGE_COUNT}" ]; then
                 echo "WARNING: Invalid Pyxis response for ${COMPONENT_NAME}"
                 PYXIS_COMPLETE="false"
