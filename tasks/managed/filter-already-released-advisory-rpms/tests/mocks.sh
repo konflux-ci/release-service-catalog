@@ -16,6 +16,8 @@ function curl() {
   if [[ "$args" == *"sso.redhat.com"* ]]; then
     echo "token_request" >> $(params.dataDir)/mock_sso.txt
     echo '{"access_token": "mock-access-token", "expires_in": 3600}'
+  elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" == *"limit="* ]]; then
+    echo '{"results": [{"name": "source"}, {"name": "x86_64"}, {"name": "aarch64"}, {"name": "s390x"}, {"name": "ppc64le"}], "count": 5}'
   elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]]; then
     echo '{"latest_version_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/mock-repo-uuid/versions/1/"}'
   elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
