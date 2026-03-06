@@ -19,10 +19,10 @@ function curl() {
 
     if [[ "$args" == *"sso.redhat.com"* ]]; then
         # Record token requests (for auth-path tests). Do not record full args to avoid logging secrets.
-        echo "token_request" >> $(params.dataDir)/mock_sso.txt
+        echo "token_request" >> ${DATA_DIR}/mock_sso.txt
         # OAuth2 token request
         echo '{"access_token": "mock-access-token", "expires_in": 3600}'
-    elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]]; then
+    elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]] && [[ "$args" != *"modify"* ]]; then
         # Repository GET by href -> return latest_version_href
         echo '{"latest_version_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/mock-repo-uuid/versions/1/"}'
     elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
@@ -32,14 +32,14 @@ function curl() {
     elif [[ "$args" == *"/api/pulp/mock/api/v3/artifacts/"* ]]; then
         # Artifact GET -> return sha256 of empty file
         echo '{"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
-    elif [[ "$args" == *"/content/rpm/packages/"* ]]; then
+    elif [[ "$args" == *"/content/rpm/packages/"* ]] && [[ "$args" != *"modify"* ]]; then
         # Content query by NEVRA -> decide existence based on CONTENT_EXISTS_MODE_FILE
         mode="none"
         if [[ -f "${CONTENT_EXISTS_MODE_FILE}" ]]; then
             mode="$(cat "${CONTENT_EXISTS_MODE_FILE}")"
         fi
         # record the content query for debugging the tests
-        echo "content_query mode=${mode} url=${args}" >> $(params.dataDir)/mock_content_queries.txt
+        echo "content_query mode=${mode} url=${args}" >> ${DATA_DIR}/mock_content_queries.txt
         if [[ "${mode}" == "all" ]]; then
             echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}]}'
         else
@@ -61,8 +61,12 @@ function curl() {
             echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/default-uuid/"}]}'
         fi
     elif [[ "$args" == *"modify"* ]]; then
-        # Repository content modify API call
+        # Repository content modify API call (script expects body then \n%{http_code})
         echo '{"task": "/api/pulp/mock/api/v3/tasks/mock-task-id/"}'
+        echo '202'
+    elif [[ "$args" == *"/tasks/"* ]] && [[ "$args" != *"modify"* ]]; then
+        # Task poll (GET) - return completed so wait_for_pulp_task exits
+        echo '{"state": "completed"}'
     else
         # Fall back to real curl for other calls
         command curl "$@"
@@ -70,7 +74,7 @@ function curl() {
 }
 
 function pulp() {
-    echo $* >> $(params.dataDir)/mock_pulp.txt
+    echo $* >> ${DATA_DIR}/mock_pulp.txt
     if [[ "$*" == *"domain show"* ]]; then
         echo "{ \"name\": \"mydomain\" }"
     elif [[ "$*" == *"rpm repository list"* ]]; then
@@ -104,7 +108,7 @@ function select-oci-auth() {
 
 function oras() {
     echo Mock oras called with: $*
-    echo $* >> $(params.dataDir)/mock_oras.txt
+    echo $* >> ${DATA_DIR}/mock_oras.txt
     local args="$*"
 
     if [[ "$*" == "pull --registry-config"* ]]; then
@@ -242,6 +246,16 @@ function oras() {
             # mimic having logs from each rpm build
             mkdir -p $output_file_dir/logs
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.noarch.rpm.log
+        elif [[ "$args" == *"quay.io/test/x86andnoarch"* ]]; then
+            # x86_64 + noarch only (no other arch binaries); noarch must be pushed to all default arch repos
+            echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
+            touch $output_file_dir/hello-2.12.1-6.fc44.x86_64.rpm
+            touch $output_file_dir/hello-docs-2.12.1-6.fc44.noarch.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.src.rpm
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
+            touch $output_file_dir/logs/hello-docs-2.12.1-6.fc44.noarch.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
         else
             echo Error: Unexpected call
             exit 1

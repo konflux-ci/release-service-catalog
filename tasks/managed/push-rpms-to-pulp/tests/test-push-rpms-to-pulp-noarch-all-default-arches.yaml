@@ -2,10 +2,12 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-rpms-to-pulp
+  name: test-push-rpms-to-pulp-noarch-all-default-arches
 spec:
   description: |
-    Run the push-rpms-to-pulp task with required parameters - a happy path scenario.
+    Run the push-rpms-to-pulp task with an artifact that has only x86_64 + noarch (no other arch
+    binaries). Verifies that noarch RPMs are pushed to every default arch repo (from
+    DEFAULT_ARCHITECTURES), not only the arches present in the artifact.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -26,6 +28,10 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
+    - name: DEFAULT_ARCHITECTURES
+      description: Comma-delimited default arch list (match push-rpms-to-pulp). Used for expected rpmfile counts.
+      type: string
+      default: "x86_64,aarch64,s390x,ppc64le"
   tasks:
     - name: setup
       taskSpec:
@@ -36,6 +42,8 @@ spec:
           - name: workdir
             emptyDir: {}
         stepTemplate:
+          securityContext:
+            runAsUser: 1001
           volumeMounts:
             - mountPath: /var/workdir
               name: workdir
@@ -50,7 +58,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3  # yamllint disable-line rule:line-length
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -62,7 +70,7 @@ spec:
                 "artifacts": {},
                 "components": [
                   {
-                    "containerImage": "quay.io/test/happypath@sha256:12345",
+                    "containerImage": "quay.io/test/x86andnoarch@sha256:12345",
                     "name": "test",
                     "source": {
                       "git": {
@@ -110,6 +118,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: DEFAULT_ARCHITECTURES
+          value: $(params.DEFAULT_ARCHITECTURES)
       runAfter:
         - setup
     - name: check-result
@@ -118,16 +128,22 @@ spec:
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
+        - name: DEFAULT_ARCHITECTURES
+          value: $(params.DEFAULT_ARCHITECTURES)
       taskSpec:
         params:
           - name: sourceDataArtifact
             type: string
           - name: dataDir
             type: string
+          - name: DEFAULT_ARCHITECTURES
+            type: string
         volumes:
           - name: workdir
             emptyDir: {}
         stepTemplate:
+          securityContext:
+            runAsUser: 1001
           volumeMounts:
             - mountPath: /var/workdir
               name: workdir
@@ -148,54 +164,56 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3  # yamllint disable-line rule:line-length
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              ls -lR "$(params.dataDir)"
-
               results=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-rpms-to-pulp-results.json")
               echo "$results"
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 1 ]; then
-                echo Error: oras was expected to be called 1 time. Actual calls:
-                cat "$(params.dataDir)/mock_oras.txt"
+              # Parse DEFAULT_ARCHITECTURES (comma-delimited) and compute expected counts
+              DEFAULT_ARCHES=()
+              IFS=',' read -ra _raw <<< "$(params.DEFAULT_ARCHITECTURES)"
+              for x in "${_raw[@]}"; do
+                x=$(echo "$x" | xargs)
+                [[ -n "$x" ]] && DEFAULT_ARCHES+=("$x")
+              done
+              expected_noarch_count=${#DEFAULT_ARCHES[@]}
+              expected_rpmfiles_count=$((2 + expected_noarch_count))
+
+              rpmfiles_len=$(echo "$results" | jq '.rpmfiles | length')
+              if [ "$rpmfiles_len" != "$expected_rpmfiles_count" ]; then
+                echo "Error: expected $expected_rpmfiles_count rpmfiles."
+                echo "Wanted: 1 x86_64, $expected_noarch_count noarch, 1 source. Actual: $results"
                 exit 1
               fi
 
-              # Expect domain show + 1 repo list + 9 uploads = 11 total
-              if [ "$(wc -l < "$(params.dataDir)/mock_pulp.txt")" != 11 ]; then
-                echo Error: pulp was expected to be called 11 times. Actual calls:
-                cat "$(params.dataDir)/mock_pulp.txt"
-                exit 1
-              fi
+              # Noarch must be published to every default arch repo
+              for arch in "${DEFAULT_ARCHES[@]}"; do
+                count=$(echo "$results" | jq --arg a "$arch" \
+                  '[.rpmfiles[] | select(.arch == "noarch" and .pulprepo == "mydomain/"+$a)] | length')
+                if [ "$count" != "1" ]; then
+                  echo "Error: expected exactly one noarch entry for pulprepo mydomain/${arch}, got ${count}"
+                  echo "$results"
+                  exit 1
+                fi
+              done
 
-              # count how many rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | length')" != 9 ]; then
-                echo Error: there should be 9 rpmfiles in the results. Actual results:
+              noarch_len=$(echo "$results" | jq '[.rpmfiles[] | select(.arch == "noarch")] | length')
+              if [ "$noarch_len" != "$expected_noarch_count" ]; then
+                echo "Error: expected $expected_noarch_count noarch rpmfile entries. Actual:"
                 echo "$results"
                 exit 1
               fi
 
-              # count how x86_64 rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "x86_64")) | length')" != 1 ]; then
-                echo Error: there should be 1 x86_64 rpmfile in the results. Actual results:
-                echo "$results"
+              # This test artifact has exactly one x86_64 and one source rpmfile
+              if [ "$(echo "$results" | jq '[.rpmfiles[] | select(.arch == "x86_64")] | length')" != "1" ]; then
+                echo Error: expected 1 x86_64 rpmfile entry.
                 exit 1
               fi
-
-              # count how noarch rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "noarch")) | length')" != 4 ]; then
-                echo Error: there should be 4 noarch rpmfiles in the results. Actual results:
-                echo "$results"
-                exit 1
-              fi
-
-              # count how source rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "source")) | length')" != 1 ]; then
-                echo Error: there should be 1 source rpmfile in the results. Actual results:
-                echo "$results"
+              if [ "$(echo "$results" | jq '[.rpmfiles[] | select(.arch == "source")] | length')" != "1" ]; then
+                echo Error: expected 1 source rpmfile entry.
                 exit 1
               fi
       runAfter:

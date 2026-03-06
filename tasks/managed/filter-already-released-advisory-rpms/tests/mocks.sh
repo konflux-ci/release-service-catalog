@@ -16,15 +16,14 @@ function curl() {
   if [[ "$args" == *"sso.redhat.com"* ]]; then
     echo "token_request" >> $(params.dataDir)/mock_sso.txt
     echo '{"access_token": "mock-access-token", "expires_in": 3600}'
-  elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]]; then
+  elif [[ "$args" == *"/api/pulp/"*"/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]]; then
+    # Repository GET by href -> return latest_version_href
     echo '{"latest_version_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/mock-repo-uuid/versions/1/"}'
-  elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
+  elif [[ "$args" == *"/api/pulp/"*"/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
     echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
-  elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
-    echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
-  elif [[ "$args" == *"/api/pulp/mock/api/v3/artifacts/"* ]]; then
+  elif [[ "$args" == *"/api/pulp/"*"/api/v3/artifacts/"* ]]; then
     echo '{"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
-  elif [[ "$args" == *"/content/rpm/packages/"* ]]; then
+  elif [[ "$args" == *"/content/rpm/packages/"* ]] && [[ "$args" != *"mock-existing-uuid"* ]]; then
     mode="none"
     if [[ -f "${CONTENT_EXISTS_MODE_FILE}" ]]; then
       mode="$(cat "${CONTENT_EXISTS_MODE_FILE}")"
@@ -38,17 +37,17 @@ function curl() {
   elif [[ "$args" == *"repositories/rpm/rpm"* && "$args" == *"name="* ]]; then
     # Handle both old-style arch names and new repository_id based names
     if [[ "$args" == *"name=source"* ]] || [[ "$args" == *"name=rpm-source"* ]]; then
-      echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/source-uuid/"}]}'
+      echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/source-uuid/"}]}'
     elif [[ "$args" == *"name=x86_64"* ]] || [[ "$args" == *"name=rpm-x86_64"* ]]; then
-      echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/x86_64-uuid/"}]}'
+      echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/x86_64-uuid/"}]}'
     elif [[ "$args" == *"name=aarch64"* ]] || [[ "$args" == *"name=rpm-aarch64"* ]]; then
-      echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/aarch64-uuid/"}]}'
+      echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/aarch64-uuid/"}]}'
     elif [[ "$args" == *"name=ppc64le"* ]] || [[ "$args" == *"name=rpm-ppc64le"* ]]; then
-      echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/ppc64le-uuid/"}]}'
+      echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/ppc64le-uuid/"}]}'
     elif [[ "$args" == *"name=s390x"* ]] || [[ "$args" == *"name=rpm-s390x"* ]]; then
-      echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/s390x-uuid/"}]}'
+      echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/s390x-uuid/"}]}'
     else
-      echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/default-uuid/"}]}'
+      echo '{"count": 1, "results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/default-uuid/"}]}'
     fi
   elif [[ "$args" == *"modify"* ]]; then
     echo '{"task": "/api/pulp/mock/api/v3/tasks/mock-task-id/"}'

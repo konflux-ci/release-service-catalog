@@ -24,8 +24,9 @@ spec:
     - name: DEFAULT_ARCHITECTURES
       type: string
       description: >-
-        Comma-delimited list of default architectures to use for noarch RPMs when
-        no arch-specific RPMs are found
+        Comma-delimited list of arch repos. Noarch RPMs are pushed to each of these repos.
+        When no arch-specific RPMs are found (e.g. only src+noarch), this list is also used
+        so the upload loop runs
       default: "x86_64,aarch64,s390x,ppc64le"
     - name: resultsDirPath
       description: Path to the results directory in the data workspace
@@ -305,7 +306,35 @@ spec:
           esac
         }
 
-        # Function to add content to a repository via API
+        # Poll Pulp task until completed/failed. $1 = task URL. Returns 0 if completed, 1 on failure/timeout.
+        wait_for_pulp_task() {
+          local task_url="$1"
+          local auth_header="$2"
+          local max_wait_secs="${3:-300}"
+          local poll_interval_secs="${4:-5}"
+          local elapsed=0
+          local state response
+          while [[ ${elapsed} -lt ${max_wait_secs} ]]; do
+            response="$(curl --retry 3 -s -H "${auth_header}" "${task_url}")"
+            state="$(jq -r '.state // empty' <<< "${response}")"
+            if [[ "${state}" == "completed" ]]; then
+              echo "Pulp task completed: ${task_url}"
+              return 0
+            fi
+            if [[ "${state}" == "failed" ]]; then
+              echo "Error: Pulp task failed: ${task_url}" >&2
+              jq -r '.error // .description // "No details"' <<< "${response}" >&2
+              return 1
+            fi
+            echo "Waiting for Pulp task (state=${state}, ${elapsed}s elapsed)..."
+            sleep "${poll_interval_secs}"
+            (( elapsed += poll_interval_secs )) || true
+          done
+          echo "Error: Timeout waiting for Pulp task: ${task_url}" >&2
+          return 1
+        }
+
+        # Function to add content to a repository via API; waits for modify task to complete.
         add_content_to_repo() {
           local repo_name="$1"
           local hrefs_json="$2"
@@ -335,16 +364,42 @@ spec:
           local add_content_units
           add_content_units=$(echo "$hrefs_json" | jq '[.[].pulp_href]')
 
-          # Add content to repository
+          # Add content to repository (modify returns 202 with task href)
           echo "Calling API: POST ${PULP_BASE_URL}${repo_href}modify/"
-          {
+          local modify_response
+          modify_response=$(
             set +x
-            curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
+            curl --retry 3 -s -w "\n%{http_code}" -X POST "${PULP_BASE_URL}${repo_href}modify/" \
               -H "${auth_header}" \
               -H "Content-Type: application/json" \
               -d "{\"add_content_units\": $add_content_units}"
             set -x
-          }
+          )
+          local http_code
+          http_code="$(echo "${modify_response}" | tail -n1)"
+          local body
+          body="$(echo "${modify_response}" | sed '$d')"
+          if [[ "${http_code}" != "202" && "${http_code}" != "200" ]]; then
+            echo "Error: modify returned HTTP ${http_code}" >&2
+            echo "${body}" >&2
+            return 1
+          fi
+          local task_href task_url
+          task_href="$(jq -r '.task // empty' <<< "${body}")"
+          if [[ -n "${task_href}" && "${task_href}" != "null" ]]; then
+            if [[ "${task_href}" == http://* || "${task_href}" == https://* ]]; then
+              task_url="${task_href}"
+            else
+              task_url="${PULP_BASE_URL}${task_href}"
+            fi
+            set +x
+            wait_for_pulp_task "${task_url}" "${auth_header}" 300 5
+            local wait_rc=$?
+            set -x
+            if [[ ${wait_rc} -ne 0 ]]; then
+              return 1
+            fi
+          fi
         }
 
         # Function to upload an RPM to Pulp with retries
@@ -715,38 +770,66 @@ spec:
           fi
         done
 
-        # If we have noarch RPMs but no architectures, use default architectures from parameter
-        if [ ${#noarch_rpms[@]} -gt 0 ] && [ ${#ARCHES[@]} -eq 0 ]; then
-          echo "⚠️  Found noarch RPMs but no architecture-specific RPMs."
-          echo "   Using default architectures from parameter: ${DEFAULT_ARCHITECTURES}"
-          echo "   Available noarch RPMs: ${noarch_rpms[*]}"
+        # Parse default architectures once for reuse; skip empty entries (e.g. trailing comma)
+        DEFAULT_ARCHES=()
+        IFS=',' read -ra _raw_arches <<< "${DEFAULT_ARCHITECTURES}"
+        for x in "${_raw_arches[@]}"; do
+          x=$(echo "$x" | xargs)
+          [[ -n "$x" ]] && DEFAULT_ARCHES+=("$x")
+        done
 
-          # Parse comma-delimited default architectures into array
-          IFS=',' read -ra DEFAULT_ARCHES <<< "${DEFAULT_ARCHITECTURES}"
-          for i in "${!DEFAULT_ARCHES[@]}"; do
-            DEFAULT_ARCHES[i]=$(echo "${DEFAULT_ARCHES[i]}" | xargs)
-          done
+        # When there are no architecture-specific RPMs but we have noarch RPMs, use default
+        # architectures so the upload loop runs and noarch gets pushed to each arch repo.
+        # Do not run this for src-only artifacts (no noarch), to avoid requiring arch repos to exist.
+        if [ ${#ARCHES[@]} -eq 0 ] && [ ${#noarch_rpms[@]} -gt 0 ]; then
+          echo "No architecture-specific RPMs found; using default architectures: ${DEFAULT_ARCHITECTURES}"
+          echo "   Noarch RPMs to push: ${noarch_rpms[*]}"
           ARCHES=("${DEFAULT_ARCHES[@]}")
+        fi
+
+        # When we have noarch RPMs, ensure we iterate over all default arch repos so noarch
+        # is pushed to each (filter may have set targetRepos to all default arches).
+        if [ ${#noarch_rpms[@]} -gt 0 ]; then
+          for def_arch in "${DEFAULT_ARCHES[@]}"; do
+            if [[ ! " ${ARCHES[*]} " == *" ${def_arch} "* ]]; then
+              ARCHES+=("${def_arch}")
+              echo "Adding default arch for noarch: ${def_arch}"
+            fi
+          done
+        fi
+
+        # When snapshot has rpmsToPublish, only process arch repos that are targeted (avoids
+        # failing on missing repos we would not upload to).
+        if [[ "${RPM_FILTER_ENABLED}" == "true" ]]; then
+          mapfile -t ARCHES < <(echo "${RPM_REPO_MAP}" | jq -r \
+            'to_entries[].value[]? | select(. != "source")' | sort -u)
+          echo "Filter enabled; processing only targeted arch repos: ${ARCHES[*]}"
         fi
 
         # Map to the specific arch: *.x86_64.rpm -> x86_64 repo
         # Map noarch rpm: *.noarch.rpm -> every arch repo
         # Map source rpms: *.src.rpm -> source rpm repo
 
+        # Preflight: ensure all arch repos exist so upload loops do not fail with generic errors
+        if [[ ${#ARCHES[@]} -gt 0 ]]; then
+          existing_repos=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
+            rpm repository list --field name | jq -r '.[].name')
+          missing=()
+          for arch in "${ARCHES[@]}"; do
+            if ! echo "${existing_repos}" | grep -qxF "${arch}"; then
+              missing+=("${arch}")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "Error: Missing repos in Pulp domain ${PULP_DOMAIN}: ${missing[*]}." >&2
+            echo "Create the repos or adjust DEFAULT_ARCHITECTURES." >&2
+            exit 1
+          fi
+        fi
+
         # Upload files organized by architecture
         for arch in "${ARCHES[@]}"; do
           echo "Processing architecture: $arch"
-
-          REPO_EXISTS=$(pulp  --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
-            rpm repository list --field name | jq -r ".[] | \
-            select(.name == \"${arch}\") | .name")
-
-          if [[ "$REPO_EXISTS" == "${arch}" ]]; then
-              echo "Repository '${arch}' exists"
-          else
-              echo "Repository '${arch}' does not exist."
-              exit 1
-          fi
 
           # Collect hrefs for bulk add
           HREFS_JSON="[]"

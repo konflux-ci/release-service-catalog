@@ -38,8 +38,9 @@ spec:
     - name: DEFAULT_ARCHITECTURES
       type: string
       description: >-
-        Comma-delimited list of default architectures to use for noarch RPMs when
-        no arch-specific RPMs are found
+        Comma-delimited list of arch repos. Noarch RPMs are always checked and published
+        to every repo in this list. When no arch-specific RPMs are found, this list is
+        also used as the component arch list
       default: "x86_64,aarch64,s390x,ppc64le"
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
@@ -365,6 +366,35 @@ spec:
           }
         }
 
+        # Check if a Pulp RPM repository exists by exact name.
+        # Returns 0 if exists, 1 otherwise.
+        repo_exists() {
+          local repo_name="$1"
+          local auth_header count
+          set +x
+          auth_header="$(get_auth_header)" || return 1
+          count=$(curl --retry 3 -s -H "${auth_header}" \
+            "${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
+            | jq -r '.count // 0')
+          set -x
+          [[ "${count}" -gt 0 ]]
+        }
+
+        # Exit with actionable error if any required repos are missing in the Pulp domain.
+        assert_repos_exist() {
+          local required=("$@") missing=()
+          for r in "${required[@]}"; do
+            if ! repo_exists "${r}"; then
+              missing+=("${r}")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "Error: Missing repos in Pulp domain ${PULP_DOMAIN}: ${missing[*]}." >&2
+            echo "Create the repos or adjust DEFAULT_ARCHITECTURES." >&2
+            exit 1
+          fi
+        }
+
         # Returns: 0 exists+matches, 2 not found, 3 digest mismatch
         check_rpm_exists_with_digest() {
           local repo_name="$1"
@@ -530,19 +560,55 @@ spec:
             done
           )
 
-          # Determine repo info for noarch targeting from DEFAULT_ARCHITECTURES
+          # Determine arches used for arch-specific targeting and for noarch
+          mapfile -t ARCHES < <(extract_arches_from_files files)
+          if [[ ${#ARCHES[@]} -eq 0 ]]; then
+            ARCHES=()
+            IFS=',' read -ra _raw <<< "$(params.DEFAULT_ARCHITECTURES)"
+            for x in "${_raw[@]}"; do
+              x=$(echo "$x" | xargs)
+              [[ -n "$x" ]] && ARCHES+=("$x")
+            done
+          fi
+          # Noarch RPMs must target all default arch repos, not just arches in this artifact
+          DEFAULT_ARCH_LIST=()
+          IFS=',' read -ra _raw_default <<< "$(params.DEFAULT_ARCHITECTURES)"
+          for x in "${_raw_default[@]}"; do
+            x=$(echo "$x" | xargs)
+            [[ -n "$x" ]] && DEFAULT_ARCH_LIST+=("$x")
+          done
+
+          # Build JSON array of {repository_id, repository_name} for noarch targeting
           # Filter to only include arches that have a matching rpm-repository entry
-          # Store as JSON array of {repository_id, repository_name} objects
           NOARCH_TARGET_REPOS_JSON="[]"
-          IFS=',' read -ra DEFAULT_ARCHES <<< "$(params.DEFAULT_ARCHITECTURES)"
-          for default_arch in "${DEFAULT_ARCHES[@]}"; do
-            default_arch="$(echo "${default_arch}" | xargs)"
+          for default_arch in "${DEFAULT_ARCH_LIST[@]}"; do
             repo_info="$(get_repo_info_for_arch "${default_arch}")"
             if [[ -n "${repo_info}" ]]; then
               NOARCH_TARGET_REPOS_JSON="$(jq --argjson info "${repo_info}" \
                 '. + [$info]' <<< "${NOARCH_TARGET_REPOS_JSON}")"
             fi
           done
+
+          # Preflight: ensure only repos we will target exist (align with target_repos logic below)
+          required_repos=()
+          for f in "${files[@]}"; do
+            if [[ "${f}" == *.src.rpm ]]; then
+              required_repos+=("source")
+            elif [[ "${f}" == *.noarch.rpm ]]; then
+              required_repos+=("${DEFAULT_ARCH_LIST[@]}")
+            else
+              arch="${f%.rpm}"
+              arch="${arch##*.}"
+              [[ -n "${arch}" ]] && required_repos+=("${arch}")
+            fi
+          done
+          unique_repos=()
+          while IFS= read -r r; do
+            [[ -n "$r" ]] && unique_repos+=("$r")
+          done < <(printf '%s\n' "${required_repos[@]}" | sort -u)
+          if [[ ${#unique_repos[@]} -gt 0 ]]; then
+            assert_repos_exist "${unique_repos[@]}"
+          fi
 
           rpms_to_publish="[]"
           for f in "${files[@]}"; do

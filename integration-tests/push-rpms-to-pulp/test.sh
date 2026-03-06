@@ -21,12 +21,16 @@ verify_release_contents() {
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
 
     # first 2 arches are specified in the pipelinerun templates, the last one is source.
+    # When the release includes noarch RPMs, fanout adds extra rpmfiles (one per default arch).
     arches=("x86_64" "source")
     echo "Checking RPM files count..."
     local rpmfiles=$(jq -c '.status.artifacts.rpmfiles // []' <<< "${release_json}")
     local rpmfiles_count=$(jq -r '. | length' <<< "${rpmfiles}")
-    if [ "${rpmfiles_count}" -ne ${#arches[@]} ]; then
-      echo "🔴 rpmfiles count was not equal to the number of arches"
+    local noarch_count
+    noarch_count=$(jq -r '[.[]? | select(.arch == "noarch")] | length' <<< "${rpmfiles}")
+    local expected_count=$(( ${#arches[@]} + noarch_count ))
+    if [ "${rpmfiles_count}" -ne "${expected_count}" ]; then
+      echo "🔴 rpmfiles count was ${rpmfiles_count}, expected ${expected_count} (${#arches[@]} base + ${noarch_count} noarch)"
       failures=$((failures+1))
     fi
     for arch in "${arches[@]}"; do
@@ -39,6 +43,26 @@ verify_release_contents() {
         failures=$((failures+1))
       fi
     done
+
+    # When the release includes noarch RPMs, assert they are published to all default arch repos.
+    if [ "${noarch_count}" -gt 0 ]; then
+      echo "Checking noarch RPM fanout to default arch repos..."
+      # Get arches from the rpm-repositories mapping in the RPA (excluding source)
+      default_arches=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
+        -n "${managed_namespace}" -ojson \
+        | jq -r '.spec.data.mapping["rpm-repositories"][]? | select(.arch != "source") | .arch' \
+        | sort -u)
+      for default_arch in ${default_arches}; do
+        local noarch_for_arch
+        noarch_for_arch=$(jq -r '[.[]? | select(.arch == "noarch" and (.pulprepo | test("'"${default_arch}"'")))] | length' <<< "${rpmfiles}")
+        if [ "${noarch_for_arch}" -lt 1 ]; then
+          echo "🔴 noarch RPMs not published to ${default_arch} repo (count: ${noarch_for_arch})"
+          failures=$((failures+1))
+        else
+          echo "✅️ noarch rpmfiles for ${default_arch}: ${noarch_for_arch}"
+        fi
+      done
+    fi
 
     if [ -z "$advisory_internal_url" ]; then
         echo "Warning: advisory_internal_url is empty. Skipping advisory content check."
