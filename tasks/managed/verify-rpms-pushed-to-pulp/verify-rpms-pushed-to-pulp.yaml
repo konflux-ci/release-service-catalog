@@ -1,0 +1,323 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: verify-rpms-pushed-to-pulp
+spec:
+  description: |
+    Verifies that RPMs recorded in push-rpms-to-pulp results are present in the
+    Pulp repositories with matching digests. Runs after push-rpms-to-pulp in the
+    pipeline to confirm the push succeeded.
+  params:
+    - name: dataDir
+      type: string
+      description: The workspace root where the push task wrote results
+    - name: resultsDirPath
+      type: string
+      description: Path segment under dataDir containing push-rpms-to-pulp-results.json
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted artifact from push-rpms-to-pulp (path=dataDir) to read results from
+    - name: PULP_DOMAIN
+      type: string
+      description: The Pulp domain used by the push task
+    - name: PULP_SECRET_NAME
+      type: string
+      description: The name of the secret containing the Pulp cli.toml file
+    - name: taskGitUrl
+      type: string
+      description: Git URL for the catalog (for use-trusted-artifact stepaction)
+    - name: taskGitRevision
+      type: string
+      description: Git revision for the catalog
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: pulp-secret-name-vol
+      secret:
+        secretName: $(params.PULP_SECRET_NAME)
+        defaultMode: 0444
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    workingDir: /var/workdir
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: DATA_DIR
+        value: $(params.dataDir)
+      - name: RESULTS_DIR_PATH
+        value: $(params.resultsDirPath)
+      - name: PULP_DOMAIN
+        value: $(params.PULP_DOMAIN)
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: verify-in-pulp
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3  # yamllint disable-line rule:line-length
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 200m
+        requests:
+          memory: 512Mi
+          cpu: 200m
+      volumeMounts:
+        - name: pulp-secret-name-vol
+          mountPath: /etc/secrets
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        CONFIG_FILE_CONTENT="$(cat /etc/secrets/cli.toml)"
+        echo "${CONFIG_FILE_CONTENT:?}" > /tmp/cli.toml
+        export PULP_CONFIG_FILE=/tmp/cli.toml
+
+        toml_get_optional() {
+          local key="$1"
+          [[ "${key}" =~ ^[A-Za-z0-9_]+$ ]] || { echo "Error: Invalid key '${key}'" >&2; return 1; }
+          local line current_table=""
+          while IFS= read -r line || [[ -n "${line}" ]]; do
+            if [[ "${line}" =~ ^[[:space:]]*\[([^]]+)\][[:space:]]*$ ]]; then
+              current_table="${BASH_REMATCH[1]}"
+              continue
+            fi
+            [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+            [[ "${line}" =~ ^[[:space:]]*$ ]] && continue
+            [[ -n "${current_table}" && "${current_table}" != "cli" ]] && continue
+            if [[ "${line}" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
+              [[ "${line}" =~ \"([^\"]*)\" ]] && { echo "${BASH_REMATCH[1]}"; return 0; }
+              [[ "${line}" =~ \'([^\']*)\' ]] && { echo "${BASH_REMATCH[1]}"; return 0; }
+              echo ""
+              return 0
+            fi
+          done < "${PULP_CONFIG_FILE}"
+          echo ""
+          return 0
+        }
+
+        toml_get_required() {
+          local key="$1" value
+          value="$(toml_get_optional "${key}")"
+          if [[ -z "${value}" ]]; then
+            echo "Error: Missing required '${key}' in cli.toml" >&2
+            return 1
+          fi
+          echo "${value}"
+        }
+
+        PULP_BASE_URL="$(toml_get_required "base_url" | sed 's:/*$::')" || exit 1
+        CLIENT_ID="$(toml_get_optional "client_id")"
+        CLIENT_SECRET="$(toml_get_optional "client_secret")"
+        PULP_USERNAME="$(toml_get_optional "username")"
+        PULP_PASSWORD="$(toml_get_optional "password")"
+        TOKEN_URL="https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token"
+
+        get_access_token() {
+          if [[ -z "${CLIENT_ID}" || -z "${CLIENT_SECRET}" ]]; then
+            echo "Error: client_id/client_secret not present in cli.toml" >&2
+            return 1
+          fi
+          local token
+          token=$(curl --retry 3 -s -X POST "$TOKEN_URL" \
+            -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+            -d "grant_type=client_credentials" \
+            -d "scope=api.console" | jq -r '.access_token')
+          if [[ -z "$token" || "$token" == "null" ]]; then
+            echo "Error: Failed to get OAuth2 access token" >&2
+            return 1
+          fi
+          echo "$token"
+        }
+
+        get_auth_header() {
+          if [[ -n "${PULP_USERNAME}" && -n "${PULP_PASSWORD}" ]]; then
+            local basic
+            basic="$(printf '%s' "${PULP_USERNAME}:${PULP_PASSWORD}" | base64 -w0)"
+            echo "Authorization: Basic ${basic}"
+            return 0
+          fi
+          if [[ -n "${CLIENT_ID}" && -n "${CLIENT_SECRET}" ]]; then
+            local access_token
+            access_token="$(get_access_token)" || return 1
+            echo "Authorization: Bearer ${access_token}"
+            return 0
+          fi
+          echo "Error: No supported credentials in cli.toml." >&2
+          return 1
+        }
+
+        get_repo_latest_version_href() {
+          local repo_name="$1"
+          local auth_header repo_href
+          auth_header="$(get_auth_header)" || return 1
+          repo_href=$(curl --retry 3 -s -H "${auth_header}" \
+            "${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/repositories/rpm/rpm/?name=${repo_name}" \
+            | jq -r '.results[0].pulp_href')
+          if [[ -z "$repo_href" || "$repo_href" == "null" ]]; then
+            echo "Error: Could not find repository href for ${repo_name}" >&2
+            return 1
+          fi
+          curl --retry 3 -s -H "${auth_header}" "${PULP_BASE_URL}${repo_href}" | jq -r '.latest_version_href'
+        }
+
+        # Returns 0 if package exists in repo with matching sha256, 1 on error, 2 not found, 3 digest mismatch
+        check_rpm_in_pulp() {
+          local repo_name="$1" name="$2" epoch="$3" version="$4" release="$5" arch="$6" expected_sha="$7"
+          local endpoint="packages"
+          local query_arch="${arch}"
+          if [[ "${arch}" == "source" ]]; then
+            query_arch="src"
+          fi
+          local repo_version_href
+          repo_version_href="$(get_repo_latest_version_href "${repo_name}")" || return 1
+          local enc_repo_version enc_name enc_epoch enc_version enc_release enc_arch query_url
+          enc_repo_version="$(jq -rn --arg x "${repo_version_href}" '$x|@uri')"
+          enc_name="$(jq -rn --arg x "${name}" '$x|@uri')"
+          enc_epoch="$(jq -rn --arg x "${epoch}" '$x|@uri')"
+          enc_version="$(jq -rn --arg x "${version}" '$x|@uri')"
+          enc_release="$(jq -rn --arg x "${release}" '$x|@uri')"
+          enc_arch="$(jq -rn --arg x "${query_arch}" '$x|@uri')"
+          query_url="${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/content/rpm/${endpoint}/"
+          query_url+="?repository_version=${enc_repo_version}"
+          query_url+="&name=${enc_name}&epoch=${enc_epoch}"
+          query_url+="&version=${enc_version}&release=${enc_release}&arch=${enc_arch}"
+          local auth_header response http_code body count
+          auth_header="$(get_auth_header)" || return 1
+          response="$(curl --retry 3 -sS -w "\n%{http_code}" -H "${auth_header}" "${query_url}")" || return 1
+          http_code="$(echo "${response}" | tail -n1)"
+          body="$(echo "${response}" | sed '$d')"
+          if [[ "${http_code}" != "200" ]]; then
+            echo "Error: Pulp API request failed (HTTP ${http_code})." >&2
+            echo "URL: ${query_url}" >&2
+            echo "Response (first 200 chars): $(printf '%s' "${body}" | head -c 200)" >&2
+            return 1
+          fi
+          if ! jq -e '(.count | type) == "number"' <<< "${body}" >/dev/null 2>&1; then
+            echo "Error: Pulp API returned unexpected JSON (missing or invalid .count)." >&2
+            echo "URL: ${query_url}" >&2
+            echo "Response (first 200 chars): $(printf '%s' "${body}" | head -c 200)" >&2
+            return 1
+          fi
+          count="$(jq -r '.count' <<< "${body}")"
+          if [[ "${count}" -eq 0 ]]; then
+            return 2
+          fi
+          local content_hrefs chref content_json artifact_href artifact_json server_sha
+          mapfile -t content_hrefs < <(jq -r '.results[].pulp_href' <<< "${body}" | sed '/^null$/d')
+          for chref in "${content_hrefs[@]}"; do
+            content_json="$(curl --retry 3 -s -H "${auth_header}" "${PULP_BASE_URL}${chref}")"
+            artifact_href="$(jq -r '.artifact // .artifacts[0] // empty' <<< "${content_json}")"
+            [[ -z "${artifact_href}" || "${artifact_href}" == "null" ]] && continue
+            artifact_json="$(curl --retry 3 -s -H "${auth_header}" "${PULP_BASE_URL}${artifact_href}")"
+            server_sha="$(jq -r '.sha256 // empty' <<< "${artifact_json}")"
+            if [[ -n "${server_sha}" && "${server_sha}" == "${expected_sha}" ]]; then
+              return 0
+            fi
+          done
+          return 3
+        }
+
+        # Verify RPM in Pulp with retries on "not found" (Pulp may still be applying modify tasks).
+        verify_rpm_with_retry() {
+          local max_attempts=3
+          local delay_secs=15
+          local attempt=1
+          local rc
+          while [[ ${attempt} -le ${max_attempts} ]]; do
+            set +e
+            check_rpm_in_pulp "$@"
+            rc=$?
+            set -e
+            if [[ ${rc} -eq 0 || ${rc} -eq 3 ]]; then
+              return ${rc}
+            fi
+            if [[ ${rc} -eq 2 && ${attempt} -lt ${max_attempts} ]]; then
+              echo "RPM not found (attempt ${attempt}/${max_attempts}), waiting ${delay_secs}s for Pulp modify..."
+              sleep "${delay_secs}"
+              (( attempt++ )) || true
+            else
+              return ${rc}
+            fi
+          done
+          return 2
+        }
+
+        RESULTS_FILE="${DATA_DIR}/${RESULTS_DIR_PATH}/push-rpms-to-pulp-results.json"
+        if [[ ! -f "${RESULTS_FILE}" ]]; then
+          echo "Error: Results file not found: ${RESULTS_FILE}" >&2
+          exit 1
+        fi
+
+        rpmfiles_json="$(jq -c '.rpmfiles // []' "${RESULTS_FILE}")"
+        count="$(jq -r 'length' <<< "${rpmfiles_json}")"
+        if [[ "${count}" -eq 0 ]]; then
+          echo "No rpmfiles to verify; skipping."
+          exit 0
+        fi
+
+        echo "Verifying ${count} rpmfile(s) in Pulp..."
+        failures=0
+        idx=0
+        while [[ ${idx} -lt ${count} ]]; do
+          entry="$(jq -c ".[${idx}]" <<< "${rpmfiles_json}")"
+          rpmname="$(jq -r '.rpmname // ""' <<< "${entry}")"
+          arch="$(jq -r '.arch // ""' <<< "${entry}")"
+          pulprepo="$(jq -r '.pulprepo // ""' <<< "${entry}")"
+          epoch="$(jq -r '.epoch // "0"' <<< "${entry}")"
+          version="$(jq -r '.version // ""' <<< "${entry}")"
+          release="$(jq -r '.release // ""' <<< "${entry}")"
+          sha256="$(jq -r '.sha256 // ""' <<< "${entry}")"
+          repo_name="${pulprepo##*/}"
+          if [[ -z "${repo_name}" ]]; then
+            echo "Error: Could not derive repo name from pulprepo: ${pulprepo}" >&2
+            (( failures++ )) || true
+            (( idx++ )) || true
+            continue
+          fi
+          set +e
+          verify_rpm_with_retry "${repo_name}" "${rpmname}" "${epoch}" "${version}" "${release}" "${arch}" "${sha256}"
+          rc=$?
+          set -e
+          if [[ ${rc} -eq 0 ]]; then
+            echo "OK ${rpmname} in ${pulprepo}"
+          elif [[ ${rc} -eq 2 ]]; then
+            echo "Error: RPM not found in Pulp: ${rpmname} (${pulprepo})" >&2
+            (( failures++ )) || true
+          elif [[ ${rc} -eq 3 ]]; then
+            echo "Error: RPM digest mismatch in Pulp: ${rpmname} (${pulprepo})" >&2
+            (( failures++ )) || true
+          else
+            echo "Error: Failed to verify ${rpmname} in ${pulprepo} (rc=${rc})" >&2
+            (( failures++ )) || true
+          fi
+          (( idx++ )) || true
+        done
+
+        if [[ ${failures} -gt 0 ]]; then
+          echo "Verify failed: ${failures} rpmfile(s) missing or digest mismatch in Pulp." >&2
+          exit 1
+        fi
+        echo "All ${count} rpmfile(s) verified in Pulp."
+        exit 0
