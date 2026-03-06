@@ -24,8 +24,9 @@ spec:
     - name: DEFAULT_ARCHITECTURES
       type: string
       description: >-
-        Comma-delimited list of default architectures to use for noarch RPMs when
-        no arch-specific RPMs are found
+        Comma-delimited list of arch repos. Noarch RPMs are pushed to each of these repos.
+        When no arch-specific RPMs are found (e.g. only src+noarch), this list is also used
+        so the upload loop runs
       default: "x86_64,aarch64,s390x,ppc64le"
     - name: resultsDirPath
       description: Path to the results directory in the data workspace
@@ -305,7 +306,7 @@ spec:
           esac
         }
 
-        # Function to add content to a repository via API
+        # Function to add content to a repository via API.
         add_content_to_repo() {
           local repo_name="$1"
           local hrefs_json="$2"
@@ -337,14 +338,12 @@ spec:
 
           # Add content to repository
           echo "Calling API: POST ${PULP_BASE_URL}${repo_href}modify/"
-          {
-            set +x
-            curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
-              -H "${auth_header}" \
-              -H "Content-Type: application/json" \
-              -d "{\"add_content_units\": $add_content_units}"
-            set -x
-          }
+          set +x
+          curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
+            -H "${auth_header}" \
+            -H "Content-Type: application/json" \
+            -d "{\"add_content_units\": $add_content_units}"
+          set -x
         }
 
         # Function to upload an RPM to Pulp with retries
@@ -712,18 +711,39 @@ spec:
           fi
         done
 
-        # If we have noarch RPMs but no architectures, use default architectures from parameter
-        if [ ${#noarch_rpms[@]} -gt 0 ] && [ ${#ARCHES[@]} -eq 0 ]; then
-          echo "⚠️  Found noarch RPMs but no architecture-specific RPMs."
-          echo "   Using default architectures from parameter: ${DEFAULT_ARCHITECTURES}"
-          echo "   Available noarch RPMs: ${noarch_rpms[*]}"
+        # Parse default architectures once for reuse; skip empty entries (e.g. trailing comma)
+        DEFAULT_ARCHES=()
+        IFS=',' read -ra _raw_arches <<< "${DEFAULT_ARCHITECTURES}"
+        for x in "${_raw_arches[@]}"; do
+          x=$(echo "$x" | xargs)
+          [[ -n "$x" ]] && DEFAULT_ARCHES+=("$x")
+        done
 
-          # Parse comma-delimited default architectures into array
-          IFS=',' read -ra DEFAULT_ARCHES <<< "${DEFAULT_ARCHITECTURES}"
-          for i in "${!DEFAULT_ARCHES[@]}"; do
-            DEFAULT_ARCHES[i]=$(echo "${DEFAULT_ARCHES[i]}" | xargs)
-          done
+        # When there are no architecture-specific RPMs but we have noarch RPMs, use default
+        # architectures so the upload loop runs and noarch gets pushed to each arch repo.
+        # Do not run this for src-only artifacts (no noarch), to avoid requiring arch repos to exist.
+        if [ ${#ARCHES[@]} -eq 0 ] && [ ${#noarch_rpms[@]} -gt 0 ]; then
+          echo "No architecture-specific RPMs found; using default architectures: ${DEFAULT_ARCHITECTURES}"
+          echo "   Noarch RPMs to push: ${noarch_rpms[*]}"
           ARCHES=("${DEFAULT_ARCHES[@]}")
+        fi
+
+        # When we have noarch RPMs, ensure we iterate over all default arch repos so noarch
+        # is pushed to each (filter may have set targetRepos to all default arches).
+        if [ ${#noarch_rpms[@]} -gt 0 ]; then
+          for def_arch in "${DEFAULT_ARCHES[@]}"; do
+            if [[ ! " ${ARCHES[*]} " == *" ${def_arch} "* ]]; then
+              ARCHES+=("${def_arch}")
+              echo "Adding default arch for noarch: ${def_arch}"
+            fi
+          done
+        fi
+
+        # When snapshot has rpmsToPublish, only process arch repos that are targeted (avoids
+        # failing on missing repos we would not upload to).
+        if [[ "${RPM_FILTER_ENABLED}" == "true" ]]; then
+          mapfile -t ARCHES < <(echo "${RPM_REPO_MAP}" | jq -r 'to_entries[].value[]? | select(. != "source")' | sort -u)
+          echo "Filter enabled; processing only targeted arch repos: ${ARCHES[*]}"
         fi
 
         # Map to the specific arch: *.x86_64.rpm -> x86_64 repo
@@ -733,17 +753,6 @@ spec:
         # Upload files organized by architecture
         for arch in "${ARCHES[@]}"; do
           echo "Processing architecture: $arch"
-
-          REPO_EXISTS=$(pulp  --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
-            rpm repository list --field name | jq -r ".[] | \
-            select(.name == \"${arch}\") | .name")
-
-          if [[ "$REPO_EXISTS" == "${arch}" ]]; then
-              echo "Repository '${arch}' exists"
-          else
-              echo "Repository '${arch}' does not exist."
-              exit 1
-          fi
 
           # Collect hrefs for bulk add
           HREFS_JSON="[]"
