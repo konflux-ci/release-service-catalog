@@ -225,6 +225,22 @@ spec:
         configMapJson=$(kubectl get "cm/${config_map_name:?}" -ojson)
         SIG_KEY_NAMES=$(jq -er "$jqquery" <<< "${configMapJson}")
 
+        # Resolve UMB topics from configMap: use batch topics if SIGNER_TYPE=batch, else single
+        SIGNER_TYPE=$(jq -r '.data.SIGNER_TYPE // "single"' <<< "${configMapJson}")
+        if [ "${SIGNER_TYPE}" = "batch" ]; then
+          umb_listen_topic=$(jq -er '.data.UMB_BATCH_LISTEN_TOPIC // .data.UMB_LISTEN_TOPIC' <<< "${configMapJson}")
+          umb_publish_topic=$(jq -er '.data.UMB_BATCH_PUBLISH_TOPIC // .data.UMB_PUBLISH_TOPIC' <<< "${configMapJson}")
+        else
+          umb_listen_topic=$(jq -er '.data.UMB_LISTEN_TOPIC' <<< "${configMapJson}")
+          umb_publish_topic=$(jq -er '.data.UMB_PUBLISH_TOPIC' <<< "${configMapJson}")
+        fi
+
+        signing_pyxis_url=$(jq -er '.data.PYXIS_URL' <<< "${configMapJson}")
+        signing_pyxis_ssl_secret=$(jq -er '.data.PYXIS_SSL_CERT_SECRET_NAME' <<< "${configMapJson}")
+        signing_umb_client=$(jq -er '.data.UMB_CLIENT_NAME' <<< "${configMapJson}")
+        signing_umb_url=$(jq -er '.data.UMB_URL' <<< "${configMapJson}")
+        signing_umb_ssl_secret=$(jq -er '.data.UMB_SSL_CERT_SECRET_NAME' <<< "${configMapJson}")
+
         requestType=$(jq -r '.requestType // "internal-request"' "${DATA_FILE}")
         if [ "${requestType}" == "internal-pipelinerun" ] ; then
           RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
@@ -246,7 +262,6 @@ spec:
 
         declare -a to_sign_references=()
         declare -a to_sign_digests=()
-        declare -a to_sign_repos=()
 
         component_count=$(jq '.components | length' "$RESULTS_FILE")
         for ((i = 0; i < component_count; i++)); do
@@ -261,25 +276,19 @@ spec:
           for ((j = 0; j < digest_count; j++)); do
             manifest_digest=$(jq -r ".components[$i].image_digests[$j]" "$RESULTS_FILE")
 
-            rh_registry_repo=$(jq -r ".components[$i][\"rh-registry-repo\"]" "$RESULTS_FILE")
-            repository="${rh_registry_repo#*/}"
-
             to_sign_references+=("${reference_image}")
             to_sign_digests+=("${manifest_digest}")
-            to_sign_repos+=("${repository}")
 
           done
         done
 
         references_batch=""
         digests_batch=""
-        repos_batch=""
 
         # Process to sign arrays in batches
         for i in "${!to_sign_references[@]}"; do
           new_references_batch="${references_batch}${to_sign_references[$i]} "
           new_digests_batch="${digests_batch}${to_sign_digests[$i]} "
-          new_repos_batch="${repos_batch}${to_sign_repos[$i]} "
 
           # if batches are too big, send the request
           if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
@@ -295,9 +304,15 @@ spec:
             ${requestType} --pipeline "${request}" \
               -p references="${references_batch}" \
               -p manifest_digests="${digests_batch}" \
-              -p repositories="${repos_batch}" \
               -p requester="$(params.requester)" \
-              -p config_map_name="${config_map_name}" \
+              -p umb_listen_topic="${umb_listen_topic}" \
+              -p umb_publish_topic="${umb_publish_topic}" \
+              -p pyxis_url="${signing_pyxis_url}" \
+              -p umb_url="${signing_umb_url}" \
+              -p umb_client_name="${signing_umb_client}" \
+              -p pyxis_ssl_cert_secret_name="${signing_pyxis_ssl_secret}" \
+              -p umb_ssl_cert_secret_name="${signing_umb_ssl_secret}" \
+              -p signer_type="${SIGNER_TYPE}" \
               -p signing_key_names="${SIG_KEY_NAMES}" \
               -p taskGitUrl="$(params.taskGitUrl)" \
               -p taskGitRevision="$(params.taskGitRevision)" \
@@ -317,12 +332,10 @@ spec:
             # next batches consist of values which didn't fit in the previous batches
             references_batch="${to_sign_references[$i]} "
             digests_batch="${to_sign_digests[$i]} "
-            repos_batch="${to_sign_repos[$i]} "
           else
             # if batches are still small enough, add the values to the batches
             references_batch="${new_references_batch}"
             digests_batch="${new_digests_batch}"
-            repos_batch="${new_repos_batch}"
           fi
         done
 
@@ -340,8 +353,14 @@ spec:
             --pipeline "${request}" \
             -p references="${references_batch[*]}" \
             -p manifest_digests="${digests_batch[*]}" \
-            -p repositories="${repos_batch[*]}" \
-            -p config_map_name="${config_map_name}" \
+            -p umb_listen_topic="${umb_listen_topic}" \
+            -p umb_publish_topic="${umb_publish_topic}" \
+            -p pyxis_url="${signing_pyxis_url}" \
+            -p umb_url="${signing_umb_url}" \
+            -p umb_client_name="${signing_umb_client}" \
+            -p pyxis_ssl_cert_secret_name="${signing_pyxis_ssl_secret}" \
+            -p umb_ssl_cert_secret_name="${signing_umb_ssl_secret}" \
+            -p signer_type="${SIGNER_TYPE}" \
             -p requester="$(params.requester)" \
             -p signing_key_names="${SIG_KEY_NAMES}" \
             -p taskGitUrl="$(params.taskGitUrl)" \

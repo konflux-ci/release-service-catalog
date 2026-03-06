@@ -55,7 +55,7 @@ scripts/check-vault-encrypted.sh path/to/vault/file.yaml
 
 ### Directory Organization
 - `tasks/managed/` - Production release tasks (60+ tasks: signing, publishing, advisory management)
-- `tasks/collectors/` - Data collection and aggregation tasks  
+- `tasks/collectors/` - Data collection and aggregation tasks
 - `tasks/internal/` - Internal workflow tasks
 - `pipelines/managed/` - Production release pipelines
 - `pipelines/run-collectors/` - Data collection pipelines
@@ -92,18 +92,12 @@ scripts/check-vault-encrypted.sh path/to/vault/file.yaml
 - Integration tests for task changes
 - Both Trusted Artifacts and PVC-based workflow support
 
-### README Generation (DO NOT manually edit generated READMEs)
-Task and pipeline READMEs are auto-generated from YAML metadata. CI validates them.
-
+### Task and pipeline README generation
+README.md under `tasks/` and `pipelines/` are generated from the Tekton YAML. Do not edit them by hand. Update `spec.description` and `spec.params` in the YAML, then run:
 ```bash
-# Regenerate README after modifying a task or pipeline
-.github/scripts/readme_generator.sh tasks/managed/my-task/
-.github/scripts/readme_generator.sh pipelines/managed/my-pipeline/
+./.github/scripts/readme_generator.sh <directory>
 ```
-
-**Important:** Do NOT manually write or edit README.md files in task/pipeline directories.
-The generator extracts descriptions and parameters from the YAML spec. If CI fails
-with README validation errors, run the generator on the affected directories.
+Example: `./.github/scripts/readme_generator.sh pipelines/internal/simple-signing-pipeline/`
 
 ## Security Critical Points
 - Never commit unencrypted vault files
@@ -115,7 +109,7 @@ with README validation errors, run the generator on the affected directories.
 Run this validation sequence:
 ```bash
 yamllint .
-gitlint --commits origin/development..HEAD  
+gitlint --commits origin/development..HEAD
 pre-commit run --all-files
 check-jsonschema --check-metaschema schema/dataKeys.json
 ```

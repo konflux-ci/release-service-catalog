@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-sign-index-image-multicomponent
+  name: test-sign-index-image-single-signer
 spec:
   description: |
-    Test creating a internal request to sign an image.
-    In this scenario there will be multiple index images to sign.
+    Same as test-sign-index-image but uses signing-config-map-single (SIGNER_TYPE=single)
+    to keep the legacy single-signer path covered now that default tests use batch signing.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -58,7 +58,7 @@ spec:
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "sign": {
-                  "configMapName": "signing-config-map"
+                  "configMapName": "signing-config-map-single"
                 }
               }
               EOF
@@ -92,16 +92,10 @@ spec:
               {
                   "components": [
                       {
-                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.15",
+                          "target_index": "quay.io/testrepo/testimage:tag",
                           "image_digests": [
                               "sha256:6f9a420f660e73a",
                               "sha256:6f9a420f660e73b"
-                          ]
-                      },
-                      {
-                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.16",
-                          "image_digests": [
-                              "sha256:6f9a420f660e73c"
                           ]
                       }
                   ]
@@ -165,26 +159,25 @@ spec:
                 echo "incorrect number of internalRequests created. Expected 1"
                 exit 1
               fi
-
               expected_references=$(cat << EOF
-              registry.redhat.io/redhat/redhat-operator-index:v4.15
-              registry.redhat.io/redhat/redhat-operator-index:v4.15
-              registry.redhat.io/redhat/redhat-operator-index:v4.16
+              quay.io/testrepo/testimage:tag
+              quay.io/testrepo/testimage:tag
               EOF
               )
+
               for internalRequest in ${internalRequests};
               do
                 params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
 
-                if [[ "$(jq -r '.references' <<< "${params}")" \
-                    != $(echo "${expected_references}" | tr '\n' ' ') ]]; then
+                if [ "$(jq -r '.references' <<< "${params}")" != \
+                     "$(echo "$expected_references" | tr '\n' ' ')" ]; then
                   echo "reference image does not match"
                   exit 1
                 fi
 
                 if [ "$(jq -r '.pyxis_url' <<< "${params}")" != "https://pyxis.stage.engineering.redhat.com" ]; then
                   echo "pyxis_url does not match"; exit 1; fi
-                if [ "$(jq -r '.signer_type' <<< "${params}")" != "batch" ]; then
+                if [ "$(jq -r '.signer_type' <<< "${params}")" != "single" ]; then
                   echo "signer_type does not match"; exit 1; fi
 
                 if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
