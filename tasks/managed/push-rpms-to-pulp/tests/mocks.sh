@@ -61,8 +61,12 @@ function curl() {
             echo '{"results": [{"pulp_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/default-uuid/"}]}'
         fi
     elif [[ "$args" == *"modify"* ]]; then
-        # Repository content modify API call
+        # Repository content modify API call (script expects body then \n%{http_code})
         echo '{"task": "/api/pulp/mock/api/v3/tasks/mock-task-id/"}'
+        echo '202'
+    elif [[ "$args" == *"/tasks/"* ]] && [[ "$args" != *"modify"* ]]; then
+        # Task poll (GET) - return completed so wait_for_pulp_task exits
+        echo '{"state": "completed"}'
     else
         # Fall back to real curl for other calls
         command curl "$@"
@@ -242,6 +246,16 @@ function oras() {
             # mimic having logs from each rpm build
             mkdir -p $output_file_dir/logs
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.noarch.rpm.log
+        elif [[ "$args" == *"quay.io/test/x86andnoarch"* ]]; then
+            # x86_64 + noarch only (no other arch binaries); noarch must be pushed to all default arch repos
+            echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
+            touch $output_file_dir/hello-2.12.1-6.fc44.x86_64.rpm
+            touch $output_file_dir/hello-docs-2.12.1-6.fc44.noarch.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.src.rpm
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
+            touch $output_file_dir/logs/hello-docs-2.12.1-6.fc44.noarch.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
         else
             echo Error: Unexpected call
             exit 1

@@ -306,7 +306,35 @@ spec:
           esac
         }
 
-        # Function to add content to a repository via API.
+        # Poll Pulp task until completed/failed. $1 = task URL. Returns 0 if completed, 1 on failure/timeout.
+        wait_for_pulp_task() {
+          local task_url="$1"
+          local auth_header="$2"
+          local max_wait_secs="${3:-300}"
+          local poll_interval_secs="${4:-5}"
+          local elapsed=0
+          local state response
+          while [[ ${elapsed} -lt ${max_wait_secs} ]]; do
+            response="$(curl --retry 3 -s -H "${auth_header}" "${task_url}")"
+            state="$(jq -r '.state // empty' <<< "${response}")"
+            if [[ "${state}" == "completed" ]]; then
+              echo "Pulp task completed: ${task_url}"
+              return 0
+            fi
+            if [[ "${state}" == "failed" ]]; then
+              echo "Error: Pulp task failed: ${task_url}" >&2
+              jq -r '.error // .description // "No details"' <<< "${response}" >&2
+              return 1
+            fi
+            echo "Waiting for Pulp task (state=${state}, ${elapsed}s elapsed)..."
+            sleep "${poll_interval_secs}"
+            (( elapsed += poll_interval_secs )) || true
+          done
+          echo "Error: Timeout waiting for Pulp task: ${task_url}" >&2
+          return 1
+        }
+
+        # Function to add content to a repository via API; waits for modify task to complete.
         add_content_to_repo() {
           local repo_name="$1"
           local hrefs_json="$2"
@@ -336,14 +364,42 @@ spec:
           local add_content_units
           add_content_units=$(echo "$hrefs_json" | jq '[.[].pulp_href]')
 
-          # Add content to repository
+          # Add content to repository (modify returns 202 with task href)
           echo "Calling API: POST ${PULP_BASE_URL}${repo_href}modify/"
-          set +x
-          curl --retry 3 -s -X POST "${PULP_BASE_URL}${repo_href}modify/" \
-            -H "${auth_header}" \
-            -H "Content-Type: application/json" \
-            -d "{\"add_content_units\": $add_content_units}"
-          set -x
+          local modify_response
+          modify_response=$(
+            set +x
+            curl --retry 3 -s -w "\n%{http_code}" -X POST "${PULP_BASE_URL}${repo_href}modify/" \
+              -H "${auth_header}" \
+              -H "Content-Type: application/json" \
+              -d "{\"add_content_units\": $add_content_units}"
+            set -x
+          )
+          local http_code
+          http_code="$(echo "${modify_response}" | tail -n1)"
+          local body
+          body="$(echo "${modify_response}" | sed '$d')"
+          if [[ "${http_code}" != "202" && "${http_code}" != "200" ]]; then
+            echo "Error: modify returned HTTP ${http_code}" >&2
+            echo "${body}" >&2
+            return 1
+          fi
+          local task_href task_url
+          task_href="$(jq -r '.task // empty' <<< "${body}")"
+          if [[ -n "${task_href}" && "${task_href}" != "null" ]]; then
+            if [[ "${task_href}" == http://* || "${task_href}" == https://* ]]; then
+              task_url="${task_href}"
+            else
+              task_url="${PULP_BASE_URL}${task_href}"
+            fi
+            set +x
+            wait_for_pulp_task "${task_url}" "${auth_header}" 300 5
+            local wait_rc=$?
+            set -x
+            if [[ ${wait_rc} -ne 0 ]]; then
+              return 1
+            fi
+          fi
         }
 
         # Function to upload an RPM to Pulp with retries
