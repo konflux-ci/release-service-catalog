@@ -173,34 +173,58 @@ spec:
         printf '%s\n' "header = \"PRIVATE-TOKEN: ${access_token}\"" > "${curl_config}"
 
         response_file="$(mktemp)"
-        mr_search_url="${gitlab_api_url}/projects/${project_path_encoded}/merge_requests"
-        mr_search_url="${mr_search_url}?state=all&search=${search_encoded}"
-        mr_search_url="${mr_search_url}&order_by=created_at&sort=desc&per_page=50"
-        http_code="$(
-          curl --retry "$(params.apiRetryCount)" --retry-all-errors \
-            --connect-timeout "$(params.apiConnectTimeout)" --max-time "$(params.apiMaxTime)" \
-            -sS "${ca_bundle_args[@]}" --config "${curl_config}" \
-            -o "${response_file}" -w "%{http_code}" \
-            "${mr_search_url}" \
-            2>/dev/null || echo "000"
-        )"
+        mr_base_url="${gitlab_api_url}/projects/${project_path_encoded}/merge_requests"
+        mr_base_url="${mr_base_url}?state=all&search=${search_encoded}"
+        mr_base_url="${mr_base_url}&order_by=created_at&sort=desc&per_page=100"
 
-        if [ "${http_code}" != "200" ]; then
-          fail "GitLab API query failed for ${project_path} (HTTP ${http_code})"
-        fi
+        # Paginate through all results — per_page=100 (GitLab max) reduces round-trips,
+        # but a project with many "Konflux release" MRs from other component groups could
+        # push the relevant MR beyond the first page.
+        latest_mr=""
+        page=1
+        max_pages=20
+        while [ "${page}" -le "${max_pages}" ]; do
+          mr_search_url="${mr_base_url}&page=${page}"
+          http_code="$(
+            curl --retry "$(params.apiRetryCount)" --retry-all-errors \
+              --connect-timeout "$(params.apiConnectTimeout)" --max-time "$(params.apiMaxTime)" \
+              -sS "${ca_bundle_args[@]}" --config "${curl_config}" \
+              -o "${response_file}" -w "%{http_code}" \
+              "${mr_search_url}" \
+              2>/dev/null || echo "000"
+          )"
 
-        # Find the latest MR matching this componentGroup and fileUpdates title pattern.
-        # process-file-updates-task creates titles like:
-        #   [Konflux release] <componentGroup>: fileUpdates changes <branch>
-        latest_mr="$(
-          jq -c --arg cg "${component_group}" '
-            map(
-              select((.title // "") | contains($cg))
-              | select((.title // "") | contains("fileUpdates changes"))
-            )
-            | .[0] // empty
-          ' "${response_file}" 2>/dev/null || true
-        )"
+          if [ "${http_code}" != "200" ]; then
+            fail "GitLab API query failed for ${project_path} (HTTP ${http_code})"
+          fi
+
+          page_count="$(jq '. | length' "${response_file}" 2>/dev/null || echo "0")"
+          if [ "${page_count}" -eq 0 ]; then
+            break
+          fi
+
+          # Find the latest MR matching this componentGroup and fileUpdates title pattern.
+          # process-file-updates-task creates titles like:
+          #   [Konflux release] <componentGroup>: fileUpdates changes <branch>
+          # Use startswith("[Konflux release] " + cg + ":") for an exact componentGroup match —
+          # contains() would be a substring match and could match a different componentGroup
+          # that has this one as a prefix (e.g. "foo" matching "foobar").
+          latest_mr="$(
+            jq -c --arg cg "${component_group}" '
+              map(
+                select((.title // "") | startswith("[Konflux release] " + $cg + ":"))
+                | select((.title // "") | contains("fileUpdates changes"))
+              )
+              | .[0] // empty
+            ' "${response_file}" 2>/dev/null || true
+          )"
+
+          if [ -n "${latest_mr}" ]; then
+            break
+          fi
+
+          page=$((page + 1))
+        done
 
         if [ -z "${latest_mr}" ]; then
           echo "No matching fileUpdates MR found for componentGroup=${component_group}"

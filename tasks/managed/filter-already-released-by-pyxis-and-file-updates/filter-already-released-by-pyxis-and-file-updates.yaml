@@ -324,7 +324,6 @@ spec:
         # to consider a component "fully released" for idempotency.
         FILE_UPDATES_COMPLETE="true"
         FILE_UPDATES_REQUIRED="false"
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
         COMPONENT_GROUP=$(jq -r '.componentGroup // .application // ""' "${SNAPSHOT_FILE}")
 
         if [ -n "$(params.dataPath)" ]; then
@@ -556,7 +555,10 @@ spec:
                   | jq -r '.manifests[]?.digest // empty' 2>/dev/null || echo "")
                 if [ -n "${ARCH_DIGESTS}" ]; then
                   echo "Manifest list detected — checking per-arch digests in Pyxis..."
-                  FOUND_ARCH="false"
+                  # ALL arches must have rpm_manifest.rpms — one arch having RPM data while
+                  # another does not means push-rpm-data-to-pyxis only partially completed
+                  # and the pipeline must be re-run.
+                  ALL_ARCHES_COMPLETE="true"
                   while IFS= read -r ARCH_D; do
                     [ -z "${ARCH_D}" ] && continue
                     ARCH_FILTER=$(printf '%s' "image_id==${ARCH_D}" | jq -sRr @uri)
@@ -570,18 +572,26 @@ spec:
                           "${PYXIS_RESPONSE}" 2>/dev/null || echo "false")
                         if [ "${HAS_RPM_DATA}" = "true" ]; then
                           echo "Arch ${ARCH_D}: found in Pyxis with rpm_manifest.rpms"
-                          FOUND_ARCH="true"
-                          break
                         else
                           echo "Arch ${ARCH_D}: found but incomplete: HAS_RPM_DATA=${HAS_RPM_DATA}"
+                          ALL_ARCHES_COMPLETE="false"
+                          break
                         fi
+                      else
+                        echo "Arch ${ARCH_D}: not found in Pyxis"
+                        ALL_ARCHES_COMPLETE="false"
+                        break
                       fi
+                    else
+                      echo "Arch ${ARCH_D}: Pyxis query failed (HTTP ${ARCH_HTTP})"
+                      ALL_ARCHES_COMPLETE="false"
+                      break
                     fi
                   done <<< "${ARCH_DIGESTS}"
-                  if [ "${FOUND_ARCH}" = "true" ]; then
+                  if [ "${ALL_ARCHES_COMPLETE}" = "true" ]; then
                     PYXIS_COMPLETE="true"
                   else
-                    echo "No arch images found in Pyxis with rpm_manifest.rpms for ${COMPONENT_NAME}"
+                    echo "Not all arch images found in Pyxis with rpm_manifest.rpms for ${COMPONENT_NAME}"
                     PYXIS_COMPLETE="false"
                   fi
                 else
@@ -611,29 +621,14 @@ spec:
               echo "  PYXIS_COMPLETE=${PYXIS_COMPLETE}"
             fi
 
-            ALL_CHECKS_PASSED="true"
-            if [ "${PYXIS_COMPLETE}" != "true" ]; then
-              ALL_CHECKS_PASSED="false"
-              echo "  → Check failed: PYXIS_COMPLETE=${PYXIS_COMPLETE}"
-            fi
-            if [ "${FILE_UPDATES_REQUIRED}" = "true" ] && [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
-              ALL_CHECKS_PASSED="false"
-              echo "  → Check failed: FILE_UPDATES_REQUIRED=${FILE_UPDATES_REQUIRED}," \
-                "FILE_UPDATES_COMPLETE=${FILE_UPDATES_COMPLETE}"
-            fi
-            
-            echo "  Decision: ALL_CHECKS_PASSED=${ALL_CHECKS_PASSED}"
+            echo "  Decision: PYXIS_COMPLETE=${PYXIS_COMPLETE}"
 
-            if [ "${ALL_CHECKS_PASSED}" == "true" ]; then
-                echo "Component ${COMPONENT_NAME}: FILTERED (Pyxis + fileUpdates complete)"
+            if [ "${PYXIS_COMPLETE}" == "true" ]; then
+                echo "Component ${COMPONENT_NAME}: FILTERED (Pyxis complete)"
                 FILTERED_COUNT=$((FILTERED_COUNT + 1))
                 echo ""
             else
-                if [ "${FILE_UPDATES_REQUIRED}" = "true" ] && [ "${FILE_UPDATES_COMPLETE}" != "true" ]; then
-                  keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (fileUpdates incomplete)"
-                else
-                  keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (Pyxis metadata incomplete)"
-                fi
+                keep_component "${COMPONENT}" "Component ${COMPONENT_NAME}: KEPT (Pyxis metadata incomplete)"
             fi
         done
 
