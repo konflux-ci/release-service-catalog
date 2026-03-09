@@ -10,8 +10,9 @@ spec:
   description: |-
     Syncs the promoted build into the integration snapshot in releng-integration-tenant.
     After promote-koji-draft-build, gets the dev namespace Snapshot metadata and components,
-    maps package-collections to application names (replace "." with "-"), and creates or
-    updates the Snapshot in the integration tenant with the latest RPM OCI.
+    maps package-collections to application names (replace "." with "-"), and creates a new
+    Snapshot in the integration tenant (snapshot is immutable; name is <app>-<6 char commit_sha>-<pipelinerunstarttime>, max 63 chars).
+    Merges components from the previous latest snapshot so other packages' OCIs are kept.
   params:
     - name: snapshotPath
       type: string
@@ -228,7 +229,7 @@ spec:
             matched=
             while IFS= read -r rc; do
                 [ -z "$rc" ] && continue
-                if [ "$component_name" = "$rc" ] || [[ "$component_name" == *"-${rc}" ]]; then
+                if [ "$component_name" = "$rc" ] || [[ "$component_name" == *"-${rc}" ]] || [[ "$component_name" == *"-${rc#*-}" ]]; then
                     matched=1
                     break
                 fi
@@ -282,6 +283,10 @@ spec:
         DEV_STATUS=$(jq -c '.status // {}' /tmp/dev-snapshot.json)
         DEV_SPEC_COMPONENTS=$(jq -c '.spec.components // .components' "${SNAPSHOT_SPEC_FILE}")
         DEV_SPEC_APPLICATION=$(jq -r '.application' "${SNAPSHOT_SPEC_FILE}")
+        # For new snapshot name (JIRA): <app>-<6 char commit_sha>-<pipelinerunstarttime>, max 63 chars
+        COMMIT_SHA=$(jq -r '.metadata.annotations["build.appstudio.redhat.com/commit_sha"] // ""' /tmp/dev-snapshot.json)
+        PIPELINE_RUN_START_TIME=$(jq -r '.metadata.annotations["test.appstudio.openshift.io/pipelinerunstarttime"] // ""' /tmp/dev-snapshot.json)
+        COMMIT_SHA_6=$(echo -n "${COMMIT_SHA}" | head -c 6)
 
         # If no application name to process, emit warning and exit 0 (pipeline warning, not failure)
         if [ -z "$APPLICATION_NAMES" ] || [ "$APPLICATION_NAMES" = "null" ]; then
@@ -305,6 +310,17 @@ spec:
                 exit 0
             fi
 
+            # New snapshot name: <app>-<6 char commit_sha>-<pipelinerunstarttime> (JIRA), max 63 chars. Snapshot is immutable so we always create.
+            if [ -n "$COMMIT_SHA_6" ] && [ -n "$PIPELINE_RUN_START_TIME" ]; then
+                SNAPSHOT_NAME="${APP_NAME}-${COMMIT_SHA_6}-${PIPELINE_RUN_START_TIME}"
+            else
+                SNAPSHOT_NAME="${APP_NAME}"
+            fi
+            if [ ${#SNAPSHOT_NAME} -gt 63 ]; then
+                SNAPSHOT_NAME="${SNAPSHOT_NAME:0:63}"
+            fi
+            echo "Snapshot name: ${SNAPSHOT_NAME}"
+
             # Merge components: copy previous latest snapshot's components and update/add by name so other packages' OCIs are kept
             PREV_COMPONENTS='[]'
             SNAPSHOTS_JSON=$(kubectl get snapshots -n "${INTEGRATION_NAMESPACE}" -l "appstudio.openshift.io/application=${APP_NAME}" -o json 2>/dev/null || echo '{"items":[]}')
@@ -315,9 +331,9 @@ spec:
                 '($prev | map(select(.name as $n | ($dev | any(.name == $n)) | not))) + $dev')
             echo "Merged components count: $(echo "$MERGED_COMPONENTS" | jq 'length')"
 
-            # Build integration Snapshot: metadata from dev (override name and namespace), merged components, status from dev
+            # Build integration Snapshot: new name (per run), merged components, metadata and status from dev
             INTEGRATION_SNAPSHOT=$(jq -n \
-                --arg name "$APP_NAME" \
+                --arg name "$SNAPSHOT_NAME" \
                 --arg namespace "$INTEGRATION_NAMESPACE" \
                 --arg application "$APP_NAME" \
                 --argjson annotations "$DEV_ANNOTATIONS" \
@@ -355,19 +371,11 @@ spec:
                     blockOwnerDeletion: false
                 }]')
 
-            if kubectl get "snapshot/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" &>/dev/null; then
-                # Patch existing snapshot: spec.components and status
-                echo "$INTEGRATION_SNAPSHOT" | jq -c '{spec: .spec, status: .status}' | \
-                    kubectl patch "snapshot/${APP_NAME}" -n "${INTEGRATION_NAMESPACE}" --type=merge -p @-
-                echo "Updated snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}"
-                echo -n "Updated" > "$(results.integrationSnapshotStatus.path)"
-                echo -n "Updated snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}" > "$(results.integrationSnapshotMessage.path)"
-            else
-                echo "$INTEGRATION_SNAPSHOT" | kubectl apply -f -
-                echo "Created snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}"
-                echo -n "Created" > "$(results.integrationSnapshotStatus.path)"
-                echo -n "Created snapshot ${INTEGRATION_NAMESPACE}/${APP_NAME}" > "$(results.integrationSnapshotMessage.path)"
-            fi
+            # Snapshot is immutable; always create a new one (name is unique per run). No patch.
+            echo "$INTEGRATION_SNAPSHOT" | kubectl apply -f -
+            echo "Created snapshot ${INTEGRATION_NAMESPACE}/${SNAPSHOT_NAME}"
+            echo -n "Created" > "$(results.integrationSnapshotStatus.path)"
+            echo -n "Created snapshot ${INTEGRATION_NAMESPACE}/${SNAPSHOT_NAME}" > "$(results.integrationSnapshotMessage.path)"
         done <<< "$APPLICATION_NAMES"
 
         printf 'Completed "%s"\n' "$(context.task.name)"
