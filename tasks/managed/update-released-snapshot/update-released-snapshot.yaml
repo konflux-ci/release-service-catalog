@@ -305,7 +305,17 @@ spec:
                 exit 0
             fi
 
-            # Build integration Snapshot: metadata from dev (override name and namespace), spec and status from dev
+            # Merge components: copy previous latest snapshot's components and update/add by name so other packages' OCIs are kept
+            PREV_COMPONENTS='[]'
+            SNAPSHOTS_JSON=$(kubectl get snapshots -n "${INTEGRATION_NAMESPACE}" -l "appstudio.openshift.io/application=${APP_NAME}" -o json 2>/dev/null || echo '{"items":[]}')
+            if echo "$SNAPSHOTS_JSON" | jq -e '.items | length > 0' &>/dev/null; then
+                PREV_COMPONENTS=$(echo "$SNAPSHOTS_JSON" | jq -c '.items | sort_by(.metadata.creationTimestamp) | last | .spec.components // []')
+            fi
+            MERGED_COMPONENTS=$(jq -n --argjson prev "$PREV_COMPONENTS" --argjson dev "$DEV_SPEC_COMPONENTS" \
+                '($prev | map(select(.name as $n | ($dev | any(.name == $n)) | not))) + $dev')
+            echo "Merged components count: $(echo "$MERGED_COMPONENTS" | jq 'length')"
+
+            # Build integration Snapshot: metadata from dev (override name and namespace), merged components, status from dev
             INTEGRATION_SNAPSHOT=$(jq -n \
                 --arg name "$APP_NAME" \
                 --arg namespace "$INTEGRATION_NAMESPACE" \
@@ -313,7 +323,7 @@ spec:
                 --argjson annotations "$DEV_ANNOTATIONS" \
                 --argjson labels "$DEV_LABELS" \
                 --argjson status "$DEV_STATUS" \
-                --argjson components "$DEV_SPEC_COMPONENTS" \
+                --argjson components "$MERGED_COMPONENTS" \
                 '{
                     apiVersion: "appstudio.redhat.com/v1alpha1",
                     kind: "Snapshot",
