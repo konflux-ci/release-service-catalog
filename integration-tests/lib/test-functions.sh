@@ -60,6 +60,18 @@ check_env_vars() {
         fi
     done
 
+    # Kubernetes label values must be <= 63 characters.
+    # originating_tool is used as a label on every resource and as the cleanup selector.
+    # If the value is too long, truncate it here and re-export so both labeling and cleanup
+    # use the same value — silent mismatch is worse than a shorter label.
+    if [ -n "${originating_tool}" ] && [ "${#originating_tool}" -gt 63 ]; then
+        local truncated="${originating_tool:0:63}"
+        echo "⚠️  originating_tool is ${#originating_tool} chars (max 63 for a Kubernetes label)."
+        echo "   Auto-truncating: '${originating_tool}' → '${truncated}'"
+        echo "   Consider shortening the value in test.env to avoid this."
+        export originating_tool="${truncated}"
+    fi
+
     # Check for optional component2 variables (for multi-component tests)
     local optional_component2_vars=(
         "component2_name"
@@ -438,7 +450,7 @@ merge_github_pr() {
 # Function to wait for a PipelineRun to appear
 # Sets global variable: component_push_plr_name
 wait_for_plr_to_appear() {
-    local timeout=300  # 5 minutes timeout
+    local timeout="${PLR_APPEAR_TIMEOUT:-900}"  # default 15 min; under heavy parallel load PAC delivery is slower
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
@@ -458,7 +470,7 @@ wait_for_plr_to_appear() {
         sleep 5
         echo -n "."
         # get only running pipelines
-        component_push_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$SHA" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
+        component_push_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$SHA" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}') || component_push_plr_name=""
     done
     echo
     echo "✅ Found PipelineRun: ${component_push_plr_name}"
@@ -467,13 +479,15 @@ wait_for_plr_to_appear() {
 
 # Function to wait for PipelineRun to complete
 # Relies on global variables: component_push_plr_name, tenant_namespace
+# Retries up to MAX_PLR_RETRIES times (default 2) to tolerate transient build failures
+# under parallel load (node pressure, image pull blips, quota spikes).
 wait_for_plr_to_complete() {
     local timeout=1800  # 30 minutes timeout
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
     local completed=""
-    local retry_attempted="false"
+    local retries_remaining="${MAX_PLR_RETRIES:-2}"
     local taskStatus="" # taskrun status from last output
     local previousTaskStatus="" # to avoid duplicate output
 
@@ -490,8 +504,8 @@ wait_for_plr_to_complete() {
 
         sleep 5
 
-        # Check if the pipeline run is completed
-        completed=$(kubectl get pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null)
+        # Check if the pipeline run is completed (kubectl exits 1 if PipelineRun missing; avoid failing script)
+        completed=$(kubectl get pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null) || completed=""
 
         # If completed, check the status
         if [ -n "$completed" ]; then
@@ -507,13 +521,14 @@ wait_for_plr_to_complete() {
           elif [ "$completed" == "False" ]; then
             echo ""
             echo "❌ PipelineRun failed"
-            if [ "${retry_attempted}" == "false" ]; then
-                echo "Attempting retry for PR ${pr_number} in repo ${component_repo_name}..."
-                kubectl annotate components/${component_name} build.appstudio.openshift.io/request=trigger-pac-build -n "${tenant_namespace}"
+            if [ "${retries_remaining}" -gt 0 ]; then
+                echo "Retrying build (${retries_remaining} attempt(s) remaining) — waiting 60s before trigger..."
+                sleep 60
+                kubectl annotate "components/${component_name}" build.appstudio.openshift.io/request=trigger-pac-build -n "${tenant_namespace}"
+                retries_remaining=$(( retries_remaining - 1 ))
                 wait_for_plr_to_appear # component_push_plr_name is set here
-                retry_attempted="true"
             else
-                echo "Retry already attempted. Exiting."
+                echo "All retry attempts exhausted. Exiting."
                 exit 1
             fi
           fi
@@ -523,10 +538,177 @@ wait_for_plr_to_complete() {
     echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${component_push_plr_name}")"
 }
 
+# Wait for a single component to be initialized by PaC and get its PR details.
+# Sets globals: component_pr, pr_number
+# Args: $1 = component name
+wait_for_single_component_initialization() {
+    local comp_name=$1
+    local max_attempts=90
+    local attempt=1
+    local component_annotations=""
+
+    while [ $attempt -le $max_attempts ]; do
+        component_annotations=$(kubectl get component/"${comp_name}" -n "${tenant_namespace}" -ojson 2>/dev/null | \
+            jq -r --arg k "build.appstudio.openshift.io/status" '.metadata.annotations[$k] // ""' 2>/dev/null) || component_annotations=""
+
+        if [ -n "${component_annotations}" ]; then
+            component_pr=$(jq -r '.pac."merge-url" // ""' <<< "${component_annotations}")
+            if [ -n "${component_pr}" ]; then
+                echo "✅ Component ${comp_name} initialized"
+                pr_number=$(cut -f7 -d/ <<< "${component_pr}")
+                return 0
+            fi
+        fi
+        if [ $((attempt % 6)) -eq 0 ]; then
+            echo "   Still waiting for ${comp_name} (attempt ${attempt}/${max_attempts})..."
+        fi
+        attempt=$((attempt + 1))
+        sleep 10
+    done
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "DEBUG: Component initialization timeout for ${comp_name}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if ! kubectl get component/"${comp_name}" -n "${tenant_namespace}" &>/dev/null; then
+        echo "  Component does not exist in ${tenant_namespace}."
+        echo "  Check: kubectl get component -n ${tenant_namespace}"
+    else
+        echo "  Component exists. Annotation build.appstudio.openshift.io/status:"
+        local status_annot
+        status_annot=$(kubectl get component/"${comp_name}" -n "${tenant_namespace}" \
+            -o jsonpath='{.metadata.annotations.build\.appstudio\.openshift\.io/status}' 2>/dev/null)
+        if [ -z "${status_annot}" ]; then
+            echo "  (missing - PaC has not set it yet)"
+        else
+            echo "${status_annot}" | jq '.' 2>/dev/null || echo "${status_annot}"
+        fi
+        echo ""
+        echo "  Spec (repo/branch):"
+        kubectl get component/"${comp_name}" -n "${tenant_namespace}" -o json 2>/dev/null \
+            | jq -r '.spec' 2>/dev/null || \
+            kubectl get component/"${comp_name}" -n "${tenant_namespace}" -o yaml 2>/dev/null \
+            | grep -A 20 '^spec:'
+        echo ""
+        echo "  To inspect full resource:"
+        echo "    kubectl get component ${comp_name} -n ${tenant_namespace} -o yaml"
+        echo "  To check Pipelines as Code / build controller logs:"
+        echo "    kubectl logs -n openshift-pipelines -l app.kubernetes.io/name=pipelines-as-code --tail=100"
+        echo "    kubectl logs -n build-service -l app.kubernetes.io/name=build-service --tail=100"
+    fi
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    log_error "Component ${comp_name} failed to initialize after ${max_attempts} attempts"
+}
+
+# Merge a single component's GitHub PR.
+# Sets global: SHA
+# Args: $1 = PR number, $2 = repo name (org/repo)
+merge_single_component_pr() {
+    local pr_num=$1
+    local repo_name=$2
+    local commit_message="e2e test"
+    local merge_result
+    merge_result=$(curl -L -X PUT \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $GITHUB_TOKEN" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "https://api.github.com/repos/${repo_name}/pulls/${pr_num}/merge" \
+        -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" \
+        --silent --show-error --fail-with-body)
+    SHA=$(jq -r '.sha' <<< "${merge_result}")
+}
+
+# Wait for a build PipelineRun to appear for a given commit SHA.
+# Status output goes to stderr; echoes PLR name to stdout for capture.
+# Uses PLR_APPEAR_TIMEOUT (default 900s) to tolerate PAC webhook delivery delays under load.
+# Args: $1 = commit SHA
+wait_for_single_plr_to_appear() {
+    local sha=$1
+    local timeout="${PLR_APPEAR_TIMEOUT:-900}"
+    local start_time
+    start_time=$(date +%s)
+    local found_plr_name=""
+
+    echo -n "Waiting for PipelineRun for SHA ${sha}..." >&2
+    while [ -z "$found_plr_name" ]; do
+        if [ $(($(date +%s) - start_time)) -ge $timeout ]; then
+            echo "" >&2
+            log_error "Timeout waiting for PipelineRun for SHA ${sha}"
+        fi
+        sleep 5
+        echo -n "." >&2
+        found_plr_name=$(kubectl get pr \
+            -l "pipelinesascode.tekton.dev/sha=$sha" \
+            -n "${tenant_namespace}" --no-headers 2>/dev/null \
+            | { grep "Running" || true; } | awk '{print $1}') || found_plr_name=""
+    done
+    echo "" >&2
+    echo "✅ Found PipelineRun: ${found_plr_name}" >&2
+    echo "${found_plr_name}"
+}
+
+# Wait for a single build PipelineRun to complete.
+# Retries up to MAX_PLR_RETRIES times (default 2) with a 60s cool-down before each retry.
+# Args: $1 = PipelineRun name, $2 = component name (required for retry annotation)
+wait_for_single_plr_to_complete() {
+    local plr_name=$1
+    local comp_name="${2:-}"
+    local timeout=1800
+    local start_time
+    start_time=$(date +%s)
+    local status=""
+    local retries_remaining="${MAX_PLR_RETRIES:-2}"
+
+    echo "Waiting for PipelineRun ${plr_name} to complete..."
+    while true; do
+        if [ $(($(date +%s) - start_time)) -ge $timeout ]; then
+            log_error "Timeout waiting for PipelineRun ${plr_name}"
+        fi
+        sleep 5
+        status=$(kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" \
+            -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null) \
+            || status=""
+        if [ "${status}" = "True" ]; then
+            echo "✅ ${plr_name} completed successfully"
+            break
+        elif [ "${status}" = "False" ]; then
+            echo "❌ ${plr_name} failed"
+            if [ "${retries_remaining}" -gt 0 ] && [ -n "${comp_name}" ]; then
+                echo "Retrying build for ${comp_name} (${retries_remaining} attempt(s) remaining) — waiting 60s..."
+                sleep 60
+                kubectl annotate "components/${comp_name}" \
+                    build.appstudio.openshift.io/request=trigger-pac-build \
+                    -n "${tenant_namespace}"
+                retries_remaining=$(( retries_remaining - 1 ))
+                local new_plr=""
+                local wait_start
+                wait_start=$(date +%s)
+                while [ -z "${new_plr}" ]; do
+                    if [ $(($(date +%s) - wait_start)) -ge "${PLR_APPEAR_TIMEOUT:-900}" ]; then
+                        log_error "Timeout waiting for retry PipelineRun for ${comp_name}"
+                    fi
+                    sleep 5
+                    new_plr=$(kubectl get pr \
+                        -l "appstudio.openshift.io/component=${comp_name}" \
+                        -n "${tenant_namespace}" --no-headers 2>/dev/null \
+                        | grep "Running" | awk '{print $1}' | head -1) || new_plr=""
+                done
+                echo "↩️  Retry PLR: ${new_plr}"
+                plr_name="${new_plr}"
+                status=""
+            else
+                echo "All retry attempts exhausted. Exiting."
+                exit 1
+            fi
+        fi
+    done
+}
+
 # Function to wait for Releases to complete
 # Relies on global variables: component_push_plr_name, tenant_namespace, SUITE_DIR
 wait_for_releases() {
-    local timeout=300  # 5 minutes timeout
+    local timeout="${RELEASE_APPEAR_TIMEOUT:-600}"  # default 10 min; release controller can be backlogged under parallel load
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
@@ -554,18 +736,39 @@ wait_for_releases() {
     RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
 
     export RELEASE_NAMESPACE=${tenant_namespace}
+    local effective_names=""
+    local output_files=()
     for release in ${release_names};
     do
+      local outfile
+      outfile=$(mktemp)
+      output_files+=("${release}:${outfile}")
       export RELEASE_NAME=${release}
+      export RELEASE_NAME_OUTPUT_FILE="${outfile}"
       "${SUITE_DIR}/../scripts/wait-for-release.sh" &
     done
+    unset RELEASE_NAME_OUTPUT_FILE
 
     # Wait for remaining processes to finish
     while (( ${RUNNING_JOBS@P} > 0 )); do
         wait -n
     done
 
-    export RELEASE_NAMES="$release_names"
+    # Build effective release names, substituting any retried Release names
+    for entry in "${output_files[@]}"; do
+      local orig="${entry%%:*}"
+      local outfile="${entry##*:}"
+      local effective
+      effective=$(cat "${outfile}" 2>/dev/null)
+      rm -f "${outfile}"
+      if [ -n "${effective}" ]; then
+        effective_names="${effective_names} ${effective}"
+      else
+        effective_names="${effective_names} ${orig}"
+      fi
+    done
+
+    export RELEASE_NAMES="${effective_names# }"
 }
 
 # Function to clean up old resources based on originating tool label
@@ -580,6 +783,10 @@ cleanup_old_resources() {
         echo "🔴 Error: originating_tool parameter is required"
         return 1
     fi
+    if [ "${#originating_tool}" -gt 63 ]; then
+        echo "⚠️  originating_tool is ${#originating_tool} chars — truncating to 63 for label selector."
+        originating_tool="${originating_tool:0:63}"
+    fi
 
     # disable exit on error to allow for cleanup of old resources
     set +e
@@ -591,7 +798,7 @@ cleanup_old_resources() {
 
     echo "🔍 Searching for resources with originating-tool=${originating_tool}"
 
-    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component"
+    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component release"
     for kind in $kinds; do
         local namespaces="dev-release-team-tenant managed-release-team-tenant"
         for namespace in $namespaces; do
