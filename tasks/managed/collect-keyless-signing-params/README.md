@@ -1,4 +1,4 @@
-# collect-signing-params
+# collect-keyless-signing-params
 
 Tekton task to collect Konflux configuration parameters related to
 keyless signing using cosign. The task attempts to read the "cluster-config"

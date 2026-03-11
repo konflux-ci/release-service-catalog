@@ -2,18 +2,42 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-collect-signing-params-missing-cm
+  name: test-collect-keyless-signing-params
 spec:
   description: |
-    Run the collect-signing-params task with a missing ConfigMap.
+    Run the collect-keyless-signing-params task with an available ConfigMap.
   tasks:
+    - name: setup
+      taskSpec:
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl create configmap cluster-config --namespace "$(context.pipelineRun.namespace)" \
+                --from-literal=enableKeylessSigning=true \
+                --from-literal=defaultOIDCIssuer=oidcIssuerValue \
+                --from-literal=rekorExternalUrl=rekorUrlValue \
+                --from-literal=rekorInternalUrl=rekorInternalUrlValue \
+                --from-literal=fulcioExternalUrl=fulcioUrlValue \
+                --from-literal=fulcioInternalUrl=fulcioInternalUrlValue \
+                --from-literal=tufExternalUrl=tufUrlValue \
+                --from-literal=tufInternalUrl=tufInternalUrlValue \
+                --from-literal=buildIdentityRegexp=buildIdentityRegexpValue
     - name: run-task
       taskRef:
-        name: collect-signing-params
+        name: collect-keyless-signing-params
+      params:
+        - name: configMapNamespace
+          value: "$(context.pipelineRun.namespace)"
+      runAfter:
+        - setup
     - name: check-result
       params:
         - name: enableKeylessSigning
-          value: $(tasks.run-task.results.enableKeylessSigning)
+          value: $(tasks.run-task.results.keylessSigningEnabled)
         - name: defaultOIDCIssuer
           value: $(tasks.run-task.results.defaultOIDCIssuer)
         - name: rekorExternalUrl
@@ -76,12 +100,23 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              test "$ENABLE_KEYLESS_SIGNING" = ""
-              test "$DEFAULT_OIDC_ISSUER" = ""
-              test "$REKOR_EXTERNAL_URL" = ""
-              test "$REKOR_INTERNAL_URL" = ""
-              test "$FULCIO_EXTERNAL_URL" = ""
-              test "$FULCIO_INTERNAL_URL" = ""
-              test "$TUF_EXTERNAL_URL" = ""
-              test "$TUF_INTERNAL_URL" = ""
-              test "$BUILD_IDENTITY_REGEXP" = ""
+              test "$ENABLE_KEYLESS_SIGNING" = "true"
+              test "$DEFAULT_OIDC_ISSUER" = "oidcIssuerValue"
+              test "$REKOR_EXTERNAL_URL" = "rekorUrlValue"
+              test "$REKOR_INTERNAL_URL" = "rekorInternalUrlValue"
+              test "$FULCIO_EXTERNAL_URL" = "fulcioUrlValue"
+              test "$FULCIO_INTERNAL_URL" = "fulcioInternalUrlValue"
+              test "$TUF_EXTERNAL_URL" = "tufUrlValue"
+              test "$TUF_INTERNAL_URL" = "tufInternalUrlValue"
+              test "$BUILD_IDENTITY_REGEXP" = "buildIdentityRegexpValue"
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-configmap
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete configmap cluster-config --namespace "$(context.pipelineRun.namespace)" --ignore-not-found
