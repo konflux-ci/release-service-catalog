@@ -78,6 +78,8 @@ spec:
                 touch "$(params.dataDir)/$(echo $REF | tr '/' '-')"
               done
 
+              # one call for cosign init
+              echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
               # first 8 cosign calls should end with success
               for _ in $(seq 1 8); do
                   echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
@@ -102,10 +104,18 @@ spec:
       params:
         - name: snapshotPath
           value: $(context.pipelineRun.uid)/snapshot_spec.json
-        - name: secretName
-          value: 'test-cosign-secret-keyless'
-        - name: keyless
+        - name: keylessEnabled
           value: "true"
+        - name: keylessOidcIssuer
+          value: "https://kubernetes.default.svc"
+        - name: keylessFulcioURL
+          value: "fake-fulcio-server"
+        - name: keylessRekorURL
+          value: "fake-rekor-server"
+        - name: keylessTufURL
+          value: "https://tuf-openshift-operators.apps-crc.testing"
+        - name: keylessOIDCIssuerRegEx
+          value: ".*"
         - name: signRegistryAccessPath
           value: $(context.pipelineRun.uid)/signRegistryAccess.txt
         - name: concurrentLimit
@@ -177,13 +187,16 @@ spec:
               # Replace the OIDC token value with a placeholder for comparison
               CALLS=$(sort "$(params.dataDir)/mock_cosign_sign_calls" \
                 | sed 's/--identity-token [^ ]*/--identity-token <token>/g')
-              REKOR="https://fake-rekor-server"
-              COSIGN_COMMON="-t 3m0s sign -y --rekor-url=$REKOR --identity-token <token> --sign-container-identity"
+              REKOR="--rekor-url=fake-rekor-server"
+              FULCIO="--fulcio-url fake-fulcio-server"
+              TUF="https://tuf-openshift-operators.apps-crc.testing"
+              COSIGN_COMMON="-t 3m0s sign -y $REKOR --identity-token <token> $FULCIO --sign-container-identity"
               EXPECTED=$(cat <<EOF
               $COSIGN_COMMON ${_TEST_PUB_REPO2}:t1 ${_TEST_REPO}@sha256:2222
               $COSIGN_COMMON ${_TEST_PUB_REPO2}:t2 ${_TEST_REPO}@sha256:2222
               $COSIGN_COMMON ${_TEST_PUB_REPO1}:t1 ${_TEST_REPO}@sha256:2222
               $COSIGN_COMMON ${_TEST_PUB_REPO1}:t2 ${_TEST_REPO}@sha256:2222
+              initialize --mirror=${TUF} --root=${TUF}/root.json
               EOF
               )
               echo "TESTING SIGN CALLS"
@@ -198,7 +211,7 @@ spec:
               fi
 
               CALLS=$(cat "$(params.dataDir)/mock_cosign_verify_calls")
-              COSIGN_COMMON="verify --rekor-url=$REKOR"
+              COSIGN_COMMON="verify $REKOR"
               COSIGN_COMMON+=" --certificate-identity-regexp=.*"
               COSIGN_COMMON+=" --certificate-oidc-issuer-regexp=.*"
               EXPECTED=$(cat <<EOF
