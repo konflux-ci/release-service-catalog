@@ -1,0 +1,228 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rh-sign-rpm
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: sign-rpm
+spec:
+  description: |-
+    Tekton task to create internalrequests to sign RPMs
+  params:
+    - name: snapshotPath
+      type: string
+      description: |
+        Path to the JSON file of the mapped Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace
+    - name: snapshotBuildId
+      type: string
+      description: |
+        Build Id that the snapshot originated from
+    - name: releasePlanAdmissionPath
+      description: Path to the JSON string of the releasePlanAdmission in the data workspace
+      type: string
+    - name: artifactsJsonPath
+      type: string
+      description: |
+        Path to the artifacts.json file in the data workspace (pulp-tool format with RPM metadata)
+      default: ""
+    - name: requester
+      type: string
+      description: Name of the user that requested the signing, for auditing purposes
+    - name: requestTimeout
+      type: string
+      default: "1800"
+      description: InternalRequest timeout
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: domain
+      type: string
+      description: The domain to use for Pulp operations
+      default: rok-storage
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: rh-sign-rpm
+      image: quay.io/konflux-ci/release-service-utils:d08bdfa3733a7c75d5334aaa77b7aa46fbace00b
+      computeResources:
+        limits:
+          memory: 2Gi
+          cpu: "1"
+        requests:
+          memory: 2Gi
+          cpu: "1"
+      env:
+        - name: SNAPSHOT_SPEC_FILE
+          value: $(params.dataDir)/$(params.snapshotPath)
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+        - name: ARTIFACTS_JSON_FILE
+          value: $(params.dataDir)/$(params.artifactsJsonPath)
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
+            echo "No valid snapshot file was provided."
+            exit 1
+        fi
+
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
+        if [ ! -f "${RPA_FILE}" ] ; then
+            echo "No valid rpa file was provided."
+            exit 1
+        fi
+
+        # Check artifacts.json if path is provided
+        if [ -n "$(params.artifactsJsonPath)" ]; then
+            if [ ! -f "${ARTIFACTS_JSON_FILE}" ] ; then
+                echo "No valid artifacts.json file was provided."
+                exit 1
+            fi
+            echo "Found artifacts.json at: ${ARTIFACTS_JSON_FILE}"
+        else
+            echo "No artifacts.json path provided, skipping artifact metadata validation."
+        fi
+
+        set -x
+
+        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+        # Extract signing configuration from data file
+        KERBEROS_PRINCIPAL=$(jq --exit-status -r '.signOptions.signKeytab.principal' "${DATA_FILE}")
+        KERBEROS_KEYTAB=$(jq --exit-status -r '.signOptions.signKeytab.name' "${DATA_FILE}")
+        KERBEROS_KEYTAB_SECRET=$(jq --exit-status -r '.signOptions.signKeytab.secret' "${DATA_FILE}")
+        PIPELINE_IMAGE=$(jq --exit-status -r '.signOptions.signPipelineImage' "${DATA_FILE}")
+        SIGNING_ALIAS=$(jq --exit-status -r '.signOptions.signKeyAlias.key' "${DATA_FILE}")
+
+        echo "Creating internal-request for RPM signing..."
+
+        internal-request \
+          --pipeline "direct-rpm-signing" \
+          -p image="${PIPELINE_IMAGE}" \
+          -p artifact_json="$(params.artifactsJsonPath)" \
+          -p ociStorage="$(params.ociStorage)" \
+          -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
+          -p kerberos_keytab="${KERBEROS_KEYTAB}" \
+          -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET}" \
+          -p signing_alias="${SIGNING_ALIAS}" \
+          -p unsigned_rpms_location= "$(params.domain)/$(params.snapshotBuildId)/rpms"\
+          -p signed_rpms_destination= "$(params.domain)/$(params.snapshotBuildId)/rpms-signed"\
+          -p requester="$(params.requester)" \
+          -p force="false" \
+          -p signed_rpms_upload_subpath="signed/${SIGNING_ALIAS}" \
+          -p taskGitUrl="https://gitlab.cee.redhat.com/signing/signing.git" \
+          -p taskGitRevision="main" \
+          -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+          -t "$(params.requestTimeout)" \
+          --pipeline-timeout "0h30m0s" \
+          --task-timeout "0h25m0s" \
+          -s true
+
+        echo "RPM signing request completed"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 250m
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
