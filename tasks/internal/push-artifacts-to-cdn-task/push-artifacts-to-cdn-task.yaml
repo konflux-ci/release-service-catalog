@@ -965,26 +965,39 @@ spec:
           scp "${SCP_OPTS[@]}" "$windows_signing_script_file" \
           "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_SIGNING_SCRIPT_PATH}"
 
-          # Execute the script on the Windows host
+          # Execute the script on the Windows host, capture exit code
+          ssh_exit=0
+          failed_operation=""
           # shellcheck disable=SC2029,SC2086
           ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" \
-            "${WINDOWS_SIGNING_SCRIPT_PATH}"
+            "${WINDOWS_SIGNING_SCRIPT_PATH}" \
+            || { ssh_exit=$?; failed_operation="signing"; }
 
-          # Copy signed digest back to shared volume for this component
-          # shellcheck disable=SC2029,SC2086
-          WINDOWS_DIGEST_PATH="C:/Users/${WINDOWS_USER}/AppData/Local/Temp/${WINDOWS_TEMP_DIR}/unsigned/digest.txt"
-          scp "${SCP_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_DIGEST_PATH}" \
-          "$COMPONENT_DIR/signed_windows_digest.txt"
+          # Copy signed digest back if signing succeeded
+          if [ $ssh_exit -eq 0 ]; then
+            # shellcheck disable=SC2029,SC2086
+            WINDOWS_DIGEST_PATH="C:/Users/${WINDOWS_USER}/AppData/Local/Temp/${WINDOWS_TEMP_DIR}/unsigned/digest.txt"
+            scp "${SCP_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}:${WINDOWS_DIGEST_PATH}" \
+            "$COMPONENT_DIR/signed_windows_digest.txt" || { ssh_exit=$?; failed_operation="scp of signed digest"; }
 
-          # Remove trailing spaces, carriage returns, newlines
-          sed -i 's/[[:space:]]*$//; s/\r//g; :a;N;$!ba;s/\n//g' "$COMPONENT_DIR/signed_windows_digest.txt"
+            if [ $ssh_exit -eq 0 ]; then
+              # Remove trailing spaces, carriage returns, newlines
+              sed -i 's/[[:space:]]*$//; s/\r//g; :a;N;$!ba;s/\n//g' "$COMPONENT_DIR/signed_windows_digest.txt"
+            fi
+          fi
 
-          # Clean up the windows host now that we are done with this component
+          # Always clean up the Windows host (on success or failure)
           WINDOWS_CLEANUP_PATH="C:\\Users\\${WINDOWS_USER}\\AppData\\Local\\Temp\\${WINDOWS_TEMP_DIR}"
           # shellcheck disable=SC2029,SC2086
           ssh "${SSH_OPTS[@]}" "${WINDOWS_USER}@${WINDOWS_HOST}" \
             "Remove-Item -LiteralPath ${WINDOWS_CLEANUP_PATH} -Force -Recurse; \
-            Remove-Item -LiteralPath ${WINDOWS_SIGNING_SCRIPT_PATH} -Force"
+            Remove-Item -LiteralPath ${WINDOWS_SIGNING_SCRIPT_PATH} -Force" || true
+
+          # Fail the step if signing or scp failed
+          if [ $ssh_exit -ne 0 ]; then
+            echo "Windows ${failed_operation} failed for component: $COMPONENT_NAME (exit code: $ssh_exit)"
+            exit $ssh_exit
+          fi
         done
     - name: generate-checksums
       image: quay.io/konflux-ci/release-service-utils@sha256:b62e2fef45c84259c60c7097f5a572a4c32f957ffeee3eed53eb0b7d560e5234

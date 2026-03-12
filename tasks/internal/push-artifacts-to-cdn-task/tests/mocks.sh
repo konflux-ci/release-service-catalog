@@ -369,6 +369,10 @@ function publish_to_cgw_wrapper() {
 
 function ssh() {
     echo Mocking ssh call with: $*
+    if [[ "$*" == *"fail-windows-signing"* ]] && [[ "$*" == *".bat"* ]]; then
+        echo "Simulating Windows signing failure" >&2
+        return 1
+    fi
 }
 
 function scp() {
