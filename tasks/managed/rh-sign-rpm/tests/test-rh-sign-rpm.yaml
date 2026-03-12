@@ -1,0 +1,274 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-rpm
+spec:
+  description: Test creating an internal request to sign RPMs
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "signOptions": {
+                  "signKeytab": {
+                    "principal": "test-principal@REDHAT.COM",
+                    "name": "test-keytab",
+                    "secret": "test-keytab-secret"
+                  },
+                  "signPipelineImage": "quay.io/konflux-ci/signing:latest",
+                  "signKeyAlias": {
+                    "key": "devkey1"
+                  }
+                },
+                "sign": {
+                  "request": "rpm-signing-pipeline"
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts/artifacts.json" << EOF
+              {
+                "artifacts": {
+                  "test-rpm-1.0-1.el9.x86_64.rpm": {
+                    "labels": {"arch": "x86_64"},
+                    "url": "https://pulp.example.com/pulp/content/test/x86_64/test-rpm-1.0-1.el9.x86_64.rpm",
+                    "sha256": "abc123def456"
+                  },
+                  "test-rpm-1.0-1.el9.src.rpm": {
+                    "labels": {"arch": "source"},
+                    "url": "https://pulp.example.com/pulp/content/test/source/test-rpm-1.0-1.el9.src.rpm",
+                    "sha256": "def789ghi012"
+                  }
+                },
+                "distributions": {
+                  "x86_64": "https://pulp.example.com/pulp/content/test/x86_64/",
+                  "source": "https://pulp.example.com/pulp/content/test/source/"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: rh-sign-rpm
+      params:
+        - name: requester
+          value: testuser-rpm
+        - name: requestTimeout
+          value: "1800"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: artifactsJsonPath
+          value: $(context.pipelineRun.uid)/artifacts/artifacts.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: signedRpmsDomain
+          value: "rok-storage"
+        - name: pipelineImage
+          value: "quay.io/konflux-ci/signing:latest"
+        - name: signPipeline
+          value: "rpm-signing-pipeline"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
+
+              echo "Found ${irsLength} internal requests"
+
+              # We expect 1 internal request
+              if [ "${irsLength}" != "1" ]; then
+                echo "Expected 1 internal request, found ${irsLength}"
+                exit 1
+              fi
+
+              params=$(jq -r ".items[0].spec.params" <<< "${internalRequests}")
+
+              # Verify parameters passed to internal-request
+              requester=$(jq -r '.requester' <<< "${params}")
+              if [ "${requester}" != "testuser-rpm" ]; then
+                echo "requester does not match: expected 'testuser-rpm', got '${requester}'"
+                exit 1
+              fi
+
+              pipelineImage=$(jq -r '.pipeline_image' <<< "${params}")
+              if [ "${pipelineImage}" != "quay.io/konflux-ci/signing:latest" ]; then
+                echo "pipeline_image does not match"
+                exit 1
+              fi
+
+              kerberosKeytab=$(jq -r '.kerberos_keytab' <<< "${params}")
+              if [ "${kerberosKeytab}" != "test-keytab" ]; then
+                echo "kerberos_keytab does not match"
+                exit 1
+              fi
+
+              signingAlias=$(jq -r '.signing_alias' <<< "${params}")
+              if [ "${signingAlias}" != "devkey1" ]; then
+                echo "signing_alias does not match: expected 'devkey1', got '${signingAlias}'"
+                exit 1
+              fi
+
+              kerberosPrincipal=$(jq -r '.kerberos_principal' <<< "${params}")
+              if [ "${kerberosPrincipal}" != "test-principal@REDHAT.COM" ]; then
+                echo "kerberos_principal does not match:" \
+                  "expected 'test-principal@REDHAT.COM', got '${kerberosPrincipal}'"
+                exit 1
+              fi
+
+              kerberosKeytabSecret=$(jq -r '.kerberos_keytab_secret' <<< "${params}")
+              if [ "${kerberosKeytabSecret}" != "test-keytab-secret" ]; then
+                echo "kerberos_keytab_secret does not match:" \
+                  "expected 'test-keytab-secret', got '${kerberosKeytabSecret}'"
+                exit 1
+              fi
+
+              artifactStorageSecret=$(jq -r '.artifact_storage_secret' <<< "${params}")
+              if [ "${artifactStorageSecret}" != "signing-artifact-storage-preprod" ]; then
+                echo "artifact_storage_secret does not match:" \
+                  "expected 'signing-artifact-storage-preprod'," \
+                  "got '${artifactStorageSecret}'"
+                exit 1
+              fi
+
+              destinationDomain=$(jq -r '.destination_artifact_storage_domain' <<< "${params}")
+              if [ "${destinationDomain}" != "rok-storage" ]; then
+                echo "destination_artifact_storage_domain does not match:" \
+                  "expected 'rok-storage', got '${destinationDomain}'"
+                exit 1
+              fi
+
+              force=$(jq -r '.force' <<< "${params}")
+              if [ "${force}" != "false" ]; then
+                echo "force does not match: expected 'false', got '${force}'"
+                exit 1
+              fi
+
+              artifactJson=$(jq -r '.artifact_json' <<< "${params}")
+              # artifact_json is base64-encoded content, not a path - decode and verify it's valid JSON with artifacts
+              decodedArtifact=$(base64 -d <<< "${artifactJson}")
+              if ! jq -e '.artifacts' > /dev/null 2>&1 <<< "${decodedArtifact}"; then
+                echo "artifact_json does not decode to valid JSON with .artifacts key"
+                exit 1
+              fi
+
+              echo "Test passed: InternalRequest created correctly with all required parameters"
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests --all

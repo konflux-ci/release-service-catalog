@@ -1,0 +1,239 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rh-sign-rpm
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: sign-rpm
+spec:
+  description: |-
+    Tekton task to create internalrequests to sign RPMs
+  params:
+    - name: dataPath
+      type: string
+      description: |
+        Path to the JSON file of the merged data to use in the data workspace
+    - name: artifactsJsonPath
+      type: string
+      description: |
+        Path to the artifacts.json file in the data workspace (pulp-tool format with RPM metadata)
+      default: "artifacts.json"
+    - name: requester
+      type: string
+      description: Name of the user that requested the signing, for auditing purposes
+    - name: requestTimeout
+      type: string
+      default: "1800"
+      description: InternalRequest timeout
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: signedRpmsDomain
+      type: string
+      description: The domain to use for pushing signed RPMs
+      default: rok-storage
+    - name: pipelineImage
+      type: string
+      description: Container image to use for the signing pipeline
+      default: "quay.io/konflux-ci/signing:latest"
+    - name: signingRepo
+      type: string
+      description: Git repository URL containing the signing tasks
+      default: "https://gitlab.cee.redhat.com/signing/signing.git"
+    - name: signingRevision
+      type: string
+      description: Git revision (branch, tag, or commit) in the signing repository
+      default: "main"
+    - name: signPipeline
+      type: string
+      description: Name of the internal pipeline to use for RPM signing
+      default: "direct-rpm-signing"
+    - name: signPipelineServiceAccount
+      type: string
+      description: Service account to use for the signing pipeline
+      default: "signing-pipeline-sa"
+    - name: force
+      type: string
+      description: When uploading signed RPMs to Pulp, overwrite existing artifacts
+      default: "false"
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: rh-sign-rpm
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 250m
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      env:
+        - name: DATA_FILE
+          value: $(params.dataDir)/$(params.dataPath)
+        - name: ARTIFACTS_JSON_FILE
+          value: $(params.dataDir)/$(params.artifactsJsonPath)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        if [ ! -f "${DATA_FILE}" ] ; then
+            echo "No data JSON was provided."
+            exit 1
+        fi
+
+        set -x
+
+        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+        # Extract signing configuration from data file
+        KERBEROS_PRINCIPAL=$(jq --exit-status -r '.signOptions.signKeytab.principal' "${DATA_FILE}")
+        KERBEROS_KEYTAB=$(jq --exit-status -r '.signOptions.signKeytab.name // "keytab"' "${DATA_FILE}")
+        KERBEROS_KEYTAB_SECRET_NAME=$(jq --exit-status -r '.signOptions.signKeytab.secret' "${DATA_FILE}")
+        SIGNING_ALIAS=$(jq --exit-status -r '.signOptions.signKeyAlias.key' "${DATA_FILE}")
+        ARTIFACT_STORAGE_SECRET=$(jq --exit-status -r \
+          '.signOptions.artifactStorageSecret // "signing-artifact-storage-preprod"' \
+          "${DATA_FILE}")
+
+        # Calculate timeouts - pipeline timeout is requestTimeout + 5 minutes for overhead
+        requestTimeout=$(params.requestTimeout)
+        if ! [[ "${requestTimeout}" =~ ^[0-9]+$ ]]; then
+            echo "requestTimeout must be a non-negative integer (seconds), got: '${requestTimeout}'"
+            exit 1
+        fi
+        format_timeout() { local s=$1; echo "$((s/3600))h$(((s%3600)/60))m$((s%60))s"; }
+        pipelineTimeoutSeconds=$((requestTimeout+300))
+        pipelineTimeout=$(format_timeout "$pipelineTimeoutSeconds")
+        taskTimeout=$(format_timeout "$requestTimeout")
+
+        if [ ! -f "${ARTIFACTS_JSON_FILE}" ] ; then
+            echo "No artifacts JSON was provided."
+            exit 1
+        fi
+
+        ARTIFACT_JSON=$(base64 -w0 < "${ARTIFACTS_JSON_FILE}")
+
+        echo "Creating internal-request for RPM signing (pipeline: $(params.signPipeline))..."
+
+        # Disable command echoing to prevent logging sensitive parameters
+        set +x
+        internal-request \
+          --pipeline "$(params.signPipeline)" \
+          -p pipeline_image="$(params.pipelineImage)" \
+          -p artifact_json="${ARTIFACT_JSON}" \
+          -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
+          -p kerberos_keytab="${KERBEROS_KEYTAB}" \
+          -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET_NAME}" \
+          -p signing_alias="${SIGNING_ALIAS}" \
+          -p artifact_storage_secret="${ARTIFACT_STORAGE_SECRET}" \
+          -p destination_artifact_storage_domain="$(params.signedRpmsDomain)" \
+          -p requester="$(params.requester)" \
+          -p force="$(params.force)" \
+          -p taskGitUrl="$(params.signingRepo)" \
+          -p taskGitRevision="$(params.signingRevision)" \
+          -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+          -t "$(params.requestTimeout)" \
+          --service-account "$(params.signPipelineServiceAccount)" \
+          --pipeline-timeout "${pipelineTimeout}" \
+          --task-timeout "$taskTimeout" \
+          -s true
+
+        set -x
+        echo "RPM signing request completed"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 250m
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
