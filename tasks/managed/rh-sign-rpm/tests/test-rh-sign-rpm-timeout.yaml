@@ -1,0 +1,216 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-rh-sign-rpm-timeout
+  annotations:
+    test/assert-task-failure: run-task
+spec:
+  description: Test that the task fails when internal request times out
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "expected-timeout-failure",
+                    "source": {
+                      "git": {
+                        "revision": "deadbeef"
+                      }
+                    },
+                    "containerImage": "quay.io/test/rpm-component@sha256:9999"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "signOptions": {
+                  "signKeytab": {
+                    "principal": "test-principal@REDHAT.COM",
+                    "name": "expected-timeout-failure",
+                    "secret": "test-keytab-secret"
+                  },
+                  "signPipelineImage": "quay.io/redhat-isv/operator-pipelines-images:released",
+                  "signKeyAlias": {
+                    "key": "devkey1"
+                  }
+                },
+                "sign": {
+                  "request": "rpm-signing-pipeline"
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
+              {
+                "spec": {
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "https://localhost.git"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipelines/rpm-signing/rpm-signing.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "release-service-account"
+                  }
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts/artifacts.json" << EOF
+              {
+                "artifacts": {
+                  "test-rpm-1.0-1.el9.x86_64.rpm": {
+                    "labels": {"arch": "x86_64"},
+                    "url": "https://pulp.example.com/pulp/content/test/x86_64/test-rpm-1.0-1.el9.x86_64.rpm",
+                    "sha256": "abc123def456"
+                  }
+                },
+                "distributions": {
+                  "x86_64": "https://pulp.example.com/pulp/content/test/x86_64/"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: rh-sign-rpm
+      params:
+        - name: requester
+          value: testuser-rpm-timeout
+        - name: requestTimeout
+          value: "10"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: releasePlanAdmissionPath
+          value: $(context.pipelineRun.uid)/release_plan_admission.json
+        - name: artifactsJsonPath
+          value: $(context.pipelineRun.uid)/artifacts/artifacts.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: snapshotBuildId
+          value: "test-timeout-build"
+        - name: domain
+          value: "rok-storage"
+      runAfter:
+        - setup
+  finally:
+    - name: check-result
+      params:
+        - name: taskStatus
+          value: "$(tasks.run-task.status)"
+      taskSpec:
+        params:
+          - name: taskStatus
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ "$(params.taskStatus)" != "Failed" ]; then
+                echo "Task should have failed but got status: $(params.taskStatus)"
+                exit 1
+              fi
+
+              echo "Test passed: Task failed as expected due to timeout"
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests --all
