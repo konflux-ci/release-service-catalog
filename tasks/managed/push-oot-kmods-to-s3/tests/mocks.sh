@@ -120,5 +120,21 @@ check_final_status() {
             echo "SUCCESS: Kernel version architecture suffix was properly stripped"
             echo "All uploads used cleaned path: 6.5.0-s3 (not 6.5.0-s3.x86_64)"
         fi
+
+        # For multiarch tests, verify extraction_summary.txt was uploaded
+        if [ -f "/var/workdir/release/arch_count.txt" ]; then
+            arch_count=$(cat "/var/workdir/release/arch_count.txt")
+            if [ "$arch_count" -gt 1 ]; then
+                echo ""
+                echo "Verifying multiarch summary files were uploaded..."
+                if ! grep -F -q "extraction_summary.txt" "$UPLOAD_LOG"; then
+                    echo "ERROR: extraction_summary.txt was not uploaded for multiarch build!"
+                    echo "Upload log:"
+                    cat "$UPLOAD_LOG"
+                    exit 1
+                fi
+                echo "SUCCESS: extraction_summary.txt upload verified"
+            fi
+        fi
     fi
 }
