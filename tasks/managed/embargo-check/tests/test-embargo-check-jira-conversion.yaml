@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-embargo-check-nonexistent-rh-issue
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-embargo-check-jira-conversion
 spec:
-  description: Test for embargo-check where a redhat.atlassian.net issue cannot be found
+  description: |
+    Test for embargo-check that ensures issues provided as issues.redhat.com use
+    the redhat.atlassian.net endpoints instead
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -61,12 +61,29 @@ spec:
                   "issues": {
                     "fixed": [
                       {
-                        "id": "MISSINGRH-123",
-                        "source": "redhat.atlassian.net"
+                        "id": "VULN-123",
+                        "source": "issues.redhat.com"
+                      }
+                    ]
+                  },
+                  "content": {
+                    "images": [
+                      {
+                        "component": "my-other-component",
+                        "architecture": "x86_64",
+                        "containerImage": "registry.io/org/other-repo"
                       },
                       {
-                        "id": "12345",
-                        "source": "bugzilla.redhat.com"
+                        "component": "my-component",
+                        "architecture": "x86_64",
+                        "containerImage": "registry.io/org/repo",
+                        "cves": {
+                          "fixed": {
+                            "CVE-123": {
+                              "packages": []
+                            }
+                          }
+                        }
                       }
                     ]
                   }
@@ -107,3 +124,51 @@ spec:
           value: "main"
       runAfter:
         - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if grep -q "issues.redhat.com" "$(params.dataDir)/mock_curl.txt" ; then
+                  echo Error: issues.redhat.com should not be queried. Calls:
+                  cat "$(params.dataDir)/mock_curl.txt"
+                  exit 1
+              fi
+      runAfter:
+        - run-task
