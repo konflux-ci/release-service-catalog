@@ -14,15 +14,15 @@ function curl-with-retry() {
   mkdir -p "$(params.dataDir)"
   echo $* >> "$(params.dataDir)/mock_curl.txt"
 
-  if [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/VULN-123" ]]; then
+  if [[ "$*" == *"-u "*"https://redhat.atlassian.net/rest/api/2/issue/VULN-123" ]]; then
     # Mock a vulnerability issue with CVE-123
-    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-123"}}'
-  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/FEATURE-456" ]]; then
+    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_10667":"CVE-123"}}'
+  elif [[ "$*" == *"-u "*"https://redhat.atlassian.net/rest/api/2/issue/FEATURE-456" ]]; then
     # Mock a non-vulnerability issue
     echo '{"fields":{"issuetype":{"name":"Feature"}}}'
-  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/VULN-MISSING-456" ]]; then
+  elif [[ "$*" == *"-u "*"https://redhat.atlassian.net/rest/api/2/issue/VULN-MISSING-456" ]]; then
     # Mock a vulnerability issue with CVE that should be missing from content
-    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-MISSING-456"}}'
+    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_10667":"CVE-MISSING-456"}}'
   else
     echo Error: Unexpected curl call: $*
     exit 1
