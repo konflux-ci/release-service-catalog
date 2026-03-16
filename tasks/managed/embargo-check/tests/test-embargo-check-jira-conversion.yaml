@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-close-advisory-issues-closed-issue
+  name: test-embargo-check-jira-conversion
 spec:
   description: |
-    Test for close-advisory-issues where the issue is already closed. Curl should only be
-    called once for the issue
+    Test for embargo-check that ensures issues provided as issues.redhat.com use
+    the redhat.atlassian.net endpoints instead
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -51,7 +51,7 @@ spec:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
@@ -61,12 +61,29 @@ spec:
                   "issues": {
                     "fixed": [
                       {
-                        "id": "CLOSED-987",
-                        "source": "redhat.atlassian.net"
+                        "id": "VULN-123",
+                        "source": "issues.redhat.com"
+                      }
+                    ]
+                  },
+                  "content": {
+                    "images": [
+                      {
+                        "component": "my-other-component",
+                        "architecture": "x86_64",
+                        "containerImage": "registry.io/org/other-repo"
                       },
                       {
-                        "id": "12345",
-                        "source": "bugzilla.redhat.com"
+                        "component": "my-component",
+                        "architecture": "x86_64",
+                        "containerImage": "registry.io/org/repo",
+                        "cves": {
+                          "fixed": {
+                            "CVE-123": {
+                              "packages": []
+                            }
+                          }
+                        }
                       }
                     ]
                   }
@@ -85,12 +102,12 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: close-advisory-issues
+        name: embargo-check
       params:
         - name: dataPath
           value: $(context.pipelineRun.uid)/data.json
-        - name: advisoryUrl
-          value: https://access.redhat.com/errata/RHBA-2025:1111
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -110,7 +127,7 @@ spec:
     - name: check-result
       params:
         - name: sourceDataArtifact
-          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+          value: "$(tasks.run-task.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
       taskSpec:
@@ -148,12 +165,10 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_curl.txt")" != 1 ]; then
-                  echo Error: curl was expected to be called 1 time. Actual calls:
+              if grep -q "issues.redhat.com" "$(params.dataDir)/mock_curl.txt" ; then
+                  echo Error: issues.redhat.com should not be queried. Calls:
                   cat "$(params.dataDir)/mock_curl.txt"
                   exit 1
               fi
-
-              [[ $(head -n 1 "$(params.dataDir)/mock_curl.txt") == *"CLOSED-987" ]]
       runAfter:
         - run-task

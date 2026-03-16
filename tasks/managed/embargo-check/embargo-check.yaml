@@ -15,7 +15,7 @@ spec:
     for a component that does not exist in the releaseNotes.content.[images|artifacts] section
     or if said component does not list the CVE from the issue.
 
-    Finally, the task will inject the `public` key to each issue listed for `issues.redhat.com`.
+    Finally, the task will inject the `public` key to each issue listed for `redhat.atlassian.net`.
     This is a boolean value that is set based on the issues visibility.
   params:
     - name: dataPath
@@ -107,6 +107,7 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
+          cpu: 30m
         requests:
           memory: 64Mi
           cpu: 30m
@@ -129,6 +130,7 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
+          cpu: 50m
         requests:
           memory: 64Mi
           cpu: 50m
@@ -139,6 +141,7 @@ spec:
         #!/usr/bin/env bash
 
         ACCESS_TOKEN="$(cat /etc/secrets/token)"
+        EMAIL="$(cat /etc/secrets/email)"
 
         set -x
 
@@ -147,7 +150,8 @@ spec:
                 "api": "rest/api/2/issue",
                 "servers": [
                     "issues.redhat.com",
-                    "jira.atlassian.com"
+                    "jira.atlassian.com",
+                    "redhat.atlassian.net"
                 ]
             },
             "bugzilla": {
@@ -165,8 +169,9 @@ spec:
         fi
 
         # It is expected for the custom field ids to remain stable, but to get them, you can do:
-        # curl -H "Authorization: Bearer $ACCESS_TOKEN" https://issues.redhat.com/rest/api/2/field
-        CVE_FIELD="customfield_12324749"
+        # curl -u "$email:$token" https://redhat.atlassian.net/rest/api/2/field and look for one with
+        # name "CVE ID"
+        CVE_FIELD="customfield_10667"
 
         RC=0
 
@@ -174,12 +179,15 @@ spec:
         for ((i = 0; i < NUM_ISSUES; i++)); do
             issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
             server=$(jq -r '.source' <<< "$issue")
+            if [ "$server" = "issues.redhat.com" ] ; then
+                server=redhat.atlassian.net
+            fi
             API=$(jq -r '.[] | select(.servers[] | contains("'"$server"'")) | .api' <<< "$SUPPORTED_ISSUE_TRACKERS")
-            API_URL="https://$(jq -r '.source' <<< "$issue")/${API}/$(jq -r '.id' <<< "$issue")"
+            API_URL="https://${server}/${API}/$(jq -r '.id' <<< "$issue")"
             AUTH_ARGS=()
             set +x # We don't want to leak the ACCESS_TOKEN
-            if [ "$server" = "issues.redhat.com" ] ; then
-                AUTH_ARGS=(-H "Authorization: Bearer $ACCESS_TOKEN")
+            if [ "$server" = "redhat.atlassian.net" ] ; then
+                AUTH_ARGS=(-u "${EMAIL}:${ACCESS_TOKEN}")
             fi
             OUTPUT=$(curl-with-retry --retry 3 "${AUTH_ARGS[@]}" "${API_URL}")
             CURL_RC=$?
@@ -206,8 +214,8 @@ spec:
             jq --argjson i "$i" --argjson public $public '.releaseNotes.issues.fixed[$i].public = $public' \
                 "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
 
-            # Perform additional checks only for issues on issues.redhat.com
-            if [ "$server" != "issues.redhat.com" ] ; then
+            # Perform additional checks only for issues on redhat.atlassian.net
+            if [ "$server" != "redhat.atlassian.net" ] ; then
                 continue
             fi
 
@@ -252,6 +260,7 @@ spec:
       computeResources:
         limits:
           memory: 512Mi
+          cpu: 100m
         requests:
           memory: 512Mi
           cpu: 100m
@@ -317,6 +326,7 @@ spec:
       computeResources:
         limits:
           memory: 128Mi
+          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m

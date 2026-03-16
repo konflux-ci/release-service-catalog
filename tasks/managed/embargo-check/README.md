@@ -1,7 +1,7 @@
 # embargo-check
 
 Tekton task to check if any issues or CVEs in the releaseNotes key of the data.json are embargoed. It checks the issues by server using curl and checks the CVEs via an InternalRequest. If any issue does not exist or any CVE is embargoed, the task will fail. The task will also fail if a Jira issue listed is for a component that does not exist in the releaseNotes.content.[images|artifacts] section or if said component does not list the CVE from the issue.
-Finally, the task will inject the `public` key to each issue listed for `issues.redhat.com`. This is a boolean value that is set based on the issues visibility.
+Finally, the task will inject the `public` key to each issue listed for `redhat.atlassian.net`. This is a boolean value that is set based on the issues visibility.
 
 ## Parameters
 

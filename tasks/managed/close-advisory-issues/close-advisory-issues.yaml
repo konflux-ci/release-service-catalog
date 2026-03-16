@@ -11,8 +11,8 @@ spec:
     Tekton task to close all issues referenced in the releaseNotes. It is meant to run after the advisory is published.
     A comment will be added to each closed issue with a link to the advisory it was fixed in.
 
-    Note: This task currently only supports issues in issues.redhat.com due to it requiring authentication.
-    Issues in other servers will be skipped without the task failing.
+    Note: This task currently only supports issues in redhat.atlassian.net and issues.redhat.com due to them requiring
+    authentication. Issues in other servers will be skipped without the task failing.
   params:
     - name: dataPath
       description: Path to the JSON string of the merged data to use in the data workspace
@@ -99,6 +99,7 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
+          cpu: 30m
         requests:
           memory: 64Mi
           cpu: 30m
@@ -121,9 +122,10 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
+          cpu: 100m
         requests:
           memory: 32Mi
-          cpu: 50m
+          cpu: 100m
       volumeMounts:
         - name: access-token-secret-vol
           mountPath: "/etc/secrets"
@@ -133,13 +135,15 @@ spec:
         set -eu
 
         ACCESS_TOKEN="$(cat /etc/secrets/token)"
+        EMAIL="$(cat /etc/secrets/email)"
 
         ISSUE_TRACKERS='{
             "Jira": {
                 "api": "rest/api/2/issue",
                 "servers": [
                     "issues.redhat.com",
-                    "jira.atlassian.com"
+                    "jira.atlassian.com",
+                    "redhat.atlassian.net"
                 ]
             },
             "bugzilla": {
@@ -160,19 +164,19 @@ spec:
         for ((i = 0; i < NUM_ISSUES; i++)); do
             issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
             server=$(jq -r '.source' <<< "$issue")
-            if [ "$server" != "issues.redhat.com" ] ; then
+            if [ "$server" = "issues.redhat.com" ] ; then
+                server=redhat.atlassian.net
+            fi
+            if [ "$server" != "redhat.atlassian.net" ] ; then
                 echo "This task currently only supports closing issues on issues.redhat.com"
-                echo "Skipping issue $issue as it is on $server"
+                echo "and redhat.atlassian.net. Skipping issue $issue as it is on $server"
                 continue
             fi
 
-            CURL_ARGS=(
-              -H "Authorization: Bearer $ACCESS_TOKEN"
-              --retry 3
-            )
+            CURL_ARGS=(-u "${EMAIL}:${ACCESS_TOKEN}")
 
             API=$(jq -r '.[] | select(.servers[] | contains("'"$server"'")) | .api' <<< "$ISSUE_TRACKERS")
-            API_URL="https://$(jq -r '.source' <<< "$issue")/${API}/$(jq -r '.id' <<< "$issue")"
+            API_URL="https://${server}/${API}/$(jq -r '.id' <<< "$issue")"
 
             if [ "$(curl-with-retry "${CURL_ARGS[@]}" "${API_URL}" | jq -r '.fields.status.name')" == "Closed" ] ; then
                 echo "Issue $issue is already in Closed state. Skipping it."
@@ -209,6 +213,7 @@ spec:
       computeResources:
         limits:
           memory: 128Mi
+          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m
