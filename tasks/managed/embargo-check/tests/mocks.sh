@@ -33,6 +33,9 @@ function curl-with-retry() {
   elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PUBLIC-1" ]] # Public: no security field, works without auth
   then
     echo '{"fields":{"foo":"bar"}}'
+  elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PUBLIC-SECNULL" ]] # Public: security field exists but is null (Atlassian Cloud behavior)
+  then
+    echo '{"fields":{"security":null}}'
   elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PRIVATE-1" ]] # Private: no security field, works with auth but not without
   then
     if [[ "$*" == *"-u "* ]] ; then
