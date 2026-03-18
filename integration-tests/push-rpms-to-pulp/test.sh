@@ -197,6 +197,75 @@ verify_release_contents() {
           echo "✅️ filter-already-released-advisory-rpms TaskRun succeeded: ${filter_tr_name}"
         fi
       fi
+
+      # Verify artifacts.json was created by push-rpms-to-pulp task
+      echo "Checking artifacts.json from push-rpms-to-pulp task..."
+      local artifacts_dir
+      artifacts_dir=$(mktemp -d -p "$(pwd)")
+
+      if "${SUITE_DIR}/../scripts/get-trusted-artifact-content.sh" \
+          "${managed_plr_name}" \
+          "push-rpms-to-pulp" \
+          "sourceDataArtifact" \
+          "${managed_namespace}" \
+          "${artifacts_dir}" > /dev/null 2>&1; then
+
+        # Find artifacts.json in the extracted content
+        local artifacts_json_file
+        artifacts_json_file=$(find "${artifacts_dir}" -name "artifacts.json" -type f | head -1)
+
+        if [ -n "${artifacts_json_file}" ] && [ -f "${artifacts_json_file}" ]; then
+          echo "Found artifacts.json at: ${artifacts_json_file}"
+          local artifacts_json_content
+          artifacts_json_content=$(cat "${artifacts_json_file}")
+
+          # Verify artifacts.json has expected structure
+          if echo "${artifacts_json_content}" | jq -e '.artifacts' > /dev/null 2>&1; then
+            echo "✅️ artifacts.json has 'artifacts' field"
+          else
+            echo "🔴 artifacts.json is missing 'artifacts' field"
+            failures=$((failures+1))
+          fi
+
+          if echo "${artifacts_json_content}" | jq -e '.distributions' > /dev/null 2>&1; then
+            echo "✅️ artifacts.json has 'distributions' field"
+          else
+            echo "🔴 artifacts.json is missing 'distributions' field"
+            failures=$((failures+1))
+          fi
+
+          # Verify there are artifacts (RPMs were uploaded)
+          local artifact_count
+          artifact_count=$(echo "${artifacts_json_content}" | jq '.artifacts | keys | length')
+          if [ "${artifact_count}" -gt 0 ]; then
+            echo "✅️ artifacts.json contains ${artifact_count} artifact(s)"
+          else
+            echo "🔴 artifacts.json has no artifacts (expected at least 1)"
+            failures=$((failures+1))
+          fi
+
+          # Verify there are distributions
+          local dist_count
+          dist_count=$(echo "${artifacts_json_content}" | jq '.distributions | keys | length')
+          if [ "${dist_count}" -gt 0 ]; then
+            echo "✅️ artifacts.json contains ${dist_count} distribution(s)"
+          else
+            echo "🔴 artifacts.json has no distributions"
+            failures=$((failures+1))
+          fi
+
+          echo "artifacts.json content:"
+          echo "${artifacts_json_content}" | jq '.'
+        else
+          echo "🔴 artifacts.json not found in trusted artifact"
+          failures=$((failures+1))
+        fi
+      else
+        echo "⚠️ Could not fetch trusted artifact from push-rpms-to-pulp task (task may not have run)"
+      fi
+
+      # Cleanup
+      rm -rf "${artifacts_dir}" 2>/dev/null || true
     fi
 
     echo "Checking advisory URLs..."
