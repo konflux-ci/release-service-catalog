@@ -13,29 +13,37 @@ function curl-with-retry() {
   elif [[ "$*" == "--retry 3 https://bugzilla.redhat.com/rest/bug/12345" ]]
   then
     :
+  elif [[ "$*" == "--retry 3 https://issues.redhat.com/"* ]]
+  then
+    echo "No calls should be made to issues.redhat.com anymore"
+    echo "The server value should've been translated to redhat.atlassian.net"
+    exit 1
   elif [[ "$*" == "--retry 3 https://jira.atlassian.com/rest/api/2/issue/EMBARGOED-987" ]]
   then
     exit 1
-  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/MISSINGRH-123" ]]
+  elif [[ "$*" == *"-u "*"https://redhat.atlassian.net/rest/api/2/issue/MISSINGRH-123" ]]
   then
     exit 1
-  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/FEATURE-123" ]] # Not a Vulnerability
+  elif [[ "$*" == *"-u "*"https://redhat.atlassian.net/rest/api/2/issue/FEATURE-123" ]] # Not a Vulnerability
   then
     echo '{"fields":{"issuetype":{"name":"Feature"},"security":"a"}}'
-  elif [[ "$*" == *"Authorization: Bearer"*"https://issues.redhat.com/rest/api/2/issue/VULN-123" ]] # Vulnerability
+  elif [[ "$*" == *"-u "*"https://redhat.atlassian.net/rest/api/2/issue/VULN-123" ]] # Vulnerability
   then
-    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_12324749":"CVE-123","customfield_12324752":"my-component","security":"a"}}'
-  elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PUBLIC-1" ]] # Public: no security field, works without auth
+    echo '{"fields":{"issuetype":{"name":"Vulnerability"},"customfield_10667":"CVE-123","customfield_12324752":"my-component","security":"a"}}'
+  elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PUBLIC-1" ]] # Public: no security field, works without auth
   then
     echo '{"fields":{"foo":"bar"}}'
-  elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PRIVATE-1" ]] # Private: no security field, works with auth but not without
+  elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PUBLIC-SECNULL" ]] # Public: security field exists but is null (Atlassian Cloud behavior)
   then
-    if [[ "$*" == *"Authorization: Bearer"* ]] ; then
+    echo '{"fields":{"security":null}}'
+  elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PRIVATE-1" ]] # Private: no security field, works with auth but not without
+  then
+    if [[ "$*" == *"-u "* ]] ; then
       :
     else
       return 1
     fi
-  elif [[ "$*" == *"https://issues.redhat.com/rest/api/2/issue/PRIVATE-2" ]] # Private: has security field
+  elif [[ "$*" == *"https://redhat.atlassian.net/rest/api/2/issue/PRIVATE-2" ]] # Private: has security field
   then
     echo '{"fields":{"security":"bar"}}'
   else
