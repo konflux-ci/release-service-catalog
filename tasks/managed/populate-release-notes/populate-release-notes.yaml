@@ -113,6 +113,7 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
+          cpu: 30m
         requests:
           memory: 64Mi
           cpu: 30m
@@ -135,6 +136,7 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
+          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -145,6 +147,7 @@ spec:
         #!/usr/bin/env bash
         set -e
         ACCESS_TOKEN="$(cat /etc/secrets/token)"
+        EMAIL="$(cat /etc/secrets/email)"
 
         set -x
 
@@ -166,7 +169,7 @@ spec:
             RELEASE_CVES["$cve"]=1
         done
 
-        CVE_FIELD="customfield_12324749"
+        CVE_FIELD="customfield_10667"
         RC=0
 
         NUM_ISSUES=$(jq -cr '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
@@ -175,8 +178,13 @@ spec:
             server=$(jq -r '.source' <<< "$issue")
             issue_id=$(jq -r '.id' <<< "$issue")
 
-            # Currently only handle issues.redhat.com
-            if [ "$server" != "issues.redhat.com" ] ; then
+            if [ "$server" = "issues.redhat.com" ] ; then
+                echo "Using redhat.atlassian.net endpoints for issues.redhat.com issue"
+                server=redhat.atlassian.net
+            fi
+
+            # Currently only handle redhat.atlassian.net
+            if [ "$server" != "redhat.atlassian.net" ] ; then
                 echo "Skipping non-JIRA issue: $issue_id from $server"
                 continue
             fi
@@ -184,7 +192,7 @@ spec:
             API_URL="https://${server}/rest/api/2/issue/${issue_id}"
 
             set +x # Don't leak the ACCESS_TOKEN
-            OUTPUT=$(curl-with-retry --retry 3 -H "Authorization: Bearer $ACCESS_TOKEN" "${API_URL}" 2>/dev/null)
+            OUTPUT=$(curl-with-retry --retry 3 -u "${EMAIL}:$ACCESS_TOKEN" "${API_URL}" 2>/dev/null)
             CURL_RC=$?
             set -x
 
@@ -225,6 +233,7 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
+          cpu: '1'
         requests:
           memory: 64Mi
           cpu: '1'
@@ -267,6 +276,7 @@ spec:
         do
             component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
             name=$(jq -r '.name' <<< "$component")
+            canonical_name=$(jq -r '.canonicalName // empty' <<< "$component")
             image=$(jq -r '.containerImage' <<< "$component")
             if ! [[ "$image" =~ ^[^:]+@sha256:[0-9a-f]+$ ]] ; then
                 echo "Failed to extract sha256 tag from ${image}. Exiting with failure"
@@ -317,8 +327,16 @@ spec:
                     arch=$(jq -r .platform.architecture <<< "${arch_json}")
                     digest=$(jq -r .digest <<< "${arch_json}")
                     containerImage="${deliveryRepo}@${digest}"
+
+                    # Determine the name part of the PURL
+                    # If canonicalName is present, use it. Otherwise fallback to the last segment of the deliveryRepo
+                    purl_path="${deliveryRepo##*/}"
+                    if [[ -n "$canonical_name" ]]; then
+                        purl_path="${canonical_name}"
+                    fi
+
                     # purl should be pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo
-                    purl="pkg:oci/${deliveryRepo##*/}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
+                    purl="pkg:oci/${purl_path}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
 
                     uniqueTag=""
 
@@ -368,6 +386,7 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
+          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -396,24 +415,23 @@ spec:
             exit 1
         fi
 
-        # generate_purl_rpm name version release arch sha256 repository_id [vendor]
+        # generate_purl_rpm name version release arch distro repository_id [vendor]
         # Example:
-        #   generate_purl_rpm "zlib-devel" "1.2.11" "40.el9" "x86_64" \
-        #     "9775022716a2b6dd51d151a40aa4a6bcb466edeb01b747f48072703e509be097" \
+        #   generate_purl_rpm "zlib-devel" "1.2.11" "40.el9" "x86_64" "rhel"\
         #     "ubi-9-for-x86_64-appstream-rpms" "redhat"
         generate_purl_rpm() {
           local name="$1"
           local version="$2"
           local release="$3"
           local arch="$4"
-          local sha256="$5"
+          local distro="$5"
           local repository_id="$6"
           local vendor="${7:-redhat}"
 
           # Assemble purl:
-          # pkg:rpm/<vendor>/<name>@<version>-<release>?arch=<arch>&checksum=sha256:<sha256>&repository_id=<repo>
-          printf 'pkg:rpm/%s/%s@%s-%s?arch=%s&checksum=sha256:%s&repository_id=%s\n' \
-            "$vendor" "$name" "$version" "$release" "$arch" "$sha256" "$repository_id"
+          # pkg:rpm/<vendor>/<name>@<version>-<release>?arch=<arch>&distro=<distro>&repository_id=<repo>
+          printf 'pkg:rpm/%s/%s@%s-%s?arch=%s&distro=%s&repository_id=%s\n' \
+            "$vendor" "$name" "$version" "$release" "$arch" "$distro" "$repository_id"
         }
 
         append_artifact_entry() {
@@ -541,8 +559,6 @@ spec:
                 exit 1
               fi
 
-              pulp_domain="$(jq -r '.pulp.domain // ""' "${DATA_FILE}")"
-
               RPM_FILES_LENGTH=$(jq --arg name "$name" \
                 '[.components[]? | select(.name == $name) | .rpmsToPublish[]?] | length' "${SNAPSHOT_FILE}")
               for ((k = 0; k < RPM_FILES_LENGTH; k++)); do
@@ -552,28 +568,29 @@ spec:
                 arch=$(jq -r '.arch' <<< "$rpmfile")
                 version=$(jq -r '.version' <<< "$rpmfile")
                 release=$(jq -r '.release' <<< "$rpmfile")
-                sha256=$(jq -r '.sha256' <<< "$rpmfile")
+                distro=$(jq -r '.distro' <<< "$rpmfile")
 
                 # Expand per-target repo to keep repository_id accurate (noarch may target multiple repos).
+                # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
                 TARGET_REPOS_LEN=$(jq '.targetRepos | length' <<< "$rpmfile")
                 if [ "${TARGET_REPOS_LEN}" -eq 0 ]; then
                   # If no targetRepos is present, fall back to a best-effort purl without repository_id.
-                  purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$sha256" "")
+                  purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$distro" "")
                   echo "purl: $purl"
                   append_artifact_entry "$name" "$arch" "$os" "$purl"
                 else
                   for ((r = 0; r < TARGET_REPOS_LEN; r++)); do
-                    repo=$(jq -r --argjson r "$r" '.targetRepos[$r]' <<< "$rpmfile")
-                    pulprepo="${repo}"
-                    if [ -n "${pulp_domain}" ]; then
-                      pulprepo="${pulp_domain}/${repo}"
-                    fi
+                    repo_obj=$(jq -c --argjson r "$r" '.targetRepos[$r]' <<< "$rpmfile")
+                    repo_id=$(jq -r '.repository_id' <<< "$repo_obj")
+                    repo_name=$(jq -r '.repository_name' <<< "$repo_obj")
+                    repo_distro=$(jq -r '.distro // empty' <<< "$repo_obj")
                     arch_for_entry="${arch}"
-                    if [ "${repo}" = "source" ]; then
+                    if [ "${repo_name}" = "source" ]; then
                       arch_for_entry="source"
                     fi
+                    # Use repo_id directly for PURL repository_id (no domain prefix)
                     purl=$(generate_purl_rpm \
-                      "$rpm_name" "$version" "$release" "$arch_for_entry" "$sha256" "$pulprepo")
+                      "$rpm_name" "$version" "$release" "$arch_for_entry" "$repo_distro" "$repo_id")
                     echo "purl: $purl"
                     append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
                   done
@@ -587,6 +604,7 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
+          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -676,7 +694,13 @@ spec:
             # Ignore manifest files
             [[ "$filename" == *_manifest.json ]] && continue
             checksum="${CHECKSUM_MAP[$filename]}"
-            download_url="https://github.com/$owner_repo/releases/download/$GITHUB_RELEASE_VERSION/$filename"
+            # GitHub release tags typically use 'v' prefix (e.g., v1.7.2), but the version
+            # extracted from filenames may not include it. Ensure the download URL uses the tag format.
+            github_tag="$GITHUB_RELEASE_VERSION"
+            if [[ ! "$github_tag" =~ ^v ]]; then
+                github_tag="v$GITHUB_RELEASE_VERSION"
+            fi
+            download_url="https://github.com/$owner_repo/releases/download/$github_tag/$filename"
             purl="pkg:generic/$name@$GITHUB_RELEASE_VERSION?checksum=$checksum&download_url=$download_url"
             jsonString=$(jq -cn \
                 --arg component "$name" \
@@ -695,6 +719,7 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
+          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -747,6 +772,7 @@ spec:
       computeResources:
         limits:
           memory: 128Mi
+          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m
