@@ -3,7 +3,15 @@
 Filters snapshot to remove already-released FBC fragments by querying Pyxis index images.
 Queries for index images and checks if fragments are present in their bundles/related_images fields.
 Components already published are filtered out to prevent EC validation failures.
-Additionally, extracts and attaches ocpVersion field to each component for downstream tasks.
+Extracts and attaches ocpVersion field to each component for downstream tasks.
+OCP version resolution order:
+  1. com.redhat.fbc.openshift.version label - expects a non-empty JSON array.
+     Currently only the first OCP version from the array is used.
+     Recommended for binaryless fragments. Works for pre-GA OCP versions.
+     Enables shipping a single FBC to multiple OCP catalogs. Allowed versions for this label are >=v4.15
+     Dockerfile example: LABEL com.redhat.fbc.openshift.version='["v4.18","v4.21"]'
+  2. org.opencontainers.image.base.name annotation - Legacy fallback.
+     Requires OCP-version-specific operator-registry image. Cannot target pre-GA versions.
 
 ## Parameters
 

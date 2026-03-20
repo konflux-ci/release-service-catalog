@@ -11,7 +11,15 @@ spec:
     Filters snapshot to remove already-released FBC fragments by querying Pyxis index images.
     Queries for index images and checks if fragments are present in their bundles/related_images fields.
     Components already published are filtered out to prevent EC validation failures.
-    Additionally, extracts and attaches ocpVersion field to each component for downstream tasks.
+    Extracts and attaches ocpVersion field to each component for downstream tasks.
+    OCP version resolution order:
+      1. com.redhat.fbc.openshift.version label - expects a non-empty JSON array.
+         Currently only the first OCP version from the array is used.
+         Recommended for binaryless fragments. Works for pre-GA OCP versions.
+         Enables shipping a single FBC to multiple OCP catalogs. Allowed versions for this label are >=v4.15
+         Dockerfile example: LABEL com.redhat.fbc.openshift.version='["v4.18","v4.21"]'
+      2. org.opencontainers.image.base.name annotation - Legacy fallback.
+         Requires OCP-version-specific operator-registry image. Cannot target pre-GA versions.
   params:
     - name: snapshotPath
       type: string
@@ -174,19 +182,55 @@ spec:
           component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
           component_name=$(jq -r '.name' <<< "$component")
           container_image=$(jq -r '.containerImage' <<< "$component")
+          ocp_version=""
 
           echo "  Component $((i+1))/${component_count}: ${component_name}"
-          echo "    → Extracting OCP version from base image..."
 
-          # Extract OCP version from org.opencontainers.image.base.name annotation
-          raw_image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${container_image}")
-          media_type=$(jq -r .mediaType <<< "${raw_image_metadata}")
-          ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${raw_image_metadata}" \
-            | cut -d: -f2 | sed "s/[\"']//g")
+          echo "    → Extracting OCP version from \"com.redhat.fbc.openshift.version\" label"
+          # Extract OCP version from com.redhat.fbc.openshift.version
+          image_metadata=$(skopeo inspect --retry-times 3 --no-tags "docker://${container_image}")
 
-          # Handle multiplatform images
-          if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]] || \
-             [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+          # Returns the label value if present, or 'MISSING' as a sentinel.
+          # Using has() instead of // to distinguish between a missing label and a label with a null value.
+          label_value=$(jq -r '
+            if .Labels | has("com.redhat.fbc.openshift.version")
+            then .Labels["com.redhat.fbc.openshift.version"]
+            else "MISSING"
+            end' <<< "$image_metadata")
+
+          # Label is present
+          if [[ "$label_value" != "MISSING" ]]; then
+
+            # Label value must be a non-empty JSON array (catches null, empty, empty array, non-array values)
+            if ! jq -e 'type == "array" and length > 0' <<< "$label_value" > /dev/null 2>&1; then
+              echo "    ❌ ERROR: \"com.redhat.fbc.openshift.version\" label has" \
+                   "invalid value '${label_value}' for ${container_image}," \
+                   "array with ocp_versions e.g. [\"v4.21\"] is expected."
+              exit 1
+            fi
+
+            # The release pipeline doesn't support multiple OCP versions for a single FBC fragment yet. 
+            # This will be removed once that support is added in CLOUDDST-32151
+            ocp_version=$(jq -r 'first' <<< "$label_value")
+
+            # There is more than one ocp version present in the label
+            if [[ $(jq 'length' <<< "$label_value") -gt 1 ]]; then
+              echo "    INFO: Multiple versions found in label (${label_value}). Selecting first: ${ocp_version}"
+            fi
+            echo "    → OCP version extracted from label \"com.redhat.fbc.openshift.version\": ${ocp_version}"
+
+          # Fallback: label was missing, extract from annotation
+          else
+            echo "    → Extracting OCP version from base image..."
+            # Extract OCP version from org.opencontainers.image.base.name annotation
+            raw_image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${container_image}")
+            media_type=$(jq -r .mediaType <<< "${raw_image_metadata}")
+            ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${raw_image_metadata}" \
+              | cut -d: -f2 | sed "s/[\"']//g")
+
+            # Handle multiplatform images
+            if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]] || \
+               [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
               echo "    INFO: Multiplatform image detected, extracting manifest"
               arch_json=$(get-image-architectures "${container_image}")
               manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
@@ -194,15 +238,17 @@ spec:
 
               ocp_version=$(skopeo inspect --retry-times 3 --raw "docker://${single_arch_fragment}" \
                | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed "s/[\"']//g")
+            fi
+
+            echo "    → OCP version extracted from annotation: ${ocp_version}"
           fi
 
           if [ -z "$ocp_version" ] || [ "$ocp_version" = "null" ]; then
             echo "    ❌ ERROR: Could not extract OCP version from ${container_image}"
+            echo "       Label \"com.redhat.fbc.openshift.version\" not found"
             echo "       Annotation 'org.opencontainers.image.base.name' not found"
             exit 1
           fi
-
-          echo "    → OCP version extracted from annotation: ${ocp_version}"
 
           # Add 'v' prefix if not already present
           if [[ ! "$ocp_version" =~ ^v ]]; then
