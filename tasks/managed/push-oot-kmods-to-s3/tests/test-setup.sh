@@ -46,6 +46,35 @@ echo "Creating valid checksum file for all .ko files..."
   echo "Generated checksums for $(wc -l < signed_kmods_checksums_x86_64.txt) files"
 )
 
+# Create multiarch summary files if arch_count.txt exists with >1 arch
+# This simulates what extract-oot-kmods task produces for multiarch builds
+if [ -f "$(params.dataDir)/arch_count.txt" ]; then
+  arch_count=$(cat "$(params.dataDir)/arch_count.txt")
+  if [ "$arch_count" -gt 1 ]; then
+    echo "Creating multiarch summary files..."
+    SIGNED_KMODS_PATH_ABS="$(params.dataDir)/$(params.signedKmodsPath)"
+
+    # Create signing_summary.txt
+    cat > "$SIGNED_KMODS_PATH_ABS/signing_summary.txt" << EOF
+Multi-architecture signing summary:
+Total architectures processed: $arch_count
+Signing details:
+  x86_64: $(find "$ARCH_DIR" -name "*.ko" | wc -l) signed .ko files
+    Checksums: verified
+EOF
+
+    # Create extraction_summary.txt
+    cat > "$SIGNED_KMODS_PATH_ABS/extraction_summary.txt" << EOF
+Multi-architecture extraction summary:
+Total architectures processed: $arch_count
+Extraction details:
+  x86_64: $(find "$ARCH_DIR" -name "*.ko" | wc -l) extracted .ko files
+EOF
+
+    echo "Created signing_summary.txt and extraction_summary.txt"
+  fi
+fi
+
 # Create signed-kmods.tar.gz file to simulate what sign-oot-kmods produces
 echo "Creating signed-kmods.tar.gz to simulate signing task output..."
 cd "$(params.dataDir)"
