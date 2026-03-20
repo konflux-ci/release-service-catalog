@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-rpms-to-pulp-filtered-snapshot
+  name: test-upload-src-rpm-sbom-attestation-idempotent
 spec:
   description: |
-    Run the push-rpms-to-pulp task with a snapshot that already contains rpmsToPublish.
-    Verify only RPMs listed in rpmsToPublish are uploaded.
+    Run the upload-src-rpm-sbom-attestation task when files already exist in Pulp.
+    Verifies idempotency - no uploads should happen.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -45,37 +45,55 @@ spec:
               value: /var/workdir
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
-            - name: ORAS_OPTIONS
+            - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: DEBUG
+            - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              # Use "alreadyexists" in image name to trigger idempotent mock behavior
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
                 "application": "rpms",
                 "artifacts": {},
                 "components": [
                   {
-                    "containerImage": "quay.io/test/happypath@sha256:12345",
+                    "containerImage": "quay.io/test/alreadyexists@sha256:12345",
                     "name": "test",
+                    "source": {
+                      "git": {
+                        "revision": "32c8f78c26e5831a87aa865ea80452fadbb3a95e",
+                        "url": "https://gitlab.example.com/rpms/test"
+                      }
+                    },
                     "rpmsToPublish": [
                       {
-                        "rpm": "hello-2.12.1-6.fc44.x86_64.rpm",
-                        "targetRepos": [
-                          {"repository_id": "rpm-x86_64", "repository_name": "x86_64",
-                           "distro": "testdistro"}
-                        ]
+                        "rpm": "hello-2.12.1-6.fc44.src.rpm",
+                        "rpmname": "hello",
+                        "arch": "src",
+                        "epoch": "0",
+                        "version": "2.12.1",
+                        "release": "6.fc44",
+                        "sha256": "abc123",
+                        "targetRepos": [{"repository_id": "1", "repository_name": "source"}]
                       }
                     ]
                   }
                 ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "rpm-repositories": []
+                }
               }
               EOF
           - name: create-trusted-artifact
@@ -90,16 +108,14 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: push-rpms-to-pulp
+        name: upload-src-rpm-sbom-attestation
       params:
-        - name: SNAPSHOT_PATH
+        - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
         - name: PULP_DOMAIN
-          value: "mydomain"
+          value: "mock"
         - name: PULP_SECRET_NAME
           value: "pulp-task-pulp-secret"
-        - name: resultsDirPath
-          value: "$(context.pipelineRun.uid)/results"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -138,9 +154,9 @@ spec:
           env:
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
-            - name: ORAS_OPTIONS
+            - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: DEBUG
+            - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: use-trusted-artifact
@@ -152,22 +168,55 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9  # yamllint disable-line rule:line-length
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              results="$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-rpms-to-pulp-results.json")"
-              echo "$results" | jq .
+              ls -lR "$(params.dataDir)"
 
-              # Only the x86_64 RPM listed in rpmsToPublish should be uploaded.
-              test "$(echo "$results" | jq '.rpmfiles | length')" = "1"
-              test "$(echo "$results" | jq -r '.rpmfiles[0].rpm')" = "hello-2.12.1-6.fc44.x86_64.rpm"
+              # Verify cosign was called twice (SBOM and attestation) - downloads still happen
+              cosign_calls=$(wc -l < "$(params.dataDir)/mock_cosign.txt")
+              if [ "$cosign_calls" != 2 ]; then
+                echo "Error: cosign was expected to be called 2 times. Actual: $cosign_calls"
+                cat "$(params.dataDir)/mock_cosign.txt"
+                exit 1
+              fi
 
-              # oras pull should be called once
-              test "$(wc -l < "$(params.dataDir)/mock_oras.txt")" = "1"
+              # Verify no file uploads happened (idempotency)
+              # 1x file repository list + 2x file content list (no uploads) = 3
+              pulp_calls=$(wc -l < "$(params.dataDir)/mock_pulp.txt")
+              if [ "$pulp_calls" != 3 ]; then
+                echo "Error: pulp was expected to be called 3 times (no uploads). Actual: $pulp_calls"
+                cat "$(params.dataDir)/mock_pulp.txt"
+                exit 1
+              fi
 
-              # Expect domain show + rpm repo list + 1 upload = 3
-              test "$(wc -l < "$(params.dataDir)/mock_pulp.txt")" = "3"
+              # Verify NO file uploads were called
+              file_upload_count=$(grep -c "file content upload" "$(params.dataDir)/mock_pulp.txt" || true)
+              if [ "${file_upload_count:-0}" != 0 ]; then
+                echo "Error: expected 0 file content uploads (idempotent). Actual: $file_upload_count"
+                cat "$(params.dataDir)/mock_pulp.txt"
+                exit 1
+              fi
+
+              # Verify snapshot was still updated with sbomPath and attestationPath
+              snapshot="$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json"
+              sbom_path=$(jq -r '.components[0].rpmsToPublish[0].sbomPath // empty' "$snapshot")
+              att_path=$(jq -r '.components[0].rpmsToPublish[0].attestationPath // empty' "$snapshot")
+
+              if [ -z "$sbom_path" ]; then
+                echo "Error: sbomPath not found in snapshot for source RPM"
+                jq '.' "$snapshot"
+                exit 1
+              fi
+
+              if [ -z "$att_path" ]; then
+                echo "Error: attestationPath not found in snapshot for source RPM"
+                jq '.' "$snapshot"
+                exit 1
+              fi
+
+              echo "Test passed: Idempotent run - no uploads, snapshot updated"
       runAfter:
         - run-task

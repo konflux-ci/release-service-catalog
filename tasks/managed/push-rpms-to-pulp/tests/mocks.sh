@@ -256,6 +256,18 @@ function oras() {
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
             touch $output_file_dir/logs/hello-docs-2.12.1-6.fc44.noarch.rpm.log
             touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
+        elif [[ "$args" == *"quay.io/test/nodigest"* ]]; then
+            # Image without sha256 digest - task should fail during SBOM processing
+            echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
+            touch $output_file_dir/hello-2.12.1-6.fc44.x86_64.rpm
+            touch $output_file_dir/hello-2.12.1-6.fc44.src.rpm
+            mkdir -p $output_file_dir/logs
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.x86_64.rpm.log
+            touch $output_file_dir/logs/hello-2.12.1-6.fc44.src.rpm.log
+        elif [[ "$args" == *" null "* ]] || [[ "$args" =~ \ null$ ]]; then
+            # Component with no containerImage - oras pull with "null" creates no files
+            # Task should fail during SBOM processing when it finds no containerImage
+            echo "none" > "${CONTENT_EXISTS_MODE_FILE}"
         else
             echo Error: Unexpected call
             exit 1

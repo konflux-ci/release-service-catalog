@@ -81,6 +81,89 @@ verify_release_contents() {
             echo "Found topic: ${topic}"
             description=$(yq '.spec.description // ""' "${advisory_yaml_dir}/advisory.yaml")
             echo "Found description: ${description}"
+
+            # Verify SBOM field is present for source RPM artifacts and is downloadable
+            echo "Checking SBOM for source RPM artifacts..."
+            sbom_url=$(yq '.spec.content.artifacts[] | select(.architecture == "source") | .sbom // ""' \
+              "${advisory_yaml_dir}/advisory.yaml" | head -n1)
+
+            if [ -n "${sbom_url}" ]; then
+              echo "Found SBOM URL: ${sbom_url}"
+
+              # Get Pulp credentials from the secret
+              # Disable tracing to prevent credential exposure
+              { set +x; } 2>/dev/null
+              pulp_secret_name="pulp-credentials-${component_name}"
+              cli_toml=$(kubectl get secret "${pulp_secret_name}" -n "${managed_namespace}" \
+                -o jsonpath='{.data.cli\.toml}' 2>/dev/null | base64 -d || echo "")
+
+              if [ -n "${cli_toml}" ]; then
+                pulp_username=$(echo "${cli_toml}" | grep username | cut -d'"' -f2)
+                pulp_password=$(echo "${cli_toml}" | grep password | cut -d'"' -f2)
+
+                # Try to download the SBOM
+                sbom_file=$(mktemp)
+                http_code=$(curl -L -s -w "%{http_code}" -u "${pulp_username}:${pulp_password}" \
+                  -o "${sbom_file}" "${sbom_url}" 2>/dev/null || echo "000")
+
+                if [ "${http_code}" = "200" ]; then
+                  echo "✅️ SBOM downloaded successfully (HTTP ${http_code})"
+                  # Validate it's valid JSON
+                  if jq -e . "${sbom_file}" >/dev/null 2>&1; then
+                    echo "✅️ SBOM is valid JSON"
+                  else
+                    echo "🔴 SBOM is not valid JSON"
+                    failures=$((failures+1))
+                  fi
+                else
+                  echo "🔴 Failed to download SBOM (HTTP ${http_code})"
+                  failures=$((failures+1))
+                fi
+                rm -f "${sbom_file}"
+              else
+                echo "Warning: Could not retrieve Pulp credentials, skipping SBOM download verification"
+              fi
+            else
+              echo "🔴 sbom field not found in source RPM artifact entry"
+              failures=$((failures+1))
+            fi
+
+            # Verify attestation field is present for source RPM artifacts and is downloadable
+            echo "Checking attestation for source RPM artifacts..."
+            attestation_url=$(yq '.spec.content.artifacts[] | select(.architecture == "source") | .attestation // ""' \
+              "${advisory_yaml_dir}/advisory.yaml" | head -n1)
+
+            if [ -n "${attestation_url}" ]; then
+              echo "Found attestation URL: ${attestation_url}"
+
+              # Reuse Pulp credentials from SBOM check
+              if [ -n "${cli_toml}" ]; then
+                # Try to download the attestation
+                att_file=$(mktemp)
+                http_code=$(curl -L -s -w "%{http_code}" -u "${pulp_username}:${pulp_password}" \
+                  -o "${att_file}" "${attestation_url}" 2>/dev/null || echo "000")
+
+                if [ "${http_code}" = "200" ]; then
+                  echo "✅️ Attestation downloaded successfully (HTTP ${http_code})"
+                  # Validate it's valid JSON
+                  if jq -e . "${att_file}" >/dev/null 2>&1; then
+                    echo "✅️ Attestation is valid JSON"
+                  else
+                    echo "🔴 Attestation is not valid JSON"
+                    failures=$((failures+1))
+                  fi
+                else
+                  echo "🔴 Failed to download attestation (HTTP ${http_code})"
+                  failures=$((failures+1))
+                fi
+                rm -f "${att_file}"
+              else
+                echo "Warning: Could not retrieve Pulp credentials, skipping attestation download verification"
+              fi
+            else
+              echo "🔴 attestation field not found in source RPM artifact entry"
+              failures=$((failures+1))
+            fi
         fi
     fi
 

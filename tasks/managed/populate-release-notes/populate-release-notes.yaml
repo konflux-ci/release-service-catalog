@@ -446,7 +446,7 @@ spec:
         }
 
         append_artifact_entry() {
-          local component="$1" arch="$2" os="$3" purl="$4"
+          local component="$1" arch="$2" os="$3" purl="$4" sbom="${5:-}" attestation="${6:-}"
           local jsonString
           jsonString=$(jq -cn \
             --arg component "$component" \
@@ -454,6 +454,12 @@ spec:
             --arg os "$os" \
             --arg purl "$purl" \
             '{"architecture": $arch, "os": $os, "purl": $purl, "component": $component}')
+          if [ -n "$sbom" ]; then
+            jsonString=$(jq --arg sbom "$sbom" '. + {sbom: $sbom}' <<< "$jsonString")
+          fi
+          if [ -n "$attestation" ]; then
+            jsonString=$(jq --arg att "$attestation" '. + {attestation: $att}' <<< "$jsonString")
+          fi
 
           if [ "$(jq '.cves.fixed | length' <<< "$CVEsJson")" -gt 0 ]; then
             jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< "$jsonString")
@@ -570,6 +576,10 @@ spec:
                 exit 1
               fi
 
+              # Read Pulp domain for constructing SBOM URLs
+              PULP_DOMAIN=$(jq -r '.pulp.domain // empty' "$DATA_FILE")
+              PULP_CONTENT_BASE_URL="https://packages.redhat.com/api/pulp-content"
+
               RPM_FILES_LENGTH=$(jq --arg name "$name" \
                 '[.components[]? | select(.name == $name) | .rpmsToPublish[]?] | length' "${SNAPSHOT_FILE}")
               for ((k = 0; k < RPM_FILES_LENGTH; k++)); do
@@ -584,6 +594,18 @@ spec:
                 # Expand per-target repo to keep repository_id accurate (noarch may target multiple repos).
                 # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
                 TARGET_REPOS_LEN=$(jq '.targetRepos | length' <<< "$rpmfile")
+                # Extract sbomPath and attestationPath for source RPMs (if present)
+                sbom_path=$(jq -r '.sbomPath // empty' <<< "$rpmfile")
+                sbom_url=""
+                if [ -n "${sbom_path}" ] && [ -n "${PULP_DOMAIN}" ]; then
+                  sbom_url="${PULP_CONTENT_BASE_URL}/${PULP_DOMAIN}/${sbom_path}"
+                fi
+                attestation_path=$(jq -r '.attestationPath // empty' <<< "$rpmfile")
+                attestation_url=""
+                if [ -n "${attestation_path}" ] && [ -n "${PULP_DOMAIN}" ]; then
+                  attestation_url="${PULP_CONTENT_BASE_URL}/${PULP_DOMAIN}/${attestation_path}"
+                fi
+
                 if [ "${TARGET_REPOS_LEN}" -eq 0 ]; then
                   # If no targetRepos is present, fall back to a best-effort purl without repository_id.
                   purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$distro" "")
@@ -603,7 +625,15 @@ spec:
                     purl=$(generate_purl_rpm \
                       "$rpm_name" "$version" "$release" "$arch_for_entry" "$repo_distro" "$repo_id")
                     echo "purl: $purl"
-                    append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
+                    # Include SBOM and attestation URLs for source RPM entries
+                    if [ "${arch_for_entry}" = "source" ]; then
+                      [ -n "${sbom_url}" ] && echo "sbom: $sbom_url"
+                      [ -n "${attestation_url}" ] && echo "attestation: $attestation_url"
+                      append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl" \
+                        "$sbom_url" "$attestation_url"
+                    else
+                      append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
+                    fi
                   done
                 fi
               done
