@@ -2,10 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-rpms-to-pulp-only-noarch-rpms
+  name: test-upload-src-rpm-sbom-attestation
 spec:
   description: |
-    Run the push-rpms-to-pulp task with required parameters - but only noarch rpms are expected.
+    Run the upload-src-rpm-sbom-attestation task with required parameters - a happy path scenario.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -62,16 +62,46 @@ spec:
                 "artifacts": {},
                 "components": [
                   {
-                    "containerImage": "quay.io/test/onlynoarch@sha256:12345",
+                    "containerImage": "quay.io/test/happypath@sha256:12345",
                     "name": "test",
                     "source": {
                       "git": {
                         "revision": "32c8f78c26e5831a87aa865ea80452fadbb3a95e",
                         "url": "https://gitlab.example.com/rpms/test"
                       }
-                    }
+                    },
+                    "rpmsToPublish": [
+                      {
+                        "rpm": "hello-2.12.1-6.fc44.src.rpm",
+                        "rpmname": "hello",
+                        "arch": "src",
+                        "epoch": "0",
+                        "version": "2.12.1",
+                        "release": "6.fc44",
+                        "sha256": "abc123",
+                        "targetRepos": [{"repository_id": "1", "repository_name": "source"}]
+                      },
+                      {
+                        "rpm": "hello-2.12.1-6.fc44.x86_64.rpm",
+                        "rpmname": "hello",
+                        "arch": "x86_64",
+                        "epoch": "0",
+                        "version": "2.12.1",
+                        "release": "6.fc44",
+                        "sha256": "def456",
+                        "targetRepos": [{"repository_id": "2", "repository_name": "x86_64"}]
+                      }
+                    ]
                   }
                 ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "rpm-repositories": []
+                }
               }
               EOF
           - name: create-trusted-artifact
@@ -86,16 +116,14 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: push-rpms-to-pulp
+        name: upload-src-rpm-sbom-attestation
       params:
-        - name: SNAPSHOT_PATH
+        - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
         - name: PULP_DOMAIN
-          value: "mydomain"
+          value: "mock"
         - name: PULP_SECRET_NAME
           value: "pulp-task-pulp-secret"
-        - name: resultsDirPath
-          value: "$(context.pipelineRun.uid)/results"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -155,45 +183,68 @@ spec:
 
               ls -lR "$(params.dataDir)"
 
-              results=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-rpms-to-pulp-results.json")
-              echo "$results"
-
-              if [ "$(wc -l < "$(params.dataDir)/mock_oras.txt")" != 1 ]; then
-                echo Error: oras was expected to be called 1 time. Actual calls:
-                cat "$(params.dataDir)/mock_oras.txt"
+              # Verify cosign was called twice (SBOM and attestation)
+              if [ ! -f "$(params.dataDir)/mock_cosign.txt" ]; then
+                echo "Error: cosign was not called"
+                exit 1
+              fi
+              cosign_calls=$(wc -l < "$(params.dataDir)/mock_cosign.txt")
+              if [ "$cosign_calls" != 2 ]; then
+                echo "Error: cosign was expected to be called 2 times. Actual: $cosign_calls"
+                cat "$(params.dataDir)/mock_cosign.txt"
                 exit 1
               fi
 
-              # Expect domain show + rpm repo list + 4 uploads = 6
-              if [ "$(wc -l < "$(params.dataDir)/mock_pulp.txt")" != 6 ]; then
-                echo Error: pulp was expected to be called 6 times. Actual calls:
+              # Verify pulp was called:
+              # 1x file repository list + 2x file content list + 2x file content upload = 5
+              pulp_calls=$(wc -l < "$(params.dataDir)/mock_pulp.txt")
+              if [ "$pulp_calls" != 5 ]; then
+                echo "Error: pulp was expected to be called 5 times. Actual: $pulp_calls"
                 cat "$(params.dataDir)/mock_pulp.txt"
                 exit 1
               fi
 
-              # count how many rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | length')" != 4 ]; then
-                echo Error: there should be 4 rpmfiles in the results. Actual results:
-                echo "$results"
+              # Verify file uploads were called (SBOM and attestation)
+              file_upload_count=$(grep -c "file content upload" "$(params.dataDir)/mock_pulp.txt" || true)
+              if [ "${file_upload_count:-0}" != 2 ]; then
+                echo "Error: expected 2 file content uploads. Actual: $file_upload_count"
+                cat "$(params.dataDir)/mock_pulp.txt"
                 exit 1
               fi
-              # count how noarch rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "noarch")) | length')" != 4 ]; then
-                echo Error: there should be 4 noarch rpmfiles in the results. Actual results:
-                echo "$results"
+
+              # Verify snapshot was updated with sbomPath and attestationPath
+              snapshot="$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json"
+              sbom_path=$(jq -r '.components[0].rpmsToPublish[0].sbomPath // empty' "$snapshot")
+              att_path=$(jq -r '.components[0].rpmsToPublish[0].attestationPath // empty' "$snapshot")
+
+              if [ -z "$sbom_path" ]; then
+                echo "Error: sbomPath not found in snapshot for source RPM"
+                jq '.' "$snapshot"
                 exit 1
               fi
-              # count how non-noarch rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch != "noarch")) | length')" != 0 ]; then
-                echo Error: there should be 0 non-noarch rpmfiles in the results. Actual results:
-                echo "$results"
+
+              if [ -z "$att_path" ]; then
+                echo "Error: attestationPath not found in snapshot for source RPM"
+                jq '.' "$snapshot"
                 exit 1
               fi
-              # count how source rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "source")) | length')" != 0 ]; then
-                echo Error: there should be 0 source rpmfiles in the results. Actual results:
-                echo "$results"
+
+              # Verify non-source RPM does NOT have sbomPath or attestationPath
+              x86_sbom=$(jq -r '.components[0].rpmsToPublish[1].sbomPath // empty' "$snapshot")
+              x86_att=$(jq -r '.components[0].rpmsToPublish[1].attestationPath // empty' "$snapshot")
+
+              if [ -n "$x86_sbom" ]; then
+                echo "Error: x86_64 RPM should not have sbomPath"
+                jq '.' "$snapshot"
                 exit 1
               fi
+
+              if [ -n "$x86_att" ]; then
+                echo "Error: x86_64 RPM should not have attestationPath"
+                jq '.' "$snapshot"
+                exit 1
+              fi
+
+              echo "Test passed: SBOM and attestation uploaded successfully"
       runAfter:
         - run-task

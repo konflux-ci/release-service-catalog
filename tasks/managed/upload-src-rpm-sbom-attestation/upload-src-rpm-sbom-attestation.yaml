@@ -1,0 +1,395 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: upload-src-rpm-sbom-attestation
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    Downloads SBOMs and attestations from container images and uploads them to a Pulp
+    file repository. Updates the snapshot with sbomPath and attestationPath for each
+    source RPM entry.
+
+    The task:
+    - iterates over each component in the snapshot
+    - downloads SBOM and attestation using cosign
+    - uploads them to the Pulp metadata file repository
+    - updates .components[].rpmsToPublish[] with sbomPath and attestationPath
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON Snapshot spec in the data workspace
+    - name: PULP_DOMAIN
+      type: string
+      description: The domain to use for Pulp operations
+    - name: PULP_SECRET_NAME
+      type: string
+      description: >-
+        The name of the secret containing the Pulp cli.toml file. It must have the cli.toml key
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: pulp-secret-name-vol
+      secret:
+        secretName: $(params.PULP_SECRET_NAME)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: HOME
+        value: /tmp
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: ORAS_OPTIONS
+        value: "$(params.orasOptions)"
+      - name: DEBUG
+        value: "$(params.trustedArtifactsDebug)"
+      - name: PULP_DOMAIN
+        value: "$(params.PULP_DOMAIN)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: upload
+      image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 350m
+        requests:
+          memory: 512Mi
+          cpu: 350m
+      volumeMounts:
+        - name: pulp-secret-name-vol
+          mountPath: "/etc/secrets"
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+        set +x
+
+        SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
+        if [[ ! -f "${SNAPSHOT_PATH}" ]]; then
+          echo "Error: No valid snapshot file was provided at ${SNAPSHOT_PATH}" >&2
+          exit 1
+        fi
+
+        CONFIG_FILE_CONTENT="$(cat /etc/secrets/cli.toml || true)"
+        if [[ -z "${CONFIG_FILE_CONTENT}" ]]; then
+          echo "Error: Missing cli.toml in secret $(params.PULP_SECRET_NAME)" >&2
+          exit 1
+        fi
+        echo "${CONFIG_FILE_CONTENT:?}" > "/tmp/cli.toml"
+        export PULP_CONFIG_FILE="/tmp/cli.toml"
+
+        METADATA_REPO_NAME="metadata"
+        metadata_repo_exists=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
+          file repository list | \
+          jq -r --arg name "${METADATA_REPO_NAME}" '.[] | select(.name == $name) | .name // empty')
+        if [[ -z "${metadata_repo_exists}" ]]; then
+          echo "Error: Metadata file repository '${METADATA_REPO_NAME}' not found in Pulp domain ${PULP_DOMAIN}." >&2
+          echo "Create the file repository before running this task." >&2
+          exit 1
+        fi
+        echo "Metadata repository '${METADATA_REPO_NAME}' exists."
+
+        set -x
+
+        # Check if file exists in Pulp with matching checksum (idempotency)
+        # Returns: 0=exists+matches (skip), 1=error, 2=not found (upload), 3=checksum mismatch (error)
+        check_file_exists_with_checksum() {
+          local relative_path="$1"
+          local local_file="$2"
+
+          local local_sha256
+          local_sha256=$(sha256sum "${local_file}" | cut -d' ' -f1)
+
+          local existing
+          existing=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
+            file content list --relative-path "${relative_path}" 2>/dev/null || echo "[]")
+
+          if [ "$(echo "$existing" | jq 'length')" -eq 0 ]; then
+            return 2
+          fi
+
+          local remote_sha256
+          remote_sha256=$(echo "$existing" | jq -r '.[0].sha256')
+          if [ "${local_sha256}" = "${remote_sha256}" ]; then
+            echo "File already exists with matching checksum: ${relative_path}"
+            return 0
+          else
+            echo "Error: File exists with different checksum: ${relative_path}" >&2
+            echo "  Local:  ${local_sha256}" >&2
+            echo "  Remote: ${remote_sha256}" >&2
+            return 3
+          fi
+        }
+
+        SBOM_DIR="/var/workdir/sboms"
+        mkdir -p "${SBOM_DIR}"
+
+        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_PATH}")
+        echo "Processing ${NUM_COMPONENTS} components for SBOM/attestation upload..."
+
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          # Write component to temp file to avoid "Argument list too long" errors
+          component_file="${SBOM_DIR}/component_${c}.json"
+          jq -c --argjson c "$c" '.components[$c]' "${SNAPSHOT_PATH}" > "${component_file}"
+          component_name=$(jq -r '.name' "${component_file}")
+          container_image=$(jq -r '.containerImage' "${component_file}")
+
+          # Check if component has source RPMs
+          has_src_rpms=$(jq -r '.rpmsToPublish[]? | select(.rpm | endswith(".src.rpm")) | .rpm' \
+            "${component_file}" | head -1)
+          if [[ -z "${has_src_rpms}" ]]; then
+            echo "Skipping component ${component_name}: no source RPMs"
+            rm -f "${component_file}"
+            continue
+          fi
+
+          if [[ -z "${container_image}" || "${container_image}" == "null" ]]; then
+            echo "Error: No containerImage for component ${component_name}" >&2
+            exit 1
+          fi
+
+          # Extract digest from containerImage (e.g., quay.io/foo/bar@sha256:abc123...)
+          image_digest="${container_image##*@}"
+          if [[ ! "${image_digest}" =~ ^sha256: ]]; then
+            echo "Error: Could not extract sha256 digest from ${container_image}" >&2
+            exit 1
+          fi
+
+          # Convert digest for filename: sha256:abc -> sha256-abc
+          sbom_filename="${image_digest//:/-}.sbom"
+          sbom_local_file="${SBOM_DIR}/${sbom_filename}"
+          sbom_relative_path="sboms/${component_name}/${sbom_filename}"
+
+          att_filename="${image_digest//:/-}.att"
+          att_local_file="${SBOM_DIR}/${att_filename}"
+          att_relative_path="attestations/${component_name}/${att_filename}"
+
+          # Paths for snapshot include metadata repo name for correct URL resolution
+          sbom_snapshot_path="${METADATA_REPO_NAME}/${sbom_relative_path}"
+          att_snapshot_path="${METADATA_REPO_NAME}/${att_relative_path}"
+
+          # Setup auth for cosign
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          select-oci-auth "${container_image}" > "${DOCKER_CONFIG}/config.json"
+
+          # Download SBOM using cosign with retries
+          echo "Downloading SBOM for component ${component_name} from ${container_image}..."
+          sbom_download_success="false"
+          for attempt in 1 2 3; do
+            if cosign download sbom --output-file "${sbom_local_file}" "${container_image}" 2>/dev/null; then
+              sbom_download_success="true"
+              break
+            fi
+            echo "SBOM download attempt ${attempt} failed, retrying..."
+            sleep $((attempt * 2))
+          done
+
+          if [[ "${sbom_download_success}" != "true" ]]; then
+            echo "Error: Failed to download SBOM for ${component_name} after 3 attempts." >&2
+            exit 1
+          fi
+
+          # Download attestation using cosign with retries
+          echo "Downloading attestation for component ${component_name}..."
+          att_download_success="false"
+          for attempt in 1 2 3; do
+            if cosign download attestation --output-file "${att_local_file}" "${container_image}" 2>/dev/null; then
+              att_download_success="true"
+              break
+            fi
+            echo "Attestation download attempt ${attempt} failed, retrying..."
+            sleep $((attempt * 2))
+          done
+
+          if [[ "${att_download_success}" != "true" ]]; then
+            echo "Error: Failed to download attestation for ${component_name} after 3 attempts." >&2
+            exit 1
+          fi
+
+          # Upload SBOM with idempotency check
+          sbom_check_result=0
+          check_file_exists_with_checksum "${sbom_relative_path}" "${sbom_local_file}" || sbom_check_result=$?
+          case ${sbom_check_result} in
+            0)
+              echo "SBOM already exists in Pulp, skipping upload: ${sbom_relative_path}"
+              ;;
+            2)
+              echo "Uploading SBOM to Pulp: ${sbom_relative_path}"
+              upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
+                file content upload \
+                --repository "${METADATA_REPO_NAME}" \
+                --file "${sbom_local_file}" \
+                --relative-path "${sbom_relative_path}" 2>&1) || {
+                echo "Error: Failed to upload SBOM for ${component_name}: ${upload_response}" >&2
+                exit 1
+              }
+              echo "SBOM uploaded successfully for ${component_name}"
+              ;;
+            3)
+              echo "Error: SBOM checksum mismatch for ${component_name}" >&2
+              exit 1
+              ;;
+            *)
+              echo "Error: Failed to check SBOM existence for ${component_name} (rc=${sbom_check_result})" >&2
+              exit 1
+              ;;
+          esac
+
+          # Upload attestation with idempotency check
+          att_check_result=0
+          check_file_exists_with_checksum "${att_relative_path}" "${att_local_file}" || att_check_result=$?
+          case ${att_check_result} in
+            0)
+              echo "Attestation already exists in Pulp, skipping upload: ${att_relative_path}"
+              ;;
+            2)
+              echo "Uploading attestation to Pulp: ${att_relative_path}"
+              att_upload_response=$(pulp --config "$PULP_CONFIG_FILE" --domain "${PULP_DOMAIN}" \
+                file content upload \
+                --repository "${METADATA_REPO_NAME}" \
+                --file "${att_local_file}" \
+                --relative-path "${att_relative_path}" 2>&1) || {
+                echo "Error: Failed to upload attestation for ${component_name}: ${att_upload_response}" >&2
+                exit 1
+              }
+              echo "Attestation uploaded successfully for ${component_name}"
+              ;;
+            3)
+              echo "Error: Attestation checksum mismatch for ${component_name}" >&2
+              exit 1
+              ;;
+            *)
+              echo "Error: Failed to check attestation existence for ${component_name} (rc=${att_check_result})" >&2
+              exit 1
+              ;;
+          esac
+
+          # Update snapshot: add sbomPath to source RPM entries for this component
+          jq --arg comp "${component_name}" \
+             --arg sbomPath "${sbom_snapshot_path}" \
+            '(.components[] | select(.name == $comp) | .rpmsToPublish[]? |
+              select(.rpm | endswith(".src.rpm"))) += {sbomPath: $sbomPath}' \
+            "${SNAPSHOT_PATH}" > "${SNAPSHOT_PATH}.tmp" && mv "${SNAPSHOT_PATH}.tmp" "${SNAPSHOT_PATH}"
+
+          echo "Updated snapshot with sbomPath for ${component_name}"
+
+          # Update snapshot: add attestationPath to source RPM entries for this component
+          jq --arg comp "${component_name}" \
+             --arg attPath "${att_snapshot_path}" \
+            '(.components[] | select(.name == $comp) | .rpmsToPublish[]? |
+              select(.rpm | endswith(".src.rpm"))) += {attestationPath: $attPath}' \
+            "${SNAPSHOT_PATH}" > "${SNAPSHOT_PATH}.tmp" && mv "${SNAPSHOT_PATH}.tmp" "${SNAPSHOT_PATH}"
+
+          echo "Updated snapshot with attestationPath for ${component_name}"
+
+          # Cleanup temp component file
+          rm -f "${component_file}"
+        done
+
+        echo "SBOM/attestation upload complete."
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 250m
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
