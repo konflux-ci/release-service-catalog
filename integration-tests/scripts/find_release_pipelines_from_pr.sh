@@ -213,10 +213,10 @@ _find_and_process_pipelines() {
     done
   done
 
-  # Self-hosted Quay test uses the same pipeline, so trigger it alongside
-  if [[ " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry " ]] && \
-     [[ ! " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry-self-hosted-quay " ]]; then
+  # push-to-external-registry has extra test suites defined for it
+  if [[ " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry " ]]; then
     SELECTED_TESTCASES+=("push-to-external-registry-self-hosted-quay")
+    SELECTED_TESTCASES+=("push-to-external-registry-idempotent")
   fi
   if (( ${#SELECTED_TESTCASES[@]} > 0 )); then
     echo -n "${SELECTED_TESTCASES[*]}"
