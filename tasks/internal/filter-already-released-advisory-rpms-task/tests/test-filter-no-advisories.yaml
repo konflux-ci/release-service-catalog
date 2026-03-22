@@ -1,0 +1,75 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-no-advisories
+spec:
+  description: |
+    Test the filter-already-released-advisory-rpms-task when no advisories exist.
+    All RPMs should be returned as unreleased.
+  tasks:
+    - name: run-filter-task
+      taskRef:
+        name: filter-already-released-advisory-rpms-task
+      params:
+        - name: transformedSnapshot
+          # [{"name":"new-rpm","purl":"pkg:rpm/redhat/new-rpm@1.0-1.fc44?arch=x86_64",...}]
+          value: 'H4sIAAAAAAAAA2WNzQrCMBCE7z5Gzv03FikUfQ+REtOtKbZN2NQ/xHd3KsGLt52ZnfkOLzGpkUQlJrrH7EYRCXflAYa7nCsYKVNr1JyGfJ8nWZwnnZZyp1ib+rEtm1Ki5o0qNiWK6qTzYt1SJyEjgdIfgpzVBk6G+0bseztBYXr5p4GUp69eMLAWEPQPxej7frb8bMJ0iN7H1QfyQbb30gAAAA=='
+        - name: origin
+          value: "no-advisories-origin"
+        - name: advisory_secret_name
+          value: "filter-advisory-rpms-secret"
+        - name: internalRequestPipelineRunName
+          value: "$(context.pipelineRun.name)"
+    - name: validate-result
+      runAfter:
+        - run-filter-task
+      params:
+        - name: result
+          value: "$(tasks.run-filter-task.results.result)"
+        - name: unreleased_rpms
+          value: "$(tasks.run-filter-task.results.unreleased_rpms)"
+        - name: in_advisory_rpms
+          value: "$(tasks.run-filter-task.results.in_advisory_rpms)"
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: unreleased_rpms
+            type: string
+          - name: in_advisory_rpms
+            type: string
+        steps:
+          - name: validate
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "Validating filter task result..."
+
+              if [[ "$(params.result)" != "Success" ]]; then
+                echo "Task result was not Success: $(params.result)"
+                exit 1
+              fi
+
+              UNRELEASED=$(base64 -d <<< "$(params.unreleased_rpms)" | gunzip)
+              IN_ADVISORY=$(base64 -d <<< "$(params.in_advisory_rpms)" | gunzip)
+
+              echo "Unreleased RPMs: $UNRELEASED"
+              echo "In-advisory RPMs: $IN_ADVISORY"
+
+              UNRELEASED_COUNT=$(jq 'length' <<< "$UNRELEASED")
+              IN_ADVISORY_COUNT=$(jq 'length' <<< "$IN_ADVISORY")
+
+              if [[ "$UNRELEASED_COUNT" -ne 1 ]]; then
+                echo "Expected 1 unreleased RPM, but found $UNRELEASED_COUNT"
+                exit 1
+              fi
+
+              if [[ "$IN_ADVISORY_COUNT" -ne 0 ]]; then
+                echo "Expected 0 in-advisory RPMs, but found $IN_ADVISORY_COUNT"
+                exit 1
+              fi
+
+              echo "Validation successful!"
