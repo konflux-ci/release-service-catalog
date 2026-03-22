@@ -140,7 +140,7 @@ verify_release_contents() {
 
             # Verify SBOM field is present for source RPM artifacts and is downloadable
             echo "Checking SBOM for source RPM artifacts..."
-            sbom_url=$(yq '.spec.content.artifacts[] | select(.architecture == "source") | .sbom // ""' \
+            sbom_url=$(yq '.spec.content.artifacts[] | select(.architecture == "src") | .sbom // ""' \
               "${advisory_yaml_dir}/advisory.yaml" | head -n1)
 
             if [ -n "${sbom_url}" ]; then
@@ -186,7 +186,7 @@ verify_release_contents() {
 
             # Verify attestation field is present for source RPM artifacts and is downloadable
             echo "Checking attestation for source RPM artifacts..."
-            attestation_url=$(yq '.spec.content.artifacts[] | select(.architecture == "source") | .attestation // ""' \
+            attestation_url=$(yq '.spec.content.artifacts[] | select(.architecture == "src") | .attestation // ""' \
               "${advisory_yaml_dir}/advisory.yaml" | head -n1)
 
             if [ -n "${attestation_url}" ]; then

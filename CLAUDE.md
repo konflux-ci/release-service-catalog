@@ -92,6 +92,19 @@ scripts/check-vault-encrypted.sh path/to/vault/file.yaml
 - Integration tests for task changes
 - Both Trusted Artifacts and PVC-based workflow support
 
+### README Generation (DO NOT manually edit generated READMEs)
+Task and pipeline READMEs are auto-generated from YAML metadata. CI validates them.
+
+```bash
+# Regenerate README after modifying a task or pipeline
+.github/scripts/readme_generator.sh tasks/managed/my-task/
+.github/scripts/readme_generator.sh pipelines/managed/my-pipeline/
+```
+
+**Important:** Do NOT manually write or edit README.md files in task/pipeline directories.
+The generator extracts descriptions and parameters from the YAML spec. If CI fails
+with README validation errors, run the generator on the affected directories.
+
 ## Security Critical Points
 - Never commit unencrypted vault files
 - Pre-commit hooks prevent accidental secret exposure
