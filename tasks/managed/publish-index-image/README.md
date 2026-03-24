@@ -10,7 +10,6 @@ Publish a built FBC index image using skopeo
 | internalRequestResultsFile | File containing the results of the build                                                                                   | No       | -                    |
 | retries                    | Number of skopeo retries                                                                                                   | Yes      | 0                    |
 | requestTimeout             | Max seconds waiting for the status update                                                                                  | Yes      | 360                  |
-| buildTimestamp             | Build timestamp for the publishing image                                                                                   | No       | -                    |
 | pipelineRunUid             | The uid of the current pipelineRun. Used as a label value when creating internal requests                                  | No       | -                    |
 | ociStorage                 | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
 | ociArtifactExpiresAfter    | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                   |

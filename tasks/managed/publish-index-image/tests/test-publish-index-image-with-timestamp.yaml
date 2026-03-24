@@ -69,6 +69,7 @@ spec:
                   {
                     "fbc_fragment": "registry.io/image0@sha256:0000",
                     "target_index": "quay.io/scoheb/fbc-target-index-testing:v4.12",
+                    "target_index_with_timestamp": "quay.io/scoheb/fbc-target-index-testing:v4.12-1678118351",
                     "ocp_version": "v4.12",
                     "index_image": "redhat.com/rh-stage/iib:01",
                     "index_image_resolved": "redhat.com/rh-stage/iib@sha256:abcdefghijk",
@@ -98,8 +99,6 @@ spec:
       params:
         - name: internalRequestResultsFile
           value: "internal-requests-results.json"
-        - name: buildTimestamp
-          value: 11111111111
         - name: retries
           value: 2
         - name: pipelineRunUid
@@ -165,34 +164,72 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                sed 's/[[:space:]]*$//' |head -1)"
-              pipeline="$(kubectl get internalrequest "${internalRequest}" -o \
-              jsonpath="{.spec.pipeline.pipelineRef.params[2].value}")"
-
-              params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-
-              if [ "$pipeline" != \
-                "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
-                echo "pipeline does not match"
+              # Verify that TWO InternalRequests were created (one for v4.12, one for v4.12-timestamp)
+              irCount=$(kubectl get internalrequest --no-headers | wc -l)
+              if [ "${irCount}" != "2" ]; then
+                echo "Expected 2 InternalRequests, got ${irCount}"
+                kubectl get internalrequest
                 exit 1
               fi
 
-              if [ "$(jq -r '.retries' <<< "${params}")" != "2" ]; then
-                echo "number of retries does not match"
-                exit 1
-              fi
+              # Check both InternalRequests
+              for i in 0 1; do
+                internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
+                  sed 's/[[:space:]]*$//' | sed -n "$((i+1))p")"
 
-              if [ "$(jq -r '.sourceIndex' <<< "${params}")" != "redhat.com/rh-stage/iib:01" ]; then
-                echo "sourceIndex image does not match"
-                exit 1
-              fi
+                pipeline="$(kubectl get internalrequest "${internalRequest}" -o \
+                  jsonpath="{.spec.pipeline.pipelineRef.params[2].value}")"
 
-              targetIndex=$(jq -r '.targetIndex' <<< "${params}")
-              if [ "$targetIndex" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
-                echo "targetIndex image does not match"
-                exit 1
-              fi
+                params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
+
+                if [ "${pipeline}" != \
+                  "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
+                  echo "pipeline does not match for IR ${i}"
+                  exit 1
+                fi
+
+                if [ "$(jq -r '.retries' <<< "${params}")" != "2" ]; then
+                  echo "number of retries does not match for IR ${i}"
+                  exit 1
+                fi
+
+                sourceIndex=$(jq -r '.sourceIndex' <<< "${params}")
+                if [ "${i}" = 0 ]; then
+                  # Floating tag uses index_image (tag)
+                  if [ "${sourceIndex}" != "redhat.com/rh-stage/iib:01" ]; then
+                    echo "sourceIndex image does not match for IR ${i}"
+                    echo "Expected: redhat.com/rh-stage/iib:01"
+                    echo "Got: ${sourceIndex}"
+                    exit 1
+                  fi
+                else
+                  # Timestamped tag uses index_image_resolved (digest)
+                  if [ "${sourceIndex}" != "redhat.com/rh-stage/iib@sha256:abcdefghijk" ]; then
+                    echo "sourceIndex image does not match for IR ${i}"
+                    echo "Expected: redhat.com/rh-stage/iib@sha256:abcdefghijk"
+                    echo "Got: ${sourceIndex}"
+                    exit 1
+                  fi
+                fi
+
+                targetIndex=$(jq -r '.targetIndex' <<< "${params}")
+                if [ "${i}" = 0 ]; then
+                  if [ "${targetIndex}" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
+                    echo "targetIndex image does not match for IR 0"
+                    echo "Expected: quay.io/scoheb/fbc-target-index-testing:v4.12"
+                    echo "Got: ${targetIndex}"
+                    exit 1
+                  fi
+                else
+                  expectedTargetIndex="quay.io/scoheb/fbc-target-index-testing:v4.12-1678118351"
+                  if [ "${targetIndex}" != "${expectedTargetIndex}" ]; then
+                    echo "targetIndex image does not match for IR 1"
+                    echo "Expected: ${expectedTargetIndex}"
+                    echo "Got: ${targetIndex}"
+                    exit 1
+                  fi
+                fi
+              done
 
               if [ "$(jq -r '.taskGitUrl' <<< "${params}")" != "http://localhost" ]; then
                 echo "taskGitUrl image does not match"

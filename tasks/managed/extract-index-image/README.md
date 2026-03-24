@@ -1,6 +1,9 @@
 # extract-index-image
 
-Extract the index image fields from the internalRequestResultsFile
+Extract the index image fields from the internalRequestResultsFile.
+
+The internalRequestResultsFile is a result from another task that contains the result of a finished
+internal-request.
 
 ## Parameters
 

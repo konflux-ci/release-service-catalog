@@ -537,19 +537,13 @@ verify_multi_component_release() {
             return $failures
         fi
 
-        # we can't reach the image in registry-proxy, so we need to resolve it to quay.io
-        # a conditional is not necessary because the test optin index image is only
-        # available in quay.io/redhat/redhat----preview-operator-index.
-        image_sha="${index_image_resolved#*@}"
-        index_image="quay.io/redhat/redhat----preview-operator-index@${image_sha}"
-
         # generate the authentication config for skopeo
         managed_secrets_yaml="${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
         registry_authenticate $managed_secrets_yaml "konflux-fbc-preview-"
 
         # making sure the produced indexes versions matches with the requested ones
         index_build_version="$(skopeo \
-            inspect "docker://${index_image}" | jq -r '.Env[] | select(test("BUILD_VERSION.*")) | split("=")[1]')"
+            inspect "docker://${target_index}" | jq -r '.Env[] | select(test("BUILD_VERSION.*")) | split("=")[1]')"
         if [[ "${index_build_version}" =~ ^${ocp_version} ]]; then
             echo "✅️ Opt-in index-image's BUILD_VERSION matches the required OCP_VERSION ($ocp_version)"
         else
