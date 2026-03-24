@@ -133,7 +133,7 @@ function date() {
       "+%Y-%m-%dT%H:%M:%SZ")
           echo "2023-10-10T15:00:00Z" |tee $(params.dataDir)/mock_date_iso_format.txt
           ;;
-      "+%s")
+      "+%s"*)
           echo "1696946200" | tee $(params.dataDir)/mock_date_epoch.txt
           ;;
       "-u +%Hh%Mm%Ss -d @"*)

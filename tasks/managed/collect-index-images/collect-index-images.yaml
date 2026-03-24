@@ -10,9 +10,6 @@ spec:
   description: >-
     Tekton task that generates a JSON file to be used to create pyxis image for index images.
   params:
-    - name: buildTimestamp
-      type: string
-      description: Build timestamp for the index image
     - name: internalRequestResultsFile
       type: string
       description: Path to the results file of the InternalRequest build result
@@ -130,18 +127,24 @@ spec:
         LENGTH="$(jq -r '.components | length' "$RESULTS_FILE")"
         for((i=0; i<LENGTH; i++)); do
           TARGETINDEX=$(jq -r --argjson i "$i" '.components[$i].target_index' "$RESULTS_FILE")
+          TARGETINDEX_TS=$(jq -r --argjson i "$i" '.components[$i].target_index_with_timestamp' "$RESULTS_FILE")
           SOURCEINDEX=$(jq -r  --argjson i "$i" '.components[$i].index_image_resolved' "$RESULTS_FILE")
           IMAGE_DIGESTS=$(jq -c --argjson i "$i" '.components[$i].image_digests // []' "$RESULTS_FILE")
+          COMPLETION_TIME=$(jq -r --argjson i "$i" '.components[$i].completion_time // empty' "$RESULTS_FILE")
+
+          # Validate completion_time is present
+          if [[ -z "${COMPLETION_TIME}" || "${COMPLETION_TIME}" == "null" ]]; then
+              echo "ERROR: Component $i missing completion_time in results file"
+              exit 1
+          fi
+
           REPOSITORY=${TARGETINDEX%:*}
 
           TAG=${TARGETINDEX#*:}
           TAGS=("${TAG}")
-          # Only add a buildTimestamp tag for bare OCP version tags (e.g., "v4.13").
-          # Hotfix and pre-GA tags already have unique suffixes from prepare-fbc-snapshot
-          # (e.g., "v4.13-RELEASE-1234-<ts>" or "v4.13-product-1.0-<ts>"), so appending
-          # a second timestamp would create a redundant tag.
-          if [[ "${TAG}" =~ ^v[0-9]+\.[0-9]+$ ]]; then
-            TAGS+=("${TAG}-$(params.buildTimestamp)")
+          if [[ "${TARGETINDEX}" != "${TARGETINDEX_TS}" ]]; then
+            TAG=${TARGETINDEX_TS#*:}
+            TAGS+=("${TAG}")
           fi
           JSON_TAGS=$(jq -n -c '$ARGS.positional' --args -- "${TAGS[@]}")
 

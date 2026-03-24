@@ -2,9 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-prepare-fbc-snapshot-hotfix
+  name: test-add-fbc-contribution-hotfix
 spec:
-  description: Test prepare-fbc-snapshot task with hotfix mode
+  description: Test add-fbc-contribution task for hotfix releases
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -32,8 +32,6 @@ spec:
   tasks:
     - name: setup
       params:
-        - name: snapshotPath
-          value: snapshot.json
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
         - name: dataDir
@@ -46,9 +44,6 @@ spec:
           - name: dataDir
             type: string
             description: The location where data will be stored
-          - name: snapshotPath
-            type: string
-            description: Path to the JSON string of the mapped Snapshot spec in the data workspace
         results:
           - name: sourceDataArtifact
             type: string
@@ -67,7 +62,7 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup-hotfix-data
+          - name: setup-test-data
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
@@ -76,33 +71,40 @@ spec:
               # Ensure data directory exists
               mkdir -p "$(params.dataDir)"
 
-              # Create snapshot with FBC components
-              cat > "$(params.dataDir)/$(params.snapshotPath)" << 'EOF'
+              # Create snapshot with prepared FBC components (already processed by prepare-fbc-snapshot)
+              # Note: In hotfix mode, prepare-fbc-snapshot would have already replaced {{timestamp}}
+              # with an actual timestamp. We use a fixed timestamp for test reproducibility.
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
               {
                 "components": [
                   {
-                    "name": "test-fbc-component",
-                    "ocpVersion": "v4.12",
+                    "name": "fbc-target-index-testing",
                     "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
-                    "repository": "quay.io/test/test-fbc-component"
+                    "repository": "quay.io/scoheb/fbc-target-index-testing",
+                    "ocpVersion": "v4.12",
+                    "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.12",
+                    "targetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12-KONFLUX-123-1234567890"
                   }
                 ]
               }
               EOF
 
-              # Create FBC data configuration with hotfix mode
+              # Create FBC data configuration for staged release
               cat > "$(params.dataDir)/data.json" << 'EOF'
               {
                 "fbc": {
                   "fromIndex": "quay.io/redhat/redhat-operator-index:{{ OCP_VERSION }}",
-                  "targetIndex": "quay.io/test/target-index:{{ OCP_VERSION }}",
+                  "targetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12-KONFLUX-123-1234567890",
                   "hotfix": true,
-                  "issueId": "RELEASE-1234"
+                  "issueId": "KONFLUX-123"
                 }
               }
               EOF
 
-              echo "Hotfix test data created"
+              # Create mock results directory structure
+              mkdir -p "$(params.dataDir)/results"
+
+              echo "Staged test data created for add-fbc-contribution"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -116,12 +118,16 @@ spec:
 
     - name: run-task
       taskRef:
-        name: prepare-fbc-snapshot
+        name: add-fbc-contribution
       params:
         - name: snapshotPath
           value: snapshot.json
         - name: dataPath
           value: data.json
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: resultsDirPath
+          value: results
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
@@ -136,17 +142,23 @@ spec:
           value: "https://github.com/konflux-ci/release-service-catalog.git"
         - name: taskGitRevision
           value: "development"
+        - name: maxBatchSize
+          value: "5"
+        - name: mustPublishIndexImage
+          value: "false"
+        - name: mustOverwriteFromIndexImage
+          value: "false"
+        - name: iibServiceAccountSecret
+          value: "iib-services-config"
       runAfter:
         - setup
 
-    - name: verify-hotfix-suffix
+    - name: verify-results
       params:
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
-        - name: snapshotPath
-          value: snapshot.json
       taskSpec:
         params:
           - name: sourceDataArtifact
@@ -155,9 +167,6 @@ spec:
           - name: dataDir
             type: string
             description: The location where data will be stored
-          - name: snapshotPath
-            type: string
-            description: Path to the JSON string of the mapped Snapshot spec in the data workspace
         results:
           - name: sourceDataArtifact
             type: string
@@ -186,40 +195,54 @@ spec:
                 value: $(params.sourceDataArtifact)
               - name: orasOptions
                 value: $(params.orasOptions)
-          - name: verify-hotfix
+          - name: verify-hotfix-processing
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              echo "=== HOTFIX SUFFIX VERIFICATION ==="
+              echo "=== HOTFIX RELEASE VERIFICATION ==="
 
-              SNAPSHOT_PATH="$(params.dataDir)/$(params.snapshotPath)"
-              echo "Updated snapshot contents:"
-              jq . "$SNAPSHOT_PATH"
-
-              # Get the target index from the updated snapshot
-              TARGET_INDEX=$(jq -r '.components[0].targetIndex' "$SNAPSHOT_PATH")
-              echo "Target index: $TARGET_INDEX"
-
-              # Verify hotfix suffix pattern: v4.12-RELEASE-1234-<10-digit-timestamp>
-              if [[ "$TARGET_INDEX" =~ v[0-9]+\.[0-9]+-RELEASE-1234-[0-9]{10}$ ]]; then
-                echo "✅ Hotfix suffix correctly applied with 10-digit timestamp"
+              # Verify results file was created
+              RESULTS_FILE="$(params.dataDir)/results/internal-requests-results.json"
+              if [[ -f "$RESULTS_FILE" ]]; then
+                echo "✅ Results file exists"
+                echo "Results contents:"
+                jq . "$RESULTS_FILE"
               else
-                echo "❌ Hotfix suffix not found or incorrect format"
-                echo "Expected pattern: v4.12-RELEASE-1234-<10-digit-timestamp>"
-                echo "Actual: $TARGET_INDEX"
+                echo "❌ Results file missing at $RESULTS_FILE"
                 exit 1
               fi
 
-              # Verify OCP version is still present
-              if [[ "$TARGET_INDEX" == *"v4.12"* ]]; then
-                echo "✅ OCP version preserved in target index"
+              # Verify components were processed despite empty targetIndex
+              COMPONENTS_COUNT=$(jq '.components | length' "$RESULTS_FILE")
+              if [[ "$COMPONENTS_COUNT" -gt 0 ]]; then
+                echo "✅ Components were processed successfully: $COMPONENTS_COUNT"
               else
-                echo "❌ OCP version missing from target index"
+                echo "❌ No components processed"
                 exit 1
               fi
 
-              echo "✅ All hotfix suffix verifications passed"
+              # Verify hotfix release specific behavior
+              FIRST_COMPONENT_TARGET=$(jq -r '.components[0].target_index' "$RESULTS_FILE")
+              FIRST_COMPONENT_TARGET_TS=$(jq -r '.components[0].target_index_with_timestamp' "$RESULTS_FILE")
+              if [[ "$FIRST_COMPONENT_TARGET" =~ v4\.12-KONFLUX-123-[0-9]{10}$ ]]; then
+                echo "✅ Target index matches hotfix pattern with 10-digit timestamp"
+              else
+                echo "❌ Unexpected target index format, got: $FIRST_COMPONENT_TARGET"
+                exit 1
+              fi
+
+              # Verify that for hotfix, target_index and target_index_with_timestamp are the same
+              if [[ "$FIRST_COMPONENT_TARGET" == "$FIRST_COMPONENT_TARGET_TS" ]]; then
+                echo "✅ Hotfix: target_index equals target_index_with_timestamp (no duplication)"
+              else
+                echo "❌ Hotfix should have same target_index and target_index_with_timestamp"
+                echo "   target_index: $FIRST_COMPONENT_TARGET"
+                echo "   target_index_with_timestamp: $FIRST_COMPONENT_TARGET_TS"
+                exit 1
+              fi
+
+              echo "=== HOTFIX RELEASE TEST PASSED ==="
       runAfter:
         - run-task
