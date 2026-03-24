@@ -6,7 +6,6 @@ Tekton task that generates a JSON file to be used to create pyxis image for inde
 
 | Name                       | Description                                                                                                                | Optional | Default value        |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------|
-| buildTimestamp             | Build timestamp for the index image                                                                                        | No       | -                    |
 | internalRequestResultsFile | Path to the results file of the InternalRequest build result                                                               | No       | -                    |
 | ociStorage                 | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
 | ociArtifactExpiresAfter    | Expiration date for the trusted artifacts created in the OCI repository. An empty string means the artifacts do not expire | Yes      | 1d                   |

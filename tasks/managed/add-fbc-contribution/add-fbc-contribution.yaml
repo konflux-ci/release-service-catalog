@@ -100,8 +100,6 @@ spec:
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
   results:
-    - name: buildTimestamp
-      description: Build timestamp used in the tag
     - name: requestResultsFile
       description: Internal Request results file
     - name: internalRequestResultsFile
@@ -211,9 +209,6 @@ spec:
         mustPublishIndexImage="$(params.mustPublishIndexImage)"
         mustOverwriteFromIndexImage="$(params.mustOverwriteFromIndexImage)"
 
-        timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
-        timestamp=$(date "+${timestamp_format}")
-
         # Extract OCP versions from snapshot (ocpVersion is JSON array)
         # Components can have multiple versions: ["v4.17", "v4.18", "v4.19"]
         # Fallback to empty array if ocpVersion is absent or null for backward compatibility
@@ -225,8 +220,6 @@ spec:
         echo "  - mustOverwriteFromIndexImage: ${mustOverwriteFromIndexImage}"
         echo "  - iibServiceAccountSecret: ${iib_service_account_secret}"
 
-        # Initialize results file for multi-OCP processing
-        echo -n "$timestamp" > "$(results.buildTimestamp.path)"
         jq -n '{"components": []}' | tee "$RESULTS_FILE"
 
         # Snapshot validation for multi-OCP processing
@@ -497,10 +490,43 @@ spec:
                 # Process results for each fragment in this batch
                 local decompressed_json_build_info
                 decompressed_json_build_info="$(jq -r '.jsonBuildInfo' <<< "${results}" | base64 -d | gunzip)"
+
+                # Extract and validate completion_time from IIB build info
                 local completion_time_raw
                 completion_time_raw="$(jq -r '.updated' <<< "${decompressed_json_build_info}")"
+
+                if [[ -z "${completion_time_raw}" || "${completion_time_raw}" == "null" ]]; then
+                    echo "ERROR: completion_time not found in IIB build info"
+                    return 1
+                fi
+
+                echo "INFO: Extracting completion_time from IIB build info"
+                echo "  Raw value: ${completion_time_raw}"
+
                 local completion_time
-                completion_time=$(date +"${timestamp_format}" -d "${completion_time_raw}")
+                if ! completion_time=$(date +"%s" -d "${completion_time_raw}"); then
+                    echo "ERROR: Failed to parse completion_time: ${completion_time_raw}"
+                    echo "Date conversion error: ${completion_time}"
+                    return 1
+                fi
+                echo "  Epoch timestamp: ${completion_time}"
+
+                # Ensure completion_time contains ten digits
+                if [[ ! "${completion_time}" =~ ^[0-9]{10}$ ]]; then
+                    echo "ERROR: Invalid completion_time format (expected 10 digits): ${completion_time}"
+                    return 1
+                fi
+
+                # timestamped_target_index is the target_index with completion_time, unless
+                # for hotfix or pre-ga which already has it and can be the same.
+                # For staged releases, target_index is empty, so target_index_with_timestamp is also empty.
+                if [[ -z "${group_target_index}" ]]; then
+                    target_index_with_timestamp=""
+                elif [[ "${group_target_index}" =~ .*[0-9]{10}$ ]]; then
+                    target_index_with_timestamp="${group_target_index}"
+                else
+                    target_index_with_timestamp="${group_target_index}-${completion_time}"
+                fi
 
                 # Process fragments in batch
                 local fragment_index=0
@@ -512,17 +538,19 @@ spec:
                     local build_results
                     build_results=$(jq \
                       --arg fragment "$fragment" \
-                      --arg target_index "$group_target_index" \
+                      --arg target_index "${group_target_index}" \
+                      --arg target_index_with_timestamp "${target_index_with_timestamp}" \
                       --arg ocp_version "$group_ocp_version" \
                       --arg completion_time "$completion_time" \
                       --argjson decompressed_json "${decompressed_json_build_info}" \
                     '{
                       "fbc_fragment": $fragment,
                       "target_index": $target_index,
+                      "target_index_with_timestamp": $target_index_with_timestamp,
                       "ocp_version": $ocp_version,
                       "image_digests": (.indexImageDigests | split(" ") | del(.[] | select(. == ""))),
                       "index_image": $decompressed_json.index_image,
-                      "index_image_resolved": $decompressed_json.index_image_resolved,
+                      "index_image_resolved": $decompressed_json.internal_index_image_copy_resolved,
                       "completion_time": $completion_time,
                       "iibLog": .iibLog
                     }' <<< "${results}")
