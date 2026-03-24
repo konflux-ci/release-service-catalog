@@ -3,6 +3,62 @@
 CLEANUP="true"
 NO_CVE="false" # Default to false
 
+# Override merge_github_pr to include JIRA reference for simple-jira collector
+merge_github_pr() {
+    echo "Merging PR ${pr_number} in repo ${component_repo_name}..."
+    local commit_message="This fixes CVE-2024-8260. Fixes RELEASE-1502"
+    if [ "${NO_CVE}" == "true" ]; then
+      echo "(Note: NOT Adding a CVE to the commit message)"
+      commit_message="e2e test. Fixes RELEASE-1502"
+    else
+      echo "(Note: Adding CVE-2024-8260 and RELEASE-1502 to the commit message)"
+    fi
+    echo "Commit message: \"${commit_message}\""
+
+    local merge_result
+    local attempt=1
+    local max_attempts=3
+    local success=false
+
+    while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
+        echo "Merge attempt ${attempt}/${max_attempts}..."
+
+        set +e
+        merge_result=$(curl -L \
+          -X PUT \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}/merge" \
+          -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" --silent --show-error --fail-with-body)
+
+        if [ $? -eq 0 ]; then
+            success=true
+            echo "✅ PR merge succeeded on attempt ${attempt}"
+        else
+            echo "❌ PR merge failed on attempt ${attempt}. Response: ${merge_result}"
+            if [ $attempt -lt $max_attempts ]; then
+                echo "Waiting 5 seconds before retry..."
+                sleep 5
+            fi
+        fi
+        set -e
+
+        attempt=$((attempt + 1))
+    done
+
+    if [ "$success" = false ]; then
+        log_error "Failed to merge PR after ${max_attempts} attempts. Last response: ${merge_result}"
+    fi
+
+    # SHA is made global by not declaring it local
+    SHA=$(jq -r '.sha' <<< "${merge_result}")
+    if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
+        log_error "Failed to get SHA from merge response: ${merge_result}"
+    fi
+    echo "Merge SHA: ${SHA}"
+}
+
 # Function to verify Release contents
 verify_release_contents() {
   local failures=0
@@ -163,6 +219,88 @@ verify_release_contents() {
             else
               echo "🔴 attestation field not found in source RPM artifact entry"
               failures=$((failures+1))
+            fi
+
+            # Validate advisory description contains expected RPM grouping format
+            echo "Validating advisory description RPM content..."
+
+            # Check for source RPM group header (e.g., "hello:")
+            if echo "${description}" | grep -qE "^hello:$"; then
+              echo "✅️ Found source RPM group header 'hello:' in description"
+            else
+              echo "🔴 Missing source RPM group header 'hello:' in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for source RPM entry with .src suffix (e.g., "hello-2.12.1-xxx.src (source)")
+            if echo "${description}" | grep -q "hello-.*\.src (source)"; then
+              echo "✅️ Found source RPM entry with .src suffix in description"
+            else
+              echo "🔴 Missing source RPM entry with .src suffix in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for binary RPM entry with arch (e.g., "hello-2.12.1-xxx (x86_64)")
+            # Use pattern that doesn't match the .src entry
+            if echo "${description}" | grep -E "hello-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
+              echo "✅️ Found binary RPM entry with x86_64 arch in description"
+            else
+              echo "🔴 Missing binary RPM entry with x86_64 arch in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for noarch RPM entry (e.g., "hello-data-2.12.1-xxx (noarch)")
+            if echo "${description}" | grep -q "hello-data-.* (noarch)"; then
+              echo "✅️ Found noarch RPM entry (hello-data) in description"
+            else
+              echo "🔴 Missing noarch RPM entry (hello-data) in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for Security Fix(es) section if CVEs are present in artifacts
+            echo "Validating advisory description CVE content..."
+            # Count unique CVEs across all artifacts
+            cve_count=$(yq '[.spec.content.artifacts[]?.cves.fixed // {} | keys] | flatten | unique | length' "${advisory_yaml_dir}/advisory.yaml")
+            if [ "${cve_count}" -gt 0 ]; then
+              if echo "${description}" | grep -q "Security Fix(es):"; then
+                echo "✅️ Found 'Security Fix(es):' section in description"
+                # Check that at least one CVE ID is present (CVE-YYYY-NNNNN format)
+                if echo "${description}" | grep -qE "CVE-[0-9]{4}-[0-9]+"; then
+                  echo "✅️ Found CVE ID in description"
+                else
+                  echo "🔴 Missing CVE ID in 'Security Fix(es):' section"
+                  failures=$((failures+1))
+                fi
+              else
+                echo "🔴 Missing 'Security Fix(es):' section but ${cve_count} CVEs found in advisory artifacts"
+                failures=$((failures+1))
+              fi
+            else
+              echo "ℹ️ No CVEs in advisory artifacts, skipping Security Fix(es) check"
+            fi
+
+            # Check for Bug Fix(es) section if issues are present
+            echo "Validating advisory description JIRA content..."
+            # Count issues (simple-jira collector finds issues from commit messages)
+            issue_count=$(yq '[.spec.issues.fixed[]?] | length' "${advisory_yaml_dir}/advisory.yaml")
+            if [ "${issue_count}" -gt 0 ]; then
+              echo "ℹ️ Found ${issue_count} issues in advisory.spec.issues.fixed"
+              if echo "${description}" | grep -q "Bug Fix(es) and Enhancement(s):"; then
+                echo "✅️ Found 'Bug Fix(es) and Enhancement(s):' section in description"
+                # Check that RELEASE-1502 is present (from commit message "Fixes RELEASE-1502")
+                if echo "${description}" | grep -q "RELEASE-1502"; then
+                  echo "✅️ Found JIRA ID 'RELEASE-1502' in description"
+                else
+                  echo "🔴 Missing JIRA ID 'RELEASE-1502' in 'Bug Fix(es) and Enhancement(s):' section"
+                  failures=$((failures+1))
+                fi
+              else
+                echo "🔴 Missing 'Bug Fix(es) and Enhancement(s):' section but ${issue_count} issues found in advisory"
+                failures=$((failures+1))
+              fi
+            else
+              echo "ℹ️ No issues in advisory.spec.issues.fixed - simple-jira collector may not have found JIRA references"
+              echo "ℹ️ Check that commit message contains 'Fixes RELEASE-1502' and collector is configured correctly"
             fi
         fi
     fi
@@ -357,7 +495,7 @@ patch_component_source_before_merge() {
         "${component_repo_name}" \
         "${pr_number}" \
         "${file_name}" \
-        "Update component source before merge" \
+        "Update component source before merge. Fixes RELEASE-1502" \
         "${encoded_contents}"
   done
 
@@ -374,7 +512,7 @@ patch_component_source_before_merge() {
       "${component_repo_name}" \
       "${pr_number}" \
       "${file_name}" \
-      "Update component source before merge" \
+      "Update component source before merge. Fixes RELEASE-1502" \
       "${encoded_contents}"
 
   echo "✅️ Successfully patched component source!"
