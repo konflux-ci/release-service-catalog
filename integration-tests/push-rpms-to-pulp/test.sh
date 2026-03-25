@@ -76,9 +76,9 @@ verify_release_contents() {
     advisory_url=$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}")
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
 
-    # first 2 arches are specified in the pipelinerun templates, the last one is source.
+    # first 2 arches are specified in the pipelinerun templates, the last one is src.
     # When the release includes noarch RPMs, fanout adds extra rpmfiles (one per default arch).
-    arches=("x86_64" "source")
+    arches=("x86_64" "src")
     echo "Checking RPM files count..."
     local rpmfiles=$(jq -c '.status.artifacts.rpmfiles // []' <<< "${release_json}")
     local rpmfiles_count=$(jq -r '. | length' <<< "${rpmfiles}")
@@ -103,10 +103,10 @@ verify_release_contents() {
     # When the release includes noarch RPMs, assert they are published to all default arch repos.
     if [ "${noarch_count}" -gt 0 ]; then
       echo "Checking noarch RPM fanout to default arch repos..."
-      # Get arches from the rpm-repositories mapping in the RPA (excluding source)
+      # Get arches from the rpm-repositories mapping in the RPA (excluding src)
       default_arches=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
         -n "${managed_namespace}" -ojson \
-        | jq -r '.spec.data.mapping["rpm-repositories"][]? | select(.arch != "source") | .arch' \
+        | jq -r '.spec.data.mapping["rpm-repositories"][]? | select(.arch != "src") | .arch' \
         | sort -u)
       for default_arch in ${default_arches}; do
         local noarch_for_arch
@@ -232,8 +232,8 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
-            # Check for source RPM entry with .src suffix (e.g., "hello-2.12.1-xxx.src (source)")
-            if echo "${description}" | grep -q "hello-.*\.src (source)"; then
+            # Check for source RPM entry with .src suffix (e.g., "hello-2.12.1-xxx.src (source)" or "(src)")
+            if echo "${description}" | grep -qE "hello-.*\.src \((source|src)\)"; then
               echo "✅️ Found source RPM entry with .src suffix in description"
             else
               echo "🔴 Missing source RPM entry with .src suffix in description"
