@@ -35,6 +35,9 @@
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
+# shellcheck source=../lib/test-functions.sh
+source "${SCRIPT_DIR}/../lib/test-functions.sh"
+
 function describeFailedPipelineRun() {
   local json=$1
   conditions=$(jq -r '.status.conditions[] | [.type, .status, .reason, .message] | @csv' <<< "${json}")
@@ -55,64 +58,7 @@ function describeFailedPipelineRun() {
   PLR_NAME=$(cut -f2 -d/ <<< "${failedPipelineRun}")
   PLR_NS=$(cut -f1 -d/ <<< "${failedPipelineRun}")
 
-  diagnoseFailedPLR "${PLR_NAME}" "${PLR_NS}"
-}
-
-# Function to diagnose a failed Tekton PipelineRun
-# Arguments:
-#   $1: PipelineRun name
-#   $2: Namespace (optional, defaults to current namespace)
-function diagnoseFailedPLR() {
-    local plr_name="$1"
-    local namespace="${2:-$(kubectl config view --minify -o jsonpath='{..namespace}')}"
-
-    echo "🔍 Diagnosing PipelineRun: ${plr_name} in namespace: ${namespace}"
-
-    # Check if PipelineRun exists
-    if [ ! kubectl get pipelinerun "${plr_name}" -n "${namespace}" &>/dev/null ] ; then
-        echo "❌ PipelineRun ${plr_name} not found in namespace ${namespace}"
-        return 1
-    fi
-
-    # Get PipelineRun status
-    local status
-    status=$(kubectl get pipelinerun "${plr_name}" -n "${namespace}" -o jsonpath='{.status.conditions[0].reason}')
-    echo "📊 PipelineRun Status: ${status}"
-
-    # Get all tasks and their statuses
-    echo "📋 Task Status Summary:"
-    kubectl get pipelinerun "${plr_name}" -n "${namespace}" -o jsonpath='{range .status.taskRuns[*]}{"\n"}Task: {.taskRef.name}{"\nStatus: "}{.status.conditions[0].reason}{"\nMessage: "}{.status.conditions[0].message}{end}' | sed 's/^/  /'
-
-    # Find and show logs for failed tasks
-    echo -e "\n❌ Failed Task Details:"
-    local failed_tasks
-    failed_tasks=$(kubectl get taskruns -l tekton.dev/pipelineRun="${plr_name}" -n "${namespace}" -o jsonpath='{.items[?(@.status.conditions[0].status=="False")].metadata.name}{"\n"}')
-
-    if [ -n "${failed_tasks}" ]; then
-        while read -r taskrun_name; do
-            echo -e "\n🔍 Examining failed taskrun: ${taskrun_name}"
-
-            if [ -n "${taskrun_name}" ]; then
-                echo "📜 Last 50 lines of logs for taskrun ${taskrun_name}:"
-                tkn taskrun logs "${taskrun_name}" -n "${namespace}" 2>/dev/null | tail -n 50 | sed 's/^/  /'
-
-                echo -e "\n💡 Describe output:"
-                tkn tr desc "${taskrun_name}" -n "${namespace}"
-
-                echo -e "\n💡 Error message:"
-                kubectl get taskrun "${taskrun_name}" -n "${namespace}" -o jsonpath='{.status.conditions[0].message}' | sed 's/^/  /'
-            else
-                echo "⚠️ Could not find TaskRun for task: ${taskrun_name}"
-            fi
-        done <<< "${failed_tasks}"
-    else
-        echo "  No failed tasks found. Check overall PipelineRun status and conditions."
-    fi
-
-    # Show final conditions and reason for failure
-    echo -e "\n📝 Final PipelineRun Conditions:"
-    kubectl get pipelinerun "${plr_name}" -n "${namespace}" -o jsonpath='{range .status.conditions[*]}{"\nType: "}{.type}{"\nStatus: "}{.status}{"\nReason: "}{.reason}{"\nMessage: "}{.message}{end}' | sed 's/^/  /'
-    echo ""
+  diagnose_failed_pipelinerun "${PLR_NAME}" "${PLR_NS}"
 }
 
 function getPipelinerunFromStatus() { # args are json, statusSection
