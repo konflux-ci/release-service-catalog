@@ -2,21 +2,17 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: rh-sign-image-cosign
+  name: sign-image-cosign-keyless
   annotations:
     tekton.dev/pipelines.minVersion: "0.12.1"
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task to sign container images in snapshot by cosign.
+    Tekton task to sign container images in snapshot by cosign in keyless mode
   params:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
       type: string
-    - name: secretName
-      description: Name of secret containing needed credentials
-      type: string
-      default: signing-secret-name
     - name: signRegistryAccessPath
       type: string
       description: |
@@ -79,6 +75,26 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: keylessOIDCIssuer
+      type: string
+      description: OIDC issuer for keyless signing
+      default: ""
+    - name: keylessFulcioURL
+      type: string
+      description: Fulcio URL for keyless signing
+      default: ""
+    - name: keylessRekorURL
+      type: string
+      description: rekor URL for keyless signing
+      default: ""
+    - name: keylessTufURL
+      type: string
+      description: TUF URL for keyless signing
+      default: ""
+    - name: keylessOIDCIssuerRegEx
+      type: string
+      description: OIDC issuer regex for keyless signing
+      default: ".*"
   results:
     - description: Produced trusted data artifact
       name: sourceDataArtifact
@@ -86,10 +102,13 @@ spec:
   volumes:
     - name: workdir
       emptyDir: {}
-    - name: secret-vol
-      secret:
-        secretName: $(params.secretName)
-        defaultMode: 0444
+    - name: oidc-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: oidc-token
+              expirationSeconds: 3600
+              audience: sigstore
     - name: trusted-ca
       configMap:
         name: $(params.caTrustConfigMapName)
@@ -146,29 +165,33 @@ spec:
           memory: 2.5Gi
           cpu: "2"
       volumeMounts:
-        - name: secret-vol
-          mountPath: "/etc/secrets"
+        - name: oidc-token
+          mountPath: "/var/run/secrets/tokens"
+          readOnly: true
       script: |
         #!/usr/bin/env bash
         set -eu
 
-        if [ -z "$(params.secretName)" ]; then
-          echo "ERROR: secretName parameter is mandatory for key-based signing"
+        # Keyless mode: use OIDC identity token with Fulcio/Rekor
+        if [ -z "$(params.keylessRekorURL)" ]; then
+          echo "ERROR: keylessRekorURL parameter is mandatory for keyless signing"
           exit 1
         fi
-        # Key-based mode: use AWS KMS signing key
-        AWS_DEFAULT_REGION="$(cat /etc/secrets/AWS_DEFAULT_REGION)"
-        AWS_ACCESS_KEY_ID="$(cat /etc/secrets/AWS_ACCESS_KEY_ID)"
-        AWS_SECRET_ACCESS_KEY="$(cat /etc/secrets/AWS_SECRET_ACCESS_KEY)"
-        export AWS_DEFAULT_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-        SIGN_KEY="$(cat /etc/secrets/SIGN_KEY)"
-        REKOR_URL_PATH="/etc/secrets/REKOR_URL"
-        if [ -f "${REKOR_URL_PATH}" ] && [ -s "${REKOR_URL_PATH}" ]; then
-          REKOR_URL="$(cat /etc/secrets/REKOR_URL)"
+        REKOR_URL="$(params.keylessRekorURL)"
+        if [ -z "$(params.keylessFulcioURL)" ]; then
+          echo "ERROR: keylessFulcioURL parameter is mandatory for keyless signing"
+          exit 1
         fi
-        PUBLIC_KEY="$(cat /etc/secrets/PUBLIC_KEY)"
-        REKOR_PUBLIC_KEY="$(cat /etc/secrets/REKOR_PUBLIC_KEY)"
+        FULCIO_URL="$(params.keylessFulcioURL)"
+        if [ -z "$(params.keylessTufURL)" ]; then
+          echo "ERROR: _URL is mandatory for keyless signing"
+          exit 1
+        fi
+        TUF_URL="$(params.keylessTufURL)"
+
+        SIGSTORE_ID_TOKEN=/var/run/secrets/tokens/oidc-token
+        export SIGSTORE_ID_TOKEN
+        cosign initialize --mirror="${TUF_URL}" --root="${TUF_URL}/root.json"
 
         set -x
 
@@ -187,10 +210,6 @@ spec:
                 exit 1
             fi
         fi
-        PUBLIC_KEY_FILE=$(mktemp)
-        echo -n "${PUBLIC_KEY:?}" > "$PUBLIC_KEY_FILE"
-        ls -ld "$PUBLIC_KEY_FILE"
-
         # Initialize memory throttling
         # This file is located at utils/memory-throttle.sh in the release-service-utils image
         # shellcheck source=/dev/null
@@ -234,15 +253,9 @@ spec:
           local reference=$2
           local digest=$3
           declare -a COSIGN_REKOR_ARGS=()
-          if [ -v REKOR_URL ]; then
-              COSIGN_REKOR_ARGS+=("--rekor-url=$REKOR_URL")
-              REKOR_PUBLIC_KEY_FILE=$(mktemp)
-              echo -n "$REKOR_PUBLIC_KEY" > "$REKOR_PUBLIC_KEY_FILE"
-              export SIGSTORE_REKOR_PUBLIC_KEY="$REKOR_PUBLIC_KEY_FILE"
-          else
-              COSIGN_REKOR_ARGS+=("--insecure-ignore-tlog=true")
-          fi
-          COSIGN_REKOR_ARGS+=("--key" "$PUBLIC_KEY_FILE")
+          COSIGN_REKOR_ARGS+=("--rekor-url=$REKOR_URL")
+          COSIGN_REKOR_ARGS+=("--certificate-identity-regexp=.*"
+            "--certificate-oidc-issuer-regexp=$(params.keylessOIDCIssuerRegEx)")
           verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" "$reference")
           found_signatures=$(echo "$verify_output" | jq -j '['\
         '.[]|select(.critical.image."docker-manifest-digest"| contains("'"$digest"'"))'\
@@ -267,18 +280,11 @@ spec:
             found_signatures=0
           fi
           echopid "FOUND SIGNATURES for ${identity} ${digest}: $found_signatures"
-
-          if [ -v REKOR_URL ]; then
-              COSIGN_REKOR_ARGS+=("-y" "--rekor-url=$REKOR_URL")
-              REKOR_PUBLIC_KEY_FILE=$(mktemp)
-              echo -n "$REKOR_PUBLIC_KEY" > "$REKOR_PUBLIC_KEY_FILE"
-              export SIGSTORE_REKOR_PUBLIC_KEY="$REKOR_PUBLIC_KEY_FILE"
-          else
-              COSIGN_REKOR_ARGS+=("--tlog-upload=false")
-          fi
+          COSIGN_REKOR_ARGS+=("-y" "--rekor-url=$REKOR_URL")
 
           if [ "$found_signatures" -eq 0 ]; then
-              COSIGN_REKOR_ARGS+=("--key" "$SIGN_KEY")
+            COSIGN_REKOR_ARGS+=("--identity-token" "$SIGSTORE_ID_TOKEN")
+            COSIGN_REKOR_ARGS+=("--fulcio-url" "$FULCIO_URL")
             run_cosign -t 3m0s sign "${COSIGN_REKOR_ARGS[@]}" \
               --sign-container-identity "$identity" "$reference@$digest"
           else

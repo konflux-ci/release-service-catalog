@@ -20,11 +20,6 @@ kubectl create secret generic test-cosign-secret-rekor\
   --from-literal=REKOR_PUBLIC_KEY=rekor_public_key\
   --from-literal=PUBLIC_KEY=public_key
 
-kubectl create secret generic test-cosign-secret-keyless\
-  --from-literal=REKOR_URL=https://fake-rekor-server\
-  --from-literal=FULCIO_URL=https://fake-fulcio-server\
-  --from-literal=REKOR_PUBLIC_KEY=rekor_public_key
-
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
