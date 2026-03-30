@@ -11,6 +11,7 @@ spec:
     Filters snapshot to remove already-released FBC fragments by querying Pyxis index images.
     Queries for index images and checks if fragments are present in their bundles/related_images fields.
     Components already published are filtered out to prevent EC validation failures.
+    Additionally, extracts and attaches ocpVersion field to each component for downstream tasks.
   params:
     - name: snapshotPath
       type: string
@@ -156,94 +157,150 @@ spec:
 
         pyxis_server=$(jq -r '.pyxis.server // "production"' "${DATA_FILE}")
         staged_index=$(jq -r '.fbc.stagedIndex // false' "${DATA_FILE}")
-        
-        # Exit early for stage builds - they never filter
-        if [ "$staged_index" = "true" ]; then
-          echo "ℹ️  Stage build detected (stagedIndex=true)"
-          echo "  → Skipping idempotence filtering (keeping all components)"
-          echo ""
-          cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
-          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
-          exit 0
-        fi
-        
+
         component_count=$(jq '.components | length' "${SNAPSHOT_FILE}")
         echo "Found $component_count component(s) in snapshot"
-        
+
         if [ "$component_count" -eq 0 ]; then
           echo "ℹ️  Empty snapshot - no components to filter"
           cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
           echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
           exit 0
         fi
-        
-        # Read targetIndex template from RPA data (single source of truth)
-        target_index_template=$(jq -r '.fbc.targetIndex // ""' "${DATA_FILE}")
-        
-        if [ -z "$target_index_template" ]; then
-          echo "ℹ️  No fbc.targetIndex found in data file"
-          echo "  → Skipping idempotence filtering (keeping all components)"
-          echo ""
-          cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
-          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
-          exit 0
-        fi
-        
-        echo "targetIndex template: ${target_index_template}"
-        echo ""
-        
-        # Resolve {{ OCP_VERSION }} for each component and group by resolved targetIndex
-        declare -A target_index_to_components  # resolved targetIndex -> space-separated component indices
-        declare -a unique_target_indices       # Array of unique resolved targetIndex values
-        
-        echo "Resolving targetIndex for each component..."
+
+        # Extract OCP versions from ALL components UPFRONT (before any early exits)
+        # This ensures versions are available for all code paths
+        declare -A component_ocp_versions  # component index -> OCP version
+
+        echo "Extracting OCP versions from all components..."
         for ((i=0; i<component_count; i++)); do
           component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
           component_name=$(jq -r '.name' <<< "$component")
           container_image=$(jq -r '.containerImage' <<< "$component")
-          
+
           echo "  Component $((i+1))/${component_count}: ${component_name}"
-          
+          echo "    → Extracting OCP version from base image..."
+
+          # Extract OCP version from org.opencontainers.image.base.name annotation
+          raw_image_metadata=$(skopeo inspect --retry-times 3 --raw "docker://${container_image}")
+          media_type=$(jq -r .mediaType <<< "${raw_image_metadata}")
+          ocp_version=$(jq -r '.annotations."org.opencontainers.image.base.name"' <<< "${raw_image_metadata}" \
+            | cut -d: -f2 | sed "s/[\"']//g")
+
+          # Handle multiplatform images
+          if [[ "$media_type" == "application/vnd.oci.image.index.v1+json" ]] || \
+             [[ "$media_type" == "application/vnd.docker.distribution.manifest.list.v2+json" ]]; then
+              echo "    INFO: Multiplatform image detected, extracting manifest"
+              arch_json=$(get-image-architectures "${container_image}")
+              manifest_image_sha="$(jq -rs 'map(.digest)[0]'  <<< "$arch_json")"
+              single_arch_fragment="${container_image%@*}@${manifest_image_sha}"
+
+              ocp_version=$(skopeo inspect --retry-times 3 --raw "docker://${single_arch_fragment}" \
+               | jq -r '.annotations."org.opencontainers.image.base.name"' | cut -d: -f2 | sed "s/[\"']//g")
+          fi
+
+          if [ -z "$ocp_version" ] || [ "$ocp_version" = "null" ]; then
+            echo "    ❌ ERROR: Could not extract OCP version from ${container_image}"
+            echo "       Annotation 'org.opencontainers.image.base.name' not found"
+            exit 1
+          fi
+
+          echo "    → OCP version extracted from annotation: ${ocp_version}"
+
+          # Add 'v' prefix if not already present
+          if [[ ! "$ocp_version" =~ ^v ]]; then
+            ocp_version="v${ocp_version}"
+          fi
+
+          # Validate OCP version format using bash regex (avoids grep pipe issues)
+          if [[ ! "$ocp_version" =~ ^v[0-9]+\.[0-9]{1,2}$ ]]; then
+            echo "    ❌ ERROR: Invalid OCP version format: '${ocp_version}'"
+            echo "       Expected format: vX.Y (e.g., v4.12)"
+            exit 1
+          fi
+          echo "    ✓ OCP version validated: ${ocp_version}"
+
+          # Store OCP version for this component
+          component_ocp_versions[$i]="$ocp_version"
+        done
+
+        echo "✓ OCP versions extracted and validated for all ${component_count} component(s)"
+        echo ""
+
+        # Build OCP versions JSON for jq (used by both early exits and main filtering)
+        ocp_args=()
+        for idx in "${!component_ocp_versions[@]}"; do
+          ocp_args+=(--arg "$idx" "${component_ocp_versions[$idx]}")
+        done
+        ocp_versions_json=$(jq -n '$ARGS.named' "${ocp_args[@]}")
+
+        # Helper function to attach already-extracted OCP versions to ALL components
+        # Reuses the same jq pattern from the main filtering flow
+        attach_ocp_versions_to_all() {
+          local snapshot_file="$1"
+          local output_file="$2"
+
+          # Attach ocpVersion to ALL components using jq (uses pre-built ocp_versions_json)
+          jq --argjson ocp_versions "$ocp_versions_json" '
+            .components |= [
+              to_entries[] |
+              .value + {ocpVersion: $ocp_versions[.key | tostring]}
+            ]
+          ' "$snapshot_file" > "$output_file"
+
+          echo "✓ OCP versions attached to all ${component_count} component(s)"
+        }
+
+        # Exit early for stage builds - they never filter
+        if [ "$staged_index" = "true" ]; then
+          echo "ℹ️  Stage build detected (stagedIndex=true)"
+          echo "  → Skipping idempotence filtering (keeping all components)"
+          echo ""
+          attach_ocp_versions_to_all "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+
+        # Read targetIndex template from RPA data (single source of truth)
+        target_index_template=$(jq -r '.fbc.targetIndex // ""' "${DATA_FILE}")
+
+        if [ -z "$target_index_template" ]; then
+          echo "ℹ️  No fbc.targetIndex found in data file"
+          echo "  → Skipping idempotence filtering (keeping all components)"
+          echo ""
+          attach_ocp_versions_to_all "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+
+        echo "targetIndex template: ${target_index_template}"
+        echo ""
+
+        # Resolve {{ OCP_VERSION }} for each component and group by resolved targetIndex
+        # OCP versions were already extracted upfront
+        declare -A target_index_to_components  # resolved targetIndex -> space-separated component indices
+        declare -a unique_target_indices       # Array of unique resolved targetIndex values
+
+        echo "Resolving targetIndex for each component..."
+        for ((i=0; i<component_count; i++)); do
+          component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
+          component_name=$(jq -r '.name' <<< "$component")
+          ocp_version="${component_ocp_versions[$i]}"  # Use already-extracted OCP version
+
+          echo "  Component $((i+1))/${component_count}: ${component_name}"
+          echo "    → OCP version: ${ocp_version}"
+
           # Resolve {{ OCP_VERSION }} if present in template
           if [[ "$target_index_template" == *"{{ OCP_VERSION }}"* ]]; then
-            echo "    → Extracting OCP version from base image..."
-            
-            # Extract OCP version from image metadata
-            # Real FBC images built by ART/Doozer have OCP version in Env variables
-            image_metadata=$(skopeo inspect --no-tags "docker://${container_image}")
-            
-            # Try method 1: Extract from Env variables (OS_GIT_MAJOR and OS_GIT_MINOR)
-            # This is the standard for ART-built FBC images
-            ocp_major=$(echo "$image_metadata" | jq -r '.Env[]? | select(startswith("OS_GIT_MAJOR=")) | split("=")[1]')
-            ocp_minor=$(echo "$image_metadata" | jq -r '.Env[]? | select(startswith("OS_GIT_MINOR=")) | split("=")[1]')
-            
-            if [ -n "$ocp_major" ] && [ -n "$ocp_minor" ] && \
-               [ "$ocp_major" != "null" ] && [ "$ocp_minor" != "null" ]; then
-              ocp_version="${ocp_major}.${ocp_minor}"
-              echo "    → OCP version extracted from Env (OS_GIT_MAJOR/MINOR): ${ocp_version}"
-            else
-              # Try method 2: Extract from annotations (for test mocks compatibility)
-              ocp_version=$(echo "$image_metadata" \
-                | jq -r '.annotations."org.opencontainers.image.base.name"' \
-                | cut -d: -f2 | sed 's/"//g')
-              
-              if [ -z "$ocp_version" ] || [ "$ocp_version" = "null" ]; then
-                echo "    ❌ ERROR: Could not extract OCP version from ${container_image}"
-                echo "       Neither Env variables (OS_GIT_MAJOR/MINOR) nor annotation found"
-                exit 1
-              fi
-              echo "    → OCP version extracted from annotation: ${ocp_version}"
-            fi
-            
             # Resolve {{ OCP_VERSION }} placeholder using bash parameter expansion
             target_index="${target_index_template//\{\{ OCP_VERSION \}\}/$ocp_version}"
           else
             # No placeholder, use template as-is
             target_index="$target_index_template"
           fi
-          
+
           echo "    → Resolved targetIndex: ${target_index}"
-          
+
           # Group component by its resolved targetIndex
           if [ -z "${target_index_to_components[$target_index]:-}" ]; then
             target_index_to_components[$target_index]="$i"
@@ -432,7 +489,7 @@ spec:
             echo "Keeping all components for release (fail-safe behavior)."
             echo "If there are real registry issues, they will be caught during actual release."
             echo ""
-            cp "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+            attach_ocp_versions_to_all "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
             echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
             exit 0
           fi
@@ -459,7 +516,8 @@ spec:
           resolved_target_index=""
           for target_idx in "${unique_target_indices[@]}"; do
             component_indices="${target_index_to_components[$target_idx]}"
-            if echo "$component_indices" | grep -qw "$i"; then
+            # Check if index i is in the space-separated list using bash pattern matching
+            if [[ " $component_indices " == *" $i "* ]]; then
               resolved_target_index="$target_idx"
               break
             fi
@@ -472,7 +530,18 @@ spec:
           
           published_fragments="${target_index_fragments[$resolved_target_index]}"
 
-          if [ -n "$published_fragments" ] && echo "$published_fragments" | grep -Fqx "$fragment_digest"; then
+          # Check if fragment digest is in the newline-separated list using bash pattern matching
+          fragment_found=false
+          if [ -n "$published_fragments" ]; then
+            while IFS= read -r published_digest; do
+              if [ "$published_digest" = "$fragment_digest" ]; then
+                fragment_found=true
+                break
+              fi
+            done <<< "$published_fragments"
+          fi
+
+          if [ "$fragment_found" = "true" ]; then
             echo "  Status: ✓ FOUND in published index"
             echo "  Action: FILTER OUT (already published)"
             filtered_out_count=$((filtered_out_count + 1))
@@ -501,8 +570,8 @@ spec:
           jq '.components = []' "${SNAPSHOT_FILE}" > "${FILTERED_SNAPSHOT_FILE}"
         else
           echo "Building filtered snapshot with ${components_kept} component(s)..."
-          
-          # Build jq filter to keep only non-published components
+
+          # Build jq filter to keep only non-published components and attach ocpVersion
           # shellcheck disable=SC2016  # jq variables, not bash - single quotes are correct
           jq_filter='def processComponents:
             [
@@ -511,30 +580,28 @@ spec:
               $indices[] |
               . as $idx |
               if $keep_indices[$idx | tostring] == "keep" then
-                $comps[$idx]
+                $comps[$idx] | .ocpVersion |= $ocp_versions[$idx | tostring]
               else
                 empty
               end
             ];
           . + {components: processComponents}'
-          
-          keep_indices_json="{"
-          first=true
+
+          keep_args=()
           for idx in "${!components_to_keep[@]}"; do
-            if [ "$first" = true ]; then
-              first=false
-            else
-              keep_indices_json+=","
-            fi
-            keep_indices_json+="\"$idx\":\"${components_to_keep[$idx]}\""
+            keep_args+=(--arg "$idx" "${components_to_keep[$idx]}")
           done
-          keep_indices_json+="}"
-          
-          jq --argjson keep_indices "$keep_indices_json" "$jq_filter" \
+          keep_indices_json=$(jq -n '$ARGS.named' "${keep_args[@]}")
+
+          # Use pre-built ocp_versions_json (built earlier after OCP version extraction)
+          jq --argjson keep_indices "$keep_indices_json" \
+             --argjson ocp_versions "$ocp_versions_json" \
+             "$jq_filter" \
             "${SNAPSHOT_FILE}" > "${FILTERED_SNAPSHOT_FILE}"
-          
+
           kept_count=$(jq '.components | length' "${FILTERED_SNAPSHOT_FILE}")
           echo "✓ Filtered snapshot created with ${kept_count} component(s)"
+          echo "✓ Attached ocpVersion to all ${kept_count} component(s)"
         fi
 
         echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"

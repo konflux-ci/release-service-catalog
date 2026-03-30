@@ -42,9 +42,12 @@ skopeo() {
     # Determine OCP version based on component image digest
     local ocp_version=""
     if [[ "$image" == *"@sha256:comp1v414"* ]] || [[ "$image" == *"@sha256:comp2v414"* ]]; then
-      ocp_version="4.14"
+      ocp_version="v4.14"
     elif [[ "$image" == *"@sha256:comp3v416"* ]] || [[ "$image" == *"@sha256:comp4v416"* ]]; then
-      ocp_version="4.16"
+      ocp_version="v4.16"
+    elif [[ "$image" == *"@sha256:invalidocp"* ]]; then
+      # Invalid OCP version format for testing validation (three parts instead of two)
+      ocp_version="4.14.1"
     else
       # Default OCP version for other tests (no 'v' prefix - template adds it)
       ocp_version="4.15"
@@ -307,6 +310,9 @@ if [[ "$*" == *"inspect"* ]]; then
     ocp_version="4.14"
   elif [[ "$image" == *"@sha256:comp3v416"* ]] || [[ "$image" == *"@sha256:comp4v416"* ]]; then
     ocp_version="4.16"
+  elif [[ "$image" == *"@sha256:invalidocp"* ]]; then
+    # Invalid OCP version format for testing validation (three parts instead of two)
+    ocp_version="4.14.1"
   fi
   
   echo "  → Returning OCP version: $ocp_version" >&2

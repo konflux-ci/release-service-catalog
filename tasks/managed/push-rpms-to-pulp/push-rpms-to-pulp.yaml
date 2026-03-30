@@ -31,6 +31,10 @@ spec:
     - name: resultsDirPath
       description: Path to the results directory in the data workspace
       type: string
+    - name: artifactsJsonDirPath
+      description: Path to the directory where artifacts.json will be written (relative to dataDir)
+      type: string
+      default: ""
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
@@ -112,6 +116,8 @@ spec:
         value: $(params.PULP_SECRET_NAME)
       - name: RESULTS_DIR_PATH
         value: $(params.resultsDirPath)
+      - name: ARTIFACTS_JSON_DIR_PATH
+        value: $(params.artifactsJsonDirPath)
       - name: ociStorage
         value: $(params.ociStorage)
       - name: ociArtifactExpiresAfter
@@ -653,8 +659,20 @@ spec:
         RESULTS_FILE="${DATA_DIR}/${RESULTS_DIR_PATH}/push-rpms-to-pulp-results.json"
         mkdir -p "$(dirname "${RESULTS_FILE}")"
 
+        # Use dedicated artifacts directory if specified, otherwise fall back to results directory
+        if [[ -n "${ARTIFACTS_JSON_DIR_PATH}" ]]; then
+          ARTIFACTS_DIR="${DATA_DIR}/${ARTIFACTS_JSON_DIR_PATH}"
+        else
+          ARTIFACTS_DIR="${DATA_DIR}/${RESULTS_DIR_PATH}"
+        fi
+        ARTIFACTS_FILE="${ARTIFACTS_DIR}/artifacts.json"
+        mkdir -p "${ARTIFACTS_DIR}"
+
         # Initialize results file with empty rpmfiles array
         echo '{"rpmfiles": []}' > "$RESULTS_FILE"
+
+        # Initialize artifacts.json for downstream task (pulp-tool format)
+        echo '{"artifacts": {}, "distributions": {}}' > "$ARTIFACTS_FILE"
 
         # jq filter used to append RPM metadata entries to the results file.
         # Keep this as a multi-line bash string (not a heredoc) so it stays valid YAML inside script: |
@@ -670,6 +688,16 @@ spec:
           release: $release,
           sha256: $sha256
         }]
+        '
+
+        # jq filter for pulp-tool compatible artifacts.json format
+        # shellcheck disable=SC2016
+        JQ_ADD_ARTIFACT='
+        .artifacts[$key] = {
+          labels: {arch: $arch},
+          url: $url,
+          sha256: $sha256
+        }
         '
 
         # If the snapshot was pre-processed by filter-already-released-advisory-rpms, it will include
@@ -769,6 +797,9 @@ spec:
             noarch_rpms+=("$file")
           fi
         done
+
+        # Track which noarch RPMs were actually uploaded (not skipped)
+        UPLOADED_NOARCH_RPMS=()
 
         # Parse default architectures once for reuse; skip empty entries (e.g. trailing comma)
         DEFAULT_ARCHES=()
@@ -888,6 +919,14 @@ spec:
                  --arg sha256 "${local_sha}" \
                 "${JQ_APPEND_RPMFILE}" \
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
+
+              # Add to artifacts.json (pulp-tool format)
+              jq --arg key "${pkg}" \
+                 --arg arch "${arch}" \
+                 --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${arch}/${pkg}" \
+                 --arg sha256 "${local_sha}" \
+                "${JQ_ADD_ARTIFACT}" \
+                "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
             fi
             # Upload .noarch.rpm files to this arch repository
             if [[ "$pkg" == *.noarch.rpm ]]; then
@@ -942,6 +981,10 @@ spec:
                  --arg sha256 "${local_sha}" \
                 "${JQ_APPEND_RPMFILE}" \
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
+              # Track that this noarch RPM was uploaded (for artifacts.json later)
+              if [[ ! " ${UPLOADED_NOARCH_RPMS[*]} " == *" ${pkg} "* ]]; then
+                UPLOADED_NOARCH_RPMS+=("${pkg}")
+              fi
             fi
           done
 
@@ -998,7 +1041,7 @@ spec:
 
             jq --arg pkg "${pkg}" \
                --arg rpmname "${_name}" \
-               --arg arch "source" \
+               --arg arch "src" \
                --arg pulprepo "${PULP_DOMAIN}/source" \
                --arg epoch "${epoch}" \
                --arg version "${version}" \
@@ -1006,6 +1049,14 @@ spec:
                --arg sha256 "${local_sha}" \
               "${JQ_APPEND_RPMFILE}" \
               "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
+
+            # Add to artifacts.json (pulp-tool format)
+            jq --arg key "${pkg}" \
+               --arg arch "source" \
+               --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/source/${pkg}" \
+               --arg sha256 "${local_sha}" \
+              "${JQ_ADD_ARTIFACT}" \
+              "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
           fi
         done
 
@@ -1015,7 +1066,34 @@ spec:
           add_content_to_repo "source" "$SRC_HREFS_JSON"
         fi
 
+        # Add noarch RPMs to artifacts.json once (only those that were actually uploaded)
+        # Use first available arch for the URL since content is identical in all repos
+        first_arch="${ARCHES[0]:-x86_64}"
+        for pkg in "${UPLOADED_NOARCH_RPMS[@]}"; do
+          local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+          jq --arg key "${pkg}" \
+             --arg arch "noarch" \
+             --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${first_arch}/${pkg}" \
+             --arg sha256 "${local_sha}" \
+            "${JQ_ADD_ARTIFACT}" \
+            "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+        done
+
+        # Add distribution URLs to artifacts.json
+        for dist_arch in "${ARCHES[@]}"; do
+          jq --arg arch "$dist_arch" \
+             --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${dist_arch}/" \
+            '.distributions[$arch] = $url' \
+            "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+        done
+        # Add source distribution
+        jq --arg arch "source" \
+           --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/source/" \
+          '.distributions[$arch] = $url' \
+          "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+
         echo "Results written to: $RESULTS_FILE"
+        echo "Artifacts JSON written to: $ARTIFACTS_FILE"
     - name: create-trusted-artifact
       computeResources:
         limits:

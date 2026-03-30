@@ -63,6 +63,14 @@ spec:
       # to avoid tar extraction errors, we need to specify a subdirectory
       # inside the volume.
       default: "/var/workdir/release"
+    - name: mobster_tasks_git_revision
+      type: string
+      description: The git revision to be used when consuming Mobster tasks for SBOM processing
+      default: 5949af09327ab7b133ffd23eca7b74585d4113d9
+    - name: conformaPubKey
+      type: string
+      description: Path to the key used by Conforma to verify attestations signed by it
+      default: "k8s://openshift-pipelines/public-key"
   tasks:
     - name: verify-access-to-resources
       taskRef:
@@ -140,7 +148,8 @@ spec:
         - name: keysToExtract
           value: |
             [
-              {"resultIndex": 0, "key": ".conforma.workerCount", "default": "4"}
+              {"resultIndex": 0, "key": ".conforma.workerCount", "default": "4"},
+              {"resultIndex": 1, "key": ".sign.cosignSecretName", "default": "secret-not-present"}
             ]
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
@@ -479,6 +488,99 @@ spec:
       runAfter:
         - collect-registry-token-secret
         - push-snapshot
+    - name: collect-tpa-params
+      when:
+        - input: "$(tasks.filter-already-released-images.results.skip_release)"
+          operator: in
+          values: [ "false" ]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-tpa-params/collect-tpa-params.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - collect-data
+    - name: process-component-sbom
+      when:
+        - input: "$(tasks.collect-tpa-params.results.atlasApiUrl)"
+          operator: notin
+          values: [ "" ]
+      taskRef:
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/mobster.git
+          - name: revision
+            value: $(params.mobster_tasks_git_revision)
+          - name: pathInRepo
+            value: tasks/augment-component-sboms-ta/0.3/augment-component-sboms-ta.yaml
+        resolver: git
+      params:
+        - name: resultsDirPath
+          value: $(tasks.collect-data.results.resultsDir)
+        - name: snapshotSpec
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: releaseData
+          value: "$(tasks.collect-data.results.data)"
+        - name: retryAWSSecretName
+          value: "$(tasks.collect-tpa-params.results.retryAWSSecretName)"
+        - name: retryS3Bucket
+          value: "$(tasks.collect-tpa-params.results.retryS3Bucket)"
+        - name: atlasSecretName
+          value: "$(tasks.collect-tpa-params.results.secretName)"
+        - name: ssoTokenUrl
+          value: "$(tasks.collect-tpa-params.results.ssoTokenUrl)"
+        - name: atlasApiUrl
+          value: "$(tasks.collect-tpa-params.results.atlasApiUrl)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.filter-already-released-images.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+        - name: cosignSecretName
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: attestationPubKey
+          value: "$(params.conformaPubKey)"
+        - name: defaultOIDCIssuer
+          value: "$(tasks.collect-signing-params.results.defaultOIDCIssuer)"
+        - name: rekorExternalUrl
+          value: "$(tasks.collect-signing-params.results.rekorExternalUrl)"
+        - name: fulcioExternalUrl
+          value: "$(tasks.collect-signing-params.results.fulcioExternalUrl)"
+        - name: tufExternalUrl
+          value: "$(tasks.collect-signing-params.results.tufExternalUrl)"
+        - name: buildIdentityRegexp
+          value: "$(tasks.collect-signing-params.results.buildIdentityRegexp)"
+      runAfter:
+        - collect-data
+        - apply-mapping
+        - collect-tpa-params
+        - push-snapshot
     - name: update-cr-status
       params:
         - name: resource
@@ -509,3 +611,4 @@ spec:
             value: tasks/managed/update-cr-status/update-cr-status.yaml
       runAfter:
         - push-snapshot
+        - process-component-sbom

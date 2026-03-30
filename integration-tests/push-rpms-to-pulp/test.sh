@@ -3,6 +3,62 @@
 CLEANUP="true"
 NO_CVE="false" # Default to false
 
+# Override merge_github_pr to include JIRA reference for simple-jira collector
+merge_github_pr() {
+    echo "Merging PR ${pr_number} in repo ${component_repo_name}..."
+    local commit_message="This fixes CVE-2024-8260. Fixes RELEASE-1502"
+    if [ "${NO_CVE}" == "true" ]; then
+      echo "(Note: NOT Adding a CVE to the commit message)"
+      commit_message="e2e test. Fixes RELEASE-1502"
+    else
+      echo "(Note: Adding CVE-2024-8260 and RELEASE-1502 to the commit message)"
+    fi
+    echo "Commit message: \"${commit_message}\""
+
+    local merge_result
+    local attempt=1
+    local max_attempts=3
+    local success=false
+
+    while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
+        echo "Merge attempt ${attempt}/${max_attempts}..."
+
+        set +e
+        merge_result=$(curl -L \
+          -X PUT \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}/merge" \
+          -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" --silent --show-error --fail-with-body)
+
+        if [ $? -eq 0 ]; then
+            success=true
+            echo "✅ PR merge succeeded on attempt ${attempt}"
+        else
+            echo "❌ PR merge failed on attempt ${attempt}. Response: ${merge_result}"
+            if [ $attempt -lt $max_attempts ]; then
+                echo "Waiting 5 seconds before retry..."
+                sleep 5
+            fi
+        fi
+        set -e
+
+        attempt=$((attempt + 1))
+    done
+
+    if [ "$success" = false ]; then
+        log_error "Failed to merge PR after ${max_attempts} attempts. Last response: ${merge_result}"
+    fi
+
+    # SHA is made global by not declaring it local
+    SHA=$(jq -r '.sha' <<< "${merge_result}")
+    if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
+        log_error "Failed to get SHA from merge response: ${merge_result}"
+    fi
+    echo "Merge SHA: ${SHA}"
+}
+
 # Function to verify Release contents
 verify_release_contents() {
   local failures=0
@@ -20,9 +76,9 @@ verify_release_contents() {
     advisory_url=$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}")
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
 
-    # first 2 arches are specified in the pipelinerun templates, the last one is source.
+    # first 2 arches are specified in the pipelinerun templates, the last one is src.
     # When the release includes noarch RPMs, fanout adds extra rpmfiles (one per default arch).
-    arches=("x86_64" "source")
+    arches=("x86_64" "src")
     echo "Checking RPM files count..."
     local rpmfiles=$(jq -c '.status.artifacts.rpmfiles // []' <<< "${release_json}")
     local rpmfiles_count=$(jq -r '. | length' <<< "${rpmfiles}")
@@ -47,10 +103,10 @@ verify_release_contents() {
     # When the release includes noarch RPMs, assert they are published to all default arch repos.
     if [ "${noarch_count}" -gt 0 ]; then
       echo "Checking noarch RPM fanout to default arch repos..."
-      # Get arches from the rpm-repositories mapping in the RPA (excluding source)
+      # Get arches from the rpm-repositories mapping in the RPA (excluding src)
       default_arches=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
         -n "${managed_namespace}" -ojson \
-        | jq -r '.spec.data.mapping["rpm-repositories"][]? | select(.arch != "source") | .arch' \
+        | jq -r '.spec.data.mapping["rpm-repositories"][]? | select(.arch != "src") | .arch' \
         | sort -u)
       for default_arch in ${default_arches}; do
         local noarch_for_arch
@@ -84,7 +140,7 @@ verify_release_contents() {
 
             # Verify SBOM field is present for source RPM artifacts and is downloadable
             echo "Checking SBOM for source RPM artifacts..."
-            sbom_url=$(yq '.spec.content.artifacts[] | select(.architecture == "source") | .sbom // ""' \
+            sbom_url=$(yq '.spec.content.artifacts[] | select(.architecture == "src") | .sbom // ""' \
               "${advisory_yaml_dir}/advisory.yaml" | head -n1)
 
             if [ -n "${sbom_url}" ]; then
@@ -130,7 +186,7 @@ verify_release_contents() {
 
             # Verify attestation field is present for source RPM artifacts and is downloadable
             echo "Checking attestation for source RPM artifacts..."
-            attestation_url=$(yq '.spec.content.artifacts[] | select(.architecture == "source") | .attestation // ""' \
+            attestation_url=$(yq '.spec.content.artifacts[] | select(.architecture == "src") | .attestation // ""' \
               "${advisory_yaml_dir}/advisory.yaml" | head -n1)
 
             if [ -n "${attestation_url}" ]; then
@@ -163,6 +219,88 @@ verify_release_contents() {
             else
               echo "🔴 attestation field not found in source RPM artifact entry"
               failures=$((failures+1))
+            fi
+
+            # Validate advisory description contains expected RPM grouping format
+            echo "Validating advisory description RPM content..."
+
+            # Check for source RPM group header (e.g., "hello:")
+            if echo "${description}" | grep -qE "^hello:$"; then
+              echo "✅️ Found source RPM group header 'hello:' in description"
+            else
+              echo "🔴 Missing source RPM group header 'hello:' in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for source RPM entry with .src suffix (e.g., "hello-2.12.1-xxx.src (source)" or "(src)")
+            if echo "${description}" | grep -qE "hello-.*\.src \((source|src)\)"; then
+              echo "✅️ Found source RPM entry with .src suffix in description"
+            else
+              echo "🔴 Missing source RPM entry with .src suffix in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for binary RPM entry with arch (e.g., "hello-2.12.1-xxx (x86_64)")
+            # Use pattern that doesn't match the .src entry
+            if echo "${description}" | grep -E "hello-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
+              echo "✅️ Found binary RPM entry with x86_64 arch in description"
+            else
+              echo "🔴 Missing binary RPM entry with x86_64 arch in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for noarch RPM entry (e.g., "hello-data-2.12.1-xxx (noarch)")
+            if echo "${description}" | grep -q "hello-data-.* (noarch)"; then
+              echo "✅️ Found noarch RPM entry (hello-data) in description"
+            else
+              echo "🔴 Missing noarch RPM entry (hello-data) in description"
+              failures=$((failures+1))
+            fi
+
+            # Check for Security Fix(es) section if CVEs are present in artifacts
+            echo "Validating advisory description CVE content..."
+            # Count unique CVEs across all artifacts
+            cve_count=$(yq '[.spec.content.artifacts[]?.cves.fixed // {} | keys] | flatten | unique | length' "${advisory_yaml_dir}/advisory.yaml")
+            if [ "${cve_count}" -gt 0 ]; then
+              if echo "${description}" | grep -q "Security Fix(es):"; then
+                echo "✅️ Found 'Security Fix(es):' section in description"
+                # Check that at least one CVE ID is present (CVE-YYYY-NNNNN format)
+                if echo "${description}" | grep -qE "CVE-[0-9]{4}-[0-9]+"; then
+                  echo "✅️ Found CVE ID in description"
+                else
+                  echo "🔴 Missing CVE ID in 'Security Fix(es):' section"
+                  failures=$((failures+1))
+                fi
+              else
+                echo "🔴 Missing 'Security Fix(es):' section but ${cve_count} CVEs found in advisory artifacts"
+                failures=$((failures+1))
+              fi
+            else
+              echo "ℹ️ No CVEs in advisory artifacts, skipping Security Fix(es) check"
+            fi
+
+            # Check for Bug Fix(es) section if issues are present
+            echo "Validating advisory description JIRA content..."
+            # Count issues (simple-jira collector finds issues from commit messages)
+            issue_count=$(yq '[.spec.issues.fixed[]?] | length' "${advisory_yaml_dir}/advisory.yaml")
+            if [ "${issue_count}" -gt 0 ]; then
+              echo "ℹ️ Found ${issue_count} issues in advisory.spec.issues.fixed"
+              if echo "${description}" | grep -q "Bug Fix(es) and Enhancement(s):"; then
+                echo "✅️ Found 'Bug Fix(es) and Enhancement(s):' section in description"
+                # Check that RELEASE-1502 is present (from commit message "Fixes RELEASE-1502")
+                if echo "${description}" | grep -q "RELEASE-1502"; then
+                  echo "✅️ Found JIRA ID 'RELEASE-1502' in description"
+                else
+                  echo "🔴 Missing JIRA ID 'RELEASE-1502' in 'Bug Fix(es) and Enhancement(s):' section"
+                  failures=$((failures+1))
+                fi
+              else
+                echo "🔴 Missing 'Bug Fix(es) and Enhancement(s):' section but ${issue_count} issues found in advisory"
+                failures=$((failures+1))
+              fi
+            else
+              echo "ℹ️ No issues in advisory.spec.issues.fixed - simple-jira collector may not have found JIRA references"
+              echo "ℹ️ Check that commit message contains 'Fixes RELEASE-1502' and collector is configured correctly"
             fi
         fi
     fi
@@ -197,6 +335,75 @@ verify_release_contents() {
           echo "✅️ filter-already-released-advisory-rpms TaskRun succeeded: ${filter_tr_name}"
         fi
       fi
+
+      # Verify artifacts.json was created by push-rpms-to-pulp task
+      echo "Checking artifacts.json from push-rpms-to-pulp task..."
+      local artifacts_dir
+      artifacts_dir=$(mktemp -d -p "$(pwd)")
+
+      if "${SUITE_DIR}/../scripts/get-trusted-artifact-content.sh" \
+          "${managed_plr_name}" \
+          "push-rpms-to-pulp" \
+          "sourceDataArtifact" \
+          "${managed_namespace}" \
+          "${artifacts_dir}" > /dev/null 2>&1; then
+
+        # Find artifacts.json in the extracted content
+        local artifacts_json_file
+        artifacts_json_file=$(find "${artifacts_dir}" -name "artifacts.json" -type f | head -1)
+
+        if [ -n "${artifacts_json_file}" ] && [ -f "${artifacts_json_file}" ]; then
+          echo "Found artifacts.json at: ${artifacts_json_file}"
+          local artifacts_json_content
+          artifacts_json_content=$(cat "${artifacts_json_file}")
+
+          # Verify artifacts.json has expected structure
+          if echo "${artifacts_json_content}" | jq -e '.artifacts' > /dev/null 2>&1; then
+            echo "✅️ artifacts.json has 'artifacts' field"
+          else
+            echo "🔴 artifacts.json is missing 'artifacts' field"
+            failures=$((failures+1))
+          fi
+
+          if echo "${artifacts_json_content}" | jq -e '.distributions' > /dev/null 2>&1; then
+            echo "✅️ artifacts.json has 'distributions' field"
+          else
+            echo "🔴 artifacts.json is missing 'distributions' field"
+            failures=$((failures+1))
+          fi
+
+          # Verify there are artifacts (RPMs were uploaded)
+          local artifact_count
+          artifact_count=$(echo "${artifacts_json_content}" | jq '.artifacts | keys | length')
+          if [ "${artifact_count}" -gt 0 ]; then
+            echo "✅️ artifacts.json contains ${artifact_count} artifact(s)"
+          else
+            echo "🔴 artifacts.json has no artifacts (expected at least 1)"
+            failures=$((failures+1))
+          fi
+
+          # Verify there are distributions
+          local dist_count
+          dist_count=$(echo "${artifacts_json_content}" | jq '.distributions | keys | length')
+          if [ "${dist_count}" -gt 0 ]; then
+            echo "✅️ artifacts.json contains ${dist_count} distribution(s)"
+          else
+            echo "🔴 artifacts.json has no distributions"
+            failures=$((failures+1))
+          fi
+
+          echo "artifacts.json content:"
+          echo "${artifacts_json_content}" | jq '.'
+        else
+          echo "🔴 artifacts.json not found in trusted artifact"
+          failures=$((failures+1))
+        fi
+      else
+        echo "⚠️ Could not fetch trusted artifact from push-rpms-to-pulp task (task may not have run)"
+      fi
+
+      # Cleanup
+      rm -rf "${artifacts_dir}" 2>/dev/null || true
     fi
 
     echo "Checking advisory URLs..."
@@ -357,7 +564,7 @@ patch_component_source_before_merge() {
         "${component_repo_name}" \
         "${pr_number}" \
         "${file_name}" \
-        "Update component source before merge" \
+        "Update component source before merge. Fixes RELEASE-1502" \
         "${encoded_contents}"
   done
 
@@ -374,7 +581,7 @@ patch_component_source_before_merge() {
       "${component_repo_name}" \
       "${pr_number}" \
       "${file_name}" \
-      "Update component source before merge" \
+      "Update component source before merge. Fixes RELEASE-1502" \
       "${encoded_contents}"
 
   echo "✅️ Successfully patched component source!"

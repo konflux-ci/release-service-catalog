@@ -2,13 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-already-released-advisory-rpms-digest-mismatch
+  name: test-prepare-fbc-snapshot-fail-missing-ocp-version
   annotations:
     test/assert-task-failure: "run-task"
 spec:
   description: |
-    Run filter-already-released-advisory-rpms where RPM exists in Pulp for the same NEVRA but digest differs.
-    The task should fail.
+    Run the prepare-fbc-snapshot task with a component missing ocpVersion
+    and verify the task fails as expected. The ocpVersion field should be
+    attached by filter-published-fbc-images task before prepare-fbc-snapshot runs.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -31,7 +32,13 @@ spec:
       type: string
   tasks:
     - name: setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
       taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
         results:
           - name: sourceDataArtifact
             type: string
@@ -43,58 +50,52 @@ spec:
             - mountPath: /var/workdir
               name: workdir
           env:
-            - name: HOME
-              value: /var/workdir
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
-            - name: ORAS_OPTIONS
+            - name: "ORAS_OPTIONS"
               value: "$(params.orasOptions)"
-            - name: DEBUG
+            - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:304058ae848ca6311b53b505e80533fc337e9c1a46dedd4071ee436b14e476d9  # yamllint disable-line rule:line-length
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
-              #!/usr/bin/env bash
+              #!/usr/bin/env sh
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create data file with rpm-repositories mapping
+              # Create data.json with valid FBC configuration
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
-                "mapping": {
-                  "rpm-repositories": [
-                    {
-                      "name": "rpm-x86_64",
-                      "arch": "x86_64",
-                      "repository_id": "rpm-x86_64",
-                      "repository_name": "x86_64",
-                      "distro": "testdistro"
-                    },
-                    {
-                      "name": "rpm-source",
-                      "arch": "source",
-                      "repository_id": "rpm-source",
-                      "repository_name": "source",
-                      "distro": "testdistro"
-                    }
-                  ]
+                "fbc": {
+                  "fromIndex": "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.12",
+                  "targetIndex": "quay.io/redhat/redhat----preview-operator-index:v4.12"
                 }
               }
               EOF
 
-              # Create snapshot file
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              # Create snapshot WITHOUT ocpVersion field on component
+              # This should cause the task to fail since ocpVersion is required
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << EOF
               {
-                "application": "rpms",
-                "artifacts": {},
-                "components": [
-                  {
-                    "containerImage": "quay.io/test/digestmismatch@sha256:12345",
-                    "name": "test"
-                  }
-                ]
+                  "application": "foo-app",
+                  "artifacts": {},
+                  "components": [
+                      {
+                          "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                          "name": "test-container-missing-ocp-version",
+                          "source": {
+                              "git": {
+                                  "context": "./",
+                                  "dockerfileUrl": "build/Dockerfile",
+                                  "revision": "foo",
+                                  "url": "https://github.com/foo/bar"
+                              }
+                          },
+                          "repository": "test/foo/bar"
+                      }
+                  ]
               }
               EOF
           - name: create-trusted-artifact
@@ -109,16 +110,12 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: filter-already-released-advisory-rpms
+        name: prepare-fbc-snapshot
       params:
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
         - name: dataPath
-          value: "$(context.pipelineRun.uid)/data.json"
-        - name: PULP_DOMAIN
-          value: "mydomain"
-        - name: PULP_SECRET_NAME
-          value: "pulp-task-pulp-secret"
+          value: $(context.pipelineRun.uid)/data.json
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -130,8 +127,8 @@ spec:
         - name: trustedArtifactsDebug
           value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: "http://localhost"
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
         - name: taskGitRevision
-          value: "main"
+          value: "development"
       runAfter:
         - setup
