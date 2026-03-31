@@ -31,6 +31,12 @@
 #   -nocve, --no-cve      : If set, the script will not simulate the addition of a CVE.
 #                           This affects commit messages and expected CVE data during
 #                           release verification. Defaults to including CVE data.
+#   -i, --interactive     : Enable interactive mode. On failure, pauses and offers:
+#                           [r] Retry with same snapshot (no RPM rebuild needed)
+#                           [i] Show release context info
+#                           [s] Drop into shell for debugging
+#                           [c] Cleanup and exit
+#                           [q] Quit without cleanup
 #
 # Environment Variables (Expected):
 #   The script sources suite-specific environment variables from
@@ -79,15 +85,41 @@
 
 set -eo pipefail
 
-suite=$1
-if [ -z "$suite" ] ; then
-  echo "🔴 error: missing parameter suite"
-  exit 1
-fi
-
 # --- Configuration & Global Variables ---
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 LIB_DIR="${SCRIPT_DIR}/lib"
+
+# Parse arguments - extract suite name (first non-option argument)
+suite=""
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -sc|--skip-cleanup|-nocve|--no-cve|-i|--interactive)
+      args+=("$arg")
+      ;;
+    -*)
+      echo "🔴 error: unknown option: $arg"
+      echo "Usage: ./run-test.sh <suite_name> [options]"
+      echo "Options: -i/--interactive, -sc/--skip-cleanup, -nocve/--no-cve"
+      exit 1
+      ;;
+    *)
+      if [ -z "$suite" ]; then
+        suite="$arg"
+      else
+        echo "🔴 error: unexpected argument: $arg"
+        exit 1
+      fi
+      ;;
+  esac
+done
+
+if [ -z "$suite" ]; then
+  echo "🔴 error: missing parameter suite"
+  echo "Usage: ./run-test.sh <suite_name> [options]"
+  echo "Example: ./run-test.sh push-rpms-to-pulp -i"
+  exit 1
+fi
 
 SUITE_DIR="${SCRIPT_DIR}/${suite}" # e.g. "${SCRIPT_DIR}/fbc-release"
 
@@ -121,8 +153,8 @@ fi
 # Pass error code, line number, and command to the cleanup function
 trap 'cleanup_resources $? $LINENO "$BASH_COMMAND"' EXIT
 
-check_env_vars "$@" # Pass all args for consistency, though check_env_vars doesn't use them
-parse_options "$@" # Parses options and sets CLEANUP, NO_CVE
+check_env_vars "${args[@]}" # Pass all args for consistency, though check_env_vars doesn't use them
+parse_options "${args[@]}" # Parses options and sets CLEANUP, NO_CVE, INTERACTIVE_MODE
 
 decrypt_secrets "${SUITE_DIR}"
 create_github_repository

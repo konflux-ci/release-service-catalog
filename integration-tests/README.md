@@ -90,6 +90,8 @@ Example:
 ### Command Line Options
 
 - **`--skip-cleanup`** or **`-sc`** - Skip cleanup operations after test completion (useful for debugging)
+- **`--no-cve`** or **`-nocve`** - Skip CVE simulation in commit messages and release verification
+- **`--interactive`** or **`-i`** - Enable interactive mode for iterative debugging (see [Interactive Mode](#interactive-mode))
 
 ### Examples
 
@@ -99,6 +101,9 @@ Example:
 
 # Run test with debugging (skip cleanup)
 ./run-test.sh fbc-release --skip-cleanup
+
+# Run test in interactive mode
+./run-test.sh push-rpms-to-pulp --interactive
 ```
 
 ## Debugging
@@ -110,6 +115,44 @@ When debugging test failures, use the `--skip-cleanup` option to preserve resour
 ```bash
 ./run-test.sh <test-suite-name> --skip-cleanup
 ```
+
+### Interactive Mode
+
+Interactive mode (`-i` or `--interactive`) provides an iterative development experience for debugging release pipeline failures. When a release fails, instead of immediately exiting, the test pauses and presents an interactive menu:
+
+```
+🛑 Interactive Mode - Test paused
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  [r] Retry    - Create new Release with same snapshot
+  [i] Info     - Show release context again
+  [s] Shell    - Drop into bash shell (exit to return)
+  [c] Cleanup  - Run cleanup and exit
+  [q] Quit     - Exit without cleanup (keep resources)
+```
+
+**Key Features:**
+
+- **Retry (`r`)**: Creates a new Release CR using the same snapshot. This is useful when you've fixed the underlying pipeline code and want to re-test without rebuilding RPMs or recreating the entire test environment.
+- **Info (`i`)**: Displays release context including the Release name, Snapshot, ReleasePlan, managed PipelineRun URL (clickable link to OpenShift console), and namespace information.
+- **Shell (`s`)**: Drops into an interactive bash shell with useful environment variables pre-set (`RELEASE_NAME`, `RELEASE_NAMESPACE`, `tenant_namespace`, `managed_namespace`). Type `exit` to return to the menu.
+- **Cleanup (`c`)**: Runs the normal cleanup process and exits.
+- **Quit (`q`)**: Exits immediately without cleanup, preserving all resources for later debugging.
+
+**Example Usage:**
+
+```bash
+# Run test in interactive mode for pipeline development
+./run-test.sh push-rpms-to-pulp -i
+
+# Combine with skip-cleanup for maximum flexibility
+./run-test.sh fbc-release --interactive --skip-cleanup
+```
+
+Interactive mode is particularly useful when:
+- Developing or debugging release pipeline tasks
+- Iterating on fixes without full test re-runs
+- Investigating failures that require manual inspection
 
 ### Manual Cleanup
 
