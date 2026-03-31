@@ -2,11 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-rh-sign-rpm-ir-failure
-  annotations:
-    test/assert-task-failure: run-task
+  name: test-rh-sign-rpm-dynamic-arch
 spec:
-  description: Test that the task fails when internal request fails
+  description: Test creating internal requests with dynamic architecture detection from artifacts.json
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -62,13 +60,13 @@ spec:
                 "application": "myapp",
                 "components": [
                   {
-                    "name": "expected-ir-failure",
+                    "name": "rpm-comp0",
                     "source": {
                       "git": {
                         "revision": "deadbeef"
                       }
                     },
-                    "containerImage": "quay.io/test/rpm-component@sha256:9999"
+                    "containerImage": "quay.io/test/rpm-component@sha256:1111"
                   }
                 ]
               }
@@ -79,7 +77,7 @@ spec:
                 "signOptions": {
                   "signKeytab": {
                     "principal": "test-principal@REDHAT.COM",
-                    "name": "expected-ir-failure",
+                    "name": "test-keytab",
                     "secret": "test-keytab-secret"
                   },
                   "signPipelineImage": "quay.io/redhat-isv/operator-pipelines-images:released",
@@ -127,10 +125,21 @@ spec:
                     "labels": {"arch": "x86_64"},
                     "url": "https://pulp.example.com/pulp/content/test/x86_64/test-rpm-1.0-1.el9.x86_64.rpm",
                     "sha256": "abc123def456"
+                  },
+                  "another-rpm-2.0-1.el9.x86_64.rpm": {
+                    "labels": {"arch": "x86_64"},
+                    "url": "https://pulp.example.com/pulp/content/test/x86_64/another-rpm-2.0-1.el9.x86_64.rpm",
+                    "sha256": "xyz789abc123"
+                  },
+                  "test-rpm-1.0-1.el9.src.rpm": {
+                    "labels": {"arch": "source"},
+                    "url": "https://pulp.example.com/pulp/content/test/source/test-rpm-1.0-1.el9.src.rpm",
+                    "sha256": "def789ghi012"
                   }
                 },
                 "distributions": {
-                  "x86_64": "https://pulp.example.com/pulp/content/test/x86_64/"
+                  "x86_64": "https://pulp.example.com/pulp/content/test/x86_64/",
+                  "source": "https://pulp.example.com/pulp/content/test/source/"
                 }
               }
               EOF
@@ -149,7 +158,7 @@ spec:
         name: rh-sign-rpm
       params:
         - name: requester
-          value: testuser-rpm-failure
+          value: testuser-rpm
         - name: requestTimeout
           value: "1800"
         - name: pipelineRunUid
@@ -177,35 +186,123 @@ spec:
         - name: taskGitRevision
           value: "main"
         - name: snapshotBuildId
-          value: "test-failure-build"
+          value: ""
         - name: unsignedRpmsDomain
           value: "rok-storage"
         - name: signedRpmsDomain
           value: "rok-storage"
+        - name: unsignedRpmsSubpath
+          value: ""
+        - name: signedRpmsSubpath
+          value: ""
+        - name: signedRpmsUploadSubpath
+          value: ""
       runAfter:
         - setup
-  finally:
     - name: check-result
       params:
-        - name: taskStatus
-          value: "$(tasks.run-task.status)"
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
       taskSpec:
         params:
-          - name: taskStatus
+          - name: sourceDataArtifact
             type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
           - name: check-result
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              if [ "$(params.taskStatus)" != "Failed" ]; then
-                echo "Task should have failed but got status: $(params.taskStatus)"
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
+
+              echo "Found ${irsLength} internal requests"
+
+              # We expect 2 internal requests (one for x86_64, one for source)
+              if [ "${irsLength}" != "2" ]; then
+                echo "Expected 2 internal requests (one per architecture), found ${irsLength}"
                 exit 1
               fi
 
-              echo "Test passed: Task failed as expected"
+              # Check that filtered artifacts.json files were created
+              if [ ! -f "$(params.dataDir)/artifacts-x86_64.json" ]; then
+                echo "Expected filtered artifacts-x86_64.json file not found"
+                exit 1
+              fi
+
+              if [ ! -f "$(params.dataDir)/artifacts-source.json" ]; then
+                echo "Expected filtered artifacts-source.json file not found"
+                exit 1
+              fi
+
+              # Verify x86_64 filtered file contains only x86_64 artifacts
+              x86_count=$(jq '.artifacts | length' "$(params.dataDir)/artifacts-x86_64.json")
+              if [ "${x86_count}" != "2" ]; then
+                echo "Expected 2 artifacts in x86_64 filtered file, found ${x86_count}"
+                exit 1
+              fi
+
+              # Verify source filtered file contains only source artifacts
+              source_count=$(jq '.artifacts | length' "$(params.dataDir)/artifacts-source.json")
+              if [ "${source_count}" != "1" ]; then
+                echo "Expected 1 artifact in source filtered file, found ${source_count}"
+                exit 1
+              fi
+
+              # Verify all artifacts in x86_64 file have arch=x86_64
+              x86_archs=$(jq -r '.artifacts[].labels.arch' "$(params.dataDir)/artifacts-x86_64.json" | sort -u)
+              if [ "${x86_archs}" != "x86_64" ]; then
+                echo "x86_64 filtered file contains non-x86_64 artifacts: ${x86_archs}"
+                exit 1
+              fi
+
+              # Verify all artifacts in source file have arch=source
+              source_archs=$(jq -r '.artifacts[].labels.arch' "$(params.dataDir)/artifacts-source.json" | sort -u)
+              if [ "${source_archs}" != "source" ]; then
+                echo "source filtered file contains non-source artifacts: ${source_archs}"
+                exit 1
+              fi
+
+              # Verify the internal requests have correct unsigned_rpms_location
+              for i in 0 1; do
+                params_json=$(jq -r ".items[$i].spec.params" <<< "${internalRequests}")
+                unsigned_location=$(jq -r '.unsigned_rpms_location' <<< "${params_json}")
+
+                # Should be either rok-storage/x86_64 or rok-storage/source
+                if [[ "${unsigned_location}" != "rok-storage/x86_64" ]] && \
+                   [[ "${unsigned_location}" != "rok-storage/source" ]]; then
+                  echo "Unexpected unsigned_rpms_location: ${unsigned_location}"
+                  exit 1
+                fi
+              done
+
+              echo "Test passed: Multiple InternalRequests created with filtered artifacts.json files"
+      runAfter:
+        - run-task
+  finally:
     - name: cleanup
       taskSpec:
         steps:
