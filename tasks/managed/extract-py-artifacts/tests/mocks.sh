@@ -43,3 +43,15 @@ function oras() {
   return 0
 }
 
+function cosign() {
+  echo "Mock cosign called with: $*" >&2
+
+  if [[ "$1" == "verify-attestation" ]]; then
+    # Output on a single line, matching real cosign verify-attestation behavior
+    echo '{"predicateType":"https://slsa.dev/provenance/v1","predicate":{"buildDefinition":{"buildType":"https://tekton.dev/chains/v2/slsa","externalParameters":{"runSpec":{"pipelineRef":{"name":"build-python-wheels-oci-ta"},"params":[{"name":"PACKAGES","value":["test_package==1.0.0"]}]}},"internalParameters":{},"resolvedDependencies":[{"uri":"git+https://github.com/calungaproject/index.git","digest":{"sha1":"abc123def456"}}]},"runDetails":{"builder":{"id":"https://konflux-ci.dev/chains/v2"},"metadata":{"invocationId":"calunga-tenant/build-run-mock","startedOn":"2026-02-19T21:40:00Z","finishedOn":"2026-02-19T21:51:09Z"}}}}'
+    return 0
+  fi
+
+  return 0
+}
+
