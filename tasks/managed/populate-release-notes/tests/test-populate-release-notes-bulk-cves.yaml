@@ -1,0 +1,206 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-bulk-cves
+spec:
+  description: |
+    Test populate-release-notes with 15 unique CVEs on a single component to verify
+    correctness of the bulk jq path in populate-release-notes-type-and-references.
+    Motivated by RELEASE-2377 where 1037 CVEs caused a timeout with the old per-CVE
+    loop; this test catches ordering, count, and deduplication bugs at meaningful scale
+    without being a full 1100-item performance test.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Build data.json with 15 CVEs (CVE-001 through CVE-015) in a single jq call.
+              # Zero-padded IDs ensure lexicographic sort order matches numeric order,
+              # making index-based assertions in check-result straightforward.
+              jq -n '{
+                "releaseNotes": {
+                  "cves": [range(1;16) | {
+                    "component": "comp",
+                    "key": ("CVE-" + (("000" + (. | tostring))[-3:])),
+                    "packages": [],
+                    "summary": "",
+                    "uploadDate": "01-01-1980",
+                    "url": ""
+                  }],
+                  "product_id": [123],
+                  "product_name": "Test Product",
+                  "product_version": "1.0",
+                  "cpe": "cpe:/a:example:product:el9",
+                  "type": "RHSA",
+                  "issues": {"fixed": []},
+                  "synopsis": "test synopsis",
+                  "topic": "test topic",
+                  "description": "test description",
+                  "solution": "test solution"
+                }
+              }' > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "comp",
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-prod/product----repo",
+                        "rh-registry-repo": "registry.redhat.io/product/repo",
+                        "tags": [
+                          "1.0"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              DATA="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+
+              # CVEs are present, so type must be RHSA
+              test "$(jq -r '.releaseNotes.type' "$DATA")" == "RHSA"
+
+              # The mock returns 2 architectures (amd64 + s390x) for the single component,
+              # producing 2 content images each with the same 15 CVEs. After dedup:
+              # 15 CVE reference URLs + 1 classification URL = 16 total.
+              test "$(jq '.releaseNotes.references | length' "$DATA")" == 16
+
+              # No duplicates: unique count must equal total count
+              test "$(jq '.releaseNotes.references | unique | length' "$DATA")" == 16
+
+              # Zero-padded CVE IDs sort lexicographically as expected.
+              # CVE-001 through CVE-015 come before the classification URL
+              # (cve/... < updates/...).
+              test "$(jq -r '.releaseNotes.references[0]' "$DATA")" == \
+                "https://access.redhat.com/security/cve/CVE-001"
+              test "$(jq -r '.releaseNotes.references[14]' "$DATA")" == \
+                "https://access.redhat.com/security/cve/CVE-015"
+              test "$(jq -r '.releaseNotes.references[15]' "$DATA")" == \
+                "https://access.redhat.com/security/updates/classification/"
+      runAfter:
+        - run-task
