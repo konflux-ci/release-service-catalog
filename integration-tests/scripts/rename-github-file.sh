@@ -72,10 +72,21 @@ delete_file() {
 
 check_branch_exists() {
     local repo="$1" branch="$2" token="$3"
-    local response=$("$CURL_WITH_RETRY" --retry 3 --retry-all-errors -s \
-        -H "Authorization: token $token" -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/$repo/branches/$branch" 2>/dev/null || echo "")
-    [[ -n "$response" ]] && echo "$response" | jq -e '.name' >/dev/null 2>&1
+    local max_attempts=10 attempt=1 sleep_sec=5
+    # Retry on 404: GitHub API can lag behind a git push by several seconds
+    while [[ $attempt -le $max_attempts ]]; do
+        local response
+        response=$("$CURL_WITH_RETRY" --retry 3 --retry-all-errors -s \
+            -H "Authorization: token $token" -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/$repo/branches/$branch" 2>/dev/null || echo "")
+        if [[ -n "$response" ]] && echo "$response" | jq -e '.name' >/dev/null 2>&1; then
+            return 0
+        fi
+        log_warning "Branch '$branch' not yet visible via API (attempt ${attempt}/${max_attempts}), retrying in ${sleep_sec}s..."
+        sleep "$sleep_sec"
+        attempt=$(( attempt + 1 ))
+    done
+    return 1
 }
 
 rename_file() {
