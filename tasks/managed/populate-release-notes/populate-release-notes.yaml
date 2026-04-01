@@ -786,23 +786,21 @@ spec:
             exit 0
         fi
 
-        # Set type to RHSA as there are CVEs fixed
-        jq '.releaseNotes.type = "RHSA"' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-
-        # Inject classification link into data.json references
-        jq '.releaseNotes.references += ["https://access.redhat.com/security/updates/classification/"]' \
-            "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-
-        for ((i = 0; i < NUM_CVES; i++))
-        do
-            cve=$(jq -rs --argjson i "$i" 'map(keys[]) | .[$i]' <<< "${CVES}")
-            # Inject cve link into data.json references
-            jq --arg cve "$cve" '.releaseNotes.references += ["https://access.redhat.com/security/cve/\($cve)"]' \
-                "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-        done
-
-        # Remove duplicate references
-        jq '.releaseNotes.references |= unique' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
+        # Set type to RHSA, add the classification URL, and add per-CVE reference
+        # URLs — all in one jq call. CVE IDs are re-derived from DATA_FILE via
+        # getpath rather than being passed through --argjson. Passing a large JSON
+        # array (~tens of KB at 1000+ CVEs) via --argjson puts it on the process
+        # argv and triggers "Argument list too long" in Tekton containers.
+        jq --arg ct "${CONTENT_TYPE}" '
+          (getpath($ct | ltrimstr(".") | split("."))
+           | [.[] | select(.cves.fixed) | .cves.fixed | keys[]]
+           | unique) as $cveIds |
+          .releaseNotes.type = "RHSA" |
+          .releaseNotes.references +=
+            ["https://access.redhat.com/security/updates/classification/"] +
+            ($cveIds | map("https://access.redhat.com/security/cve/\(.)")) |
+          .releaseNotes.references |= unique
+        ' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
     - name: create-trusted-artifact
       computeResources:
         limits:
