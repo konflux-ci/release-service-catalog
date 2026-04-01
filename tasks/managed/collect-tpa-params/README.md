@@ -13,7 +13,9 @@ to push SBOMs to TPA. Also outputs results used to push SBOMs to an S3
 bucket.
 
 If the configmap in konflux-info cannot be parsed and no TPA fields
-are present in the data file, the task fails.
+are present in the data file, the task fails. If this is undesired,
+the task can be configured to return empty results instead by setting
+the parameter 'failOnMissing' to 'false'.
 
 ## Parameters
 
@@ -32,3 +34,4 @@ are present in the data file, the task fails.
 | caTrustConfigMapKey     | The name of the key in the ConfigMap that contains the CA bundle data                                                      | Yes      | ca-bundle.crt        |
 | configMapNamespace      | The namespace where the ConfigMap is located                                                                               | Yes      | konflux-info         |
 | configMapName           | The name of the ConfigMap to read TPA parameters from                                                                      | Yes      | cluster-config       |
+| failOnMissing           | Specify if this task should fail on missing parameters                                                                     | Yes      | true                 |
