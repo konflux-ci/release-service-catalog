@@ -103,21 +103,40 @@ if [ -z "${DEST_REPO_CHECK}" ]; then
     exit 1
   fi
   
-  # Verify the repository was created successfully
+  # Verify the repository was created successfully with retry logic
+  # GitHub API may take a moment to propagate the newly created repository
   echo "Re-verifying destination repository ${dest_repo}..."
-  DEST_REPO_RECHECK_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null)
-  if [ -n "${DEBUG}" ]; then
-    echo "🐛 Destination repo recheck API response: ${DEST_REPO_RECHECK_RESPONSE}"
-  fi
-  DEST_REPO_CHECK=$(echo "${DEST_REPO_RECHECK_RESPONSE}" | jq -r '.full_name // ""')
-  if [ -z "${DEST_REPO_CHECK}" ]; then
-    echo "🔴 error: destination repository ${dest_repo} still not accessible after creation"
+  max_attempts=5
+  attempt=1
+  verification_success=false
+
+  while [ $attempt -le $max_attempts ]; do
+    DEST_REPO_RECHECK_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null)
     if [ -n "${DEBUG}" ]; then
-      echo "🐛 Recheck response: ${DEST_REPO_RECHECK_RESPONSE}"
+      echo "🐛 Destination repo recheck API response: ${DEST_REPO_RECHECK_RESPONSE}"
+    fi
+    DEST_REPO_CHECK=$(echo "${DEST_REPO_RECHECK_RESPONSE}" | jq -r '.full_name // ""')
+    if [ -n "${DEST_REPO_CHECK}" ]; then
+      verification_success=true
+      break
+    fi
+
+    echo "⚠️  Repository not yet available (attempt ${attempt}/${max_attempts})"
+    if [ $attempt -lt $max_attempts ]; then
+      echo "Waiting 3 seconds before retry..."
+      sleep 3
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  if [ "$verification_success" = false ]; then
+    echo "🔴 error: destination repository ${dest_repo} still not accessible after ${max_attempts} attempts"
+    if [ -n "${DEBUG}" ]; then
+      echo "🐛 Last response: ${DEST_REPO_RECHECK_RESPONSE}"
     fi
     exit 1
   fi
-  
+
   echo "✅ Repository ${dest_repo} created successfully"
 fi
 

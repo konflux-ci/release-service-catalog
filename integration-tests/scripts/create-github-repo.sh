@@ -94,15 +94,33 @@ if [ -z "${CREATED_REPO}" ]; then
   exit 1
 fi
 
-# Verify the repository was created successfully
+# Verify the repository was created successfully with retry logic
+# GitHub API may take a moment to propagate the newly created repository
 echo "Verifying repository creation..."
-VERIFY_REPO=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${full_repo_name} 2> /dev/null | jq -r '.full_name // ""')
-if [ "${VERIFY_REPO}" = "${full_repo_name}" ]; then
-  echo "✅ Repository ${full_repo_name} created successfully!"
-  echo "   - URL: https://github.com/${full_repo_name}"
-  echo "   - Clone URL: https://github.com/${full_repo_name}.git"
-  echo "   - SSH URL: git@github.com:${full_repo_name}.git"
-else
-  echo "🔴 error: repository creation verification failed"
+max_attempts=5
+attempt=1
+verification_success=false
+
+while [ $attempt -le $max_attempts ]; do
+  VERIFY_REPO=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${full_repo_name} 2> /dev/null | jq -r '.full_name // ""')
+  if [ "${VERIFY_REPO}" = "${full_repo_name}" ]; then
+    echo "✅ Repository ${full_repo_name} created successfully!"
+    echo "   - URL: https://github.com/${full_repo_name}"
+    echo "   - Clone URL: https://github.com/${full_repo_name}.git"
+    echo "   - SSH URL: git@github.com:${full_repo_name}.git"
+    verification_success=true
+    break
+  fi
+
+  echo "⚠️  Repository not yet available (attempt ${attempt}/${max_attempts})"
+  if [ $attempt -lt $max_attempts ]; then
+    echo "Waiting 3 seconds before retry..."
+    sleep 3
+  fi
+  attempt=$((attempt + 1))
+done
+
+if [ "$verification_success" = false ]; then
+  echo "🔴 error: repository creation verification failed after ${max_attempts} attempts"
   exit 1
 fi
