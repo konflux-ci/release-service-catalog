@@ -22,7 +22,7 @@ spec:
       type: string
       description: |
         Pulp repository name to use for RPM signing. If provided, this value is used directly.
-        If empty, repositories are determined dynamically from the architectures in artifacts.json.
+        If empty, repositories are determined dynamically from the architectures in artifacts.json
       default: ""
     - name: releasePlanAdmissionPath
       description: Path to the JSON string of the releasePlanAdmission in the data workspace
@@ -86,21 +86,56 @@ spec:
       type: string
       description: |
         Subpath appended after the repo for unsigned RPMs location (e.g., "rpms" results in domain/repo/rpms).
-        Set to empty string for no subpath.
+        Set to empty string for no subpath
       default: "rpms"
     - name: signedRpmsSubpath
       type: string
       description: |
         Subpath appended after the repo for signed RPMs destination
         (e.g., "rpms-signed" results in domain/repo/rpms-signed).
-        Set to empty string for no subpath.
+        Set to empty string for no subpath
       default: "rpms-signed"
     - name: signedRpmsUploadSubpath
       type: string
       description: |
         Subpath for uploading signed RPMs within the signing pipeline.
-        Set to empty string for no subpath.
+        Set to empty string for no subpath
       default: ""
+    - name: kerberosPrincipal
+      type: string
+      description: Kerberos principal for RPM signing authentication
+    - name: kerberosKeytab
+      type: string
+      description: Name of the Kerberos keytab for RPM signing
+    - name: kerberosKeytabSecret
+      type: string
+      description: Name of the secret containing the Kerberos keytab
+    - name: pipelineImage
+      type: string
+      description: Container image to use for the signing pipeline
+    - name: signingAlias
+      type: string
+      description: Signing key alias to use for RPM signing
+    - name: signingRepo
+      type: string
+      description: Git repository URL containing the signing tasks
+      default: "https://gitlab.cee.redhat.com/signing/signing.git"
+    - name: signingRevision
+      type: string
+      description: Git revision (branch, tag, or commit) in the signing repository
+      default: "main"
+    - name: signPipeline
+      type: string
+      description: Name of the internal pipeline to use for RPM signing
+      default: "direct-rpm-signing"
+    - name: signPipelineServiceAccount
+      type: string
+      description: Service account to use for the signing pipeline
+      default: "release-service-account"
+    - name: artifactStorageSecret
+      type: string
+      description: Secret name for artifact storage credentials
+      default: "signing-artifact-storage-preprod"
   results:
     - name: sourceDataArtifact
       type: string
@@ -145,7 +180,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: rh-sign-rpm
-      image: quay.io/konflux-ci/release-service-utils:d08bdfa3733a7c75d5334aaa77b7aa46fbace00b
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
         limits:
           memory: 2Gi
@@ -180,57 +215,108 @@ spec:
             exit 1
         fi
 
-        if [ -z "$(params.artifactsJsonPath)" ] || [ ! -f "${ARTIFACTS_JSON_FILE}" ]; then
-            echo "No valid artifacts.json file was provided."
-            exit 1
+        # Validate artifacts.json if needed for dynamic architecture detection
+        if [ -z "$(params.snapshotBuildId)" ]; then
+            if [ -z "$(params.artifactsJsonPath)" ] || [ ! -f "${ARTIFACTS_JSON_FILE}" ]; then
+                echo "Error: snapshotBuildId is empty, so artifacts.json is required for dynamic architecture detection"
+                echo "Please provide either snapshotBuildId or a valid artifactsJsonPath"
+                exit 1
+            fi
         fi
 
         set -x
 
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
 
-        # Extract signing configuration from data file
-        KERBEROS_PRINCIPAL=$(jq --exit-status -r '.signOptions.signKeytab.principal' "${DATA_FILE}")
-        KERBEROS_KEYTAB=$(jq --exit-status -r '.signOptions.signKeytab.name' "${DATA_FILE}")
-        KERBEROS_KEYTAB_SECRET=$(jq --exit-status -r '.signOptions.signKeytab.secret' "${DATA_FILE}")
-        PIPELINE_IMAGE=$(jq --exit-status -r '.signOptions.signPipelineImage' "${DATA_FILE}")
-        SIGNING_ALIAS=$(jq --exit-status -r '.signOptions.signKeyAlias.key' "${DATA_FILE}")
+        # Calculate timeouts - pipeline timeout is requestTimeout + 5 minutes for overhead
+        requestTimeout=$(params.requestTimeout)
+        pipelineTimeoutSeconds=$((requestTimeout+300))
+        pipelineTimeout=$(date -u -d @"${pipelineTimeoutSeconds}" +"%Hh%Mm%Ss")
+        taskTimeout=$(date -u -d @"${requestTimeout}" +"%Hh%Mm%Ss")
 
         # Determine repos to process and whether to filter artifacts
         FILTER_ARTIFACTS="false"
+        HAS_NOARCH="false"
         if [ -n "$(params.snapshotBuildId)" ]; then
             # Use provided snapshotBuildId as the repo
             REPOS="$(params.snapshotBuildId)"
             echo "Using provided snapshotBuildId as repo: ${REPOS}"
         else
             # Extract unique architectures from artifacts.json
-            REPOS=$(jq -r '.artifacts | .[].labels.arch // empty' "${ARTIFACTS_JSON_FILE}" | sort -u)
+            # Filter out "noarch" - noarch RPMs are uploaded to all arch repos by push-rpms-to-pulp
+            # and should be signed as part of actual arch repos, not a separate "noarch" repo
+            ALL_ARCHS=$(jq -r '.artifacts | .[].labels.arch // empty' "${ARTIFACTS_JSON_FILE}" | sort -u)
+
+            if echo "${ALL_ARCHS}" | grep -q "^noarch$"; then
+                HAS_NOARCH="true"
+            fi
+
+            # Start with arch-specific repos from artifacts
+            REPOS=$(echo "${ALL_ARCHS}" | grep -v "^noarch$" || true)
+            echo "Extracted repos from artifacts.json architectures: ${REPOS:-<none>}"
+
+            # When noarch RPMs exist, use distributions to determine all repos that have content
+            # This reflects where push-rpms-to-pulp actually uploaded noarch RPMs
+            if [ "${HAS_NOARCH}" = "true" ]; then
+                echo "noarch RPMs found - adding all arch repos from distributions"
+                DIST_REPOS=$(jq -r '.distributions | keys[]' "${ARTIFACTS_JSON_FILE}" \
+                  | grep -v "^source$" || true)
+                for dist_repo in ${DIST_REPOS}; do
+                    if ! echo "${REPOS}" | grep -q "^${dist_repo}$"; then
+                        if [ -z "${REPOS}" ]; then
+                            REPOS="${dist_repo}"
+                        else
+                            REPOS="${REPOS}"$'\n'"${dist_repo}"
+                        fi
+                        echo "  Adding repo from distributions: ${dist_repo}"
+                    fi
+                done
+            fi
+
+            # Add source if present in artifacts
+            if echo "${ALL_ARCHS}" | grep -q "^source$"; then
+                REPOS="${REPOS}"$'\n'"source"
+            fi
+
             if [ -z "${REPOS}" ]; then
                 echo "No architectures found in artifacts.json"
                 exit 1
             fi
-            echo "Extracted repos from artifacts.json architectures: ${REPOS}"
+            echo "Final repos to process: ${REPOS}"
             FILTER_ARTIFACTS="true"
         fi
 
         # Process each repo
         for REPO in ${REPOS}; do
-            echo "Creating internal-request for RPM signing (repo: ${REPO})..."
+            echo "Creating internal-request for RPM signing (pipeline: $(params.signPipeline), repo: ${REPO})..."
 
             # Determine which artifacts.json to use
             if [ "${FILTER_ARTIFACTS}" = "true" ]; then
                 # Create filtered artifacts.json for this architecture
                 FILTERED_ARTIFACTS_FILE="$(params.dataDir)/artifacts-${REPO}.json"
-                jq --arg arch "${REPO}" '{
-                  artifacts: (.artifacts | to_entries | map(select(.value.labels.arch == $arch))
-                    | from_entries),
-                  distributions: {($arch): .distributions[$arch]}
-                }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
+                if [ "${HAS_NOARCH}" = "true" ] && [ "${REPO}" != "source" ]; then
+                    # Include both arch-specific AND noarch artifacts in each arch repo
+                    # noarch RPMs exist in all arch repos, so each needs to be signed
+                    jq --arg arch "${REPO}" '{
+                      artifacts: (.artifacts | to_entries
+                        | map(select(.value.labels.arch == $arch or .value.labels.arch == "noarch"))
+                        | from_entries),
+                      distributions: {($arch): .distributions[$arch]}
+                    }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
+                    echo "Created filtered artifacts.json for ${REPO} (including noarch)"
+                else
+                    jq --arg arch "${REPO}" '{
+                      artifacts: (.artifacts | to_entries | map(select(.value.labels.arch == $arch))
+                        | from_entries),
+                      distributions: {($arch): .distributions[$arch]}
+                    }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
+                    echo "Created filtered artifacts.json for ${REPO}"
+                fi
                 ARTIFACT_JSON_PATH="${FILTERED_ARTIFACTS_FILE}"
-                echo "Created filtered artifacts.json for ${REPO}: ${FILTERED_ARTIFACTS_FILE}"
             else
                 ARTIFACT_JSON_PATH="${ARTIFACTS_JSON_FILE}"
             fi
+            ARTIFACT_JSON=$(cat "${ARTIFACT_JSON_PATH}" | base64 -w0)
 
             # Build unsigned RPMs location path
             if [ -n "$(params.unsignedRpmsSubpath)" ]; then
@@ -249,24 +335,30 @@ spec:
             echo "Unsigned RPMs location: ${UNSIGNED_LOCATION}"
             echo "Signed RPMs destination: ${SIGNED_DESTINATION}"
 
+            # Disable command echoing to prevent logging sensitive parameters
+            set +x
             internal-request \
-              --pipeline "direct-rpm-signing" \
-              -p image="${PIPELINE_IMAGE}" \
-              -p artifact_json="${ARTIFACT_JSON_PATH}" \
+              --pipeline "$(params.signPipeline)" \
+              -p image="$(params.pipelineImage)" \
+              -p artifact_json="${ARTIFACT_JSON}" \
               -p ociStorage="$(params.ociStorage)" \
-              -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
-              -p kerberos_keytab="${KERBEROS_KEYTAB}" \
-              -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET}" \
-              -p signing_alias="${SIGNING_ALIAS}" \
+              -p kerberos_principal="$(params.kerberosPrincipal)" \
+              -p kerberos_keytab="$(params.kerberosKeytab)" \
+              -p kerberos_keytab_secret="$(params.kerberosKeytabSecret)" \
+              -p signing_alias="$(params.signingAlias)" \
+              -p artifact_storage_secret="$(params.artifactStorageSecret)" \
               -p unsigned_rpms_location="${UNSIGNED_LOCATION}" \
               -p signed_rpms_destination="${SIGNED_DESTINATION}" \
+              -p source_artifact_storage_domain="$(params.unsignedRpmsDomain)" \
+              -p destination_artifact_storage_domain="$(params.signedRpmsDomain)" \
               -p requester="$(params.requester)" \
               -p force="false" \
               -p signed_rpms_upload_subpath="$(params.signedRpmsUploadSubpath)" \
-              -p taskGitUrl="https://gitlab.cee.redhat.com/signing/signing.git" \
-              -p taskGitRevision="main" \
+              -p taskGitUrl="$(params.signingRepo)" \
+              -p taskGitRevision="$(params.signingRevision)" \
               -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
               -t "$(params.requestTimeout)" \
+              --service-account "$(params.signPipelineServiceAccount)" \
               --pipeline-timeout "0h30m0s" \
               --task-timeout "0h25m0s" \
               -s true
