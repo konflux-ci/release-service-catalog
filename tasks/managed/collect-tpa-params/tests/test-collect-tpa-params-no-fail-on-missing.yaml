@@ -1,0 +1,146 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-collect-tpa-params-no-fail-on-missing
+spec:
+  description: |
+    Run the collect-tpa-params task with a missing atlasServer key and
+    failOnMissing set to false (default is true). The task should
+    succeed and return empty strings.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image:
+              quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              echo "{}" > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: collect-tpa-params
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: configMapNamespace
+          value: "$(context.pipelineRun.namespace)"
+        - name: configMapName
+          value: "nonexistent-configmap"
+        - name: failOnMissing
+          value: "false"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: secretName
+          value: $(tasks.run-task.results.secretName)
+        - name: ssoTokenUrl
+          value: $(tasks.run-task.results.ssoTokenUrl)
+        - name: atlasApiUrl
+          value: $(tasks.run-task.results.atlasApiUrl)
+        - name: retryAWSSecretName
+          value: $(tasks.run-task.results.retryAWSSecretName)
+        - name: retryS3Bucket
+          value: $(tasks.run-task.results.retryS3Bucket)
+      taskSpec:
+        params:
+          - name: secretName
+            type: string
+          - name: ssoTokenUrl
+            type: string
+          - name: atlasApiUrl
+            type: string
+          - name: retryAWSSecretName
+            type: string
+          - name: retryS3Bucket
+            type: string
+        steps:
+          - name: check-result
+            image:
+              quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            env:
+              - name: "SECRET_NAME"
+                value: '$(params.secretName)'
+              - name: "SSO_TOKEN_URL"
+                value: '$(params.ssoTokenUrl)'
+              - name: "ATLAS_API_URL"
+                value: '$(params.atlasApiUrl)'
+              - name: "RETRY_AWS_SECRET_NAME"
+                value: '$(params.retryAWSSecretName)'
+              - name: "RETRY_S3_BUCKET"
+                value: '$(params.retryS3Bucket)'
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              test -z "$ATLAS_API_URL"
+              test -z "$SSO_TOKEN_URL"
+              test -z "$SECRET_NAME"
+              test -z "$RETRY_AWS_SECRET_NAME"
+              test -z "$RETRY_S3_BUCKET"
