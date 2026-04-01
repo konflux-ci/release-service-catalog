@@ -125,18 +125,28 @@ check_env_vars "$@" # Pass all args for consistency, though check_env_vars doesn
 parse_options "$@" # Parses options and sets CLEANUP, NO_CVE
 
 decrypt_secrets "${SUITE_DIR}"
-create_github_repository
-patch_component_source
+# Conditionally skip component build workflow steps if skip_build is set
+if [ "${skip_build}" != "true" ]; then
+    create_github_repository
+    patch_component_source
+else
+    echo "⏩ Skipping component build workflow (skip_build=true) - using pre-built snapshot"
+fi
 setup_namespaces # Ensures correct context before resource creation
 cleanup_old_resources "${originating_tool}"
 create_kubernetes_resources # tmpDir is set here
 
-wait_for_component_initialization # component_pr and pr_number are set here
-patch_component_source_before_merge
-merge_github_pr # SHA is set here
+# Conditionally skip component build workflow steps if skip_build is set
+if [ "${skip_build}" != "true" ]; then
+    wait_for_component_initialization # component_pr and pr_number are set here
+    patch_component_source_before_merge
+    merge_github_pr # SHA is set here
 
-wait_for_plr_to_appear # component_push_plr_name is set here
-wait_for_plr_to_complete
+    wait_for_plr_to_appear # component_push_plr_name is set here
+    wait_for_plr_to_complete
+else
+    echo "⏩ Skipping component build workflow (skip_build=true) - using pre-built snapshot"
+fi
 
 wait_for_releases # RELEASE_NAME, RELEASE_NAMESPACE are set and exported here
 verify_release_contents

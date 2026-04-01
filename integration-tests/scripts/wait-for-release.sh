@@ -214,7 +214,7 @@ RELEASE_URL=$(getConsoleLogForRelease "${APPLICATION}" "${RELEASE_NAMESPACE}" "$
 
 while true;
 do
-  RELEASE_JSON=$(kubectl get release/${RELEASE_NAME} -n ${RELEASE_NAMESPACE} -ojson)
+  RELEASE_JSON=$(kubectl get release/${RELEASE_NAME} -n ${RELEASE_NAMESPACE} -o json)
   RELEASED=$(jq -r '.status.conditions[] | select(.type=="Released") | [.status, .reason, .message] | @csv' \
     <<< "${RELEASE_JSON}" )
   RELEASED_STATUS=$(cut -f1 -d, <<< "${RELEASED}")

@@ -27,8 +27,15 @@ RUN curl -L https://github.com/kubernetes-sigs/kustomize/releases/download/kusto
     | tar -C /usr/bin/ -xzf - kustomize &&\
     chmod +x /usr/bin/kustomize
 
-# Install ansible system-wide so it's in /usr/local/bin (accessible by all users)  
-RUN python3 -m pip install --no-cache-dir ansible  
+# Install ansible system-wide so it's in /usr/local/bin (accessible by all users)
+RUN python3 -m pip install --no-cache-dir ansible
+
+# Install AWS CLI v2
+RUN dnf install -y unzip && dnf clean all
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf awscliv2.zip aws
 
 ADD integration-tests/ /home/e2e/tests/
 
@@ -50,3 +57,4 @@ USER 1001
 RUN tkn version --component client
 RUN ansible-vault --version
 RUN kubectl version --client=true
+RUN aws --version

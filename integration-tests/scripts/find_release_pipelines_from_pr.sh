@@ -199,7 +199,7 @@ _find_and_process_pipelines() {
   fi
 
   ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "release-to-github" "push-to-external-registry" \
-  "push-to-external-registry-self-hosted-quay" \
+  "push-to-external-registry-self-hosted-quay" "release-to-nrrc" \
   "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" "push-to-addons-registry" \
   "push-rpms-to-pulp")
 
