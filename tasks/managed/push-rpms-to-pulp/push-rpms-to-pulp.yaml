@@ -798,6 +798,8 @@ spec:
 
         # Track which noarch RPMs were actually uploaded (not skipped)
         UPLOADED_NOARCH_RPMS=()
+        # Track existing noarch RPMs (for artifacts.json - idempotency support)
+        EXISTING_NOARCH_RPMS=()
 
         # Parse default architectures once for reuse; skip empty entries (e.g. trailing comma)
         DEFAULT_ARCHES=()
@@ -879,7 +881,18 @@ spec:
               status=$?
               set -e
               if [[ $status -eq 0 ]]; then
-                echo "Already exists with matching digest: $pkg in ${arch}. Skipping."
+                echo "Already exists with matching digest: $pkg in ${arch}. Skipping upload."
+                # Still add to artifacts.json for signing (idempotency support)
+                nevra="$(parse_nevra "${pkg}")"
+                IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+                local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+                jq --arg key "${pkg}" \
+                   --arg arch "${arch}" \
+                   --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${arch}/${pkg}" \
+                   --arg sha256 "${local_sha}" \
+                  "${JQ_ADD_ARTIFACT}" \
+                  "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+                echo "  Added to artifacts.json for downstream signing"
                 continue
               elif [[ $status -eq 3 ]]; then
                 echo "Error: Package exists in ${arch} with different digest: $pkg"
@@ -941,7 +954,11 @@ spec:
               status=$?
               set -e
               if [[ $status -eq 0 ]]; then
-                echo "Already exists with matching digest: $pkg in ${arch}. Skipping."
+                echo "Already exists with matching digest: $pkg in ${arch}. Skipping upload."
+                # Track for artifacts.json (idempotency support)
+                if [[ ! " ${EXISTING_NOARCH_RPMS[*]} " == *" ${pkg} "* ]]; then
+                  EXISTING_NOARCH_RPMS+=("${pkg}")
+                fi
                 continue
               elif [[ $status -eq 3 ]]; then
                 echo "Error: Package exists in ${arch} with different digest: $pkg"
@@ -1010,7 +1027,18 @@ spec:
             status=$?
             set -e
             if [[ $status -eq 0 ]]; then
-              echo "Already exists with matching digest: $pkg in source. Skipping."
+              echo "Already exists with matching digest: $pkg in source. Skipping upload."
+              # Still add to artifacts.json for signing (idempotency support)
+              nevra="$(parse_nevra "${pkg}")"
+              IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+              local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+              jq --arg key "${pkg}" \
+                 --arg arch "source" \
+                 --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/source/${pkg}" \
+                 --arg sha256 "${local_sha}" \
+                "${JQ_ADD_ARTIFACT}" \
+                "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+              echo "  Added to artifacts.json for downstream signing"
               continue
             elif [[ $status -eq 3 ]]; then
               echo "Error: Package exists in source with different digest: $pkg"
@@ -1064,10 +1092,12 @@ spec:
           add_content_to_repo "source" "$SRC_HREFS_JSON"
         fi
 
-        # Add noarch RPMs to artifacts.json once (only those that were actually uploaded)
+        # Add noarch RPMs to artifacts.json once
         # Use first available arch for the URL since content is identical in all repos
+        # Include both uploaded and existing noarch RPMs (idempotency support)
         first_arch="${ARCHES[0]:-x86_64}"
-        for pkg in "${UPLOADED_NOARCH_RPMS[@]}"; do
+        ALL_NOARCH_RPMS=("${UPLOADED_NOARCH_RPMS[@]}" "${EXISTING_NOARCH_RPMS[@]}")
+        for pkg in "${ALL_NOARCH_RPMS[@]}"; do
           local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
           jq --arg key "${pkg}" \
              --arg arch "noarch" \
@@ -1076,6 +1106,9 @@ spec:
             "${JQ_ADD_ARTIFACT}" \
             "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
         done
+        if [[ ${#EXISTING_NOARCH_RPMS[@]} -gt 0 ]]; then
+          echo "Added ${#EXISTING_NOARCH_RPMS[@]} existing noarch RPMs to artifacts.json"
+        fi
 
         # Add distribution URLs to artifacts.json
         for dist_arch in "${ARCHES[@]}"; do
