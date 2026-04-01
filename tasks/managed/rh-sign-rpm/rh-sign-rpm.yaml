@@ -198,18 +198,53 @@ spec:
 
         # Determine repos to process and whether to filter artifacts
         FILTER_ARTIFACTS="false"
+        HAS_NOARCH="false"
         if [ -n "$(params.snapshotBuildId)" ]; then
             # Use provided snapshotBuildId as the repo
             REPOS="$(params.snapshotBuildId)"
             echo "Using provided snapshotBuildId as repo: ${REPOS}"
         else
             # Extract unique architectures from artifacts.json
-            REPOS=$(jq -r '.artifacts | .[].labels.arch // empty' "${ARTIFACTS_JSON_FILE}" | sort -u)
+            # Filter out "noarch" - noarch RPMs are uploaded to all arch repos by push-rpms-to-pulp
+            # and should be signed as part of actual arch repos, not a separate "noarch" repo
+            ALL_ARCHS=$(jq -r '.artifacts | .[].labels.arch // empty' "${ARTIFACTS_JSON_FILE}" | sort -u)
+
+            if echo "${ALL_ARCHS}" | grep -q "^noarch$"; then
+                HAS_NOARCH="true"
+            fi
+
+            # Start with arch-specific repos from artifacts
+            REPOS=$(echo "${ALL_ARCHS}" | grep -v "^noarch$" || true)
+            echo "Extracted repos from artifacts.json architectures: ${REPOS:-<none>}"
+
+            # When noarch RPMs exist, use distributions to determine all repos that have content
+            # This reflects where push-rpms-to-pulp actually uploaded noarch RPMs
+            if [ "${HAS_NOARCH}" = "true" ]; then
+                echo "noarch RPMs found - adding all arch repos from distributions"
+                DIST_REPOS=$(jq -r '.distributions | keys[]' "${ARTIFACTS_JSON_FILE}" \
+                  | grep -v "^source$" || true)
+                for dist_repo in ${DIST_REPOS}; do
+                    if ! echo "${REPOS}" | grep -q "^${dist_repo}$"; then
+                        if [ -z "${REPOS}" ]; then
+                            REPOS="${dist_repo}"
+                        else
+                            REPOS="${REPOS}"$'\n'"${dist_repo}"
+                        fi
+                        echo "  Adding repo from distributions: ${dist_repo}"
+                    fi
+                done
+            fi
+
+            # Add source if present in artifacts
+            if echo "${ALL_ARCHS}" | grep -q "^source$"; then
+                REPOS="${REPOS}"$'\n'"source"
+            fi
+
             if [ -z "${REPOS}" ]; then
                 echo "No architectures found in artifacts.json"
                 exit 1
             fi
-            echo "Extracted repos from artifacts.json architectures: ${REPOS}"
+            echo "Final repos to process: ${REPOS}"
             FILTER_ARTIFACTS="true"
         fi
 
@@ -221,13 +256,25 @@ spec:
             if [ "${FILTER_ARTIFACTS}" = "true" ]; then
                 # Create filtered artifacts.json for this architecture
                 FILTERED_ARTIFACTS_FILE="$(params.dataDir)/artifacts-${REPO}.json"
-                jq --arg arch "${REPO}" '{
-                  artifacts: (.artifacts | to_entries | map(select(.value.labels.arch == $arch))
-                    | from_entries),
-                  distributions: {($arch): .distributions[$arch]}
-                }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
+                if [ "${HAS_NOARCH}" = "true" ] && [ "${REPO}" != "source" ]; then
+                    # Include both arch-specific AND noarch artifacts in each arch repo
+                    # noarch RPMs exist in all arch repos, so each needs to be signed
+                    jq --arg arch "${REPO}" '{
+                      artifacts: (.artifacts | to_entries
+                        | map(select(.value.labels.arch == $arch or .value.labels.arch == "noarch"))
+                        | from_entries),
+                      distributions: {($arch): .distributions[$arch]}
+                    }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
+                    echo "Created filtered artifacts.json for ${REPO} (including noarch)"
+                else
+                    jq --arg arch "${REPO}" '{
+                      artifacts: (.artifacts | to_entries | map(select(.value.labels.arch == $arch))
+                        | from_entries),
+                      distributions: {($arch): .distributions[$arch]}
+                    }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
+                    echo "Created filtered artifacts.json for ${REPO}"
+                fi
                 ARTIFACT_JSON_PATH="${FILTERED_ARTIFACTS_FILE}"
-                echo "Created filtered artifacts.json for ${REPO}: ${FILTERED_ARTIFACTS_FILE}"
             else
                 ARTIFACT_JSON_PATH="${ARTIFACTS_JSON_FILE}"
             fi
