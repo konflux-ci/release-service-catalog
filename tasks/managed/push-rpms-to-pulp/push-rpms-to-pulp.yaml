@@ -10,6 +10,14 @@ spec:
     - name: SNAPSHOT_PATH
       type: string
       description: Path to the snapshot spec file containing image information
+      default: ""
+    - name: signedRpmsOciArtifact
+      type: string
+      description: |
+        OCI artifact reference containing signed RPMs (e.g., oci:registry/repo@sha256:...).
+        When provided, RPMs are extracted from this artifact instead of from the snapshot.
+        Either SNAPSHOT_PATH or signedRpmsOciArtifact must be provided.
+      default: ""
     - name: PULP_DOMAIN
       type: string
       description: The domain to use for Pulp operations
@@ -128,6 +136,8 @@ spec:
         value: $(params.dataDir)/images.txt
       - name: FILES_DIR
         value: /var/workdir/rpm-extract
+      - name: SIGNED_RPMS_OCI_ARTIFACT
+        value: $(params.signedRpmsOciArtifact)
       - name: IMAGE_EXPIRES_AFTER
         value: $(params.ociArtifactExpiresAfter)
       - name: ORAS_OPTIONS
@@ -698,35 +708,72 @@ spec:
         }
         '
 
-        # If the snapshot was pre-processed by filter-already-released-advisory-rpms, it will include
-        # `.components[].rpmsToPublish[]` entries that specify exactly which RPMs should
-        # be published to which repos. When present, we only attempt uploads for those.
-        # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
-        # We extract repository_name for Pulp repo lookups.
-        RPM_REPO_MAP="$(
-          jq -c '
-            [ .components[].rpmsToPublish[]? |
-              {rpm, targetRepos: [.targetRepos[]?.repository_name // empty]} ]
-            | reduce .[] as $i ({}; .[$i.rpm] =
-                ((.[$i.rpm] // []) + ($i.targetRepos // []) | unique)
-              )
-          ' "${SNAPSHOT_PATH}" 2>/dev/null || echo "{}"
-        )"
-        RPM_FILTER_ENABLED="false"
-        if [[ "${RPM_REPO_MAP}" != "{}" ]]; then
-          RPM_FILTER_ENABLED="true"
-        fi
-        echo "RPM pre-filter detected in snapshot: ${RPM_FILTER_ENABLED}"
-
-        jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | tee "${IMAGES_TXT}"
-
-        AUTHFILE='/tmp/auth.json'
         mkdir -p "${FILES_DIR}"
-        while read -r IMAGE; do
-          echo "Processing ${IMAGE}"
-          select-oci-auth "${IMAGE}" > "${AUTHFILE}"
-          oras pull --registry-config "${AUTHFILE}" "${IMAGE}" -o "${FILES_DIR}"
-        done < "${IMAGES_TXT}"
+
+        # Check if we're extracting from signed RPMs OCI artifact or from snapshot
+        if [ -n "${SIGNED_RPMS_OCI_ARTIFACT}" ]; then
+          echo "=== Extracting RPMs from signed RPMs OCI artifact ==="
+          echo "Artifact: ${SIGNED_RPMS_OCI_ARTIFACT}"
+
+          # Strip the "oci:" prefix if present
+          oci_ref="${SIGNED_RPMS_OCI_ARTIFACT#oci:}"
+          echo "OCI ref (stripped): ${oci_ref}"
+
+          # Pull the OCI artifact
+          echo "Pulling artifact to ${FILES_DIR}..."
+          oras pull "${oci_ref}" -o "${FILES_DIR}"
+
+          # Extract the gzipped tar archive if present
+          if [ -f "${FILES_DIR}/signed-rpms" ]; then
+            echo "Extracting signed-rpms archive..."
+            tar -xzf "${FILES_DIR}/signed-rpms" -C "${FILES_DIR}"
+            rm -f "${FILES_DIR}/signed-rpms"
+          fi
+
+          echo "Extracted RPM files:"
+          ls -la "${FILES_DIR}"
+
+          # No RPM filtering when using signed RPMs artifact
+          RPM_FILTER_ENABLED="false"
+          RPM_REPO_MAP="{}"
+        else
+          echo "=== Extracting RPMs from snapshot containerImages ==="
+
+          # Validate snapshot path is provided
+          if [ -z "${SNAPSHOT_PATH}" ] || [ ! -f "${SNAPSHOT_PATH}" ]; then
+            echo "Error: Either signedRpmsOciArtifact or SNAPSHOT_PATH must be provided"
+            exit 1
+          fi
+
+          # If the snapshot was pre-processed by filter-already-released-advisory-rpms, it will include
+          # `.components[].rpmsToPublish[]` entries that specify exactly which RPMs should
+          # be published to which repos. When present, we only attempt uploads for those.
+          # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
+          # We extract repository_name for Pulp repo lookups.
+          RPM_REPO_MAP="$(
+            jq -c '
+              [ .components[].rpmsToPublish[]? |
+                {rpm, targetRepos: [.targetRepos[]?.repository_name // empty]} ]
+              | reduce .[] as $i ({}; .[$i.rpm] =
+                  ((.[$i.rpm] // []) + ($i.targetRepos // []) | unique)
+                )
+            ' "${SNAPSHOT_PATH}" 2>/dev/null || echo "{}"
+          )"
+          RPM_FILTER_ENABLED="false"
+          if [[ "${RPM_REPO_MAP}" != "{}" ]]; then
+            RPM_FILTER_ENABLED="true"
+          fi
+          echo "RPM pre-filter detected in snapshot: ${RPM_FILTER_ENABLED}"
+
+          jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | tee "${IMAGES_TXT}"
+
+          AUTHFILE='/tmp/auth.json'
+          while read -r IMAGE; do
+            echo "Processing ${IMAGE}"
+            select-oci-auth "${IMAGE}" > "${AUTHFILE}"
+            oras pull --registry-config "${AUTHFILE}" "${IMAGE}" -o "${FILES_DIR}"
+          done < "${IMAGES_TXT}"
+        fi
 
         cd "${FILES_DIR}"
 
