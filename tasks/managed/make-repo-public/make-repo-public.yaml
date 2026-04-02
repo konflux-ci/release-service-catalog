@@ -8,7 +8,7 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Tekton task that makes repositories public using quay.io API
+    Tekton task that makes repositories public using the Quay API
   params:
     - name: dataPath
       type: string
@@ -18,7 +18,7 @@ spec:
       description: Path to the JSON string of the Snapshot spec in the data workspace
     - name: registrySecret
       type: string
-      description: "The kube secret to use quay.io API, containing one key: token"
+      description: "The kube secret to use the Quay API, containing one key: token"
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
@@ -61,7 +61,7 @@ spec:
     - name: caCertPath
       type: string
       description: Path to CA certificate bundle for TLS verification with self-signed certificates
-      default: /etc/pki/tls/certs/ca-bundle.crt
+      default: /mnt/trusted-ca/ca-bundle.crt
   results:
     - description: Produced trusted data artifact
       name: sourceDataArtifact
@@ -86,12 +86,10 @@ spec:
       - mountPath: /var/workdir
         name: workdir
       - name: trusted-ca
-        mountPath: /etc/pki/tls/certs/ca-bundle.crt
-        subPath: ca-bundle.crt
+        mountPath: /etc/ssl/certs
         readOnly: true
       - name: trusted-ca
-        mountPath: /etc/ssl/certs/ca-custom-bundle.crt
-        subPath: ca-bundle.crt
+        mountPath: /mnt/trusted-ca
         readOnly: true
     env:
       - name: IMAGE_EXPIRES_AFTER
@@ -143,23 +141,51 @@ spec:
 
         REGISTRY_TOKEN="$(cat /etc/secrets/token)"
 
+        if [ -f "/mnt/trusted-ca/ca-bundle.crt" ]; then
+          CA_BUNDLE=$(mktemp)
+          { cat /etc/pki/tls/certs/ca-bundle.crt; echo; cat /mnt/trusted-ca/ca-bundle.crt; } > "$CA_BUNDLE"
+          export CURL_CA_BUNDLE="$CA_BUNDLE"
+        fi
+
+        declare -A QUAY_REGISTRY_CACHE
+
         set -x
 
-        # Function to call quay.io to make a repository public
-        # Parameters:
-        # repository: full path to repo on quay.io, e.g. "myorg/myrepo"
+        function is_quay_registry() {
+          local registry="$1"
+          if [[ -v "QUAY_REGISTRY_CACHE[$registry]" ]]; then
+            [ "${QUAY_REGISTRY_CACHE[$registry]}" = "true" ]
+            return
+          fi
+          set +x
+          local http_code
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            --retry 3 \
+            "https://${registry}/api/v1/discovery")
+          set -x
+          if [ "$http_code" = "200" ]; then
+            QUAY_REGISTRY_CACHE[$registry]="true"
+            return 0
+          else
+            QUAY_REGISTRY_CACHE[$registry]="false"
+            return 1
+          fi
+        }
+
         function make_repo_public() {
+          local registry="$1"
+          local repo_path="$2"
           set +x
           if curl -X POST \
             --fail-with-body --retry 3 \
             --header "Authorization: Bearer ${REGISTRY_TOKEN}" \
             --header 'Content-Type: application/json' \
             --data '{"visibility": "public"}' \
-            "https://quay.io/api/v1/repository/${1}/changevisibility"
+            "https://${registry}/api/v1/repository/${repo_path}/changevisibility"
           then
             echo Success
           else
-            echo "Error: Failed to make repo quay.io/${1} public."\
+            echo "Error: Failed to make repo ${registry}/${repo_path} public."\
               "Make sure the secret $(params.registrySecret) contains"\
               " the \"token\" key with token that has permission to"\
               " Administer Repositories."
@@ -182,6 +208,8 @@ spec:
 
         DEFAULT="$(jq -r '.mapping.defaults.public // false' "$DATA_FILE")"
 
+        TARGET_REGISTRY=""
+
         NUM_COMPONENTS=$(jq '.components | length' "$SNAPSHOT_FILE")
         for ((i=0; i < NUM_COMPONENTS; i++)); do
           COMPONENT="$(jq -c ".components[$i]" "$SNAPSHOT_FILE")"
@@ -194,15 +222,25 @@ spec:
 
               echo "Making repository $REPO public..."
 
-              if [[ "$REPO" != quay.io/* ]]; then
-                echo "Warning: Only quay.io repositories are supported. Skipping this repo."
+              registry=$(echo "$REPO" | cut -d '/' -f 1)
+              repo_path=${REPO#"${registry}/"}
+              repo_path=${repo_path%/}
+
+              if ! is_quay_registry "$registry"; then
+                echo "Warning: Registry ${registry} is not a Quay instance. Skipping."
                 continue
               fi
 
-              REPO=${REPO#quay.io/}
-              REPO=${REPO%/} # Remove trailing slash just in case
+              if [ -z "$TARGET_REGISTRY" ]; then
+                TARGET_REGISTRY="$registry"
+              elif [ "$TARGET_REGISTRY" != "$registry" ]; then
+                echo "Error: Multiple Quay registries found (${TARGET_REGISTRY} and ${registry})."\
+                  " Only a single Quay registry is supported because the registrySecret"\
+                  " contains a token for one registry."
+                exit 1
+              fi
 
-              make_repo_public "$REPO"
+              make_repo_public "$registry" "$repo_path"
             done
           fi
         done

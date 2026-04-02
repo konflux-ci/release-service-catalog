@@ -258,6 +258,19 @@ kubectl create secret generic quay-api-token \
 echo "  Created: hacbs-release-tests-token, release-catalog-trusted-artifacts-quay-secret,"
 echo "           quay-api-token"
 
+# --- Step 4b: Create Conforma public key for build-time signature verification ---
+# The test images were signed with a specific key at build time. Extract the matching
+# public key from the vault secrets and deploy it so the EC policy can reference it.
+echo "=== Creating cosign-public-key for Conforma verification ==="
+PUBLIC_KEY_VALUE=$(yq \
+    'select(.metadata.name == "konflux-cosign-signing-stage-${component_name}") | .data.PUBLIC_KEY' \
+    "${SCRIPT_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d)
+kubectl create secret generic cosign-public-key \
+    --namespace="${managed_namespace}" \
+    --from-literal=cosign.pub="${PUBLIC_KEY_VALUE}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+echo "  Created: cosign-public-key in ${managed_namespace}"
+
 # --- Step 5: Apply kustomize resource templates ---
 echo "=== Applying Kubernetes resources ==="
 
@@ -411,6 +424,18 @@ if [ "${tag_count}" -gt 0 ]; then
 else
     echo "    ERROR: No tags found in released repository ${RELEASED_REPO}"
     echo "    Response: ${VERIFY_RESPONSE}"
+    failures=$((failures+1))
+fi
+
+echo "  Verifying released repository is public..."
+VISIBILITY_RESPONSE=$(curl -4 -sk "https://localhost:8443/api/v1/repository/${RELEASED_REPO}" \
+    -H "Authorization: Bearer ${TOKEN}" 2>/dev/null)
+is_public=$(echo "$VISIBILITY_RESPONSE" | jq -r '.is_public // false' 2>/dev/null)
+if [ "$is_public" = "true" ]; then
+    echo "    Released repository is public"
+else
+    echo "    ERROR: Released repository is not public"
+    echo "    Response: ${VISIBILITY_RESPONSE}"
     failures=$((failures+1))
 fi
 
