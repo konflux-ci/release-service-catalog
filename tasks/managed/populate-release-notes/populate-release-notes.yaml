@@ -113,7 +113,6 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
-          cpu: 30m
         requests:
           memory: 64Mi
           cpu: 30m
@@ -136,7 +135,6 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
-          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -160,6 +158,17 @@ spec:
         if ! jq -e '.releaseNotes.issues.fixed' "$DATA_FILE" > /dev/null; then
             echo "No issues.fixed found. Skipping CVE validation."
             exit 0
+        fi
+
+        # Drop duplicate issue references (same source + id); keeps first occurrence.
+        DEDUP_TMP="$(mktemp)"
+        BEFORE_LEN=$(jq -r '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
+        jq '.releaseNotes.issues.fixed |= unique_by([.source, .id])' \
+            "${DATA_FILE}" > "${DEDUP_TMP}"
+        mv "${DEDUP_TMP}" "${DATA_FILE}"
+        AFTER_LEN=$(jq -r '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
+        if [ "${BEFORE_LEN}" -gt "${AFTER_LEN}" ]; then
+            echo "Deduplicated releaseNotes.issues.fixed: ${BEFORE_LEN} -> ${AFTER_LEN} entries"
         fi
 
         declare -A RELEASE_CVES
@@ -233,7 +242,6 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
-          cpu: '1'
         requests:
           memory: 64Mi
           cpu: '1'
@@ -335,8 +343,8 @@ spec:
                         purl_path="${canonical_name}"
                     fi
 
-                    # purl should be pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo
-                    purl="pkg:oci/${purl_path}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo%/*}"
+                    # purl should be pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo/bar
+                    purl="pkg:oci/${purl_path}@${digest/:/%3A}?arch=${arch}&repository_url=${deliveryRepo}"
 
                     uniqueTag=""
 
@@ -355,9 +363,9 @@ spec:
                     fi
 
                     # for values derived from org.opencontainers.image.created, the purl will become
-                    # pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo&tag=1742843776
+                    # pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo/bar&tag=1742843776
                     # OR if the label is not present and a unique tag is found, purl will look like:
-                    # pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo&tag=0.1-12345678
+                    # pkg:oci/bar@sha256%3Aabcde?arch=amd64&repository_url=registry.redhat.io/foo/bar&tag=0.1-12345678
                     if [[ -n $uniqueTag ]] ; then
                         purl="${purl}&tag=${uniqueTag}"
                     fi
@@ -386,7 +394,6 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
-          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -435,7 +442,7 @@ spec:
         }
 
         append_artifact_entry() {
-          local component="$1" arch="$2" os="$3" purl="$4"
+          local component="$1" arch="$2" os="$3" purl="$4" sbom="${5:-}" attestation="${6:-}"
           local jsonString
           jsonString=$(jq -cn \
             --arg component "$component" \
@@ -443,6 +450,12 @@ spec:
             --arg os "$os" \
             --arg purl "$purl" \
             '{"architecture": $arch, "os": $os, "purl": $purl, "component": $component}')
+          if [ -n "$sbom" ]; then
+            jsonString=$(jq --arg sbom "$sbom" '. + {sbom: $sbom}' <<< "$jsonString")
+          fi
+          if [ -n "$attestation" ]; then
+            jsonString=$(jq --arg att "$attestation" '. + {attestation: $att}' <<< "$jsonString")
+          fi
 
           if [ "$(jq '.cves.fixed | length' <<< "$CVEsJson")" -gt 0 ]; then
             jsonString=$(jq --argjson cves "$CVEsJson" '. += $cves' <<< "$jsonString")
@@ -559,6 +572,10 @@ spec:
                 exit 1
               fi
 
+              # Read Pulp domain for constructing SBOM URLs
+              PULP_DOMAIN=$(jq -r '.pulp.domain // empty' "$DATA_FILE")
+              PULP_CONTENT_BASE_URL="https://packages.redhat.com/api/pulp-content"
+
               RPM_FILES_LENGTH=$(jq --arg name "$name" \
                 '[.components[]? | select(.name == $name) | .rpmsToPublish[]?] | length' "${SNAPSHOT_FILE}")
               for ((k = 0; k < RPM_FILES_LENGTH; k++)); do
@@ -573,6 +590,18 @@ spec:
                 # Expand per-target repo to keep repository_id accurate (noarch may target multiple repos).
                 # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
                 TARGET_REPOS_LEN=$(jq '.targetRepos | length' <<< "$rpmfile")
+                # Extract sbomPath and attestationPath for source RPMs (if present)
+                sbom_path=$(jq -r '.sbomPath // empty' <<< "$rpmfile")
+                sbom_url=""
+                if [ -n "${sbom_path}" ] && [ -n "${PULP_DOMAIN}" ]; then
+                  sbom_url="${PULP_CONTENT_BASE_URL}/${PULP_DOMAIN}/${sbom_path}"
+                fi
+                attestation_path=$(jq -r '.attestationPath // empty' <<< "$rpmfile")
+                attestation_url=""
+                if [ -n "${attestation_path}" ] && [ -n "${PULP_DOMAIN}" ]; then
+                  attestation_url="${PULP_CONTENT_BASE_URL}/${PULP_DOMAIN}/${attestation_path}"
+                fi
+
                 if [ "${TARGET_REPOS_LEN}" -eq 0 ]; then
                   # If no targetRepos is present, fall back to a best-effort purl without repository_id.
                   purl=$(generate_purl_rpm "$rpm_name" "$version" "$release" "$arch" "$distro" "")
@@ -586,13 +615,21 @@ spec:
                     repo_distro=$(jq -r '.distro // empty' <<< "$repo_obj")
                     arch_for_entry="${arch}"
                     if [ "${repo_name}" = "source" ]; then
-                      arch_for_entry="source"
+                      arch_for_entry="src"
                     fi
                     # Use repo_id directly for PURL repository_id (no domain prefix)
                     purl=$(generate_purl_rpm \
                       "$rpm_name" "$version" "$release" "$arch_for_entry" "$repo_distro" "$repo_id")
                     echo "purl: $purl"
-                    append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
+                    # Include SBOM and attestation URLs for source RPM entries
+                    if [ "${arch_for_entry}" = "src" ]; then
+                      [ -n "${sbom_url}" ] && echo "sbom: $sbom_url"
+                      [ -n "${attestation_url}" ] && echo "attestation: $attestation_url"
+                      append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl" \
+                        "$sbom_url" "$attestation_url"
+                    else
+                      append_artifact_entry "$name" "$arch_for_entry" "$os" "$purl"
+                    fi
                   done
                 fi
               done
@@ -604,7 +641,6 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
-          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -719,7 +755,6 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
-          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -772,7 +807,6 @@ spec:
       computeResources:
         limits:
           memory: 128Mi
-          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m

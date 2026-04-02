@@ -83,6 +83,17 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: addImplicitTimestampTag
+      type: string
+      description: |
+        When "true", for each repository the resolved {{ timestamp }} value is added to the list of
+        tags after translation (deduplicated). Fails if timestamp is empty. Only pipelines referencing
+        the check-labels task should set this to "true"
+      default: "false"
+    - name: caCertPath
+      type: string
+      description: Path to CA certificate bundle for TLS verification with self-signed certificates
+      default: /mnt/trusted-ca/ca-bundle.crt
   results:
     - name: mapped
       type: string
@@ -138,6 +149,8 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+        - name: caCertPath
+          value: $(params.caCertPath)
     - name: apply-mapping
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
@@ -149,6 +162,10 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euxo pipefail
+
+        if [ -f "/mnt/trusted-ca/ca-bundle.crt" ]; then
+            export SSL_CERT_FILE="/mnt/trusted-ca/ca-bundle.crt"
+        fi
 
         SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
         DATA_FILE="$(params.dataDir)/$(params.dataPath)"
@@ -187,14 +204,17 @@ spec:
             # Remove `{{ incrementer }}` placeholder to get the version prefix for regex pattern
             # shellcheck disable=SC2001
             version_prefix=$(echo "${tag_template}" | sed 's/{{ incrementer }}//g')
-            tag_pattern="^${version_prefix}[0-9]+$"  # Build regex pattern dynamically
+            # Match tags with 1–6 digit increments only. Ignore 7+ digit tags to avoid
+            # treating short commit SHAs as incrementer values
+            tag_pattern="^${version_prefix}[0-9]{1,6}$"
 
             # Extract the numeric part of existing tags and find the max increment
             max_increment=$(echo "${existing_tags}" | { grep -E "${tag_pattern}" || true; } \
             | sed -E "s/${version_prefix}//" | sort -nr | head -n1)
 
             # Calculate the next increment (default to 1 if max_increment is empty or unset)
-            increment=$((max_increment + 1))
+            # Use 10# to force decimal input preventing leading 0 from being treated as octal
+            increment=$((10#${max_increment:-0} + 1))
 
             # Substitute `{{ incrementer }}` in the tag template with the calculated increment
             tag="${tag_template//\{\{ incrementer \}\}/${increment}}"
@@ -222,6 +242,23 @@ spec:
                 result="$(jq -r --arg variable "$variable" '.[$variable] // ""' <<< "${substitute_map}")"
             fi
             echo "$result"
+        }
+
+        # When addImplicitTimestampTag is true, append the resolved timestamp value to the
+        # translated tag list (and deduplicate). Fails if timestamp is empty. Only used by
+        # the rh-advisories pipeline.
+        ensure_implicit_timestamp_value() {
+            local tags_json="$1"
+            local timestamp_val="$2"
+            if [ "$(params.addImplicitTimestampTag)" != "true" ]; then
+                echo "$tags_json"
+                return
+            fi
+            if [ -z "$timestamp_val" ]; then
+                echo "Error: addImplicitTimestampTag is true but timestamp is empty (no build-date or Created)." >&2
+                exit 1
+            fi
+            echo "$tags_json" | jq -c --arg ts "$timestamp_val" '. + [$ts] | unique'
         }
 
         # Expected arguments are [tags, substitute_map, labels_map, repo]
@@ -295,6 +332,14 @@ spec:
                     echo "${repository/registry.stage.redhat.io/quay.io/redhat-pending}" \
                         | sed 's|/|----|g; s|quay.io----redhat-pending----|quay.io/redhat-pending/|'
                     ;;
+                flatpaks.registry.redhat.io/*)
+                    echo "${repository/flatpaks.registry.redhat.io/quay.io/rh-flatpaks-prod}" \
+                        | sed 's|/|----|g; s|quay.io----rh-flatpaks-prod----|quay.io/rh-flatpaks-prod/|'
+                    ;;
+                flatpaks.registry.stage.redhat.io/*)
+                    echo "${repository/flatpaks.registry.stage.redhat.io/quay.io/rh-flatpaks-stage}" \
+                        | sed 's|/|----|g; s|quay.io----rh-flatpaks-stage----|quay.io/rh-flatpaks-stage/|'
+                    ;;
                 *)
                     echo "$repository"
                     ;;
@@ -313,6 +358,16 @@ spec:
                     ;;
                 quay.io/redhat-pending/*)
                     repository="${repository//quay.io\/redhat-pending/registry.stage.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
+                    ;;
+                quay.io/rh-flatpaks-prod/*)
+                    repository="${repository//quay.io\/rh-flatpaks-prod/flatpaks.registry.redhat.io}"
+                    repository="${repository//----//}"
+                    echo "$repository"
+                    ;;
+                quay.io/rh-flatpaks-stage/*)
+                    repository="${repository//quay.io\/rh-flatpaks-stage/flatpaks.registry.stage.redhat.io}"
                     repository="${repository//----//}"
                     echo "$repository"
                     ;;
@@ -377,13 +432,13 @@ spec:
             # images are required to use sha reference - check this
             NAME=$(jq -r '.name' <<< "$component")
             IMAGE_REF=$(jq -r '.containerImage' <<< "$component")
-            if ! [[ "$IMAGE_REF" =~ ^[^:]+@sha256:[0-9a-f]+$ ]] ; then
+            if ! [[ "$IMAGE_REF" =~ ^.+@sha256:[0-9a-f]+$ ]] ; then
               echo "Component ${NAME} contains an invalid containerImage value. sha reference is required: ${IMAGE_REF}"
               exit 1
             fi
 
             git_sha=$(jq -r '.source.git.revision' <<< "$component") # this sets the value to "null" if it doesn't exist
-            build_sha=$(echo "$IMAGE_REF" | cut -d ':' -f 2)
+            build_sha=${IMAGE_REF##*:}
             passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
               '.timestampFormat // $default' <<< "$component")
             release_timestamp="$(date -d "$currentTimestamp" "+$passedTimestampFormat")"
@@ -529,6 +584,7 @@ spec:
               oldAllTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson imageTags \
                 "$imageTags" '$defaults? + $imageTags? | unique')
               oldTags=$(translate_tags "${oldAllTagsPreSubstitution}" "${substitute_map}" "${labels}" "${repository}")
+              oldTags=$(ensure_implicit_timestamp_value "${oldTags}" "${timestamp}")
               if [ "$(jq 'length' <<< "$oldTags")" -gt 0 ] ; then
                 jq --argjson i "$i" --argjson updatedTags "$oldTags" '.components[$i].tags = $updatedTags' \
                   "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
@@ -579,8 +635,8 @@ spec:
 
                 allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson repoTags \
                   "$repoTags" '$defaults? + $repoTags? | unique')
-
                 tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}" "${url}")
+                tags=$(ensure_implicit_timestamp_value "${tags}" "${timestamp}")
                 if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
                   jq --argjson i "$i" --argjson j "$j" --argjson updatedTags "$tags" \
                     '.components[$i].repositories[$j].tags = $updatedTags' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
@@ -589,12 +645,18 @@ spec:
 
                 # This block is temporary to support both quay.io and registry.redhat.io
                 # It should be removed once all repositories are migrated to registry.redhat.io
-                if [[ "$url" == quay.io/redhat-prod/* || "$url" == quay.io/redhat-pending/* ]]; then
+                if [[ "$url" == quay.io/redhat-prod/* ||
+                  "$url" == quay.io/redhat-pending/* ||
+                  "$url" == quay.io/rh-flatpaks-prod/* ||
+                  "$url" == quay.io/rh-flatpaks-stage/* ]]; then
                     url=$(convert_to_registry "$url")
                 fi
 
                 # Convert to registry and quay format
-                if [[ "$url" == registry.redhat.io/* || "$url" == registry.stage.redhat.io/* ]]; then
+                if [[ "$url" == registry.redhat.io/* ||
+                  "$url" == registry.stage.redhat.io/* ||
+                  "$url" == flatpaks.registry.redhat.io/* ||
+                  "$url" == flatpaks.registry.stage.redhat.io/* ]]; then
                   rh_registry_repo=$url
                   registry_access_repo=$(convert_to_registry_access "$url")
                   url=$(convert_to_quay "$url")
@@ -634,3 +696,5 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(results.sourceDataArtifact.path)
+        - name: caCertPath
+          value: $(params.caCertPath)

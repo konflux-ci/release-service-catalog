@@ -5,6 +5,11 @@ set -eux
 function select-oci-auth() {
     echo Mock select-oci-auth called with: $*
     echo $* > "$(params.dataDir)/mock_select-oci-auth.txt"
+
+    if [[ "$*" == *"fail-raw-disk-image@sha256:123456" ]]; then
+        echo Simulating failed select-oci-auth
+        exit 1
+    fi
 }
 
 function oras() {

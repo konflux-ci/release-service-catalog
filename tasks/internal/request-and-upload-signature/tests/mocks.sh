@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -eux
 
+function check_cert_expiration() {
+  local cert_file="$1"
+  echo "Mock check_cert_expiration called with: $cert_file"
+  echo "Certificate $cert_file is valid (mocked)"
+  return 0
+}
+
 count_file="/tmp/request-signature-failure-count.txt"
 if [[ ! -f "$count_file" ]]; then
     echo "0" > "$count_file"

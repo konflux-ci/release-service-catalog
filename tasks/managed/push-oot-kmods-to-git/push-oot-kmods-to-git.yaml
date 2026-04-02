@@ -5,15 +5,11 @@ metadata:
   name: push-oot-kmods-to-git
 spec:
   description: >-
-    Task to upload out-of-tree kernel modules and optionally RPMs to a private vendor git repo
+    Task to upload out-of-tree kernel modules to a private vendor git repo
   params:
     - name: signedKmodsPath
       type: string
       description: Path where the kernel modules are stored relative to the dataDir
-    - name: rpmPath
-      type: string
-      description: Path where the RPM packages are stored relative to the dataDir (optional)
-      default: ""
     - name: dataDir
       type: string
       description: The absolute path to the working directory
@@ -85,6 +81,34 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: extract-signed-files
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        cd "$(params.dataDir)"
+
+        if [ -f signed-kmods.tar.gz ]; then
+          echo "Extracting signed-kmods.tar.gz for Git upload"
+          tar -xzf signed-kmods.tar.gz
+
+          # Verify extraction
+          ko_count=$(find signed-kmods -name "*.ko" -type f | wc -l)
+          echo "Extracted $ko_count .ko files for Git upload"
+
+          if [ "$ko_count" -eq 0 ]; then
+            echo "WARNING: No .ko files found after extraction"
+          fi
+        else
+          echo "No signed-kmods.tar.gz found, assuming files are already extracted"
+        fi
     - name: push-to-git
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
@@ -92,18 +116,17 @@ spec:
           memory: 1Gi
         requests:
           memory: 1Gi
-          cpu: 250m
+          cpu: '1'
       volumeMounts:
         - name: git-token-secret-vol
           mountPath: /var/secrets/git-token
           readOnly: true
       script: |
         #!/usr/bin/env bash
-        set -euxo pipefail
+        set -euo pipefail
 
         PUSH_TOKEN=$(cat /var/secrets/git-token/gitlab-gr-maintenance-token)
         SIGNED_KMODS_PATH="$(params.dataDir)/$(params.signedKmodsPath)"
-        RPM_FULL_PATH="$(params.dataDir)/$(params.rpmPath)"
         REPO_URL="$(params.gitRepoUrl)"
         GIT_WORK_DIR="$(params.dataDir)/git-work"
 
@@ -177,10 +200,32 @@ spec:
             git checkout
             mkdir -p "$TARGET_DIR"
 
-            # Copy .ko files
-            if ls "$source_dir"/*.ko 1> /dev/null 2>&1; then
-                cp "$source_dir"/*.ko "$TARGET_DIR/"
-                echo "Copied .ko files for $arch_name"
+            # Copy .ko files (preserving directory structure)
+            if [ -n "$(find "$source_dir" -name "*.ko" -type f -print -quit)" ]; then
+                echo "Copying .ko files with preserved directory structure for $arch_name..."
+
+                # Copy entire directory structure containing .ko files
+                # Process files from source_dir and copy to TARGET_DIR using a subshell
+                # to avoid changing the current working directory
+                (
+                    cd "$source_dir"
+                    find . -name "*.ko" -type f | while read -r ko_file; do
+                        ko_dir=$(dirname "$ko_file")
+                        # Use absolute path by prepending the git work directory
+                        target_path="${GIT_WORK_DIR}/local-artifacts/$TARGET_DIR"
+                        mkdir -p "$target_path/$ko_dir"
+                        cp "$ko_file" "$target_path/$ko_file"
+                    done
+                )
+                ko_file_count=$(find "$TARGET_DIR" -name "*.ko" -type f | wc -l)
+                echo "Copied $ko_file_count .ko files for $arch_name (preserving directory structure)"
+
+                # Show directory structure for verification
+                echo "Directory structure copied for $arch_name:"
+                find "$TARGET_DIR" -name "*.ko" -type f | sort | head -10 | sed 's|^|  |'
+                if [ "$(find "$TARGET_DIR" -name "*.ko" -type f | wc -l)" -gt 10 ]; then
+                    echo "  ... (showing first 10 files)"
+                fi
             else
                 echo "WARNING: No .ko files found for $arch_name"
                 return 1
@@ -196,20 +241,6 @@ spec:
             if [ -f "$source_dir/envfile" ]; then
                 cp "$source_dir/envfile" "$TARGET_DIR/"
                 echo "Copied envfile for $arch_name"
-            fi
-
-            # Copy RPM files if available (architecture-specific RPMs would be in arch-specific directories)
-            if [ -n "$(params.rpmPath)" ] && [ -d "${RPM_FULL_PATH}" ]; then
-                # Look for architecture-specific RPMs or general RPMs
-                rpm_source_dir="${RPM_FULL_PATH}"
-                if [ "$arch_count" -gt 1 ] && [ -d "${RPM_FULL_PATH}/${arch_name}" ]; then
-                    rpm_source_dir="${RPM_FULL_PATH}/${arch_name}"
-                fi
-
-                if [ -n "$(find "${rpm_source_dir}" -maxdepth 1 -name '*.rpm' -print -quit 2>/dev/null)" ]; then
-                    cp "${rpm_source_dir}"/*.rpm "$TARGET_DIR/"
-                    echo "Copied RPM files for $arch_name"
-                fi
             fi
 
             # Add files to git

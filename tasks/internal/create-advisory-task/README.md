@@ -11,7 +11,7 @@ request.
 | Name                           | Description                                                                                            | Optional | Default value |
 |--------------------------------|--------------------------------------------------------------------------------------------------------|----------|---------------|
 | advisory_json                  | String containing a JSON representation of the advisory data (e.g. '{"product_id":123,"type":"RHSA"}') | No       | -             |
-| application                    | Application being released                                                                             | No       | -             |
+| componentGroup                 | ComponentGroup being released                                                                          | No       | -             |
 | origin                         | The origin workspace where the release CR comes from. This is used to determine the advisory path      | No       | -             |
 | config_map_name                | The name of the configMap that contains the signing key                                                | No       | -             |
 | advisory_secret_name           | The name of the secret that contains the advisory creation metadata                                    | No       | -             |

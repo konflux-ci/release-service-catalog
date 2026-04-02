@@ -12,7 +12,9 @@ kubectl delete internalrequests --all -A
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Add mocks to the beginning of task step script
+# Add mocks to the beginning of task step scripts
+# Step 1 is update-purl (needs oras mock), Step 2 is run-script (needs kubectl mock)
+yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
 yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
 
 yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mock_generic_type_advisories.sh") + .spec.steps[1].script' "$TASK_PATH"

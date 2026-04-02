@@ -16,10 +16,11 @@ shopt -s nullglob
 WORKSPACE_TEMPLATE=${BASH_SOURCE%/*/*}/resources/workspace-template.yaml
 
 show_help() {
-  echo "Usage: $0 [--remove-compute-resources] [item1] [item2] [...]"
+  echo "Usage: $0 [--remove-compute-resources] [--no-cleanup] [item1] [item2] [...]"
   echo
   echo Flags:
   echo "  --help: Show this help message"
+  echo "  --no-cleanup: Keeps test resources after each test"
   echo "  --remove-compute-resources: Remove compute resources from tasks"
   echo
   echo "Items can be task directories or paths to task test yaml files"
@@ -33,12 +34,17 @@ show_help() {
 }
 
 REMOVE_COMPUTE_RESOURCES=false
+NO_CLEANUP=false
 CLI_TEST_ITEMS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --remove-compute-resources)
       REMOVE_COMPUTE_RESOURCES=true
+      shift
+      ;;
+    --no-cleanup)
+      NO_CLEANUP=true
       shift
       ;;
     --help)
@@ -338,44 +344,48 @@ do
       fi
     fi
 
-    # Cleanup test resources to prevent cluster exhaustion when running many tests
-    echo "  Cleaning up test resources..."
-    kubectl delete pipelinerun $PIPELINERUN --ignore-not-found=true
-    kubectl delete pipeline $TEST_NAME --ignore-not-found=true
+    if [[ "$NO_CLEANUP" != "true" ]]; then
+      # Cleanup test resources to prevent cluster exhaustion when running many tests
+      echo "  Cleaning up test resources..."
+      kubectl delete pipelinerun $PIPELINERUN --ignore-not-found=true
+      kubectl delete pipeline $TEST_NAME --ignore-not-found=true
 
-    # Clean up old completed PipelineRuns (keep only last 5 to avoid filling the cluster)
-    OLD_PRS=$(kubectl get pipelineruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -5)
-    if [ ! -z "$OLD_PRS" ]; then
-      echo "$OLD_PRS" | xargs -r kubectl delete pipelinerun --ignore-not-found=true
-    fi
+      # Clean up old completed PipelineRuns (keep only last 5 to avoid filling the cluster)
+      OLD_PRS=$(kubectl get pipelineruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -5)
+      if [ ! -z "$OLD_PRS" ]; then
+        echo "$OLD_PRS" | xargs -r kubectl delete pipelinerun --ignore-not-found=true
+      fi
 
-    # Clean up completed TaskRuns to free disk space
-    OLD_TRS=$(kubectl get taskruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -10)
-    if [ ! -z "$OLD_TRS" ]; then
-      echo "  Cleaning up completed TaskRuns..."
-      echo "$OLD_TRS" | xargs -r kubectl delete taskrun --ignore-not-found=true
-    fi
+      # Clean up completed TaskRuns to free disk space
+      OLD_TRS=$(kubectl get taskruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -10)
+      if [ ! -z "$OLD_TRS" ]; then
+        echo "  Cleaning up completed TaskRuns..."
+        echo "$OLD_TRS" | xargs -r kubectl delete taskrun --ignore-not-found=true
+      fi
 
-    # Clean up old Pods in terminal states to free disk space (and their emptyDir volumes)
-    # Keep last 10 of each status (Succeeded, Failed, Unknown)
-    OLD_PODS=$(kubectl get pods -o json | jq -r '
-      .items
-      | group_by(.status.phase)
-      | map(select(.[0].status.phase == "Succeeded" or .[0].status.phase == "Failed" or .[0].status.phase == "Unknown"))
-      | map(.[:-10])
-      | flatten
-      | .[].metadata.name
-    ')
-    if [ ! -z "$OLD_PODS" ]; then
-      echo "  Cleaning up old Pods in terminal states (and emptyDir volumes)..."
-      echo "$OLD_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
+      # Clean up old Pods in terminal states to free disk space (and their emptyDir volumes)
+      # Keep last 10 of each status (Succeeded, Failed, Unknown)
+      OLD_PODS=$(kubectl get pods -o json | jq -r '
+        .items
+        | group_by(.status.phase)
+        | map(select(.[0].status.phase == "Succeeded" or .[0].status.phase == "Failed" or .[0].status.phase == "Unknown"))
+        | map(.[:-10])
+        | flatten
+        | .[].metadata.name
+      ')
+      if [ ! -z "$OLD_PODS" ]; then
+        echo "  Cleaning up old Pods in terminal states (and emptyDir volumes)..."
+        echo "$OLD_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
+      fi
     fi
     echo
   done
 
-  # Cleanup task after all its tests complete
-  echo "Cleaning up task $TASK_NAME"
-  kubectl delete task $TASK_NAME --ignore-not-found=true
+  if [[ "$NO_CLEANUP" != "true" ]]; then
+    # Cleanup task after all its tests complete
+    echo "Cleaning up task $TASK_NAME"
+    kubectl delete task $TASK_NAME --ignore-not-found=true
+  fi
 
   KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
   if [ ! -z "$KIND_NODE" ]; then

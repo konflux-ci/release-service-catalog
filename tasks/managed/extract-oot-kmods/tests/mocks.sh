@@ -80,6 +80,15 @@ skopeo() {
   # Write to workspace since the task runs there initially
   echo "$*" >> "$(params.dataDir)/mock_skopeo.txt"
 
+  # Extract tmp_dir from the "dir:" argument
+  local tmp_dir
+  for arg in "$@"; do
+    if [[ "$arg" == dir:* ]]; then
+      tmp_dir="${arg#dir:}"
+      break
+    fi
+  done
+
   case "$*" in
     "copy docker://quay.io/mock/image@sha256:dummy dir:"*)
       # Create a proper manifest.json with layers for single arch
@@ -94,12 +103,20 @@ EOF
       # Create a temporary directory to build the tar structure
       LAYER_BUILD_DIR=$(mktemp -d)
 
-      # Create the kmods directory structure with leading slash to match task expectation
+      # Create the kmods directory structure with nested subdirectories to test recursive extraction
       # Task looks for "^${KMODS_PATH#/}/" where KMODS_PATH=/kmods, so it looks for "^kmods/"
       mkdir -p "$LAYER_BUILD_DIR/kmods"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversA"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversB"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversB/submodule"
 
+      # Place .ko files in both top-level and subdirectories to test recursive extraction
       echo "mock-kmod1" > "$LAYER_BUILD_DIR/kmods/mod1.ko"
       echo "mock-kmod2" > "$LAYER_BUILD_DIR/kmods/mod2.ko"
+      echo "mock-driverA-kmod1" > "$LAYER_BUILD_DIR/kmods/driversA/driverA-mod1.ko"
+      echo "mock-driverA-kmod2" > "$LAYER_BUILD_DIR/kmods/driversA/driverA-mod2.ko"
+      echo "mock-driverB-kmod1" > "$LAYER_BUILD_DIR/kmods/driversB/driverB-mod1.ko"
+      echo "mock-driverB-submod" > "$LAYER_BUILD_DIR/kmods/driversB/submodule/submodule.ko"
 
       # The task expects envfile at $TMP_DIR$KMODS_PATH/../../envfile
       # For kmodsPath=/kmods, this resolves to $TMP_DIR/envfile
@@ -131,9 +148,13 @@ EOF
 
       LAYER_BUILD_DIR=$(mktemp -d)
       mkdir -p "$LAYER_BUILD_DIR/kmods"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversA"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversB"
 
       echo "amd64-kmod1" > "$LAYER_BUILD_DIR/kmods/amd64-mod1.ko"
       echo "amd64-kmod2" > "$LAYER_BUILD_DIR/kmods/amd64-mod2.ko"
+      echo "amd64-driverA-kmod" > "$LAYER_BUILD_DIR/kmods/driversA/amd64-driverA.ko"
+      echo "amd64-driverB-kmod" > "$LAYER_BUILD_DIR/kmods/driversB/amd64-driverB.ko"
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
@@ -154,9 +175,13 @@ EOF
 
       LAYER_BUILD_DIR=$(mktemp -d)
       mkdir -p "$LAYER_BUILD_DIR/kmods"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversA"
+      mkdir -p "$LAYER_BUILD_DIR/kmods/driversB"
 
       echo "arm64-kmod1" > "$LAYER_BUILD_DIR/kmods/arm64-mod1.ko"
       echo "arm64-kmod2" > "$LAYER_BUILD_DIR/kmods/arm64-mod2.ko"
+      echo "arm64-driverA-kmod" > "$LAYER_BUILD_DIR/kmods/driversA/arm64-driverA.ko"
+      echo "arm64-driverB-kmod" > "$LAYER_BUILD_DIR/kmods/driversB/arm64-driverB.ko"
       echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
@@ -259,50 +284,6 @@ EOF
       echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
       echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
       echo "ARCH=aarch64-64k" >> "$LAYER_BUILD_DIR/envfile"
-
-      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
-      rm -rf "$LAYER_BUILD_DIR"
-      ;;
-    "copy docker://quay.io/mock/multiarch@sha256:amd64digest123 dir:"*)
-      # Handle multiarch amd64 case
-      cat > "$tmp_dir/manifest.json" << 'EOF'
-{
-  "layers": [
-    {"digest": "sha256:amd64layer123"}
-  ]
-}
-EOF
-
-      LAYER_BUILD_DIR=$(mktemp -d)
-      mkdir -p "$LAYER_BUILD_DIR/kmods"
-
-      echo "amd64-kmod1" > "$LAYER_BUILD_DIR/kmods/amd64-mod1.ko"
-      echo "amd64-kmod2" > "$LAYER_BUILD_DIR/kmods/amd64-mod2.ko"
-      echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
-      echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
-      echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
-
-      (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/amd64layer123" --transform 's,^\./kmods/,kmods/,' .)
-      rm -rf "$LAYER_BUILD_DIR"
-      ;;
-    "copy docker://quay.io/mock/multiarch@sha256:arm64digest456 dir:"*)
-      # Handle multiarch arm64 case
-      cat > "$tmp_dir/manifest.json" << 'EOF'
-{
-  "layers": [
-    {"digest": "sha256:arm64layer456"}
-  ]
-}
-EOF
-
-      LAYER_BUILD_DIR=$(mktemp -d)
-      mkdir -p "$LAYER_BUILD_DIR/kmods"
-
-      echo "arm64-kmod1" > "$LAYER_BUILD_DIR/kmods/arm64-mod1.ko"
-      echo "arm64-kmod2" > "$LAYER_BUILD_DIR/kmods/arm64-mod2.ko"
-      echo "DRIVER_VERSION=1.0.0" > "$LAYER_BUILD_DIR/envfile"
-      echo "DRIVER_VENDOR=test-vendor" >> "$LAYER_BUILD_DIR/envfile"
-      echo "KERNEL_VERSION=5.4.0" >> "$LAYER_BUILD_DIR/envfile"
 
       (cd "$LAYER_BUILD_DIR" && tar -cf "$tmp_dir/arm64layer456" --transform 's,^\./kmods/,kmods/,' .)
       rm -rf "$LAYER_BUILD_DIR"

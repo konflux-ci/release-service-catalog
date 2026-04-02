@@ -191,17 +191,45 @@ spec:
 
             for LAYER in $(jq -r '.layers[].digest' "$tmp_dir/manifest.json"); do
                 LAYER=${LAYER#sha256:}
-                # Check if the archive contains the KMODS_PATH directory
-                if tar -tf "$tmp_dir/$LAYER" | grep -q "^${KMODS_PATH#/}/"; then
+                # Check if the archive contains the KMODS_PATH directory or .ko files within it
+                if tar -tf "$tmp_dir/$LAYER" | grep -E "^${KMODS_PATH#/}.*\.ko$" > /dev/null 2>&1; then
                     echo "Extracting $KMODS_PATH/ from $LAYER for $arch_name..."
                     tar -xf "$tmp_dir/$LAYER" -C "$tmp_dir" "${KMODS_PATH#/}" --no-same-owner
 
                     mkdir -p "$dest_dir"
-                    if ls "$tmp_dir$KMODS_PATH"/*.ko 1> /dev/null 2>&1; then
-                        cp -r "$tmp_dir$KMODS_PATH"/*.ko "$dest_dir/"
-                        extracted=true
-                        ko_count=$(find "$dest_dir" -name "*.ko" -type f | wc -l)
-                        echo "Extracted .ko files for $arch_name: $ko_count files"
+
+                    # Check if KMODS_PATH directory exists and extract recursively
+                    if [ -d "$tmp_dir$KMODS_PATH" ]; then
+                        cd "$tmp_dir$KMODS_PATH"
+
+                        # Find all .ko files recursively and preserve directory structure
+                        if find . -name "*.ko" -type f | head -1 | grep -q "."; then
+                            echo "Found .ko files in directory structure, extracting recursively..."
+
+                            # Copy entire directory structure containing .ko files
+                            find . -name "*.ko" -type f | while read -r ko_file; do
+                                ko_dir=$(dirname "$ko_file")
+                                mkdir -p "$dest_dir/$ko_dir"
+                                cp "$ko_file" "$dest_dir/$ko_file"
+                                echo "  Copied: $ko_file"
+                            done
+
+                            extracted=true
+                            ko_count=$(find "$dest_dir" -name "*.ko" -type f | wc -l)
+                            echo "Extracted .ko files for $arch_name: $ko_count files (recursive)"
+
+                            # List the directory structure for verification
+                            echo "Directory structure preserved:"
+                            find "$dest_dir" -name "*.ko" -type f | sort | head -20
+                            if [ "$(find "$dest_dir" -name "*.ko" -type f | wc -l)" -gt 20 ]; then
+                                echo "  ... (showing first 20 files)"
+                            fi
+                        else
+                            echo "No .ko files found in $KMODS_PATH directory structure"
+                        fi
+                        cd - > /dev/null
+                    else
+                        echo "$KMODS_PATH directory not found in layer"
                     fi
 
                     echo "Copying envfile to get versions data for $arch_name..."

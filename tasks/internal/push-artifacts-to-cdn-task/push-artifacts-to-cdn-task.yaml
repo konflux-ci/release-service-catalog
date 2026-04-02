@@ -97,9 +97,15 @@ spec:
       type: string
       description: Number of days before expiration to warn about certificate expiration
       default: "7"
+    - name: trustedArtifactsDockerConfigSecret
+      type: string
+      description: The name of the secret that contains dockerconfig json for trusted artifact operations
+      default: quay-token-konflux-release-trusted-artifacts-secret
   results:
     - name: result
       description: Success if the task succeeds, the error otherwise
+    - name: checksum_map
+      description: OCI artifact reference containing checksum map JSON for advisory PURL updates
     - name: publishedFiles
       description: List of published files
   volumes:
@@ -152,6 +158,11 @@ spec:
     - name: cgw-secret
       secret:
         secretName: $(params.cgwSecret)
+        defaultMode: 0444
+    - name: trusted-artifacts-dockerconfig-secret
+      secret:
+        optional: true
+        secretName: $(params.trustedArtifactsDockerConfigSecret)
         defaultMode: 0444
     - name: trusted-ca
       configMap:
@@ -514,9 +525,9 @@ spec:
             # Create target directory
             mkdir -p "$TARGET_DIR"
 
-            # Unpack archive to target directory (only .tar.gz supported)
+            # Unpack archive to target directory (.tar.gz and .tar supported)
             # Preserve nested directory structure from original archive
-            tar -xzf "$ARCHIVE_PATH" -C "$TARGET_DIR"
+            tar -xf "$ARCHIVE_PATH" -C "$TARGET_DIR"
 
             # Remove the archive after successful extraction
             rm -f "$ARCHIVE_PATH"
@@ -554,9 +565,9 @@ spec:
 
             mkdir -p "$TARGET_DIR"
 
-            # Unpack archive to target directory (only .tar.gz supported)
+            # Unpack archive to target directory (.tar.gz and .tar supported)
             # Preserve nested directory structure from original archive
-            tar -xzf "$ARCHIVE_PATH" -C "$TARGET_DIR"
+            tar -xf "$ARCHIVE_PATH" -C "$TARGET_DIR"
 
             rm -f "$ARCHIVE_PATH"
           done
@@ -565,7 +576,8 @@ spec:
           if [ -f "$COMPONENT_DIR/has_mac" ]; then
             pushd "$UNSIGNED_DIR" > /dev/null
             echo "Pushing unsigned Macos content for $COMPONENT_NAME to $(params.quayURL)..."
-            output=$(oras push "$(params.quayURL)/unsigned/${COMPONENT_NAME}" macos)
+            output=$(oras push --annotation=quay.expires-after=1d \
+              "$(params.quayURL)/unsigned/${COMPONENT_NAME}:$(context.taskRun.uid)-mac" macos)
             mac_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
             echo "Digest for $COMPONENT_NAME mac content: $mac_digest"
             echo -n "$mac_digest" > "$COMPONENT_DIR/unsigned_mac_digest.txt"
@@ -578,7 +590,8 @@ spec:
           if [ -f "$COMPONENT_DIR/has_windows" ]; then
             pushd "$UNSIGNED_DIR" > /dev/null
             echo "Pushing unsigned Windows content for $COMPONENT_NAME to $(params.quayURL)..."
-            output=$(oras push "$(params.quayURL)/unsigned/${COMPONENT_NAME}" windows)
+            output=$(oras push --annotation=quay.expires-after=1d \
+              "$(params.quayURL)/unsigned/${COMPONENT_NAME}:$(context.taskRun.uid)-windows" windows)
             windows_digest=$(echo "$output" | grep 'Digest:' | awk '{print $2}')
             echo "Digest for $COMPONENT_NAME windows content: $windows_digest"
             echo -n "$windows_digest" > "$COMPONENT_DIR/unsigned_windows_digest.txt"
@@ -731,7 +744,7 @@ spec:
           set -x
 
           SIGNED_TAG="$(context.taskRun.uid)-mac"
-          PUSH_OUTPUT=\$(/usr/local/bin/oras push \
+          PUSH_OUTPUT=\$(/usr/local/bin/oras push --annotation=quay.expires-after=1d \
             "$QUAY_URL/signed/${COMPONENT_NAME}:\$SIGNED_TAG" macos)
           SIGNED_DIGEST=\$(echo "\$PUSH_OUTPUT" | grep 'Digest:' | awk '{print \$2}')
           echo -n "\$SIGNED_DIGEST" >> "$DIGEST_FILE"
@@ -741,18 +754,28 @@ spec:
           # Copy the script to the Mac host
           scp "${SSH_OPTS[@]}" "$mac_signing_script" "${MAC_USER}@${MAC_HOST}:${mac_signing_script}"
 
-          # Execute the script on the Mac host
+          # Execute the script on the Mac host, capture exit code
+          ssh_exit=0
+          failed_operation=""
           # shellcheck disable=SC2029
-          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash "${mac_signing_script}"
+          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" bash "${mac_signing_script}" \
+              || { ssh_exit=$?; failed_operation="signing"; }
 
-          # Copy the signed digest back to the shared volume for this component
-          scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:${TEMP_DIR}/push_digest.txt" \
-              "$COMPONENT_DIR/signed_mac_digest.txt"
+          # Copy the signed digest back if signing succeeded
+          if [ $ssh_exit -eq 0 ]; then
+            scp "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}:${TEMP_DIR}/push_digest.txt" \
+                "$COMPONENT_DIR/signed_mac_digest.txt" || { ssh_exit=$?; failed_operation="scp of signed digest"; }
+          fi
 
-          # Clean up the Mac host now that we are done with this component
-          # shell check complains the variables evaluate on the client side, but we want that here
+          # Always clean up the Mac host (on success or failure)
           # shellcheck disable=SC2029
-          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf ${TEMP_DIR} ${mac_signing_script}"
+          ssh "${SSH_OPTS[@]}" "${MAC_USER}@${MAC_HOST}" "rm -rf ${TEMP_DIR} ${mac_signing_script}" || true
+
+          # Fail the step if signing or scp failed
+          if [ $ssh_exit -ne 0 ]; then
+            echo "Mac ${failed_operation} failed for component: $COMPONENT_NAME (exit code: $ssh_exit)"
+            exit $ssh_exit
+          fi
         done
     - name: sign-windows-binaries
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
@@ -885,7 +908,8 @@ spec:
           echo [%DATE% %TIME%] Signing of Windows binaries for ${COMPONENT_NAME} completed successfully
 
           cd unsigned
-          oras push $(params.quayURL)/signed/${COMPONENT_NAME}:$(context.taskRun.uid)-windows windows \
+          oras push --annotation=quay.expires-after=1d \
+            $(params.quayURL)/signed/${COMPONENT_NAME}:$(context.taskRun.uid)-windows windows \
           > oras_push_output.txt 2>&1
 
           for /f "tokens=2,3 delims=: " %%a in ('findstr "Digest:" oras_push_output.txt') do @echo %%a:%%b > digest.txt
@@ -1131,10 +1155,10 @@ spec:
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
         limits:
-          memory: 256Mi
+          memory: 512Mi
         requests:
-          memory: 256Mi
-          cpu: 150m
+          memory: 512Mi
+          cpu: 500m
       volumeMounts:
         - name: shared-dir
           mountPath: /shared
@@ -1201,9 +1225,6 @@ spec:
             OS=$(jq -er '.os' <<< "$FILE")
             local ARCH
             ARCH=$(jq -er '.arch' <<< "$FILE")
-            local DELIVERY_FORMAT
-            DELIVERY_FORMAT=$(jq -r '.delivery_format // ["compressed"] | sort | .[]' <<< "$FILE")
-
             # Determine the binary file path and OS directory name based on OS and arch
             # New structure: os/arch/{binary_file}
             # Linux files remain in COMPONENT_DIR/linux/ (not signed), while Mac/Windows are in SIGNED_DIR/
@@ -1235,32 +1256,24 @@ spec:
               return 1
             fi
 
-            for FORMAT in $DELIVERY_FORMAT; do
-              if [ "$FORMAT" = "compressed" ]; then
-                case "$OS" in
-                  (darwin|linux)
-                    # Archive everything in os/arch/, preserving nested directory structure
-                    # Archive from within os/arch/ so the final archive doesn't include os/arch/ prefix
-                    tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${ARCH_DIR}" .
-                    echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
-                    ;;
-                  (windows)
-                    # Replace .tar.gz extension with .zip for Windows archives
-                    local WINDOWS_FILENAME="${SOURCE_FILENAME}"
-                    WINDOWS_FILENAME="${WINDOWS_FILENAME%.tar.gz}.zip"
-                    # Create zip preserving nested directory structure from os/arch/
-                    (cd "${ARCH_DIR}" && zip -r "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" .)
-                    echo "  Created (${ARRAY_NAME}): ${WINDOWS_FILENAME}"
-                    ;;
-                esac
-              fi
-
-              if [ "$FORMAT" = "raw" ]; then
-                # Copy all files from os/arch/, preserving nested structure
-                cp -r "${ARCH_DIR}"/* "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
-                echo "  Copied (${ARRAY_NAME}): contents from ${ARCH_DIR}"
-              fi
-            done
+            # Always deliver compressed format
+            case "$OS" in
+              (darwin|linux)
+                # Archive everything in os/arch/, preserving nested directory structure
+                # Archive from within os/arch/ so the final archive doesn't include os/arch/ prefix
+                tar -czf "${READY_FOR_DIST_DIR}/${SOURCE_FILENAME}" -C "${ARCH_DIR}" .
+                echo "  Created (${ARRAY_NAME}): ${SOURCE_FILENAME}"
+                ;;
+              (windows)
+                # Replace .tar.gz or .tar extension with .zip for Windows archives
+                local WINDOWS_FILENAME="${SOURCE_FILENAME}"
+                WINDOWS_FILENAME="${WINDOWS_FILENAME%.tar.gz}"  # Remove .tar.gz if present
+                WINDOWS_FILENAME="${WINDOWS_FILENAME%.tar}.zip" # Remove .tar if present, add .zip
+                # Create zip preserving nested directory structure from os/arch/
+                (cd "${ARCH_DIR}" && zip -r "${READY_FOR_DIST_DIR}/${WINDOWS_FILENAME}" .)
+                echo "  Created (${ARRAY_NAME}): ${WINDOWS_FILENAME}"
+                ;;
+            esac
           }
 
           # Process files[] array (Developer Portal files)
@@ -1278,7 +1291,9 @@ spec:
               SOURCE_FILENAME=$(basename "$SOURCE")
               OS=$(jq -r '.os // empty' <<< "$FILE")
               if [ "$OS" = "windows" ]; then
-                WINDOWS_SOURCE="${SOURCE%.tar.gz}.zip"
+                # Handle both .tar.gz and .tar extensions
+                WINDOWS_SOURCE="${SOURCE%.tar.gz}"
+                WINDOWS_SOURCE="${WINDOWS_SOURCE%.tar}.zip"
                 UPDATED_FILES=$(jq --arg src "$WINDOWS_SOURCE" --argjson file "$FILE" \
                   '. + [($file | .source = $src)]' <<< "$UPDATED_FILES")
               else
@@ -1325,7 +1340,7 @@ spec:
         echo "$SNAPSHOT_JSON" > /shared/snapshot.json
 
     - name: push-artifacts
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:ada350d0170351c4f8ce5f57e52bb287ad9fb8418a8c5f6ca1d2e2683cb697ea
       computeResources:
         limits:
           memory: 512Mi
@@ -1528,14 +1543,22 @@ spec:
             if [[ -n "$source_path" ]]; then
               # Get the source filename from path (basename) - this is what the file is named locally
               source_filename=$(basename "$source_path")
-              # Handle windows files that may have been converted from .tar.gz to .zip
-              if [[ "$source_filename" == *"windows"* && "$source_filename" == *.tar.gz ]]; then
-                zip_filename="${source_filename%.tar.gz}.zip"
-                if [[ -f "$component_dir/$zip_filename" ]]; then
+              # Handle windows files that may have been converted from .tar.gz or .tar to .zip
+              if [[ "$source_filename" == *"windows"* ]]; then
+                if [[ "$source_filename" == *.tar.gz ]]; then
+                  zip_filename="${source_filename%.tar.gz}.zip"
+                elif [[ "$source_filename" == *.tar ]]; then
+                  zip_filename="${source_filename%.tar}.zip"
+                else
+                  zip_filename=""
+                fi
+                if [[ -n "$zip_filename" && -f "$component_dir/$zip_filename" ]]; then
                   source_filename="$zip_filename"
-                  # Also update dest_filename if it was .tar.gz
+                  # Also update dest_filename if it was .tar.gz or .tar
                   if [[ "$dest_filename" == *.tar.gz ]]; then
                     dest_filename="${dest_filename%.tar.gz}.zip"
+                  elif [[ "$dest_filename" == *.tar ]]; then
+                    dest_filename="${dest_filename%.tar}.zip"
                   fi
                 fi
               fi
@@ -1651,3 +1674,137 @@ spec:
             --cgw_host "$(params.cgwHostname)" \
             --data_json "$SNAPSHOT_JSON" 2> >(tee "$STDERR_FILE" >&2)
         fi
+
+    - name: build-advisory-checksum-map
+      image: quay.io/konflux-ci/release-service-utils@sha256:653b4782f0693c031a5d1327c026e6895d90b8126d51d8a3d07ffe940f6721fd
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: trusted-artifacts-dockerconfig-secret
+          mountPath: /mnt/trusted_artifacts_dockerconfig
+      env:
+        - name: "SNAPSHOT_JSON"
+          value: "$(params.snapshot_json)"
+        - name: "HOME"
+          value: "/tekton/home"
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        STDERR_FILE=/tmp/stderr.txt
+        CHECKSUM_MAP_REF=""
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
+                fi
+            fi
+            # Write the OCI reference (may be empty if build failed before push)
+            echo -n "${CHECKSUM_MAP_REF}" > "$(results.checksum_map.path)"
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        # Setup docker config for OCI push (same pattern as create-advisory-oci-artifact-task)
+        TA_DOCKERCONFIG_JSON_PATH="/mnt/trusted_artifacts_dockerconfig/.dockerconfigjson"
+        if [ -f "${TA_DOCKERCONFIG_JSON_PATH}" ] && [ -s "${TA_DOCKERCONFIG_JSON_PATH}" ]; then
+          mkdir -p ~/.docker/
+          cp "${TA_DOCKERCONFIG_JSON_PATH}" ~/.docker/config.json
+          echo "Docker config loaded for OCI push"
+        fi
+
+        CONTENT_DIR=/shared/artifacts
+        CHECKSUM_MANIFEST="[]"
+
+        # Use the modified snapshot from shared volume if available
+        if [ -f /shared/snapshot.json ]; then
+          SNAPSHOT_JSON="$(cat /shared/snapshot.json)"
+        fi
+
+        # Process each component and checksum files in ready_for_distribution
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+          READY_FOR_DIST_DIR="$COMPONENT_DIR/ready_for_distribution"
+
+          echo "Generating checksum manifest for component: $COMPONENT_NAME"
+
+          if [ ! -d "$READY_FOR_DIST_DIR" ]; then
+            echo "Warning: ready_for_distribution directory not found for $COMPONENT_NAME"
+            continue
+          fi
+
+          CHECKSUM_FILES="{}"
+          # Find all files in ready_for_distribution, excluding sha256sum.txt*
+          # Use process substitution to avoid subshell variable scope issues
+          while read -r file; do
+            filename=$(basename "$file")
+            checksum=$(sha256sum "$file" | awk '{ print $1 }')
+            CHECKSUM_FILES=$(jq --arg filename "$filename" --arg checksum "sha256:${checksum}" \
+              '. + {($filename): $checksum}' <<< "$CHECKSUM_FILES")
+          done < <(find "$READY_FOR_DIST_DIR" -type f ! -name 'sha256sum.txt*' 2>/dev/null)
+
+          CHECKSUM_MANIFEST=$(jq --arg component "$COMPONENT_NAME" --argjson files "$CHECKSUM_FILES" \
+            '. + [{"component": $component, "files": $files}]' <<< "$CHECKSUM_MANIFEST")
+        done
+
+        # Write checksum manifest to JSON file and push to OCI
+        # This avoids Tekton's 4KB termination message limit by storing large data in OCI
+        # and returning only a small reference string
+        archive_dir="$(mktemp -d)"
+        echo "$CHECKSUM_MANIFEST" | jq -c '.' > "${archive_dir}/checksum_map.json"
+        echo "Checksum manifest contents:"
+        cat "${archive_dir}/checksum_map.json"
+
+        # Create tar archive
+        archive="${archive_dir}/checksum_map"
+        tar --create --use-compress-program='gzip -n' --file "${archive}" -C "${archive_dir}" checksum_map.json
+
+        echo "Prepared checksum_map artifact for push"
+
+        # Push to OCI using oras and capture the actual manifest digest
+        store="quay.io/konflux-ci/release-service-trusted-artifacts"
+
+        oras_opts="--annotation=quay.expires-after=1d"
+        pushd "${archive_dir}" > /dev/null
+        # Capture oras output to extract the actual pushed digest
+        oras_output=$(oras push "${oras_opts}" \
+          --registry-config <(select-oci-auth "${store}") "${store}" checksum_map 2>&1)
+        echo "$oras_output"
+        # Extract the manifest digest specifically from the "Digest: sha256:xxx" line
+        # This avoids accidentally capturing config/layer digests that may appear earlier
+        pushed_digest=$(echo "$oras_output" | grep "^Digest:" | grep -oE 'sha256:[a-f0-9]{64}')
+        popd > /dev/null
+
+        if [ -z "$pushed_digest" ]; then
+          echo "Error: Failed to extract digest from oras push output"
+          exit 1
+        fi
+
+        # Set the OCI reference using the actual pushed digest
+        CHECKSUM_MAP_REF="${store}@${pushed_digest}"
+        echo "Checksum map pushed to OCI: ${CHECKSUM_MAP_REF}"

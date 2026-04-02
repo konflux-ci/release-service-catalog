@@ -42,11 +42,17 @@ spec:
     - name: rhPush
       type: string
       description: >
-        If set to true, an additional entry will be created in ContainerImage.repositories with
-        the registry and repository fields converted to use Red Hat's official registry.
+        If set to true, the entry created in ContainerImage.repositories will have its
+        registry and repository fields converted to use Red Hat's official registry.
         E.g. a mapped repository of "quay.io/redhat-pending/product---my-image" will be converted
-        to use registry "registry.access.redhat.com" and repository "product/my-image". Also, this
-        repository entry will be marked as published
+        to use registry "registry.access.redhat.com" and repository "product/my-image" and
+        "quay.io/rh-flatpaks-prod/foo----bar" will be converted to "flatpaks.registry.redhat.io" and
+        "foo/bar". Also, this repository entry will be marked as published
+      default: "false"
+    - name: processHelmCharts
+      type: string
+      description: >
+        When true, Helm OCI artifacts are sent to Pyxis; when false (default), Helm charts are skipped
       default: "false"
     - name: snapshotPath
       type: string
@@ -153,7 +159,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: create-pyxis-image
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:24cac01e7e3541779e28eaf9e860224615d9068982e8d8d8be4ee38f85f58e38
       computeResources:
         limits:
           memory: 3Gi
@@ -266,9 +272,10 @@ spec:
 
                 ARCHITECTURES=$(get-image-architectures "${PULLSPEC}")
 
-                # Check if this is a Helm chart - skip Helm artifacts
+                # Helm OCI artifacts: skip unless processHelmCharts is true (Helm release pipeline)
                 config_media_type="$(jq -rs '.[0].configMediaType // ""' <<< "$ARCHITECTURES")"
-                if [[ "$config_media_type" == "application/vnd.cncf.helm.config.v1+json" ]]; then
+                if [[ "$config_media_type" == "application/vnd.cncf.helm.config.v1+json" ]] && \
+                    [[ "$(params.processHelmCharts)" != "true" ]]; then
                     echo "Detected Helm chart artifact for component ${component_index}, skipping Pyxis image creation"
 
                     # Create a minimal component JSON to indicate this was skipped
@@ -440,28 +447,56 @@ spec:
             fi
         done
 
+        # Initialize memory throttling
+        # This file is located at utils/memory-throttle.sh in the release-service-utils image
+        # shellcheck source=/dev/null
+        source memory-throttle.sh
+        # This function is stored in the utils/memory-throttle.sh file
+        log_memory_throttle_status 80
+
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         SUCCESS=true
+        BURST_SIZE=5
+        STABILIZATION_DELAY=2
+        jobs_spawned=0
+        jobs_collected=0
 
-        # Process each digest group in parallel, but components within each group in series
-        for digest in "${!digest_groups[@]}"; do
-            echo "Starting parallel processing for components with digest: $digest"
-            # Limit batch size to concurrent limit
+        # Collect digest keys into indexed array for processing
+        digest_keys=("${!digest_groups[@]}")
+        total_digests=${#digest_keys[@]}
+
+        echo "Processing $total_digests digest groups in parallel..."
+
+        for digest in "${digest_keys[@]}"; do
+            # This function is stored in the utils/memory-throttle.sh file
+            # Wait for memory and concurrent limit before spawning
+            wait_for_memory 80
             while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
                 wait -n || SUCCESS=false
+                jobs_collected=$((jobs_collected + 1))
             done
+
+            echo "Starting parallel processing for components with digest: $digest"
             # Use hex digest without sha256: prefix for filename consistency
             digest_filename="${digest#sha256:}"
             process_digest_group "$digest" "${digest_groups[$digest]}" \
               > "/tmp/component_group_${digest_filename}.out" \
               2> "/tmp/component_group_${digest_filename}.err" &
+            jobs_spawned=$((jobs_spawned + 1))
+
+            # Allow memory usage to stabilize every BURST_SIZE spawns.
+            if (( jobs_spawned % BURST_SIZE == 0 )); then
+                sleep $STABILIZATION_DELAY
+            fi
         done
 
-        # Wait for remaining processes to finish
-        while (( ${RUNNING_JOBS@P} > 0 )); do
+        # Wait for all remaining jobs - use counter to collect all exit codes
+        # in case processes finished during a burst sleep
+        while (( jobs_collected < jobs_spawned )); do
             wait -n || SUCCESS=false
+            jobs_collected=$((jobs_collected + 1))
         done
-        echo "All component processing jobs completed"
+        echo "All component processing jobs completed (spawned: $jobs_spawned, collected: $jobs_collected)"
 
         # Print outputs and errors for each component processing job
         for digest in "${!digest_groups[@]}"; do

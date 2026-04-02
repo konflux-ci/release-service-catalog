@@ -5,7 +5,7 @@ metadata:
   name: test-create-advisory-update-purl-disk-images
 spec:
   description: |
-    Assert that the update-purl step can process CGW downloadURLs and generate
+    Assert that the update-purl step can use the checksum_map to generate
     the purl field for the releaseNotes for disk-image artifacts.
   params:
     - name: ociStorage
@@ -32,6 +32,8 @@ spec:
       taskSpec:
         results:
           - name: sourceDataArtifact
+            type: string
+          - name: checksum_map
             type: string
         volumes:
           - name: workdir
@@ -179,6 +181,24 @@ spec:
                  }
                }
               EOF
+
+              # Create checksum_map mock data file (will be read by oras mock)
+              jq -nc '[
+                {
+                  "component": "intel-bootc-iso-disk-image-1-5",
+                  "files": {
+                    "rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz": "sha256:aea86cd520f01d3b9c488fe11de9a6241c825018ff834cebce8d988046a1a8ac"
+                  }
+                },
+                {
+                  "component": "intel-bootc-qcow2-disk-image-1-5",
+                  "files": {
+                    "rhel-ai-intel-1.5.1-1749643939-x86_64-kvm.qcow2": "sha256:f7dc49d369465abebb6aebf60a9962f49af854a4960d61ff6aa1f02325cee26d"
+                  }
+                }
+              ]' > "$(params.dataDir)/mock_checksum_map.json"
+              # Output mock OCI reference (oras mock will use the file above)
+              echo -n "mock-registry/checksum-map@sha256:mock" | tee "$(results.checksum_map.path)"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -221,6 +241,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: checksum_map
+          value: "$(tasks.setup.results.checksum_map)"
       runAfter:
         - setup
     - name: check-result
@@ -271,17 +293,10 @@ spec:
               DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
               artifacts=$(jq -c '.releaseNotes.content.artifacts' "$DATA_FILE")
 
-              baseUrlRoot="https://access.cdn.redhat.com"
-              isoDir="content/origin/files/sha256/ae/aea86cd520f01d3b9c488fe11de9a6241c825018ff834cebce8d988046a1a8ac"
-              isoFile="rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz"
-              isoPath="$isoDir/$isoFile"
-              qcow2Dir="content/origin/files/sha256/f7/f7dc49d369465abebb6aebf60a9962f49af854a4960d61ff6aa1f02325cee26d"
-              qcow2File="rhel-ai-intel-1.5.1-1749643939-x86_64-kvm.qcow2"
-              qcow2Path="$qcow2Dir/$qcow2File"
-              expectedIsoPurl="pkg:generic/intel-bootc-iso-disk-image-1-5@1.5.1?download_url=${baseUrlRoot}/"
-              expectedIsoPurl+="${isoPath}"
-              expectedQcow2Purl="pkg:generic/intel-bootc-qcow2-disk-image-1-5@1.5.1?download_url=${baseUrlRoot}/"
-              expectedQcow2Purl+="${qcow2Path}"
+              # Both components have contentGateway, so they get Developer Portal download URL
+              # PURLs now include filename= for unique identification and idempotency matching
+              expectedIsoPurl="pkg:generic/intel-bootc-iso-disk-image-1-5@1.5.1?filename=rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz&checksum=sha256:aea86cd520f01d3b9c488fe11de9a6241c825018ff834cebce8d988046a1a8ac&download_url=https://developers.redhat.com/products"
+              expectedQcow2Purl="pkg:generic/intel-bootc-qcow2-disk-image-1-5@1.5.1?filename=rhel-ai-intel-1.5.1-1749643939-x86_64-kvm.qcow2&checksum=sha256:f7dc49d369465abebb6aebf60a9962f49af854a4960d61ff6aa1f02325cee26d&download_url=https://developers.redhat.com/products"
 
               isoFilter='.[] | select(.component == "intel-bootc-iso-disk-image-1-5") | .purl'
               isoPurl=$(echo "$artifacts" | jq -r "$isoFilter")

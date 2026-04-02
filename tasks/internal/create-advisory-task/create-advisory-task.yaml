@@ -18,9 +18,9 @@ spec:
       type: string
       description: |
           String containing a JSON representation of the advisory data (e.g. '{"product_id":123,"type":"RHSA"}')
-    - name: application
+    - name: componentGroup
       type: string
-      description: Application being released
+      description: ComponentGroup being released
     - name: origin
       type: string
       description: |
@@ -226,8 +226,20 @@ spec:
               CONTENT_BEFORE_FILTER=$(cat "$CONTENT_FILE")
 
               # Update CONTENT by removing entries that already exist in the advisory
-              if [ "$(params.contentType)" == "generic" ] || [ "$(params.contentType)" == "rpm" ]; then
-                # Use purl as unique key for generic artifacts
+              if [ "$(params.contentType)" == "generic" ] || [ "$(params.contentType)" == "binary" ]; then
+                # Use purl as unique key, but strip checksum= for comparison
+                # This allows re-releases (with new checksums from re-signing) to update existing advisories
+                # The filename= param (if present) ensures we match the correct file
+                jq --slurpfile existing "$EXISTING_CONTENT" '
+                  # Function to strip checksum param from purl for comparison
+                  def strip_checksum:
+                    gsub("&checksum=[^&]*"; "") | gsub("\\?checksum=[^&]*&"; "?") | gsub("\\?checksum=[^&]*$"; "");
+                  map(select(
+                    (.purl | strip_checksum) as $p |
+                    ($existing[0] | map(select((.purl | strip_checksum) == $p)) | length == 0)
+                  ))' "$CONTENT_FILE" > /tmp/content_filtered.json
+              elif [ "$(params.contentType)" == "rpm" ] || [ "$(params.contentType)" == "disk-image" ]; then
+                # Use exact purl matching for RPM and disk-image (checksums are stable, no re-signing)
                 jq --slurpfile existing "$EXISTING_CONTENT" '
                   map(select(
                     .purl as $p |
@@ -338,7 +350,7 @@ spec:
           check-jsonschema --schemafile schema/advisory.json "$YAML_ADVISORY_FILEPATH" 2>&1 | tee "$STDERR_FILE"
 
           git add "${YAML_ADVISORY_FILEPATH}"
-          git commit -m "[Konflux Release] new advisory for $(params.application)"
+          git commit -m "[Konflux Release] new advisory for $(params.componentGroup)"
           echo "Pushing to ${REPO_BRANCH}..."
           git_push_with_retries --branch $REPO_BRANCH --retries 5 --url origin 2> "$STDERR_FILE"
           # Construct the advisory url on customer portal to report back to the user as a result

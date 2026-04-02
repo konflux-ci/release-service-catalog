@@ -1,0 +1,244 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-extract-kmods-recursive
+spec:
+  description: >-
+    Test extracting kernel modules from container images with recursive directory structures.
+    This test specifically validates that .ko files in subdirectories are properly extracted
+    and that the directory hierarchy is preserved.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+    - name: taskGitUrl
+      type: string
+      description: The git repository URL for task and StepAction resolution
+      default: https://github.com/enriquebelarte/release-service-catalog.git
+    - name: taskGitRevision
+      type: string
+      description: The git revision for task and StepAction resolution
+      default: signed-kmods-release
+  tasks:
+    - name: setup
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Create the trusted artifacts data directory structure
+              mkdir -p "$(params.dataDir)"
+
+              echo "Recursive directory test setup completed - mocks will create nested structure"
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+
+    - name: run-task
+      taskRef:
+        name: extract-kmods-from-image
+      params:
+        - name: kmodsPath
+          value: /kmods
+        - name: signedKmodsPath
+          value: signed-kmods
+        - name: snapshot
+          value: my-recursive-snapshot
+        - name: snapshotPath
+          value: snapshot.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: ""
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - setup
+    - name: check-recursive-extraction
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: ociStorage
+            type: string
+          - name: sourceDataArtifact
+            type: string
+            default: ""
+          - name: taskGitUrl
+            type: string
+          - name: taskGitRevision
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: "ORAS_OPTIONS"
+              value: "--insecure"
+            - name: "DEBUG"
+              value: ""
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: validate-recursive-structure
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "=== Recursive Directory Structure Test ==="
+
+              SIGNED_KMODS_PATH="$(params.dataDir)/signed-kmods"
+
+              # Find the architecture directory (should be only one for single-arch test)
+              arch_dir=""
+              for potential_arch_dir in "$SIGNED_KMODS_PATH"/*/; do
+                if [ -d "$potential_arch_dir" ]; then
+                  arch_dir="$potential_arch_dir"
+                  break
+                fi
+              done
+
+              if [ -z "$arch_dir" ]; then
+                echo "ERROR: No architecture directory found in $SIGNED_KMODS_PATH"
+                echo "Available contents:"
+                ls -la "$SIGNED_KMODS_PATH" || echo "Directory not found"
+                exit 1
+              fi
+
+              arch_name=$(basename "$arch_dir")
+              echo "SUCCESS: Found architecture directory: $arch_name"
+
+              # Count total .ko files recursively
+              total_ko_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+              if [ "$total_ko_count" -lt 1 ]; then
+                echo "ERROR: No .ko files found in $arch_name"
+                exit 1
+              fi
+
+              echo "SUCCESS: Found $total_ko_count total .ko files in $arch_name"
+
+              # Check for .ko files in top-level directory
+              top_level_ko_count=$(find "$arch_dir" -maxdepth 1 -name "*.ko" -type f | wc -l)
+              echo "Found $top_level_ko_count .ko files in top-level directory"
+
+              # Check for .ko files in subdirectories (this is the key test for recursive functionality)
+              subdir_ko_count=$(find "$arch_dir" -mindepth 2 -name "*.ko" -type f | wc -l)
+              if [ "$subdir_ko_count" -gt 0 ]; then
+                echo "SUCCESS: Found $subdir_ko_count .ko files in subdirectories - RECURSIVE EXTRACTION WORKING!"
+                echo "Subdirectory structure and .ko files:"
+                find "$arch_dir" -mindepth 2 -name "*.ko" -type f | sort | while read -r subdir_ko; do
+                  echo "  $subdir_ko"
+                done
+              else
+                echo "ERROR: No .ko files found in subdirectories - recursive extraction may not be working"
+                echo "All found .ko files:"
+                find "$arch_dir" -name "*.ko" -type f | sort
+                exit 1
+              fi
+
+              # Verify specific expected subdirectories were created based on mock data
+              expected_subdirs=("driversA" "driversB")
+              for expected_subdir in "${expected_subdirs[@]}"; do
+                subdir_path="$arch_dir/$expected_subdir"
+                if [ -d "$subdir_path" ]; then
+                  echo "SUCCESS: Expected subdirectory found: $expected_subdir"
+                  subdir_ko_files=$(find "$subdir_path" -name "*.ko" -type f | wc -l)
+                  if [ "$subdir_ko_files" -gt 0 ]; then
+                    echo "SUCCESS: Found $subdir_ko_files .ko files in $expected_subdir"
+                    find "$subdir_path" -name "*.ko" -type f | while read -r ko_file; do
+                      echo "  $ko_file"
+                    done
+                  else
+                    echo "WARNING: No .ko files found in $expected_subdir"
+                  fi
+                else
+                  echo "WARNING: Expected subdirectory not found: $expected_subdir"
+                fi
+              done
+
+              # Check for deeply nested structure (driversB/submodule)
+              deep_nested_path="$arch_dir/driversB/submodule"
+              if [ -d "$deep_nested_path" ]; then
+                echo "SUCCESS: Deeply nested directory found: driversB/submodule"
+                deep_ko_count=$(find "$deep_nested_path" -name "*.ko" -type f | wc -l)
+                if [ "$deep_ko_count" -gt 0 ]; then
+                  echo "SUCCESS: Found $deep_ko_count .ko files in deeply nested directory"
+                  find "$deep_nested_path" -name "*.ko" -type f | while read -r ko_file; do
+                    echo "  $ko_file"
+                  done
+                else
+                  echo "INFO: No .ko files found in deeply nested directory"
+                fi
+              else
+                echo "INFO: Deeply nested directory not found (may not be created by this test)"
+              fi
+
+              # Summary
+              echo "=== RECURSIVE EXTRACTION TEST SUMMARY ==="
+              echo "Total .ko files extracted: $total_ko_count"
+              echo "Top-level .ko files: $top_level_ko_count"
+              echo "Subdirectory .ko files: $subdir_ko_count"
+              echo "Directory structure preserved: $([ "$subdir_ko_count" -gt 0 ] && echo "YES" || echo "NO")"
+
+              if [ "$subdir_ko_count" -gt 0 ]; then
+                echo "SUCCESS: Recursive extraction test PASSED!"
+              else
+                echo "ERROR: Recursive extraction test FAILED!"
+                exit 1
+              fi
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: $(tasks.run-task.results.sourceDataArtifact)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - run-task

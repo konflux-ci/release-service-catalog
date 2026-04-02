@@ -82,6 +82,34 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: extract-signed-files
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        cd "$(params.dataDir)"
+
+        if [ -f signed-kmods.tar.gz ]; then
+          echo "Extracting signed-kmods.tar.gz for Azure upload"
+          tar -xzf signed-kmods.tar.gz
+
+          # Verify extraction
+          ko_count=$(find signed-kmods -name "*.ko" -type f | wc -l)
+          echo "Extracted $ko_count .ko files for Azure upload"
+
+          if [ "$ko_count" -eq 0 ]; then
+            echo "WARNING: No .ko files found after extraction"
+          fi
+        else
+          echo "No signed-kmods.tar.gz found, assuming files are already extracted"
+        fi
     - name: upload-to-azure
       image: mcr.microsoft.com/azure-cli@sha256:ed67c5ef4d0a87396fe39a8114db69b6c351c4af3b17119ac205bb6c0ee3a185
       computeResources:
@@ -172,22 +200,34 @@ spec:
             AZURE_TARGET_PATH="${DRIVER_VENDOR}/${DRIVER_VERSION}/${KERNEL_VERSION_CLEAN}${arch_suffix}/"
             echo "Azure target path: ${ACCOUNT}/${CONTAINER}/${AZURE_TARGET_PATH}"
 
-            # Upload .ko files
-            if ls "$source_dir"/*.ko 1> /dev/null 2>&1; then
-                echo "Uploading .ko files for $arch_name"
-                for f in "$source_dir"/*.ko; do
-                    if [ -f "$f" ]; then
-                        BLOB_NAME="${AZURE_TARGET_PATH}$(basename "$f")"
-                        echo "Uploading ${f} to ${BLOB_NAME}..."
-                        az storage blob upload \
-                          --account-name "$ACCOUNT" \
-                          --container-name "$CONTAINER" \
-                          --name "$BLOB_NAME" \
-                          --file "$f" \
-                          --auth-mode login \
-                          --overwrite
-                    fi
+            # Upload .ko files (with recursive directory structure support)
+            if [ -n "$(find "$source_dir" -name "*.ko" -type f -print -quit)" ]; then
+                ko_file_count=$(find "$source_dir" -name "*.ko" -type f | wc -l)
+                echo "Uploading $ko_file_count .ko files for $arch_name (preserving directory structure)"
+
+                # Show directory structure being uploaded for verification
+                echo "Directory structure for $arch_name:"
+                find "$source_dir" -name "*.ko" -type f | sort | head -10 | sed 's|^|  |'
+                if [ "$(find "$source_dir" -name "*.ko" -type f | wc -l)" -gt 10 ]; then
+                    echo "  ... (showing first 10 files)"
+                fi
+
+                # Upload each .ko file preserving the directory structure
+                cd "$source_dir"
+                find . -name "*.ko" -type f | while read -r ko_file; do
+                    # Remove the leading "./" from the path and construct blob name
+                    relative_path="${ko_file#./}"
+                    BLOB_NAME="${AZURE_TARGET_PATH}${relative_path}"
+                    echo "Uploading ${ko_file} to ${BLOB_NAME}..."
+                    az storage blob upload \
+                      --account-name "$ACCOUNT" \
+                      --container-name "$CONTAINER" \
+                      --name "$BLOB_NAME" \
+                      --file "$ko_file" \
+                      --auth-mode login \
+                      --overwrite
                 done
+                cd - > /dev/null
             else
                 echo "WARNING: No .ko files found for architecture $arch_name"
                 return 1

@@ -69,16 +69,14 @@ function az() {
                         fi
                     else
                         # Single arch mode - now expects arch suffix (x86_64)
-                        if [ "$COUNT" -eq 0 ]; then
-                            if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod1.ko"* ]]; then
-                                echo "ERROR: First az blob upload call has wrong name param for mod1.ko"
-                                echo "Expected: --name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod1.ko"
-                                return 1
-                            fi
-                        elif [ "$COUNT" -eq 1 ]; then
-                             if [[ ! "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod2.ko"* ]]; then
-                                echo "ERROR: Second az blob upload call has wrong name param for mod2.ko"
-                                echo "Expected: --name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod2.ko"
+                        if [ "$COUNT" -le 1 ]; then
+                            # First two uploads should be .ko files (mod1.ko or mod2.ko, order doesn't matter)
+                            if [[ "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod1.ko"* ]] || [[ "$*" == *"--name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod2.ko"* ]]; then
+                                echo "Valid .ko file upload detected (upload #$COUNT)"
+                            else
+                                echo "ERROR: Upload #$COUNT should be mod1.ko or mod2.ko"
+                                echo "Expected: --name mocked-vendor-azure/1.2.3-az/6.5.0-az/x86_64/mod[12].ko"
+                                echo "Got: $*"
                                 return 1
                             fi
                         elif [ "$COUNT" -eq 2 ]; then

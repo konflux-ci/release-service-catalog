@@ -12,10 +12,6 @@ spec:
     - This task is meant to be used in an internal pipeline that can be triggered frequently
       and is expected to complete as quickly as possible.
   params:
-    - description: A docker image of operator-pipeline-images for the steps to run in
-      name: pipeline_image
-      default: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
-      type: string
     - description: |
         List of space separated manifest digests for the signed content, usually in the format sha256:xxx
       name: manifest_digests
@@ -32,14 +28,8 @@ spec:
       description: Space separated signing key names that the content is signed with
       name: sig_key_names
       type: string
-    - description: Kubernetes secret name that contains the Pyxis SSL files
+    - description: Kubernetes secret name that contains the Pyxis SSL files (keys cert and key)
       name: pyxis_ssl_cert_secret_name
-      type: string
-    - description: The key within the Kubernetes secret that contains the Pyxis SSL cert
-      name: pyxis_ssl_cert_file_name
-      type: string
-    - description: The key within the Kubernetes secret that contains the Pyxis SSL key
-      name: pyxis_ssl_key_file_name
       type: string
     - description: Number of threads used to upload signatures to pyxis
       name: pyxis_threads
@@ -69,14 +59,8 @@ spec:
       description: umb host to connect to for messaging
       name: umb_url
       type: string
-    - description: Kubernetes secret name that contains the umb SSL files
+    - description: Kubernetes secret name that contains the UMB SSL files (keys cert and key)
       name: umb_ssl_cert_secret_name
-      type: string
-    - description: The key within the Kubernetes secret that contains the umb SSL cert
-      name: umb_ssl_cert_file_name
-      type: string
-    - description: The key within the Kubernetes secret that contains the umb SSL key
-      name: umb_ssl_key_file_name
       type: string
     - default: https://pyxis.engineering.redhat.com
       description: Pyxis instance to upload the signature to
@@ -121,8 +105,49 @@ spec:
         mountPath: /mnt/trusted-ca
         readOnly: true
   steps:
+    - name: check-certificates
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      volumeMounts:
+        - name: umb-ssl-cert-secret
+          mountPath: /mnt/umb_ssl_cert_secret
+          readOnly: true
+        - name: pyxis-ssl-cert-secret
+          mountPath: /mnt/pyxis_ssl_cert_secret
+          readOnly: true
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        echo "=== Checking signing certificate expiration ==="
+
+        # Check UMB certificate
+        UMB_CERT_FILE="/mnt/umb_ssl_cert_secret/cert"
+        echo "Checking UMB certificate: ${UMB_CERT_FILE}"
+        if ! check_cert_expiration "${UMB_CERT_FILE}" 7; then
+          echo "ERROR: UMB certificate validation failed"
+          exit 1
+        fi
+        echo "✓ UMB certificate is valid"
+
+        # Check Pyxis certificate
+        PYXIS_CERT_FILE="/mnt/pyxis_ssl_cert_secret/cert"
+        echo "Checking Pyxis certificate: ${PYXIS_CERT_FILE}"
+        if ! check_cert_expiration "${PYXIS_CERT_FILE}" 7; then
+          echo "ERROR: Pyxis certificate validation failed"
+          exit 1
+        fi
+        echo "✓ Pyxis certificate is valid"
+
+        echo "=== All signing certificates are valid ==="
+
     - name: get-certificate-issuer
-      image: "$(params.pipeline_image)"
+      image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       computeResources:
         limits:
           memory: 128Mi
@@ -136,7 +161,7 @@ spec:
           readOnly: true
       script: |
         #!/usr/bin/env bash
-        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
+        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/cert")"
         set -x
         issuer="$(openssl x509 -noout -subject <<< "$umb_cert" \
           | awk '{print substr($0, index($0, "UID=")+4)}')"
@@ -144,7 +169,7 @@ spec:
         echo -n "${issuer}" | tee "$(results.certificate-issuer.path)"
 
     - name: build-pubtools-sign-config
-      image: "$(params.pipeline_image)"
+      image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       securityContext:
         runAsUser: 1001
       computeResources:
@@ -221,7 +246,7 @@ spec:
         echo "Using signing config:"
         cat "$(workspaces.data.path)/pubtools-sign-config.yaml"
     - name: check-umb-connection
-      image: "$(params.pipeline_image)"
+      image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       computeResources:
         limits:
           memory: 128Mi
@@ -241,8 +266,8 @@ spec:
       script: |
         #!/usr/bin/env /bin/bash
 
-        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
-        umb_key="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)")"
+        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/cert")"
+        umb_key="$(cat "/mnt/umb_ssl_cert_secret/key")"
 
         echo "${umb_cert:?}" > /tmp/umb.crt
         echo "${umb_key:?}" >> /tmp/umb.key
@@ -253,7 +278,7 @@ spec:
                         -CAfile "${CA_BUNDLE}" < /dev/null
 
     - name: request-signature
-      image: "$(params.pipeline_image)"
+      image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       computeResources:
         limits:
           memory: 128Mi
@@ -280,8 +305,8 @@ spec:
           value: "$(params.signer_type)"
       script: |
         #!/usr/bin/env /bin/bash
-        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_cert_file_name)")"
-        umb_key="$(cat "/mnt/umb_ssl_cert_secret/$(params.umb_ssl_key_file_name)")"
+        umb_cert="$(cat "/mnt/umb_ssl_cert_secret/cert")"
+        umb_key="$(cat "/mnt/umb_ssl_cert_secret/key")"
         function get-task-id() {
           if [[ -v CUSTOM_TASK_ID ]]; then
             echo "${CUSTOM_TASK_ID}"
@@ -335,7 +360,7 @@ spec:
         echo "Signing response was:"
         jq "." "$signature_data_file"
     - name: check-signing-response
-      image: "$(params.pipeline_image)"
+      image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       computeResources:
         limits:
           memory: 128Mi
@@ -398,7 +423,7 @@ spec:
         echo "${SIGNATURE_DATA}" > "${signature_data_file}"
 
     - name: upload-signature
-      image: "$(params.pipeline_image)"
+      image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       computeResources:
         limits:
           memory: 56Mi
@@ -426,8 +451,8 @@ spec:
       script: |
         #!/usr/bin/env /bin/bash
 
-        PyxisCert="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_cert_file_name)")"
-        PyxisKey="$(cat "/mnt/pyxis_ssl_cert_secret/$(params.pyxis_ssl_key_file_name)")"
+        PyxisCert="$(cat "/mnt/pyxis_ssl_cert_secret/cert")"
+        PyxisKey="$(cat "/mnt/pyxis_ssl_cert_secret/key")"
 
         # This helps with Shellcheck warning
         echo "${PyxisCert:?}" > "${PYXIS_CERT_PATH}"

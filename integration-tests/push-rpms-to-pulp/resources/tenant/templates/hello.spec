@@ -29,6 +29,14 @@ serves as a model for GNU coding standards and GNU maintainer
 practices.
 
 
+%package data
+Summary:        Data files for GNU Hello
+BuildArch:      noarch
+
+%description data
+This package contains architecture-independent data files for GNU Hello.
+
+
 %prep
 %{gpgverify} --keyring='%{SOURCE2}' --signature='%{SOURCE1}' --data='%{SOURCE0}'
 %setup -q
@@ -44,6 +52,9 @@ practices.
 rm -f %{buildroot}%{_infodir}/dir
 %find_lang hello
 
+mkdir -p %{buildroot}%{_datadir}/hello
+echo "GNU Hello data file" > %{buildroot}%{_datadir}/hello/hello.dat
+
 
 %check
 make check
@@ -56,7 +67,14 @@ make check
 %{_infodir}/hello.info*
 
 
+%files data
+%{_datadir}/hello/
+
+
 %changelog
+* Tue Mar 10 2026 Test User <test@example.com> - 2.12.1-7
+- Add hello-data noarch subpackage for e2e testing
+
 * Fri Jan 17 2025 Fedora Release Engineering <releng@fedoraproject.org> - 2.12.1-6
 - Rebuilt for https://fedoraproject.org/wiki/Fedora_42_Mass_Rebuild
 
