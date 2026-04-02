@@ -1,0 +1,174 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-prepare-fbc-snapshot-empty-snapshot
+spec:
+  description: |
+    Run prepare-fbc-snapshot with a snapshot that has zero components
+    (all components filtered out by filter-published-fbc-images).
+    The task must exit 0 and log that nothing needs to be prepared.
+    The snapshot file must remain intact (empty components array) so the
+    downstream create-trusted-artifact step can still produce a valid artifact.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+      taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: add-snapshot
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "fbc": {
+                  "fromIndex": "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.13",
+                  "targetIndex": "quay.io/redhat/redhat----preview-operator-index:v4.13"
+                }
+              }
+              EOF
+
+              # Empty components array — simulates all fragments already published
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << EOF
+              {
+                "application": "foo-app",
+                "artifacts": {},
+                "components": []
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: prepare-fbc-snapshot
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "development"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+
+              component_count=$(jq '.components | length' "${SNAPSHOT_FILE}")
+              if [ "${component_count}" -ne 0 ]; then
+                echo "ERROR: Expected 0 components after empty-snapshot path, got ${component_count}"
+                exit 1
+              fi
+              echo "PASS: snapshot still has 0 components — task exited cleanly without modification"

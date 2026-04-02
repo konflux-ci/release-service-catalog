@@ -2,34 +2,25 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-published-fbc-all-published
+  name: test-filter-published-fbc-no-prior-releases
 spec:
   description: |
-    Negative test: Verify that filter-published-fbc-images correctly handles the case where
-    all components are already released (found in a prior successful Release CR),
-    resulting in an empty filtered snapshot.
+    Verify that when Release CR list is empty (no prior releases for this application),
+    all snapshot components are kept and ocpVersion is attached to each.
+    This is the explicit first-release path exercised through the Release CR lookup.
   params:
     - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored.
       type: string
     - name: ociArtifactExpiresAfter
-      description: >-
-        Expiration date for the trusted artifacts created in the OCI repository.
-        An empty string means the artifacts do not expire.
       type: string
       default: "1d"
     - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
       type: string
       default: "--insecure"
     - name: trustedArtifactsDebug
-      description: >-
-        Flag to enable debug logging in trusted artifacts.
-        Set to a non-empty string to enable.
       type: string
       default: ""
     - name: dataDir
-      description: The location where data will be stored
       type: string
   tasks:
     - name: setup
@@ -70,32 +61,26 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create test snapshot with all components already published
-              # All fragments (sha256:mno345, sha256:pqr678) are in published index
-              # Result: empty snapshot
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
               {
                 "application": "test-app",
                 "components": [
                   {
-                    "name": "comp1-all-published",
-                    "containerImage": "quay.io/test/comp1@sha256:mno345"
+                    "name": "comp1-new",
+                    "containerImage": "quay.io/test/comp1@sha256:new111"
                   },
                   {
-                    "name": "comp2-all-published",
-                    "containerImage": "quay.io/test/comp2@sha256:pqr678"
+                    "name": "comp2-new",
+                    "containerImage": "quay.io/test/comp2@sha256:new222"
                   }
                 ]
               }
               EOF
 
-              # Create data file with FBC targetIndex
-              # Mock will return index with both sha256:mno345 and sha256:pqr678
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
                 "fbc": {
-                  "targetIndex": "quay.io/redhat-pending/catalog:v4.16-all",
-                  "publishingCredentials": "test-publishing-creds"
+                  "targetIndex": "quay.io/redhat-pending/catalog:v4.15"
                 }
               }
               EOF
@@ -120,7 +105,7 @@ spec:
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
         - name: releaseName
-          value: "test-ns/current-release-all"
+          value: "test-ns/current-release-first"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -179,20 +164,22 @@ spec:
               set -eux
 
               FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
-
-              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
-                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
-                exit 1
-              fi
-
-              echo "Filtered snapshot contents:"
-              jq . "${FILTERED_SNAPSHOT}"
-
               COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
-              echo "Component count: ${COUNT}"
 
-              # Expected: 0 components (all are already published)
-              if [ "${COUNT}" -ne 0 ]; then
-                echo "ERROR: Expected 0 components (all published), got ${COUNT}"
+              if [ "${COUNT}" -ne 2 ]; then
+                echo "ERROR: Expected 2 components (no prior releases → keep all), got ${COUNT}"
                 exit 1
               fi
+
+              for name in comp1-new comp2-new; do
+                ocp=$(jq -r --arg n "$name" \
+                    '.components[] | select(.name==$n) | .ocpVersion // empty' \
+                    "${FILTERED_SNAPSHOT}")
+                if [ -z "$ocp" ]; then
+                  echo "ERROR: ocpVersion missing on $name"
+                  exit 1
+                fi
+                echo "✓ $name: ocpVersion=$ocp"
+              done
+
+              echo "✓ All 2 components kept with ocpVersion: no prior releases found"

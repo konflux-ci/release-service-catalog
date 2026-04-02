@@ -2,33 +2,34 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-published-fbc-bundles-field
+  name: test-filter-published-fbc-multi-ocp-partial
 spec:
   description: |
-    Test: Verify that filter-published-fbc-images correctly parses the bundles field structure
-    (alternative to related_images) to find published fragment digests.
+    Verify per-index partial filtering when a snapshot spans multiple OCP versions.
+
+    Four components across two OCP versions, with partial prior-release history:
+      - comp1 (sha256:P1, v4.14): in prior Release CR for v4.14 index → filter out
+      - comp2 (sha256:N2, v4.14): NOT in any Release CR → keep
+      - comp3 (sha256:N3, v4.16): NOT in any Release CR → keep
+      - comp4 (sha256:N4, v4.16): NOT in any Release CR → keep
+
+    Expected filtered snapshot: comp2, comp3, comp4.
+
+    This combines two already-tested axes (multi-OCP grouping + partial filtering)
+    that have not been exercised together in a single test.
   params:
     - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored.
       type: string
     - name: ociArtifactExpiresAfter
-      description: >-
-        Expiration date for the trusted artifacts created in the OCI repository.
-        An empty string means the artifacts do not expire.
       type: string
       default: "1d"
     - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
       type: string
       default: "--insecure"
     - name: trustedArtifactsDebug
-      description: >-
-        Flag to enable debug logging in trusted artifacts.
-        Set to a non-empty string to enable.
       type: string
       default: ""
     - name: dataDir
-      description: The location where data will be stored
       type: string
   tasks:
     - name: setup
@@ -69,42 +70,39 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create test snapshot with 3 fragments:
-              # - bundle1 (sha256:bun111): in published index bundles field → filter out
-              # - bundle2 (sha256:bun222): in published index bundles field → filter out
-              # - bundle3 (sha256:bun333): NOT in published index → keep
-              # targetIndex template is in data.fbc.targetIndex (no {{ OCP_VERSION }} placeholder)
+              # Digests containing "v414" route skopeo mock to OCP v4.14.
+              # Digests containing "v416" route skopeo mock to OCP v4.16.
+              # The published digest for comp1 (sha256:P1comp1v414) matches exactly what
+              # the kubectl mock returns in test-app-multi-partial.
+              # targetIndex uses {{ OCP_VERSION }} so each version gets its own index.
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
               {
                 "application": "test-app",
                 "components": [
                   {
-                    "name": "bundle1-published",
-                    "containerImage": "quay.io/test/bundle1@sha256:bun111"
+                    "name": "comp1-published-v414",
+                    "containerImage": "quay.io/test/comp1@sha256:P1comp1v414"
                   },
                   {
-                    "name": "bundle2-published",
-                    "containerImage": "quay.io/test/bundle2@sha256:bun222"
+                    "name": "comp2-new-v414",
+                    "containerImage": "quay.io/test/comp2@sha256:N2comp2v414"
                   },
                   {
-                    "name": "bundle3-new",
-                    "containerImage": "quay.io/test/bundle3@sha256:bun333"
+                    "name": "comp3-new-v416",
+                    "containerImage": "quay.io/test/comp3@sha256:N3comp3v416"
+                  },
+                  {
+                    "name": "comp4-new-v416",
+                    "containerImage": "quay.io/test/comp4@sha256:N4comp4v416"
                   }
                 ]
               }
               EOF
 
-              # Create data file with targetIndex that returns bundles structure
-              # Mock returns: sha256:bun111 and sha256:bun222 in bundles[].related_images[]
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
-                "pyxis": {
-                  "secret": "pyxis",
-                  "server": "production"
-                },
                 "fbc": {
-                  "targetIndex": "quay.io/redhat-pending/catalog:v4.18-bundles",
-                  "publishingCredentials": "test-publishing-creds"
+                  "targetIndex": "quay.io/redhat-pending/catalog:{{ OCP_VERSION }}"
                 }
               }
               EOF
@@ -128,8 +126,8 @@ spec:
           value: "$(context.pipelineRun.uid)/snapshot.json"
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
-        - name: pyxisSecret
-          value: "pyxis"
+        - name: releaseName
+          value: "test-ns/current-release-multi-partial"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -189,41 +187,40 @@ spec:
 
               FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
 
-              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
-                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
-                exit 1
-              fi
-
-              echo "Filtered snapshot contents:"
+              echo "Filtered snapshot:"
               jq . "${FILTERED_SNAPSHOT}"
 
               COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
-              echo "Component count: ${COUNT}"
 
-              # Expected: 1 component (bundle3-new only)
-              # bundle1 and bundle2 are in bundles field and should be filtered out
-              if [ "${COUNT}" -ne 1 ]; then
-                echo "ERROR: Expected 1 component, got ${COUNT}"
+              # comp1 (v4.14, sha256:P1) in prior release → filtered
+              # comp2 (v4.14, sha256:N2) not in any release → kept
+              # comp3 (v4.16, sha256:N3) not in any release → kept
+              # comp4 (v4.16, sha256:N4) not in any release → kept
+              if [ "${COUNT}" -ne 3 ]; then
+                echo "ERROR: Expected 3 components (comp1 filtered, comp2/3/4 kept), got ${COUNT}"
                 exit 1
               fi
 
-              # Verify bundle1 is NOT in filtered snapshot (in bundles field)
-              if jq -e '.components[] | select(.name == "bundle1-published")' \
+              if jq -e '.components[] | select(.name == "comp1-published-v414")' \
                   "${FILTERED_SNAPSHOT}" > /dev/null; then
-                echo "ERROR: bundle1-published should have been filtered out"
+                echo "ERROR: comp1 (sha256:P1, v4.14) should have been filtered out"
                 exit 1
               fi
 
-              # Verify bundle2 is NOT in filtered snapshot (in bundles field)
-              if jq -e '.components[] | select(.name == "bundle2-published")' \
-                  "${FILTERED_SNAPSHOT}" > /dev/null; then
-                echo "ERROR: bundle2-published should have been filtered out"
-                exit 1
-              fi
+              for name in comp2-new-v414 comp3-new-v416 comp4-new-v416; do
+                if ! jq -e --arg n "$name" '.components[] | select(.name == $n)' \
+                    "${FILTERED_SNAPSHOT}" > /dev/null; then
+                  echo "ERROR: $name should be in filtered snapshot (not in any release)"
+                  exit 1
+                fi
+                ocp=$(jq -r --arg n "$name" \
+                    '.components[] | select(.name==$n) | .ocpVersion // empty' \
+                    "${FILTERED_SNAPSHOT}")
+                if [ -z "$ocp" ]; then
+                  echo "ERROR: ocpVersion missing on $name"
+                  exit 1
+                fi
+                echo "✓ $name: ocpVersion=$ocp"
+              done
 
-              # Verify bundle3 IS in filtered snapshot (not in bundles field)
-              if ! jq -e '.components[] | select(.name == "bundle3-new")' \
-                  "${FILTERED_SNAPSHOT}" > /dev/null; then
-                echo "ERROR: bundle3-new should be in filtered snapshot"
-                exit 1
-              fi
+              echo "✓ Multi-OCP + partial filter: comp1 removed (v4.14 release), comp2/3/4 kept"
