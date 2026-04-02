@@ -1,0 +1,146 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-check-data-keys-cloud-marketplaces
+spec:
+  description: |
+    Run the check-data-keys task with cloudMarketplaces and releaseNotes system keys present.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "bootc-cuda-aws-disk-image-3-3",
+                      "staged": {
+                        "destination": "rhelai-3_DOT_3-for-rhel-9-x86_64-isos",
+                        "version": "3.3",
+                        "files": [
+                          {
+                            "filename": "rhel-ai-cuda-aws-3.3-x86_64.raw.gz",
+                            "source": "disk.raw.gz"
+                          }
+                        ]
+                      },
+                      "starmap": [
+                        {
+                          "cloud": "aws",
+                          "name": "rhel-ai-nvidia-aws",
+                          "workflow": "stratosphere"
+                        }
+                      ]
+                    }
+                  ],
+                  "cloudMarketplacesSecret": "aws-stratosphere-secret"
+                },
+                "releaseNotes": {
+                  "product_id": [932],
+                  "product_name": "Red Hat Enterprise Linux AI",
+                  "product_version": "3.3",
+                  "product_stream": "rhel-ai-3.3",
+                  "cpe": "cpe:/a:redhat:enterprise_linux_ai:3.3::el9",
+                  "content": {
+                    "artifacts": [
+                      {
+                        "architecture": "x86_64",
+                        "os": "linux",
+                        "purl": "pkg:generic/bootc-cuda-aws-disk-image-3-3@3.3",
+                        "component": "bootc-cuda-aws-disk-image-3-3"
+                      }
+                    ]
+                  },
+                  "synopsis": "Red Hat Enterprise Linux AI 3.3",
+                  "topic": "Red Hat Enterprise Linux AI 3.3 is now available.",
+                  "description": "Red Hat Enterprise Linux AI 3.3 release.",
+                  "solution": "Before applying this update, ensure all errata have been applied."
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: check-data-keys
+      params:
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: systems
+          value: |
+            [
+              {"systemName": "cloudMarketplaces", "dynamic": false},
+              {"systemName": "releaseNotes", "dynamic": false}
+            ]
+        - name: schema
+          value: "https://get-local-schema.com"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
