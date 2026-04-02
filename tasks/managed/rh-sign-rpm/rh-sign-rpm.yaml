@@ -101,20 +101,13 @@ spec:
         Subpath for uploading signed RPMs within the signing pipeline.
         Set to empty string for no subpath.
       default: ""
-    - name: singleSigningRequest
-      type: string
-      description: |
-        Feature flag: when set to "true", sends the full artifacts.json without filtering
-        and makes a single internal request instead of one per architecture.
-        Default is "false" which uses the per-architecture filtering behavior.
-      default: "true"
   results:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
     - name: signedRpmsOciArtifacts
       type: string
-      description: JSON object mapping repo names to their signed RPMs OCI artifact references
+      description: OCI artifact reference containing the signed RPMs
   volumes:
     - name: workdir
       emptyDir: {}
@@ -200,9 +193,6 @@ spec:
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
         IR_FILE="$(params.dataDir)/ir-output.txt"
 
-        # Initialize JSON object to collect signed RPMs OCI artifacts from all repos
-        SIGNED_RPMS_OCI_ARTIFACTS='{}'
-
         # Extract signing configuration from data file
         KERBEROS_PRINCIPAL=$(jq --exit-status -r '.signOptions.signKeytab.principal' "${DATA_FILE}")
         KERBEROS_KEYTAB=$(jq --exit-status -r '.signOptions.signKeytab.name' "${DATA_FILE}")
@@ -214,246 +204,87 @@ spec:
         ARTIFACT_STORAGE_SECRET=$(jq --exit-status -r \
             '.signOptions.artifactStorageSecret // "signing-artifact-storage-preprod"' "${DATA_FILE}")
 
-        # Check for single signing request feature flag
-        if [ "$(params.singleSigningRequest)" = "true" ]; then
-            echo "=== Single signing request mode (feature flag enabled) ==="
-            echo "Sending full artifacts.json without filtering..."
+        # Send full artifacts.json without filtering in a single signing request
+        echo "Sending full artifacts.json to signing pipeline..."
 
-            ARTIFACT_JSON=$(cat "${ARTIFACTS_JSON_FILE}" | base64 -w0)
+        ARTIFACT_JSON=$(cat "${ARTIFACTS_JSON_FILE}" | base64 -w0)
 
-            # Use snapshotBuildId if provided, otherwise use a default repo name
-            if [ -n "$(params.snapshotBuildId)" ]; then
-                REPO="$(params.snapshotBuildId)"
-            else
-                REPO="all"
-            fi
-
-            # Build unsigned RPMs location path
-            if [ -n "$(params.unsignedRpmsSubpath)" ]; then
-                UNSIGNED_LOCATION="$(params.unsignedRpmsDomain)/${REPO}/$(params.unsignedRpmsSubpath)"
-            else
-                UNSIGNED_LOCATION="$(params.unsignedRpmsDomain)/${REPO}"
-            fi
-
-            # Build signed RPMs destination path
-            if [ -n "$(params.signedRpmsSubpath)" ]; then
-                SIGNED_DESTINATION="$(params.signedRpmsDomain)/${REPO}/$(params.signedRpmsSubpath)"
-            else
-                SIGNED_DESTINATION="$(params.signedRpmsDomain)/${REPO}"
-            fi
-
-            echo "Repo: ${REPO}"
-            echo "Unsigned RPMs location: ${UNSIGNED_LOCATION}"
-            echo "Signed RPMs destination: ${SIGNED_DESTINATION}"
-
-            internal-request \
-              --pipeline "direct-rpm-signing" \
-              -p image="${PIPELINE_IMAGE}" \
-              -p artifact_json="${ARTIFACT_JSON}" \
-              -p ociStorage="$(params.ociStorage)" \
-              -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
-              -p kerberos_keytab="${KERBEROS_KEYTAB}" \
-              -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET}" \
-              -p signing_alias="${SIGNING_ALIAS}" \
-              -p artifact_storage_secret="${ARTIFACT_STORAGE_SECRET}" \
-              -p unsigned_rpms_location="${UNSIGNED_LOCATION}" \
-              -p signed_rpms_destination="${SIGNED_DESTINATION}" \
-              -p source_artifact_storage_domain="$(params.unsignedRpmsDomain)" \
-              -p destination_artifact_storage_domain="$(params.signedRpmsDomain)" \
-              -p requester="$(params.requester)" \
-              -p force="false" \
-              -p signed_rpms_upload_subpath="$(params.signedRpmsUploadSubpath)" \
-              -p taskGitUrl="https://gitlab.cee.redhat.com/signing/signing.git" \
-              -p taskGitRevision="ISV-7017" \
-              -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-              -t "$(params.requestTimeout)" \
-              --service-account "${SERVICE_ACCOUNT}" \
-              --pipeline-timeout "0h30m0s" \
-              --task-timeout "0h25m0s" \
-              -s true \
-              | tee "${IR_FILE}"
-
-            # Extract internal request name and query results
-            internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_FILE}")
-            echo "Internal request created: ${internalRequest}"
-
-            results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
-            echo "Internal request results: ${results}"
-
-            # Extract signed_rpms_oci_artifact and add to collection
-            signedRpmsOciArtifact="$(jq -r '.signed_rpms_oci_artifact // ""' <<< "${results}")"
-            if [ -n "${signedRpmsOciArtifact}" ]; then
-                echo "Signed RPMs OCI artifact for ${REPO}: ${signedRpmsOciArtifact}"
-                SIGNED_RPMS_OCI_ARTIFACTS=$(jq --arg repo "${REPO}" --arg artifact "${signedRpmsOciArtifact}" \
-                    '.[$repo] = $artifact' <<< "${SIGNED_RPMS_OCI_ARTIFACTS}")
-            else
-                echo "Error: No signed_rpms_oci_artifact returned for repo: ${REPO}"
-                echo "Results: ${results}"
-                exit 1
-            fi
-
-            echo "Single signing request completed"
+        # Use snapshotBuildId if provided, otherwise use a default repo name
+        if [ -n "$(params.snapshotBuildId)" ]; then
+            REPO="$(params.snapshotBuildId)"
         else
-            # === Original per-architecture filtering logic ===
-            # Determine repos to process and whether to filter artifacts
-            FILTER_ARTIFACTS="false"
-            HAS_NOARCH="false"
-            if [ -n "$(params.snapshotBuildId)" ]; then
-                # Use provided snapshotBuildId as the repo
-                REPOS="$(params.snapshotBuildId)"
-                echo "Using provided snapshotBuildId as repo: ${REPOS}"
-            else
-                # Extract unique architectures from artifacts.json
-                # Filter out "noarch" - noarch RPMs are uploaded to all arch repos by push-rpms-to-pulp
-                # and should be signed as part of actual arch repos, not a separate "noarch" repo
-                ALL_ARCHS=$(jq -r '.artifacts | .[].labels.arch // empty' "${ARTIFACTS_JSON_FILE}" | sort -u)
-
-                if echo "${ALL_ARCHS}" | grep -q "^noarch$"; then
-                    HAS_NOARCH="true"
-                fi
-
-                # Start with arch-specific repos from artifacts
-                REPOS=$(echo "${ALL_ARCHS}" | grep -v "^noarch$" || true)
-                echo "Extracted repos from artifacts.json architectures: ${REPOS:-<none>}"
-
-                # When noarch RPMs exist, use distributions to determine all repos that have content
-                # This reflects where push-rpms-to-pulp actually uploaded noarch RPMs
-                if [ "${HAS_NOARCH}" = "true" ]; then
-                    echo "noarch RPMs found - adding all arch repos from distributions"
-                    DIST_REPOS=$(jq -r '.distributions | keys[]' "${ARTIFACTS_JSON_FILE}" \
-                      | grep -v "^source$" || true)
-                    for dist_repo in ${DIST_REPOS}; do
-                        if ! echo "${REPOS}" | grep -q "^${dist_repo}$"; then
-                            if [ -z "${REPOS}" ]; then
-                                REPOS="${dist_repo}"
-                            else
-                                REPOS="${REPOS}"$'\n'"${dist_repo}"
-                            fi
-                            echo "  Adding repo from distributions: ${dist_repo}"
-                        fi
-                    done
-                fi
-
-                # Add source if present in artifacts
-                if echo "${ALL_ARCHS}" | grep -q "^source$"; then
-                    REPOS="${REPOS}"$'\n'"source"
-                fi
-
-                if [ -z "${REPOS}" ]; then
-                    echo "No architectures found in artifacts.json"
-                    exit 1
-                fi
-                echo "Final repos to process: ${REPOS}"
-                FILTER_ARTIFACTS="true"
-            fi
-
-            # Process each repo
-            for REPO in ${REPOS}; do
-                echo "Creating internal-request for RPM signing (repo: ${REPO})..."
-
-                # Determine which artifacts.json to use
-                if [ "${FILTER_ARTIFACTS}" = "true" ]; then
-                    # Create filtered artifacts.json for this architecture
-                    FILTERED_ARTIFACTS_FILE="$(params.dataDir)/artifacts-${REPO}.json"
-                    if [ "${HAS_NOARCH}" = "true" ] && [ "${REPO}" != "source" ]; then
-                        # Include both arch-specific AND noarch artifacts in each arch repo
-                        # noarch RPMs exist in all arch repos, so each needs to be signed
-                        jq --arg arch "${REPO}" '{
-                          artifacts: (.artifacts | to_entries
-                            | map(select(.value.labels.arch == $arch or .value.labels.arch == "noarch"))
-                            | from_entries),
-                          distributions: {($arch): .distributions[$arch]}
-                        }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
-                        echo "Created filtered artifacts.json for ${REPO} (including noarch)"
-                    else
-                        jq --arg arch "${REPO}" '{
-                          artifacts: (.artifacts | to_entries | map(select(.value.labels.arch == $arch))
-                            | from_entries),
-                          distributions: {($arch): .distributions[$arch]}
-                        }' "${ARTIFACTS_JSON_FILE}" > "${FILTERED_ARTIFACTS_FILE}"
-                        echo "Created filtered artifacts.json for ${REPO}"
-                    fi
-                    ARTIFACT_JSON_PATH="${FILTERED_ARTIFACTS_FILE}"
-                else
-                    ARTIFACT_JSON_PATH="${ARTIFACTS_JSON_FILE}"
-                fi
-                ARTIFACT_JSON=$(cat "${ARTIFACT_JSON_PATH}" | base64 -w0)
-
-                # Build unsigned RPMs location path
-                if [ -n "$(params.unsignedRpmsSubpath)" ]; then
-                    UNSIGNED_LOCATION="$(params.unsignedRpmsDomain)/${REPO}/$(params.unsignedRpmsSubpath)"
-                else
-                    UNSIGNED_LOCATION="$(params.unsignedRpmsDomain)/${REPO}"
-                fi
-
-                # Build signed RPMs destination path
-                if [ -n "$(params.signedRpmsSubpath)" ]; then
-                    SIGNED_DESTINATION="$(params.signedRpmsDomain)/${REPO}/$(params.signedRpmsSubpath)"
-                else
-                    SIGNED_DESTINATION="$(params.signedRpmsDomain)/${REPO}"
-                fi
-
-                echo "Unsigned RPMs location: ${UNSIGNED_LOCATION}"
-                echo "Signed RPMs destination: ${SIGNED_DESTINATION}"
-
-                internal-request \
-              --pipeline "direct-rpm-signing" \
-              -p image="${PIPELINE_IMAGE}" \
-              -p artifact_json="${ARTIFACT_JSON}" \
-              -p ociStorage="$(params.ociStorage)" \
-              -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
-              -p kerberos_keytab="${KERBEROS_KEYTAB}" \
-              -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET}" \
-              -p signing_alias="${SIGNING_ALIAS}" \
-              -p artifact_storage_secret="${ARTIFACT_STORAGE_SECRET}" \
-              -p unsigned_rpms_location="${UNSIGNED_LOCATION}" \
-              -p signed_rpms_destination="${SIGNED_DESTINATION}" \
-              -p source_artifact_storage_domain="$(params.unsignedRpmsDomain)" \
-              -p destination_artifact_storage_domain="$(params.signedRpmsDomain)" \
-              -p requester="$(params.requester)" \
-              -p force="false" \
-              -p signed_rpms_upload_subpath="$(params.signedRpmsUploadSubpath)" \
-              -p taskGitUrl="https://gitlab.cee.redhat.com/shebert/signing.git" \
-              -p taskGitRevision="ISV-7017-sh" \
-              -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-              -t "$(params.requestTimeout)" \
-              --service-account "${SERVICE_ACCOUNT}" \
-              --pipeline-timeout "0h30m0s" \
-              --task-timeout "0h25m0s" \
-              -s true \
-              | tee "${IR_FILE}"
-
-            # Extract internal request name and query results
-            internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_FILE}")
-            echo "Internal request created: ${internalRequest}"
-
-            results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
-            echo "Internal request results: ${results}"
-
-            # Extract signed_rpms_oci_artifact and add to collection
-            signedRpmsOciArtifact="$(jq -r '.signed_rpms_oci_artifact // ""' <<< "${results}")"
-            if [ -n "${signedRpmsOciArtifact}" ]; then
-                echo "Signed RPMs OCI artifact for ${REPO}: ${signedRpmsOciArtifact}"
-                SIGNED_RPMS_OCI_ARTIFACTS=$(jq --arg repo "${REPO}" --arg artifact "${signedRpmsOciArtifact}" \
-                    '.[$repo] = $artifact' <<< "${SIGNED_RPMS_OCI_ARTIFACTS}")
-            else
-                echo "Error: No signed_rpms_oci_artifact returned for repo: ${REPO}"
-                echo "Results: ${results}"
-                exit 1
-            fi
-
-            echo "RPM signing request completed for repo: ${REPO}"
-            done
+            REPO="all"
         fi
 
-        echo "All RPM signing requests completed"
+        # Build unsigned RPMs location path
+        if [ -n "$(params.unsignedRpmsSubpath)" ]; then
+            UNSIGNED_LOCATION="$(params.unsignedRpmsDomain)/${REPO}/$(params.unsignedRpmsSubpath)"
+        else
+            UNSIGNED_LOCATION="$(params.unsignedRpmsDomain)/${REPO}"
+        fi
 
-        # Write collected signed RPMs OCI artifacts to result
-        echo "Signed RPMs OCI artifacts: ${SIGNED_RPMS_OCI_ARTIFACTS}"
-        echo -n "${SIGNED_RPMS_OCI_ARTIFACTS}" > "$(results.signedRpmsOciArtifacts.path)"
+        # Build signed RPMs destination path
+        if [ -n "$(params.signedRpmsSubpath)" ]; then
+            SIGNED_DESTINATION="$(params.signedRpmsDomain)/${REPO}/$(params.signedRpmsSubpath)"
+        else
+            SIGNED_DESTINATION="$(params.signedRpmsDomain)/${REPO}"
+        fi
 
-        # Write artifacts JSON to file for next step
-        echo "${SIGNED_RPMS_OCI_ARTIFACTS}" > "$(params.dataDir)/signed-rpms-oci-artifacts.json"
+        echo "Repo: ${REPO}"
+        echo "Unsigned RPMs location: ${UNSIGNED_LOCATION}"
+        echo "Signed RPMs destination: ${SIGNED_DESTINATION}"
+
+        internal-request \
+          --pipeline "direct-rpm-signing" \
+          -p image="${PIPELINE_IMAGE}" \
+          -p artifact_json="${ARTIFACT_JSON}" \
+          -p ociStorage="$(params.ociStorage)" \
+          -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
+          -p kerberos_keytab="${KERBEROS_KEYTAB}" \
+          -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET}" \
+          -p signing_alias="${SIGNING_ALIAS}" \
+          -p artifact_storage_secret="${ARTIFACT_STORAGE_SECRET}" \
+          -p unsigned_rpms_location="${UNSIGNED_LOCATION}" \
+          -p signed_rpms_destination="${SIGNED_DESTINATION}" \
+          -p source_artifact_storage_domain="$(params.unsignedRpmsDomain)" \
+          -p destination_artifact_storage_domain="$(params.signedRpmsDomain)" \
+          -p requester="$(params.requester)" \
+          -p force="false" \
+          -p signed_rpms_upload_subpath="$(params.signedRpmsUploadSubpath)" \
+          -p taskGitUrl="https://gitlab.cee.redhat.com/shebert/signing.git" \
+          -p taskGitRevision="ISV-7017-sh" \
+          -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+          -t "$(params.requestTimeout)" \
+          --service-account "${SERVICE_ACCOUNT}" \
+          --pipeline-timeout "0h30m0s" \
+          --task-timeout "0h25m0s" \
+          -s true \
+          | tee "${IR_FILE}"
+
+        # Extract internal request name and query results
+        internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_FILE}")
+        echo "Internal request created: ${internalRequest}"
+
+        results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
+        echo "Internal request results: ${results}"
+
+        # Extract signed_rpms_oci_artifact
+        signedRpmsOciArtifact="$(jq -r '.signed_rpms_oci_artifact // ""' <<< "${results}")"
+        if [ -n "${signedRpmsOciArtifact}" ]; then
+            echo "Signed RPMs OCI artifact: ${signedRpmsOciArtifact}"
+        else
+            echo "Error: No signed_rpms_oci_artifact returned"
+            echo "Results: ${results}"
+            exit 1
+        fi
+
+        echo "RPM signing request completed"
+
+        # Write signed RPMs OCI artifact to result
+        echo -n "${signedRpmsOciArtifact}" > "$(results.signedRpmsOciArtifacts.path)"
+
+        # Write artifact reference to file for next step
+        echo "${signedRpmsOciArtifact}" > "$(params.dataDir)/signed-rpms-oci-artifact.txt"
     - name: extract-signed-rpms
       image: quay.io/konflux-ci/release-service-utils:d08bdfa3733a7c75d5334aaa77b7aa46fbace00b
       computeResources:
@@ -467,49 +298,38 @@ spec:
         #!/usr/bin/env bash
         set -ex
 
-        ARTIFACTS_JSON="$(params.dataDir)/signed-rpms-oci-artifacts.json"
+        ARTIFACT_FILE="$(params.dataDir)/signed-rpms-oci-artifact.txt"
         EXTRACT_DIR="$(params.dataDir)/signed-rpms-extracted"
 
-        if [ ! -f "${ARTIFACTS_JSON}" ]; then
-            echo "No signed RPMs OCI artifacts file found"
+        if [ ! -f "${ARTIFACT_FILE}" ]; then
+            echo "No signed RPMs OCI artifact file found"
             exit 0
         fi
+
+        artifact=$(cat "${ARTIFACT_FILE}")
+        echo "Artifact: ${artifact}"
 
         # Create extraction directory
         mkdir -p "${EXTRACT_DIR}"
 
-        # Iterate over each repo/artifact pair
-        for repo in $(jq -r 'keys[]' "${ARTIFACTS_JSON}"); do
-            artifact=$(jq -r --arg repo "${repo}" '.[$repo]' "${ARTIFACTS_JSON}")
-            echo "Processing repo: ${repo}"
-            echo "  Artifact: ${artifact}"
+        # Strip the "oci:" prefix if present
+        oci_ref="${artifact#oci:}"
+        echo "OCI ref (stripped): ${oci_ref}"
 
-            # Create repo-specific directory
-            repo_dir="${EXTRACT_DIR}/${repo}"
-            mkdir -p "${repo_dir}"
+        # Pull the OCI artifact (extracts signed-rpms archive file)
+        echo "Pulling artifact to ${EXTRACT_DIR}..."
+        oras pull "${oci_ref}" -o "${EXTRACT_DIR}"
 
-            # Strip the "oci:" prefix if present
-            oci_ref="${artifact#oci:}"
-            echo "  OCI ref (stripped): ${oci_ref}"
-
-            # Pull the OCI artifact (extracts signed-rpms archive file)
-            echo "Pulling artifact to ${repo_dir}..."
-            oras pull "${oci_ref}" -o "${repo_dir}"
-
-            # Extract the gzipped tar archive
-            echo "Extracting signed-rpms archive..."
-            tar -xzf "${repo_dir}/signed-rpms" -C "${repo_dir}"
-            rm -f "${repo_dir}/signed-rpms"
-            echo "  Extracted successfully"
-
-            echo "Contents of ${repo_dir}:"
-            ls -la "${repo_dir}" || echo "  (empty or not accessible)"
-            find "${repo_dir}" -type f -name "*.rpm" 2>/dev/null | head -20 || true
-        done
+        # Extract the gzipped tar archive
+        echo "Extracting signed-rpms archive..."
+        tar -xzf "${EXTRACT_DIR}/signed-rpms" -C "${EXTRACT_DIR}"
+        rm -f "${EXTRACT_DIR}/signed-rpms"
+        echo "Extracted successfully"
 
         echo ""
         echo "=== Summary of extracted signed RPMs ==="
         echo "Extraction directory: ${EXTRACT_DIR}"
+        ls -la "${EXTRACT_DIR}"
         find "${EXTRACT_DIR}" -type f -name "*.rpm" | while read -r rpm; do
             echo "  ${rpm}"
         done
