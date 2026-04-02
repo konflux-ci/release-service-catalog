@@ -1,0 +1,236 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-published-fbc-index-no-fragments
+spec:
+  description: |
+    Test: Verify safe fallback when Pyxis finds the index image but returns no fragment data.
+
+    This reflects the realistic post-fix behavior: the corrected repositories.* filter
+    successfully finds the index image in Pyxis (HTTP 200, data non-empty), but the
+    Pyxis ContainerImage schema does not include related_images or bundles fields, so
+    fragment extraction yields an empty list. The task must fall back to keeping all
+    components for release (safe behavior).
+
+    Assertions:
+    - All components are present in the filtered snapshot (no filtering happened)
+    - ocpVersion is attached to every component
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: >-
+        Flag to enable debug logging in trusted artifacts.
+        Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: ociStorage
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: create-test-data
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Two components that share the same targetIndex.
+              # The mock returns an index image record that has NO related_images or
+              # bundles fields (empty ContainerImage - realistic Pyxis schema).
+              # Expected: both components are kept (safe fallback), each gets ocpVersion.
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
+              {
+                "application": "test-app",
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "quay.io/test/comp1@sha256:frag001"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "quay.io/test/comp2@sha256:frag002"
+                  }
+                ]
+              }
+              EOF
+
+              # targetIndex mock returns an index record with no related_images/bundles
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "pyxis": {
+                  "secret": "pyxis",
+                  "server": "production"
+                },
+                "fbc": {
+                  "targetIndex": "quay.io/redhat-pending/catalog:v4.19-no-fragments",
+                  "publishingCredentials": "test-publishing-creds"
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-filter
+      runAfter:
+        - setup
+      taskRef:
+        name: filter-published-fbc-images
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: pyxisSecret
+          value: "pyxis"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+    - name: verify-results
+      runAfter:
+        - run-filter
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-filter.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: orasOptions
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-filtered-snapshot
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
+
+              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
+                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
+                exit 1
+              fi
+
+              echo "Filtered snapshot contents:"
+              jq . "${FILTERED_SNAPSHOT}"
+
+              COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
+              echo "Component count: ${COUNT}"
+
+              # Pyxis found the index image but returned no fragment data.
+              # The task must fall back to keeping ALL components (safe behavior).
+              if [ "${COUNT}" -ne 2 ]; then
+                echo "ERROR: Expected 2 components (safe fallback — index found but no fragments),"
+                echo "       got ${COUNT}"
+                exit 1
+              fi
+
+              # Verify both components are present
+              for comp in comp1 comp2; do
+                if ! jq -e --arg n "${comp}" '.components[] | select(.name == $n)' \
+                    "${FILTERED_SNAPSHOT}" > /dev/null; then
+                  echo "ERROR: ${comp} missing from filtered snapshot"
+                  exit 1
+                fi
+                echo "✓ ${comp} present in filtered snapshot (kept by safe fallback)"
+              done
+
+              # Verify ocpVersion is attached to each component
+              for comp in comp1 comp2; do
+                ocp=$(jq -r --arg n "${comp}" \
+                    '.components[] | select(.name == $n) | .ocpVersion // empty' \
+                    "${FILTERED_SNAPSHOT}")
+                if [ -z "${ocp}" ]; then
+                  echo "ERROR: ocpVersion not attached to ${comp}"
+                  exit 1
+                fi
+                echo "✓ ocpVersion attached to ${comp}: ${ocp}"
+              done
+
+              echo "✓ Test passed: index found in Pyxis but no fragment data → all components kept"

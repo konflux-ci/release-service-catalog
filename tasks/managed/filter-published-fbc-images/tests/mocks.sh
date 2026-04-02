@@ -102,21 +102,35 @@ curl() {
     fi
   done
 
-  # Verify Phase 1 optimization parameters are present
+  # Verify required query parameters are present for every /v1/images filter call
   if [[ "$*" == *"v1/images?filter="* ]]; then
-    # Verify date filter is present (last_update_date>=YYYY-MM-DD or URL-encoded %3E%3D)
-    if [[ ! "$*" =~ last_update_date(%3E%3D|>=)[0-9]{4}-[0-9]{2}-[0-9]{2} ]]; then
-      echo "ERROR: Date filter (last_update_date) not found in Pyxis query" >&2
+    # docker_image_id stores the config digest (SHA256), not an image reference;
+    # using it to filter by image location always returns empty results.
+    if [[ "$*" == *"docker_image_id"* ]]; then
+      echo "ERROR: Query must not use docker_image_id — use repositories.* location fields" >&2
       return 1
     fi
-    
-    # Verify page_size parameter is present
+
+    # All three repository location sub-fields must be present in the filter
+    if [[ "$*" != *"repositories.registry"* ]]; then
+      echo "ERROR: repositories.registry missing from Pyxis query filter" >&2
+      return 1
+    fi
+    if [[ "$*" != *"repositories.repository"* ]]; then
+      echo "ERROR: repositories.repository missing from Pyxis query filter" >&2
+      return 1
+    fi
+    if [[ "$*" != *"repositories.tags.name"* ]]; then
+      echo "ERROR: repositories.tags.name missing from Pyxis query filter" >&2
+      return 1
+    fi
+
     if [[ "$*" != *"page_size=500"* ]]; then
       echo "ERROR: page_size=500 parameter not found in Pyxis query" >&2
       return 1
     fi
-    
-    echo "✓ Verified: Date filter and page_size=500 present in query" >&2
+
+    echo "✓ Verified: repositories.registry/repository/tags.name + page_size=500 in query" >&2
   fi
 
   # Determine which JSON response to return based on query
@@ -135,15 +149,14 @@ curl() {
     http_status="200"
   
   # NORMAL SCENARIOS
-  
+
   # Index with published fragments sha256:abc123 and sha256:ghi789
-  # Match fully URL-encoded filter: docker_image_id==quay.io/redhat-pending/catalog:v4.14-published;last_update_date>=...
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.14-published%3Blast_update_date"* ]]; then
+  # Match URL-encoded tag filter: repositories.tags.name==v4.14-published
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.14-published"* ]]; then
     json_response='{
       "data": [{
         "_id": "index-v4.14",
-        "docker_image_digest": "sha256:index-v4.14-digest",
-        "docker_image_id": "quay.io/redhat-pending/catalog:v4.14-published",
+        "image_id": "sha256:index-v4.14-digest",
         "related_images": [
           {
             "image": "quay.io/test/comp1@sha256:abc123",
@@ -159,15 +172,14 @@ curl() {
       }]
     }'
   # Index with NO published fragments (empty index or not yet published)
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.15-unpublished%3Blast_update_date"* ]]; then
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.15-unpublished"* ]]; then
     json_response='{"data": []}'
   # All fragments published - for all-published test
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.16-all-published%3Blast_update_date"* ]]; then
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.16-all-published"* ]]; then
     json_response='{
       "data": [{
         "_id": "index-v4.16-all",
-        "docker_image_digest": "sha256:index-v4.16-all-digest",
-        "docker_image_id": "quay.io/redhat-pending/catalog:v4.16-all-published",
+        "image_id": "sha256:index-v4.16-all-digest",
         "related_images": [
           {
             "image": "quay.io/test/comp1@sha256:mno345",
@@ -183,15 +195,31 @@ curl() {
       }]
     }'
   # Empty response test - no index at all
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.17-empty%3Blast_update_date"* ]]; then
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.17-empty"* ]]; then
     json_response='{"data": []}'
+  # Index found but has no fragment data (realistic post-fix behavior: Pyxis finds the
+  # index image via the repositories filter but ContainerImage records do not carry
+  # related_images/bundles fields, so fragment extraction returns empty → safe fallback)
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.19-no-fragments"* ]]; then
+    json_response='{
+      "data": [{
+        "_id": "index-v4.19-no-fragments",
+        "image_id": "sha256:index-v4.19-no-fragments-digest",
+        "repositories": [
+          {
+            "registry": "quay.io",
+            "repository": "redhat-pending/catalog",
+            "tags": [{"name": "v4.19-no-fragments"}]
+          }
+        ]
+      }]
+    }'
   # Bundles field test - alternative structure with bundles instead of related_images
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.18-bundles%3Blast_update_date"* ]]; then
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.18-bundles"* ]]; then
     json_response='{
       "data": [{
         "_id": "index-v4.18-bundles",
-        "docker_image_digest": "sha256:index-v4.18-bundles-digest",
-        "docker_image_id": "quay.io/redhat-pending/catalog:v4.18-bundles",
+        "image_id": "sha256:index-v4.18-bundles-digest",
         "bundles": [
           {
             "bundle_path": "registry/bundle1",
@@ -219,13 +247,12 @@ curl() {
       }]
     }'
   # Multi-OCP test: v4.14 catalog with comp1v414 published (comp2v414 not published)
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.14%3Blast_update_date"* ]]; then
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.14"* ]] && [[ "$*" != *"-published"* ]] && [[ "$*" != *"-all-published"* ]]; then
     echo "✅ Matched v4.14 catalog pattern - returning comp1v414 as published" >&2
     json_response='{
       "data": [{
         "_id": "index-v4.14-multi",
-        "docker_image_digest": "sha256:index-v4.14-multi-digest",
-        "docker_image_id": "quay.io/redhat-pending/catalog:v4.14",
+        "image_id": "sha256:index-v4.14-multi-digest",
         "related_images": [
           {
             "image": "quay.io/test/comp1@sha256:comp1v414",
@@ -236,13 +263,12 @@ curl() {
       }]
     }'
   # Multi-OCP test: v4.16 catalog with comp3v416 published (comp4v416 not published)
-  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.16%3Blast_update_date"* ]] && [[ "$*" != *"all-published"* ]]; then
+  elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.16"* ]] && [[ "$*" != *"-published"* ]] && [[ "$*" != *"-all-published"* ]]; then
     echo "✅ Matched v4.16 catalog pattern - returning comp3v416 as published" >&2
     json_response='{
       "data": [{
         "_id": "index-v4.16-multi",
-        "docker_image_digest": "sha256:index-v4.16-multi-digest",
-        "docker_image_id": "quay.io/redhat-pending/catalog:v4.16",
+        "image_id": "sha256:index-v4.16-multi-digest",
         "related_images": [
           {
             "image": "quay.io/test/comp3@sha256:comp3v416",
@@ -338,7 +364,7 @@ chmod +x "$MOCK_BIN_DIR/skopeo"
 
 echo "✅ Created mock executable: $MOCK_BIN_DIR/skopeo" >&2
 
-# Create curl mock executable  
+# Create curl mock executable — mirrors every pattern in the curl() bash function above
 cat > "$MOCK_BIN_DIR/curl" << 'EOF'
 #!/bin/bash
 echo "🎯 Mock curl executable called" >&2
@@ -357,27 +383,102 @@ for ((i=1; i<=$#; i++)); do
   fi
 done
 
-# Determine response based on URL pattern
+# Validate filter fields (same rules as the bash function mock)
+if [[ "$*" == *"v1/images?filter="* ]]; then
+  if [[ "$*" == *"docker_image_id"* ]]; then
+    echo "ERROR: Query must not use docker_image_id" >&2
+    exit 1
+  fi
+  for field in "repositories.registry" "repositories.repository" "repositories.tags.name"; do
+    if [[ "$*" != *"${field}"* ]]; then
+      echo "ERROR: ${field} missing from Pyxis query filter" >&2
+      exit 1
+    fi
+  done
+  if [[ "$*" != *"page_size=500"* ]]; then
+    echo "ERROR: page_size=500 missing from Pyxis query" >&2
+    exit 1
+  fi
+fi
+
+# Determine response based on URL pattern (matches bash function mock patterns 1:1)
 json_response='{"data": []}'
 http_status="200"
 
-if [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.14%3Blast_update_date"* ]] && [[ "$*" != *"-published"* ]] && [[ "$*" != *"-all-published"* ]]; then
+if [[ "$*" == *"catalog-500-error"* ]]; then
+  json_response='{"error": "Internal Server Error"}'
+  http_status="500"
+elif [[ "$*" == *"catalog-malformed"* ]]; then
+  json_response='{"data": [{"_id": "broken", "malformed_json'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.14-published"* ]]; then
+  json_response='{
+    "data": [{
+      "_id": "index-v4.14",
+      "image_id": "sha256:index-v4.14-digest",
+      "related_images": [
+        {"image": "quay.io/test/comp1@sha256:abc123", "digest": "sha256:abc123"},
+        {"image": "quay.io/test/comp3@sha256:ghi789", "digest": "sha256:ghi789"}
+      ]
+    }]
+  }'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.15-unpublished"* ]]; then
+  json_response='{"data": []}'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.16-all-published"* ]]; then
+  json_response='{
+    "data": [{
+      "_id": "index-v4.16-all",
+      "image_id": "sha256:index-v4.16-all-digest",
+      "related_images": [
+        {"image": "quay.io/test/comp1@sha256:mno345", "digest": "sha256:mno345"},
+        {"image": "quay.io/test/comp2@sha256:pqr678", "digest": "sha256:pqr678"}
+      ]
+    }]
+  }'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.17-empty"* ]]; then
+  json_response='{"data": []}'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.18-bundles"* ]]; then
+  json_response='{
+    "data": [{
+      "_id": "index-v4.18-bundles",
+      "image_id": "sha256:index-v4.18-bundles-digest",
+      "bundles": [
+        {"bundle_path": "r/bundle1", "related_images": [
+          {"image": "quay.io/test/bundle1@sha256:bun111", "digest": "sha256:bun111"}
+        ]},
+        {"bundle_path": "r/bundle2", "related_images": [
+          {"image": "quay.io/test/bundle2@sha256:bun222", "digest": "sha256:bun222"}
+        ]}
+      ]
+    }]
+  }'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.19-no-fragments"* ]]; then
+  json_response='{
+    "data": [{
+      "_id": "index-v4.19-no-fragments",
+      "image_id": "sha256:index-v4.19-no-fragments-digest",
+      "repositories": [
+        {"registry": "quay.io", "repository": "redhat-pending/catalog",
+         "tags": [{"name": "v4.19-no-fragments"}]}
+      ]
+    }]
+  }'
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.14"* ]] && [[ "$*" != *"-published"* ]] && [[ "$*" != *"-all-published"* ]]; then
   echo "✅ Matched v4.14 catalog - returning comp1v414 as published" >&2
   json_response='{
     "data": [{
       "_id": "index-v4.14-multi",
-      "docker_image_id": "quay.io/redhat-pending/catalog:v4.14",
+      "image_id": "sha256:index-v4.14-multi-digest",
       "related_images": [
         {"image": "quay.io/test/comp1@sha256:comp1v414", "digest": "sha256:comp1v414"}
       ]
     }]
   }'
-elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.16%3Blast_update_date"* ]] && [[ "$*" != *"-published"* ]] && [[ "$*" != *"-all-published"* ]]; then
+elif [[ "$*" == *"repositories.tags.name%3D%3Dv4.16"* ]] && [[ "$*" != *"-published"* ]] && [[ "$*" != *"-all-published"* ]]; then
   echo "✅ Matched v4.16 catalog - returning comp3v416 as published" >&2
   json_response='{
     "data": [{
       "_id": "index-v4.16-multi",
-      "docker_image_id": "quay.io/redhat-pending/catalog:v4.16",
+      "image_id": "sha256:index-v4.16-multi-digest",
       "related_images": [
         {"image": "quay.io/test/comp3@sha256:comp3v416", "digest": "sha256:comp3v416"}
       ]

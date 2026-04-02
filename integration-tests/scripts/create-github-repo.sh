@@ -94,9 +94,19 @@ if [ -z "${CREATED_REPO}" ]; then
   exit 1
 fi
 
-# Verify the repository was created successfully
+# Verify the repository was created successfully.
+# GitHub's API has eventual consistency — a GET immediately after POST can return 404
+# for a few seconds while the new repository propagates. Retry with backoff.
 echo "Verifying repository creation..."
-VERIFY_REPO=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${full_repo_name} 2> /dev/null | jq -r '.full_name // ""')
+VERIFY_REPO=""
+for attempt in 1 2 3 4 5; do
+  sleep $((attempt * 2))  # 2s, 4s, 6s, 8s, 10s
+  VERIFY_REPO=$(curl -H "Authorization: token $GITHUB_TOKEN" \
+    https://api.github.com/repos/${full_repo_name} 2>/dev/null | jq -r '.full_name // ""')
+  [ "${VERIFY_REPO}" = "${full_repo_name}" ] && break
+  echo "   Verification attempt ${attempt}/5 — not yet visible, retrying..."
+done
+
 if [ "${VERIFY_REPO}" = "${full_repo_name}" ]; then
   echo "✅ Repository ${full_repo_name} created successfully!"
   echo "   - URL: https://github.com/${full_repo_name}"
