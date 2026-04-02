@@ -336,14 +336,14 @@ verify_release_contents() {
         fi
       fi
 
-      # Verify artifacts.json was created by push-rpms-to-pulp task
-      echo "Checking artifacts.json from push-rpms-to-pulp task..."
+      # Verify artifacts.json was created by push-unsigned-rpms-to-pulp task
+      echo "Checking artifacts.json from push-unsigned-rpms-to-pulp task..."
       local artifacts_dir
       artifacts_dir=$(mktemp -d -p "$(pwd)")
 
       if "${SUITE_DIR}/../scripts/get-trusted-artifact-content.sh" \
           "${managed_plr_name}" \
-          "push-rpms-to-pulp" \
+          "push-unsigned-rpms-to-pulp" \
           "sourceDataArtifact" \
           "${managed_namespace}" \
           "${artifacts_dir}" > /dev/null 2>&1; then
@@ -399,7 +399,7 @@ verify_release_contents() {
           failures=$((failures+1))
         fi
       else
-        echo "⚠️ Could not fetch trusted artifact from push-rpms-to-pulp task (task may not have run)"
+        echo "⚠️ Could not fetch trusted artifact from push-unsigned-rpms-to-pulp task (task may not have run)"
       fi
 
       # Cleanup
