@@ -362,6 +362,70 @@ spec:
         # Write collected signed RPMs OCI artifacts to result
         echo "Signed RPMs OCI artifacts: ${SIGNED_RPMS_OCI_ARTIFACTS}"
         echo -n "${SIGNED_RPMS_OCI_ARTIFACTS}" > "$(results.signedRpmsOciArtifacts.path)"
+
+        # Write artifacts JSON to file for next step
+        echo "${SIGNED_RPMS_OCI_ARTIFACTS}" > "$(params.dataDir)/signed-rpms-oci-artifacts.json"
+    - name: extract-signed-rpms
+      image: quay.io/konflux-ci/release-service-utils:d08bdfa3733a7c75d5334aaa77b7aa46fbace00b
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 500m
+        requests:
+          memory: 512Mi
+          cpu: 500m
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        ARTIFACTS_JSON="$(params.dataDir)/signed-rpms-oci-artifacts.json"
+        EXTRACT_DIR="$(params.dataDir)/signed-rpms-extracted"
+
+        if [ ! -f "${ARTIFACTS_JSON}" ]; then
+            echo "No signed RPMs OCI artifacts file found"
+            exit 0
+        fi
+
+        # Create extraction directory
+        mkdir -p "${EXTRACT_DIR}"
+
+        # Iterate over each repo/artifact pair
+        for repo in $(jq -r 'keys[]' "${ARTIFACTS_JSON}"); do
+            artifact=$(jq -r --arg repo "${repo}" '.[$repo]' "${ARTIFACTS_JSON}")
+            echo "Processing repo: ${repo}"
+            echo "  Artifact: ${artifact}"
+
+            # Create repo-specific directory
+            repo_dir="${EXTRACT_DIR}/${repo}"
+            mkdir -p "${repo_dir}"
+
+            # Strip the "oci:" prefix if present
+            oci_ref="${artifact#oci:}"
+            echo "  OCI ref (stripped): ${oci_ref}"
+
+            # Pull the OCI artifact (extracts signed-rpms archive file)
+            echo "Pulling artifact to ${repo_dir}..."
+            oras pull "${oci_ref}" -o "${repo_dir}"
+
+            # Extract the gzipped tar archive
+            echo "Extracting signed-rpms archive..."
+            tar -xzf "${repo_dir}/signed-rpms" -C "${repo_dir}"
+            rm -f "${repo_dir}/signed-rpms"
+            echo "  Extracted successfully"
+
+            echo "Contents of ${repo_dir}:"
+            ls -la "${repo_dir}" || echo "  (empty or not accessible)"
+            find "${repo_dir}" -type f -name "*.rpm" 2>/dev/null | head -20 || true
+        done
+
+        echo ""
+        echo "=== Summary of extracted signed RPMs ==="
+        echo "Extraction directory: ${EXTRACT_DIR}"
+        find "${EXTRACT_DIR}" -type f -name "*.rpm" | while read -r rpm; do
+            echo "  ${rpm}"
+        done
+        echo "=== End of summary ==="
+        exit 5 # on purpose to test the task
     - name: create-trusted-artifact
       computeResources:
         limits:
