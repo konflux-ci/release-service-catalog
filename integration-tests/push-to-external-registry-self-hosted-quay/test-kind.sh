@@ -414,6 +414,18 @@ else
     failures=$((failures+1))
 fi
 
+echo "  Verifying released repository is public..."
+VISIBILITY_RESPONSE=$(curl -4 -sk "https://localhost:8443/api/v1/repository/${RELEASED_REPO}" \
+    -H "Authorization: Bearer ${TOKEN}" 2>/dev/null)
+is_public=$(echo "$VISIBILITY_RESPONSE" | jq -r '.is_public // false' 2>/dev/null)
+if [ "$is_public" = "true" ]; then
+    echo "    Released repository is public"
+else
+    echo "    ERROR: Released repository is not public"
+    echo "    Response: ${VISIBILITY_RESPONSE}"
+    failures=$((failures+1))
+fi
+
 kill "${VERIFY_PF_PID}" 2>/dev/null || true
 VERIFY_PF_PID=""
 
