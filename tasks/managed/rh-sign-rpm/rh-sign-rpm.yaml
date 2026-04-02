@@ -105,6 +105,9 @@ spec:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
+    - name: signedRpmsOciArtifacts
+      type: string
+      description: JSON object mapping repo names to their signed RPMs OCI artifact references
   volumes:
     - name: workdir
       emptyDir: {}
@@ -188,6 +191,10 @@ spec:
         set -x
 
         PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+        IR_FILE="$(params.dataDir)/ir-output.txt"
+
+        # Initialize JSON object to collect signed RPMs OCI artifacts from all repos
+        SIGNED_RPMS_OCI_ARTIFACTS='{}'
 
         # Extract signing configuration from data file
         KERBEROS_PRINCIPAL=$(jq --exit-status -r '.signOptions.signKeytab.principal' "${DATA_FILE}")
@@ -195,8 +202,10 @@ spec:
         KERBEROS_KEYTAB_SECRET=$(jq --exit-status -r '.signOptions.signKeytab.secret' "${DATA_FILE}")
         PIPELINE_IMAGE=$(jq --exit-status -r '.signOptions.signPipelineImage' "${DATA_FILE}")
         SIGNING_ALIAS=$(jq --exit-status -r '.signOptions.signKeyAlias.key' "${DATA_FILE}")
-        SERVICE_ACCOUNT=$(jq --exit-status -r '.signOptions.signPipelineServiceAccount // "release-service-account"' "${DATA_FILE}")
-        ARTIFACT_STORAGE_SECRET=$(jq --exit-status -r '.signOptions.artifactStorageSecret // "signing-artifact-storage-preprod"' "${DATA_FILE}")
+        SERVICE_ACCOUNT=$(jq --exit-status -r \
+            '.signOptions.signPipelineServiceAccount // "release-service-account"' "${DATA_FILE}")
+        ARTIFACT_STORAGE_SECRET=$(jq --exit-status -r \
+            '.signOptions.artifactStorageSecret // "signing-artifact-storage-preprod"' "${DATA_FILE}")
 
         # Determine repos to process and whether to filter artifacts
         FILTER_ARTIFACTS="false"
@@ -323,12 +332,36 @@ spec:
               --service-account "${SERVICE_ACCOUNT}" \
               --pipeline-timeout "0h30m0s" \
               --task-timeout "0h25m0s" \
-              -s true
+              -s true \
+              | tee "${IR_FILE}"
+
+            # Extract internal request name and query results
+            internalRequest=$(awk -F"'" '/created/ { print $2 }' "${IR_FILE}")
+            echo "Internal request created: ${internalRequest}"
+
+            results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
+            echo "Internal request results: ${results}"
+
+            # Extract signed_rpms_oci_artifact and add to collection
+            signedRpmsOciArtifact="$(jq -r '.signed_rpms_oci_artifact // ""' <<< "${results}")"
+            if [ -n "${signedRpmsOciArtifact}" ]; then
+                echo "Signed RPMs OCI artifact for ${REPO}: ${signedRpmsOciArtifact}"
+                SIGNED_RPMS_OCI_ARTIFACTS=$(jq --arg repo "${REPO}" --arg artifact "${signedRpmsOciArtifact}" \
+                    '.[$repo] = $artifact' <<< "${SIGNED_RPMS_OCI_ARTIFACTS}")
+            else
+                echo "Error: No signed_rpms_oci_artifact returned for repo: ${REPO}"
+                echo "Results: ${results}"
+                exit 1
+            fi
 
             echo "RPM signing request completed for repo: ${REPO}"
         done
 
         echo "All RPM signing requests completed"
+
+        # Write collected signed RPMs OCI artifacts to result
+        echo "Signed RPMs OCI artifacts: ${SIGNED_RPMS_OCI_ARTIFACTS}"
+        echo -n "${SIGNED_RPMS_OCI_ARTIFACTS}" > "$(results.signedRpmsOciArtifacts.path)"
     - name: create-trusted-artifact
       computeResources:
         limits:
