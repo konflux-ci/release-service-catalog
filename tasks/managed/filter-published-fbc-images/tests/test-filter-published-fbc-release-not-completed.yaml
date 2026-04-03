@@ -2,33 +2,28 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-published-fbc-pyxis-500-error
+  name: test-filter-published-fbc-release-not-completed
 spec:
   description: |
-    Verify that filter-published-fbc-images handles Pyxis 500 errors gracefully with retries
-    and keeps all components (fail-safe behavior) after exhausting retry attempts.
+    Verify that a previous Release whose Released condition is False (failed/in-progress)
+    is NOT counted as published. All snapshot components must be kept.
+
+    This is the partial-delivery safety test: if a prior pipeline run failed mid-way
+    (e.g. advisory creation failed after IIB succeeded), the fragment must not be
+    treated as published — the re-release must run the full pipeline again.
   params:
     - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored.
       type: string
     - name: ociArtifactExpiresAfter
-      description: >-
-        Expiration date for the trusted artifacts created in the OCI repository.
-        An empty string means the artifacts do not expire.
       type: string
       default: "1d"
     - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
       type: string
       default: "--insecure"
     - name: trustedArtifactsDebug
-      description: >-
-        Flag to enable debug logging in trusted artifacts.
-        Set to a non-empty string to enable.
       type: string
       default: ""
     - name: dataDir
-      description: The location where data will be stored
       type: string
   tasks:
     - name: setup
@@ -62,36 +57,31 @@ spec:
               value: $(params.orasOptions)
         steps:
           - name: create-test-data
-            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
             script: |
               #!/usr/bin/env bash
               set -eux
-              
+
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              
-              # Create test snapshot with components to be released
+
+              # comp1 digest (sha256:abc123) appears in a prior FAILED release.
+              # It must NOT be filtered — released=False means partial delivery.
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
               {
                 "application": "test-app",
                 "components": [
                   {
-                    "name": "comp1-test",
-                    "containerImage": "quay.io/test/comp1@sha256:test111"
+                    "name": "comp1",
+                    "containerImage": "quay.io/test/comp1@sha256:abc123"
                   }
                 ]
               }
               EOF
-              
-              # Create data file with Pyxis configuration and targetIndex that triggers 500 error
+
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
-                "pyxis": {
-                  "secret": "pyxis",
-                  "server": "production"
-                },
                 "fbc": {
-                  "targetIndex": "quay.io/redhat/catalog-500-error:v1.0",
-                  "publishingCredentials": "test-publishing-creds"
+                  "targetIndex": "quay.io/redhat-pending/catalog:v4.15"
                 }
               }
               EOF
@@ -105,23 +95,24 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(results.sourceDataArtifact.path)
-
-    - name: run-task
+    - name: run-filter
       runAfter:
         - setup
+      taskRef:
+        name: filter-published-fbc-images
       params:
         - name: snapshotPath
-          value: $(context.pipelineRun.uid)/snapshot.json
+          value: "$(context.pipelineRun.uid)/snapshot.json"
         - name: dataPath
-          value: $(context.pipelineRun.uid)/data.json
-        - name: pyxisSecret
-          value: pyxis
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: releaseName
+          value: "test-ns/current-release-incomplete"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
           value: $(params.orasOptions)
         - name: sourceDataArtifact
-          value: $(tasks.setup.results.sourceDataArtifact)
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -130,26 +121,23 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
-      taskRef:
-        name: filter-published-fbc-images
-
-    - name: verify-components-kept
+    - name: verify-results
       runAfter:
-        - run-task
+        - run-filter
       params:
         - name: sourceDataArtifact
-          value: $(tasks.run-task.results.sourceDataArtifact)
-        - name: dataDir
-          value: $(params.dataDir)
+          value: "$(tasks.run-filter.results.sourceDataArtifact)=$(params.dataDir)"
         - name: orasOptions
           value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
       taskSpec:
         params:
           - name: sourceDataArtifact
             type: string
-          - name: dataDir
-            type: string
           - name: orasOptions
+            type: string
+          - name: dataDir
             type: string
         volumes:
           - name: workdir
@@ -170,45 +158,25 @@ spec:
                 value: $(params.dataDir)
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
-          - name: verify-all-components-kept
-            image: quay.io/konflux-ci/release-service-utils:e633d51cd41d73e4b3310face21bb980af7a662f
+          - name: check-filtered-snapshot
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              # Task should succeed and keep all components when Pyxis fails
-              FILTERED_SNAPSHOT=$(cat "$(params.dataDir)/filtered-snapshot.json")
-              COMPONENT_COUNT=$(jq '.components | length' <<< "${FILTERED_SNAPSHOT}")
+              FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
 
-              if [ "${COMPONENT_COUNT}" != "1" ]; then
-                echo "ERROR: Expected 1 component (Pyxis error should keep all components), got ${COMPONENT_COUNT}"
+              COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
+
+              # comp1 is in a FAILED release — must NOT be filtered out
+              if [ "${COUNT}" -ne 1 ]; then
+                echo "ERROR: Expected 1 component (failed release not counted), got ${COUNT}"
                 exit 1
               fi
 
-              COMPONENT_NAME=$(jq -r '.components[0].name' <<< "${FILTERED_SNAPSHOT}")
-              if [ "${COMPONENT_NAME}" != "comp1-test" ]; then
-                echo "ERROR: Expected component 'comp1-test', got '${COMPONENT_NAME}'"
+              if ! jq -e '.components[] | select(.name == "comp1")' "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "ERROR: comp1 should be present (prior release failed)"
                 exit 1
               fi
 
-              # Verify ocpVersion is attached even when Pyxis fails
-              expected_ocp_version="v4.15"
-
-              comp_ocp_version=$(jq -r '.components[0].ocpVersion //empty' <<< "${FILTERED_SNAPSHOT}")
-
-              if [ -z "${comp_ocp_version}" ]; then
-                echo "ERROR: ocpVersion not attached to comp1-test"
-                exit 1
-              fi
-
-              if [ "${comp_ocp_version}" != "${expected_ocp_version}" ]; then
-                echo "ERROR: ocpVersion mismatch for comp1-test"
-                echo "  Expected: ${expected_ocp_version}"
-                echo "  Got: ${comp_ocp_version}"
-                exit 1
-              fi
-
-              echo "✓ ocpVersion attached to comp1-test: ${comp_ocp_version}"
-              echo "✅ Test PASSED: Task succeeded with fail-safe behavior"
-              echo "   All components kept after Pyxis 500 errors and retries"
-              echo "   ocpVersion correctly attached to all components"
+              echo "✓ comp1 kept: prior Release had Released=False — not counted as published"

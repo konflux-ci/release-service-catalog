@@ -1,0 +1,178 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-prepare-fbc-parameters-empty-snapshot
+spec:
+  description: |
+    Run prepare-fbc-parameters with a snapshot that has zero components
+    (all components filtered out by filter-published-fbc-images).
+    The task must exit 0 and write mustPublishIndexImage=false,
+    mustSignIndexImage=false, and validationPassed=true to its results
+    so that downstream tasks (add-fbc-contribution, sign-index-image, etc.)
+    are correctly skipped via their when conditions.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
+      taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
+            description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        results:
+          - name: sourceDataArtifact
+            description: Location of trusted artifacts to be used to populate data directory
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Empty components array — simulates all fragments already published
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << 'EOF'
+              {
+                "application": "foo-app",
+                "components": []
+              }
+              EOF
+
+              cat > "$(params.dataDir)/data.json" << 'EOF'
+              {
+                "fbc": {
+                  "allowedPackages": ["test-operator"],
+                  "hotfix": false,
+                  "preGA": false,
+                  "stagedIndex": false
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: prepare-fbc-parameters
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: pyxisSecret
+          value: test-pyxis-secret
+        - name: pyxisServer
+          value: production
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: https://github.com/konflux-ci/release-service-catalog.git
+        - name: taskGitRevision
+          value: development
+        - name: pipelineRunUid
+          value: "test-pipeline-run-uid"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: mustPublishIndexImage
+          value: "$(tasks.run-task.results.mustPublishIndexImage)"
+        - name: mustSignIndexImage
+          value: "$(tasks.run-task.results.mustSignIndexImage)"
+        - name: mustOverwriteFromIndexImage
+          value: "$(tasks.run-task.results.mustOverwriteFromIndexImage)"
+        - name: validationPassed
+          value: "$(tasks.run-task.results.validationPassed)"
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: mustPublishIndexImage
+            type: string
+          - name: mustSignIndexImage
+            type: string
+          - name: mustOverwriteFromIndexImage
+            type: string
+          - name: validationPassed
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -e
+
+              failures=0
+
+              check() {
+                local name="$1" expected="$2" actual="$3"
+                if [ "${actual}" = "${expected}" ]; then
+                  echo "PASS: ${name}=${actual}"
+                else
+                  echo "FAIL: ${name} expected=${expected} actual=${actual}"
+                  failures=$((failures + 1))
+                fi
+              }
+
+              check "mustPublishIndexImage"    "false" "$(params.mustPublishIndexImage)"
+              check "mustSignIndexImage"       "false" "$(params.mustSignIndexImage)"
+              check "mustOverwriteFromIndexImage" "false" "$(params.mustOverwriteFromIndexImage)"
+              check "validationPassed"         "true"  "$(params.validationPassed)"
+
+              if [ "${failures}" -gt 0 ]; then
+                echo "ERROR: ${failures} result assertion(s) failed"
+                exit 1
+              fi
+              echo "All result assertions passed for empty-snapshot path"

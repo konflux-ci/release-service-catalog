@@ -2,33 +2,25 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-published-fbc-empty-input
+  name: test-filter-published-fbc-no-app-label
 spec:
   description: |
-    Negative test: Verify that filter-published-fbc-images correctly handles an empty input snapshot
-    (no components), resulting in an empty filtered snapshot without errors.
+    Verify safe fallback when the current Release CR exists but has no
+    appstudio.openshift.io/application label (kubectl get <name> returns empty string).
+    The task cannot determine the application name and must keep all components.
   params:
     - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored.
       type: string
     - name: ociArtifactExpiresAfter
-      description: >-
-        Expiration date for the trusted artifacts created in the OCI repository.
-        An empty string means the artifacts do not expire.
       type: string
       default: "1d"
     - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
       type: string
       default: "--insecure"
     - name: trustedArtifactsDebug
-      description: >-
-        Flag to enable debug logging in trusted artifacts.
-        Set to a non-empty string to enable.
       type: string
       default: ""
     - name: dataDir
-      description: The location where data will be stored
       type: string
   tasks:
     - name: setup
@@ -69,22 +61,26 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create test snapshot with NO components
-              # Should result in empty filtered snapshot (passthrough)
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
               {
                 "application": "test-app",
-                "components": []
+                "components": [
+                  {
+                    "name": "comp1",
+                    "containerImage": "quay.io/test/comp1@sha256:abc123"
+                  },
+                  {
+                    "name": "comp2",
+                    "containerImage": "quay.io/test/comp2@sha256:def456"
+                  }
+                ]
               }
               EOF
 
-              # Create data file with Pyxis configuration and targetIndex
-              # targetIndex required by task, but won't be queried (no components)
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
                 "fbc": {
-                  "targetIndex": "quay.io/redhat-pending/catalog:v4.17-empty",
-                  "publishingCredentials": "test-publishing-creds"
+                  "targetIndex": "quay.io/redhat-pending/catalog:v4.15"
                 }
               }
               EOF
@@ -109,7 +105,7 @@ spec:
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
         - name: releaseName
-          value: "test-ns/test-current"
+          value: "test-ns/current-release-no-app-label"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -168,21 +164,22 @@ spec:
               set -eux
 
               FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
-
-              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
-                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
-                exit 1
-              fi
-
-              echo "Filtered snapshot contents:"
-              jq . "${FILTERED_SNAPSHOT}"
-
               COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
-              echo "Component count: ${COUNT}"
-              
-              # Expected: 0 components (input was empty)
-              if [ "${COUNT}" -ne 0 ]; then
-                echo "ERROR: Expected 0 components (empty input), got ${COUNT}"
+
+              # Application label missing → cannot look up releases → safe fallback
+              if [ "${COUNT}" -ne 2 ]; then
+                echo "ERROR: Expected 2 components (app label missing → safe fallback), got ${COUNT}"
                 exit 1
               fi
-              
+
+              for name in comp1 comp2; do
+                ocp=$(jq -r --arg n "$name" \
+                    '.components[] | select(.name==$n) | .ocpVersion // empty' \
+                    "${FILTERED_SNAPSHOT}")
+                if [ -z "$ocp" ]; then
+                  echo "ERROR: ocpVersion not attached to $name"
+                  exit 1
+                fi
+              done
+
+              echo "✓ Application label missing → safe fallback: all 2 components kept"
