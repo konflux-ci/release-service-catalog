@@ -283,25 +283,31 @@ spec:
               --argjson result "$package_result" <<< "$package_validation_results")
 
             # === OCP VERSION READING ===
-            # Read OCP version from snapshot (attached by filter-published-fbc-images)
-            echo "  INFO: Reading OCP version from snapshot..."
-            ocp_version=$(jq -cr --argjson i "$i" '.components[$i].ocpVersion' "${SNAPSHOT_PATH}")
+            # Read OCP version(s) from snapshot (attached by filter-published-fbc-images)
+            # Expected format: JSON array ["v4.12"] or ["v4.12", "v4.13"]
+            echo "  INFO: Reading OCP version(s) from snapshot..."
+            ocp_versions_json=$(jq -c --argjson i "$i" '.components[$i].ocpVersion' "${SNAPSHOT_PATH}")
 
-            if [ -z "$ocp_version" ] || [ "$ocp_version" = "null" ]; then
+            if [ -z "$ocp_versions_json" ] || [ "$ocp_versions_json" = "null" ]; then
                 echo "    ERROR: ocpVersion not found for component $i"
                 echo "    This field should be attached by filter-published-fbc-images task"
                 validation_failed=true
-                ocp_version="invalid"
+                ocp_versions_json="null"  # Reset to prevent state leakage across iterations
             else
-                echo "    SUCCESS: Using OCP version from snapshot: ${ocp_version}"
-                target_versions=$(jq --arg version "$ocp_version" '. += [$version]' <<< "$target_versions")
+                echo "    SUCCESS: Component supports: ${ocp_versions_json}"
+
+                # Add each version to target_versions array (merge JSON arrays, keeping unique values)
+                target_versions=$(jq -s --argjson new_versions "$ocp_versions_json" \
+                  '.[0] + $new_versions | unique' <<< "$target_versions")
 
                 # Group components by OCP version for duplicate package detection
-                if [ -z "${ocp_version_to_component_indices[$ocp_version]:-}" ]; then
-                    ocp_version_to_component_indices[$ocp_version]="$i"
-                else
-                    ocp_version_to_component_indices[$ocp_version]+=$'\n'"$i"
-                fi
+                for ocp_version in $(jq -r '.[]' <<< "$ocp_versions_json"); do
+                  if [ -z "${ocp_version_to_component_indices[$ocp_version]:-}" ]; then
+                      ocp_version_to_component_indices[$ocp_version]="$i"
+                  else
+                      ocp_version_to_component_indices[$ocp_version]+=$'\n'"$i"
+                  fi
+                done
             fi
         done
         # Ensure all bundle images are unique across fragments

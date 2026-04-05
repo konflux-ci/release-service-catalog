@@ -214,9 +214,11 @@ spec:
         timestamp_format=$(jq -r '.fbc.timestampFormat // "%s"' "${DATA_FILE}")
         timestamp=$(date "+${timestamp_format}")
 
-        # Extract OCP versions from snapshot
-        ocp_versions=$(jq -r '.components[].ocpVersion' "$SNAPSHOT_PATH" | sort -u)
-        echo "INFO: Found OCP versions: $(echo "$ocp_versions" | tr '\n' ' ')"
+        # Extract OCP versions from snapshot (ocpVersion is JSON array)
+        # Components can have multiple versions: ["v4.17", "v4.18", "v4.19"]
+        # Fallback to empty array if ocpVersion is absent or null for backward compatibility
+        ocp_versions=$(jq -r '.components[] | (.ocpVersion // []) | .[]' "$SNAPSHOT_PATH" | sort -u | tr '\n' ' ')
+        echo "INFO: Found OCP versions: ${ocp_versions}"
 
         echo "INFO: Using pre-determined values from prepare-fbc-parameters:"
         echo "  - mustPublishIndexImage: ${mustPublishIndexImage}"
@@ -277,20 +279,43 @@ spec:
         task_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds )))
 
         # Group components by OCP version for isolated processing
+        # Expands multi-version components into separate instances per version
         group_components_by_ocp_version() {
             local snapshot_file="$1"
             local ocp_versions="$2"
 
-            # Group components by OCP version
+            # For each OCP version, extract/expand matching components
             for ocp_version in $ocp_versions; do
                 local group_file="${groups_dir}/${ocp_version}.json"
-                jq --arg ocp_version "$ocp_version" \
-                    '.components | map(select(.ocpVersion == $ocp_version))' \
-                    "$snapshot_file" > "$group_file"
+
+                # Build group by expanding multi-version components
+                # Uses ocpVersionMetadata to get resolved indexes for this specific version
+                jq --arg ocp_version "$ocp_version" '
+                  .components | map(
+                    # Check if component supports this OCP version (ocpVersion is JSON array)
+                    if (.ocpVersion | index($ocp_version)) then
+                      # Find metadata for this specific version
+                      (.ocpVersionMetadata | map(select(.version == $ocp_version)) | .[0]) as $version_metadata |
+
+                      # Create instance for this version with resolved indexes
+                      . + {
+                        ocpVersion: $ocp_version,
+                        updatedFromIndex: $version_metadata.updatedFromIndex,
+                        targetIndex: $version_metadata.targetIndex,
+                        originalName: .name,
+                        name: (if (.ocpVersion | length) > 1
+                               then .name + "-" + $ocp_version
+                               else .name end)
+                      }
+                    else
+                      empty
+                    end
+                  )
+                ' "$snapshot_file" > "$group_file"
 
                 local group_count
                 group_count=$(jq 'length' "$group_file")
-                echo "INFO: OCP version $ocp_version has $group_count components" >&2
+                echo "INFO: OCP version $ocp_version has $group_count component instance(s)" >&2
             done
         }
 

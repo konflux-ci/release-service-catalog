@@ -1,0 +1,310 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-prepare-fbc-snapshot-multi-ocp-intersecting
+spec:
+  description: |
+    Test prepare-fbc-snapshot with multiple components targeting multiple OCP versions with intersecting support.
+    Scenario:
+    - Component 1: supports v4.12, v4.13, v4.14
+    - Component 2: supports v4.13, v4.14 (intersecting with comp1)
+    - Component 3: supports v4.14, v4.15 (intersecting with comp2)
+    Verifies that ocpVersionMetadata is correctly generated for each OCP version per component.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+      taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: add-snapshot
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Create data.json with index templates using OCP_VERSION placeholder
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "fbc": {
+                  "fromIndex": "quay.io/redhat/redhat-operator-index:{{ OCP_VERSION }}",
+                  "targetIndex": "quay.io/test/target-index:{{ OCP_VERSION }}"
+                }
+              }
+              EOF
+
+              # Create snapshot with components having multiple OCP versions (from filter-published-fbc-images)
+              # Each component has ocpVersion as JSON array
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << 'EOF'
+              {
+                "application": "multi-ocp-intersecting-app",
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/comp1@sha256:0001",
+                    "name": "comp1-multi-ocp",
+                    "ocpVersion": ["v4.17", "v4.18", "v4.19"],
+                    "repository": "quay.io/test/comp1"
+                  },
+                  {
+                    "containerImage": "quay.io/test/comp2@sha256:0002",
+                    "name": "comp2-intersecting",
+                    "ocpVersion": ["v4.18", "v4.19"],
+                    "repository": "quay.io/test/comp2"
+                  },
+                  {
+                    "containerImage": "quay.io/test/comp3@sha256:0003",
+                    "name": "comp3-intersecting",
+                    "ocpVersion": ["v4.19", "v4.20"],
+                    "repository": "quay.io/test/comp3"
+                  }
+                ]
+              }
+              EOF
+
+              echo "Multi-OCP intersecting test data created for prepare-fbc-snapshot"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: prepare-fbc-snapshot
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "https://github.com/konflux-ci/release-service-catalog.git"
+        - name: taskGitRevision
+          value: "development"
+      runAfter:
+        - setup
+
+    - name: check-result
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+              - name: orasOptions
+                value: $(params.orasOptions)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+
+              echo "Checking multi-OCP intersecting snapshot results..."
+              echo "Snapshot contents:"
+              jq . "$SNAPSHOT_FILE"
+
+              # Verify component count
+              component_count=$(jq '.components | length' "$SNAPSHOT_FILE")
+              if [ "$component_count" != "3" ]; then
+                echo "ERROR: Expected 3 components, got $component_count"
+                exit 1
+              fi
+
+              # Component 1: should have metadata for v4.12, v4.13, v4.14
+              echo "Checking component 1 (comp1-multi-ocp)..."
+              comp1_versions=$(jq -r '.components[0].ocpVersion | length' "$SNAPSHOT_FILE")
+              if [ "$comp1_versions" != "3" ]; then
+                echo "ERROR: Component 1 should support 3 OCP versions, got $comp1_versions"
+                exit 1
+              fi
+
+              comp1_metadata_count=$(jq -r '.components[0].ocpVersionMetadata | length' "$SNAPSHOT_FILE")
+              if [ "$comp1_metadata_count" != "3" ]; then
+                echo "ERROR: Component 1 should have 3 metadata entries, got $comp1_metadata_count"
+                exit 1
+              fi
+
+              # Verify each version has correct resolved indexes
+              for version in "v4.17" "v4.18" "v4.19"; do
+                from_index=$(jq -r --arg v "$version" \
+                  '.components[0].ocpVersionMetadata[] | select(.version == $v) | .updatedFromIndex' "$SNAPSHOT_FILE")
+                target_index=$(jq -r --arg v "$version" \
+                  '.components[0].ocpVersionMetadata[] | select(.version == $v) | .targetIndex' "$SNAPSHOT_FILE")
+
+                expected_from="quay.io/redhat/redhat-operator-index:$version"
+                expected_target="quay.io/test/target-index:$version"
+
+                if [ "$from_index" != "$expected_from" ]; then
+                  echo "ERROR: Component 1 fromIndex mismatch for $version. Expected: $expected_from, Got: $from_index"
+                  exit 1
+                fi
+
+                if [ "$target_index" != "$expected_target" ]; then
+                  echo "ERROR: Component 1 targetIndex mismatch for $version." \
+                    "Expected: $expected_target, Got: $target_index"
+                  exit 1
+                fi
+
+                echo "SUCCESS: Component 1 has correct indexes for $version"
+              done
+
+              # Component 2: should have metadata for v4.13, v4.14
+              echo "Checking component 2 (comp2-intersecting)..."
+              comp2_versions=$(jq -r '.components[1].ocpVersion | length' "$SNAPSHOT_FILE")
+              if [ "$comp2_versions" != "2" ]; then
+                echo "ERROR: Component 2 should support 2 OCP versions, got $comp2_versions"
+                exit 1
+              fi
+
+              comp2_metadata_count=$(jq -r '.components[1].ocpVersionMetadata | length' "$SNAPSHOT_FILE")
+              if [ "$comp2_metadata_count" != "2" ]; then
+                echo "ERROR: Component 2 should have 2 metadata entries, got $comp2_metadata_count"
+                exit 1
+              fi
+
+              for version in "v4.18" "v4.19"; do
+                from_index=$(jq -r --arg v "$version" \
+                  '.components[1].ocpVersionMetadata[] | select(.version == $v) | .updatedFromIndex' "$SNAPSHOT_FILE")
+                target_index=$(jq -r --arg v "$version" \
+                  '.components[1].ocpVersionMetadata[] | select(.version == $v) | .targetIndex' "$SNAPSHOT_FILE")
+
+                expected_from="quay.io/redhat/redhat-operator-index:$version"
+                expected_target="quay.io/test/target-index:$version"
+
+                if [ "$from_index" != "$expected_from" ] || [ "$target_index" != "$expected_target" ]; then
+                  echo "ERROR: Component 2 index mismatch for $version"
+                  exit 1
+                fi
+
+                echo "SUCCESS: Component 2 has correct indexes for $version"
+              done
+
+              # Component 3: should have metadata for v4.14, v4.15
+              echo "Checking component 3 (comp3-intersecting)..."
+              comp3_versions=$(jq -r '.components[2].ocpVersion | length' "$SNAPSHOT_FILE")
+              if [ "$comp3_versions" != "2" ]; then
+                echo "ERROR: Component 3 should support 2 OCP versions, got $comp3_versions"
+                exit 1
+              fi
+
+              comp3_metadata_count=$(jq -r '.components[2].ocpVersionMetadata | length' "$SNAPSHOT_FILE")
+              if [ "$comp3_metadata_count" != "2" ]; then
+                echo "ERROR: Component 3 should have 2 metadata entries, got $comp3_metadata_count"
+                exit 1
+              fi
+
+              for version in "v4.19" "v4.20"; do
+                from_index=$(jq -r --arg v "$version" \
+                  '.components[2].ocpVersionMetadata[] | select(.version == $v) | .updatedFromIndex' "$SNAPSHOT_FILE")
+                target_index=$(jq -r --arg v "$version" \
+                  '.components[2].ocpVersionMetadata[] | select(.version == $v) | .targetIndex' "$SNAPSHOT_FILE")
+
+                expected_from="quay.io/redhat/redhat-operator-index:$version"
+                expected_target="quay.io/test/target-index:$version"
+
+                if [ "$from_index" != "$expected_from" ] || [ "$target_index" != "$expected_target" ]; then
+                  echo "ERROR: Component 3 index mismatch for $version"
+                  exit 1
+                fi
+
+                echo "SUCCESS: Component 3 has correct indexes for $version"
+              done
+
+              echo "SUCCESS: Multi-OCP intersecting snapshot test passed!"
+              echo "  - Component 1: 3 OCP versions (v4.17, v4.18, v4.19)"
+              echo "  - Component 2: 2 OCP versions (v4.18, v4.19) - intersects with comp1"
+              echo "  - Component 3: 2 OCP versions (v4.19, v4.20) - intersects with comp2"
+              echo "  - All components have correct ocpVersionMetadata with resolved indexes"

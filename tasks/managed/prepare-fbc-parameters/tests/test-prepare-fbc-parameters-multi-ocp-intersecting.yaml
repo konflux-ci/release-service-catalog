@@ -1,0 +1,258 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-prepare-fbc-parameters-multi-ocp-intersecting
+spec:
+  description: |
+    Test prepare-fbc-parameters with multiple components targeting multiple OCP versions with intersecting support.
+    Scenario:
+    - Component 1: supports v4.17, v4.18
+    - Component 2: supports v4.18, v4.19 (intersecting with comp1 on v4.18)
+    Verifies package validation and opt-in checking across multi-OCP components.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
+      taskSpec:
+        params:
+          - name: snapshotPath
+            type: string
+            description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        results:
+          - name: sourceDataArtifact
+            description: Location of trusted artifacts to be used to populate data directory
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Ensure data directory exists
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Create snapshot with multiple components, each supporting multiple OCP versions
+              # Using actual test FBC images that exist and are accessible
+              # comp1: sha256:f6e7... (has example-operator)
+              # comp2: sha256:4218... (has operator-foundry-e2e-example-operator)
+              # Note: Both images exist and can be pulled for opm render
+              cat > "$(params.dataDir)/$(params.snapshotPath)" << 'EOF'
+              {
+                "components": [
+                  {
+                    "name": "comp1-multi-ocp",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:f6e744662e342c1321deddb92469b55197002717a15f8c0b1bb2d9440aac2297",
+                    "ocpVersion": ["v4.17", "v4.18"]
+                  },
+                  {
+                    "name": "comp2-intersecting",
+                    "containerImage": "quay.io/hacbs-release-tests/test-ocp-version/test-fbc-component@sha256:42183bc9716448d0c25dbe35bb1c61661449270c89576bed8b9d46ec8df08a4a",
+                    "ocpVersion": ["v4.18", "v4.19"]
+                  }
+                ]
+              }
+              EOF
+
+              # Create data.json with allowed packages
+              cat > "$(params.dataDir)/data.json" << 'EOF'
+              {
+                "fbc": {
+                  "allowedPackages": [
+                    "test-operator",
+                    "example-operator",
+                    "test-package",
+                    "test-package-1",
+                    "test-package-2",
+                    "operator-foundry-e2e-example-operator"
+                  ],
+                  "hotfix": false,
+                  "preGA": false,
+                  "stagedIndex": false
+                }
+              }
+              EOF
+
+              echo "Multi-OCP intersecting test data created for prepare-fbc-parameters"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: prepare-fbc-parameters
+      params:
+        - name: snapshotPath
+          value: $(context.pipelineRun.uid)/snapshot.json
+        - name: dataPath
+          value: data.json
+        - name: pyxisSecret
+          value: test-pyxis-secret
+        - name: pyxisServer
+          value: production
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: taskGitUrl
+          value: https://github.com/konflux-ci/release-service-catalog.git
+        - name: taskGitRevision
+          value: development
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+      runAfter:
+        - setup
+
+    - name: check-result
+      params:
+        - name: fbcOptIn
+          value: $(tasks.run-task.results.fbcOptIn)
+        - name: validationPassed
+          value: $(tasks.run-task.results.validationPassed)
+        - name: mustPublishIndexImage
+          value: $(tasks.run-task.results.mustPublishIndexImage)
+        - name: mustSignIndexImage
+          value: $(tasks.run-task.results.mustSignIndexImage)
+        - name: mustOverwriteFromIndexImage
+          value: $(tasks.run-task.results.mustOverwriteFromIndexImage)
+        - name: iibServiceAccountSecret
+          value: $(tasks.run-task.results.iibServiceAccountSecret)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: fbcOptIn
+            type: string
+          - name: validationPassed
+            type: string
+          - name: mustPublishIndexImage
+            type: string
+          - name: mustSignIndexImage
+            type: string
+          - name: mustOverwriteFromIndexImage
+            type: string
+          - name: iibServiceAccountSecret
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo "Checking multi-OCP intersecting test results..."
+
+              # Verify results
+              echo "Results:"
+              echo "  - fbcOptIn: $(params.fbcOptIn)"
+              echo "  - validationPassed: $(params.validationPassed)"
+              echo "  - mustPublishIndexImage: $(params.mustPublishIndexImage)"
+              echo "  - mustSignIndexImage: $(params.mustSignIndexImage)"
+              echo "  - mustOverwriteFromIndexImage: $(params.mustOverwriteFromIndexImage)"
+              echo "  - iibServiceAccountSecret: $(params.iibServiceAccountSecret)"
+
+              # Verify opt-in is true (all components opted in via mocks)
+              if [ "$(params.fbcOptIn)" != "true" ]; then
+                echo "ERROR: Expected fbcOptIn=true, got $(params.fbcOptIn)"
+                exit 1
+              fi
+
+              # Verify validation passed
+              if [ "$(params.validationPassed)" != "true" ]; then
+                echo "ERROR: Expected validationPassed=true, got $(params.validationPassed)"
+                exit 1
+              fi
+
+              # For standard production release (not hotfix/preGA/staged), should use opt-in status
+              if [ "$(params.mustPublishIndexImage)" != "true" ]; then
+                echo "ERROR: Expected mustPublishIndexImage=true (based on opt-in), got $(params.mustPublishIndexImage)"
+                exit 1
+              fi
+
+              if [ "$(params.mustSignIndexImage)" != "true" ]; then
+                echo "ERROR: Expected mustSignIndexImage=true (based on opt-in), got $(params.mustSignIndexImage)"
+                exit 1
+              fi
+
+              if [ "$(params.mustOverwriteFromIndexImage)" != "true" ]; then
+                echo "ERROR: Expected mustOverwriteFromIndexImage=true (based on opt-in)," \
+                  "got $(params.mustOverwriteFromIndexImage)"
+                exit 1
+              fi
+
+              # Verify production IIB service account (stagedIndex=false)
+              if [ "$(params.iibServiceAccountSecret)" != "iib-service-account-prod" ]; then
+                echo "ERROR: Expected production IIB service account, got $(params.iibServiceAccountSecret)"
+                exit 1
+              fi
+
+              echo "SUCCESS: Multi-OCP intersecting test validation passed!"
+              echo "  - Validated 2 components across 3 OCP versions (v4.17, v4.18, v4.19)"
+              echo "  - Component 1: v4.17, v4.18 (multi-OCP)"
+              echo "  - Component 2: v4.18, v4.19 (intersects with comp1 on v4.18)"
+              echo "  - All components passed package validation"
+              echo "  - All components opted in to FBC"
+              echo "  - Publishing decisions correctly applied"
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+
+              echo "Multi-OCP intersecting test cleanup completed"
