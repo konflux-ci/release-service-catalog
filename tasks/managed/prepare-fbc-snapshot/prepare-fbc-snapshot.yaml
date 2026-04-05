@@ -353,56 +353,73 @@ spec:
 
             echo "INFO: Processing component $((i+1))/${component_count}: ${component_name}"
 
-            # Read OCP version from snapshot (attached by filter-published-fbc-images)
-            echo "  INFO: Reading OCP version from snapshot..."
-            ocp_version=$(jq -r ".components[$i].ocpVersion" "${SNAPSHOT_PATH}")
+            # Read OCP version(s) from snapshot (attached by filter-published-fbc-images)
+            # Expected format: JSON array ["v4.12"] or ["v4.12", "v4.13", "v4.14"]
+            echo "  INFO: Reading OCP version(s) from snapshot..."
+            ocp_versions_json=$(jq -c ".components[$i].ocpVersion" "${SNAPSHOT_PATH}")
 
-            if [ -z "${ocp_version}" ] || [ "${ocp_version}" = "null" ]; then
+            if [ -z "${ocp_versions_json}" ] || [ "${ocp_versions_json}" = "null" ]; then
                 echo "    ERROR: ocpVersion not found for component ${component_name}"
                 echo "    This field should be attached by filter-published-fbc-images task"
                 exit 1
             fi
 
-            echo "    SUCCESS: Using OCP version from snapshot: ${ocp_version}"
+            # Count versions
+            version_count=$(jq 'length' <<< "$ocp_versions_json")
 
-            # Generate resolved indexes
-            updated_from_index=""
-            resolved_target_index=""
+            echo "    SUCCESS: Component supports ${version_count} OCP version(s): ${ocp_versions_json}"
 
-            # Generate updated fromIndex if template provided
-            updated_from_index=$(replace_tag "${raw_from_index}" "${ocp_version}")
-            echo "    INFO: Resolved fromIndex: ${updated_from_index}"
+            # Convert JSON array to space-separated for iteration
+            ocp_versions=$(jq -r '.[]' <<< "$ocp_versions_json" | tr '\n' ' ')
 
-            # Generate targetIndex with OCP version and common suffix
-            # The suffix should always be just the common suffix (e.g., RELEASE-1234-timestamp)
-            # The OCP version comes from either replacing {{ OCP_VERSION }} or being in the fixed version
+            # Generate metadata for each OCP version
+            ocp_metadata="[]"
 
-            resolved_target_index=$(generate_component_target_index \
-              "${ocp_version}" "${raw_target_index}" "${common_suffix}")
-            echo "    INFO: Resolved targetIndex: ${resolved_target_index}"
+            for ocp_version in $ocp_versions; do
+                echo "  INFO: Resolving indexes for ${ocp_version}..."
 
-            # Validate OCP version consistency between indexes and base image
-            # if {{OCP_VERSION}} is not set, the original Index will be kept but its ocp version should
-            # match base image version.
-            echo "    INFO: Validating OCP version consistency..."
-            validateOCPVersion "${updated_from_index}" "${ocp_version}"
-            if [ -n "${resolved_target_index}" ]; then
-                validateOCPVersion "${resolved_target_index}" "${ocp_version}"
-            fi
-            echo "    SUCCESS: OCP version validation passed"
+                # Generate resolved indexes for this version
+                updated_from_index=$(replace_tag "${raw_from_index}" "${ocp_version}")
 
-            # Update snapshot with resolved index data
-            # Note: ocpVersion is already attached by filter-published-fbc-images task
-            echo "  INFO: Updating snapshot with resolved index data..."
+                # Generate targetIndex with OCP version and common suffix
+                # The suffix should always be just the common suffix (e.g., RELEASE-1234-timestamp)
+                # The OCP version comes from either replacing {{ OCP_VERSION }} or being in the fixed version
+
+                resolved_target_index=$(generate_component_target_index \
+                  "${ocp_version}" "${raw_target_index}" "${common_suffix}")
+
+                echo "    → fromIndex: ${updated_from_index}"
+                echo "    → targetIndex: ${resolved_target_index}"
+
+                # Validate OCP version consistency between indexes and base image
+                # if {{OCP_VERSION}} is not set, the original Index will be kept but its ocp version should
+                # match base image version.
+                echo "    INFO: Validating OCP version consistency for ${ocp_version}..."
+                validateOCPVersion "${updated_from_index}" "${ocp_version}"
+                if [ -n "${resolved_target_index}" ]; then
+                    validateOCPVersion "${resolved_target_index}" "${ocp_version}"
+                fi
+                echo "    SUCCESS: OCP version validation passed for ${ocp_version}"
+
+                # Add to metadata array
+                ocp_metadata=$(jq --arg version "$ocp_version" \
+                                  --arg from_index "$updated_from_index" \
+                                  --arg target_index "$resolved_target_index" \
+                                  '. += [{
+                                    version: $version,
+                                    updatedFromIndex: $from_index,
+                                    targetIndex: $target_index
+                                  }]' <<< "$ocp_metadata")
+            done
+
+            # Update snapshot with ocpVersionMetadata array
+            echo "  INFO: Updating snapshot with ocpVersionMetadata..."
 
             TEMP="/tmp/temp.json"
-            # Apply each update directly
-            jq ".components[$i].updatedFromIndex |= \"$updated_from_index\"" \
-              "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
-            jq ".components[$i].targetIndex |= \"$resolved_target_index\"" \
+            jq --argjson metadata "$ocp_metadata" ".components[$i].ocpVersionMetadata = \$metadata" \
               "$SNAPSHOT_PATH" > "$TEMP" && mv "$TEMP" "$SNAPSHOT_PATH"
 
-            echo "  INFO: Successfully updated component with resolved indexes"
+            echo "  INFO: Successfully updated component with metadata for ${version_count} version(s)"
         done
 
         echo "INFO: Snapshot update completed successfully"

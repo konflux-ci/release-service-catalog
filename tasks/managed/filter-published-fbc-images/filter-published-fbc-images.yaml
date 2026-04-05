@@ -217,17 +217,26 @@ spec:
           fi
           echo "    ✓ OCP version validated: ${ocp_version}"
 
-          # Store OCP version for this component
-          component_ocp_versions[$i]="$ocp_version"
+          # Store OCP version as JSON array for this component
+          # Handles both string and array formats for backward compatibility
+          component_ocp_versions[$i]=$(jq -cn --arg v "$ocp_version" '($v | fromjson? // $v) | [.] | flatten')
+
+          # Validate result is a proper JSON array
+          if ! jq -e 'type == "array"' <<< "${component_ocp_versions[$i]}" > /dev/null; then
+            echo "    ❌ ERROR: Failed to convert OCP version to array format"
+            echo "       Got: ${component_ocp_versions[$i]}"
+            exit 1
+          fi
         done
 
         echo "✓ OCP versions extracted and validated for all ${component_count} component(s)"
         echo ""
 
         # Build OCP versions JSON for jq (used by both early exits and main filtering)
+        # Each value is already a JSON array
         ocp_args=()
         for idx in "${!component_ocp_versions[@]}"; do
-          ocp_args+=(--arg "$idx" "${component_ocp_versions[$idx]}")
+          ocp_args+=(--argjson "$idx" "${component_ocp_versions[$idx]}")
         done
         ocp_versions_json=$(jq -n '$ARGS.named' "${ocp_args[@]}")
 
@@ -274,37 +283,51 @@ spec:
         echo ""
 
         # Resolve {{ OCP_VERSION }} for each component and group by resolved targetIndex
-        # OCP versions were already extracted upfront
-        declare -A target_index_to_components  # resolved targetIndex -> space-separated component indices
-        declare -a unique_target_indices       # Array of unique resolved targetIndex values
+        # OCP versions were already extracted upfront (stored as JSON arrays)
+        declare -A target_index_to_components     # resolved targetIndex -> space-separated component indices
+        declare -a unique_target_indices          # Array of unique resolved targetIndex values
+        declare -A component_version_to_target_index  # "component_idx:ocp_version" -> resolved targetIndex (for reuse)
 
         echo "Resolving targetIndex for each component..."
         for ((i=0; i<component_count; i++)); do
           component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
           component_name=$(jq -r '.name' <<< "$component")
-          ocp_version="${component_ocp_versions[$i]}"  # Use already-extracted OCP version
+          component_ocp_json="${component_ocp_versions[$i]}"  # JSON array
 
           echo "  Component $((i+1))/${component_count}: ${component_name}"
-          echo "    → OCP version: ${ocp_version}"
+          echo "    → OCP version(s): ${component_ocp_json}"
 
-          # Resolve {{ OCP_VERSION }} if present in template
-          if [[ "$target_index_template" == *"{{ OCP_VERSION }}"* ]]; then
-            # Resolve {{ OCP_VERSION }} placeholder using bash parameter expansion
-            target_index="${target_index_template//\{\{ OCP_VERSION \}\}/$ocp_version}"
-          else
-            # No placeholder, use template as-is
-            target_index="$target_index_template"
-          fi
+          # Convert JSON array to space-separated for iteration
+          ocp_versions=$(jq -r '.[]' <<< "$component_ocp_json" | tr '\n' ' ')
 
-          echo "    → Resolved targetIndex: ${target_index}"
+          # For multi-version components, resolve targetIndex for each version
+          # and track all unique targetIndex values
+          for ocp_version in $ocp_versions; do
+            # Resolve {{ OCP_VERSION }} if present in template
+            if [[ "$target_index_template" == *"{{ OCP_VERSION }}"* ]]; then
+              # Resolve {{ OCP_VERSION }} placeholder using bash parameter expansion
+              target_index="${target_index_template//\{\{ OCP_VERSION \}\}/$ocp_version}"
+            else
+              # No placeholder, use template as-is
+              target_index="$target_index_template"
+            fi
 
-          # Group component by its resolved targetIndex
-          if [ -z "${target_index_to_components[$target_index]:-}" ]; then
-            target_index_to_components[$target_index]="$i"
-            unique_target_indices+=("$target_index")
-          else
-            target_index_to_components[$target_index]+=" $i"
-          fi
+            echo "    → Resolved targetIndex for ${ocp_version}: ${target_index}"
+
+            # Store resolved targetIndex for later reuse during filtering
+            component_version_to_target_index["$i:$ocp_version"]="$target_index"
+
+            # Group component by its resolved targetIndex
+            if [ -z "${target_index_to_components[$target_index]:-}" ]; then
+              target_index_to_components[$target_index]="$i"
+              unique_target_indices+=("$target_index")
+            else
+              # Only add component index if not already in the list (avoid duplicates)
+              if [[ " ${target_index_to_components[$target_index]} " != *" $i "* ]]; then
+                target_index_to_components[$target_index]+=" $i"
+              fi
+            fi
+          done
         done
         
         unique_count=${#unique_target_indices[@]}
@@ -497,8 +520,9 @@ spec:
         echo "Filtering Components Based on Published Fragments"
         echo "================================================================"
         echo ""
-        
-        declare -A components_to_keep
+
+        declare -A components_to_keep          # component index -> "keep" if any version needs publishing
+        declare -A component_kept_versions     # component index -> space-separated versions to keep
         components_kept=0
         filtered_out_count=0
 
@@ -506,49 +530,74 @@ spec:
           component=$(jq -c ".components[$i]" "${SNAPSHOT_FILE}")
           component_name=$(jq -r '.name' <<< "$component")
           container_image=$(jq -r '.containerImage' <<< "$component")
-          
+          ocp_versions_json="${component_ocp_versions[$i]}"  # JSON array
+
           fragment_digest="${container_image##*@}"
-          
-          # Determine which resolved targetIndex this component belongs to
-          resolved_target_index=""
-          for target_idx in "${unique_target_indices[@]}"; do
-            component_indices="${target_index_to_components[$target_idx]}"
-            # Check if index i is in the space-separated list using bash pattern matching
-            if [[ " $component_indices " == *" $i "* ]]; then
-              resolved_target_index="$target_idx"
-              break
-            fi
-          done
-          
+
           echo "=== Component $((i+1))/${component_count}: ${component_name} ==="
           echo "  containerImage: ${container_image}"
           echo "  fragment digest: ${fragment_digest}"
-          echo "  Resolved targetIndex: ${resolved_target_index}"
-          
-          published_fragments="${target_index_fragments[$resolved_target_index]}"
+          echo "  OCP version(s): ${ocp_versions_json}"
 
-          # Check if fragment digest is in the newline-separated list using bash pattern matching
-          fragment_found=false
-          if [ -n "$published_fragments" ]; then
-            while IFS= read -r published_digest; do
-              if [ "$published_digest" = "$fragment_digest" ]; then
-                fragment_found=true
-                break
-              fi
-            done <<< "$published_fragments"
-          fi
+          # Convert JSON array to space-separated for iteration
+          ocp_versions=$(jq -r '.[]' <<< "$ocp_versions_json" | tr '\n' ' ')
 
-          if [ "$fragment_found" = "true" ]; then
-            echo "  Status: ✓ FOUND in published index"
-            echo "  Action: FILTER OUT (already published)"
-            filtered_out_count=$((filtered_out_count + 1))
-          else
-            echo "  Status: ✗ NOT in published index"
-            echo "  Action: KEEP (needs publishing)"
+          # Track which versions to keep for this component
+          versions_to_keep=""
+          versions_filtered=""
+
+          # Check each OCP version independently
+          for ocp_version in $ocp_versions; do
+            # Get pre-resolved targetIndex for this component and version
+            target_index="${component_version_to_target_index["$i:$ocp_version"]}"
+
+            echo "  Checking version ${ocp_version}:"
+            echo "    → targetIndex: ${target_index}"
+
+            # Get published fragments for this targetIndex
+            published_fragments="${target_index_fragments[$target_index]}"
+
+            # Check if fragment is published for this version
+            fragment_found=false
+            if [ -n "$published_fragments" ]; then
+              while IFS= read -r published_digest; do
+                if [ "$published_digest" = "$fragment_digest" ]; then
+                  fragment_found=true
+                  break
+                fi
+              done <<< "$published_fragments"
+            fi
+
+            if [ "$fragment_found" = "true" ]; then
+              echo "    Status: ✓ FOUND in ${ocp_version} catalog"
+              echo "    Action: FILTER OUT for this version"
+              versions_filtered="${versions_filtered}${ocp_version} "
+            else
+              echo "    Status: ✗ NOT in ${ocp_version} catalog"
+              echo "    Action: KEEP for this version"
+              versions_to_keep="${versions_to_keep}${ocp_version} "
+            fi
+          done
+
+          # Trim trailing spaces using parameter expansion
+          versions_to_keep="${versions_to_keep% }"
+          versions_filtered="${versions_filtered% }"
+
+          # Decision: keep component if ANY version needs publishing
+          if [ -n "$versions_to_keep" ]; then
+            echo "  Decision: KEEP component (versions: ${versions_to_keep})"
             components_to_keep[$i]="keep"
+            component_kept_versions[$i]="$versions_to_keep"
             components_kept=$((components_kept + 1))
+          else
+            echo "  Decision: FILTER OUT (all versions published)"
+            filtered_out_count=$((filtered_out_count + 1))
           fi
-          
+
+          if [ -n "$versions_filtered" ]; then
+            echo "  Filtered versions: ${versions_filtered}"
+          fi
+
           echo ""
         done
 
@@ -556,8 +605,8 @@ spec:
         echo "Filtering Summary:"
         echo "  Total components: ${component_count}"
         echo "  Unique targetIndex values: ${unique_count}"
-        echo "  New (to publish): ${components_kept}"
-        echo "  Already published: ${filtered_out_count}"
+        echo "  Components to publish: ${components_kept}"
+        echo "  Components filtered out: ${filtered_out_count}"
         echo "================================================================"
         echo ""
 
@@ -569,6 +618,7 @@ spec:
           echo "Building filtered snapshot with ${components_kept} component(s)..."
 
           # Build jq filter to keep only non-published components and attach ocpVersion
+          # For multi-version components, ocpVersion contains only versions that need publishing
           # shellcheck disable=SC2016  # jq variables, not bash - single quotes are correct
           jq_filter='def processComponents:
             [
@@ -577,7 +627,7 @@ spec:
               $indices[] |
               . as $idx |
               if $keep_indices[$idx | tostring] == "keep" then
-                $comps[$idx] | .ocpVersion |= $ocp_versions[$idx | tostring]
+                $comps[$idx] | .ocpVersion |= $kept_versions[$idx | tostring]
               else
                 empty
               end
@@ -590,15 +640,25 @@ spec:
           done
           keep_indices_json=$(jq -n '$ARGS.named' "${keep_args[@]}")
 
-          # Use pre-built ocp_versions_json (built earlier after OCP version extraction)
+          # Build kept_versions JSON (contains only unpublished versions for each component as JSON arrays)
+          # Convert space-separated strings to JSON arrays
+          version_args=()
+          for idx in "${!component_kept_versions[@]}"; do
+            # Convert space-separated to JSON array: "v4.17 v4.18" -> ["v4.17", "v4.18"]
+            versions_array=$(echo "${component_kept_versions[$idx]}" | tr ' ' '\n' | jq -R . | jq -s .)
+            version_args+=(--argjson "$idx" "$versions_array")
+          done
+          kept_versions_json=$(jq -n '$ARGS.named' "${version_args[@]}")
+
           jq --argjson keep_indices "$keep_indices_json" \
-             --argjson ocp_versions "$ocp_versions_json" \
+             --argjson kept_versions "$kept_versions_json" \
              "$jq_filter" \
             "${SNAPSHOT_FILE}" > "${FILTERED_SNAPSHOT_FILE}"
 
           kept_count=$(jq '.components | length' "${FILTERED_SNAPSHOT_FILE}")
           echo "✓ Filtered snapshot created with ${kept_count} component(s)"
           echo "✓ Attached ocpVersion to all ${kept_count} component(s)"
+          echo "  (only unpublished versions included in ocpVersion)"
         fi
 
         echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"

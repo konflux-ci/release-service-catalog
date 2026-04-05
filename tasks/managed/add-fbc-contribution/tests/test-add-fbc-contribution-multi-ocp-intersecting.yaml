@@ -1,0 +1,337 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-add-fbc-contribution-multi-ocp-intersecting
+spec:
+  description: |
+    Test add-fbc-contribution with multiple components targeting multiple OCP versions with intersecting support.
+    Scenario:
+    - Component 1: supports v4.17, v4.18, v4.19
+    - Component 2: supports v4.18, v4.19 (intersecting with comp1)
+    - Component 3: supports v4.19, v4.20 (intersecting with comp2)
+    This validates proper grouping and processing across intersecting OCP version sets.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-test-data
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/results"
+
+              # Create snapshot with multiple components, each supporting multiple OCP versions
+              # Component 1: v4.17, v4.18, v4.19
+              # Component 2: v4.18, v4.19 (intersects with comp1)
+              # Component 3: v4.19, v4.20 (intersects with comp2)
+              cat > "$(params.dataDir)/snapshot_spec.json" << 'EOF'
+              {
+                "application": "multi-ocp-intersecting-test",
+                "components": [
+                  {
+                    "name": "comp1-multi-ocp",
+                    "containerImage": "registry.io/comp1@sha256:0001",
+                    "repository": "prod-registry.io/prod-comp1",
+                    "ocpVersion": ["v4.17", "v4.18", "v4.19"],
+                    "ocpVersionMetadata": [
+                      {
+                        "version": "v4.17",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.17",
+                        "targetIndex": "quay.io/test/target-index:v4.17"
+                      },
+                      {
+                        "version": "v4.18",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.18",
+                        "targetIndex": "quay.io/test/target-index:v4.18"
+                      },
+                      {
+                        "version": "v4.19",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.19",
+                        "targetIndex": "quay.io/test/target-index:v4.19"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "comp2-intersecting",
+                    "containerImage": "registry.io/comp2@sha256:0002",
+                    "repository": "prod-registry.io/prod-comp2",
+                    "ocpVersion": ["v4.18", "v4.19"],
+                    "ocpVersionMetadata": [
+                      {
+                        "version": "v4.18",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.18",
+                        "targetIndex": "quay.io/test/target-index:v4.18"
+                      },
+                      {
+                        "version": "v4.19",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.19",
+                        "targetIndex": "quay.io/test/target-index:v4.19"
+                      }
+                    ]
+                  },
+                  {
+                    "name": "comp3-intersecting",
+                    "containerImage": "registry.io/comp3@sha256:0003",
+                    "repository": "prod-registry.io/prod-comp3",
+                    "ocpVersion": ["v4.19", "v4.20"],
+                    "ocpVersionMetadata": [
+                      {
+                        "version": "v4.19",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.19",
+                        "targetIndex": "quay.io/test/target-index:v4.19"
+                      },
+                      {
+                        "version": "v4.20",
+                        "updatedFromIndex": "quay.io/redhat/redhat-operator-index:v4.20",
+                        "targetIndex": "quay.io/test/target-index:v4.20"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+
+              # Create data.json with FBC configuration
+              cat > "$(params.dataDir)/data.json" << 'EOF'
+              {
+                "fbc": {
+                  "fromIndex": "quay.io/redhat/redhat-operator-index:{{ OCP_VERSION }}",
+                  "targetIndex": "quay.io/test/target-index:{{ OCP_VERSION }}",
+                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
+                  "buildTimeoutSeconds": 420,
+                  "requestTimeoutSeconds": 120,
+                  "buildTags": ["latest"],
+                  "addArches": []
+                }
+              }
+              EOF
+
+              echo "Multi-OCP intersecting test data created"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+
+    - name: run-task
+      taskRef:
+        name: add-fbc-contribution
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: snapshotPath
+          value: snapshot_spec.json
+        - name: dataPath
+          value: data.json
+        - name: resultsDirPath
+          value: results
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: mustPublishIndexImage
+          value: "true"
+        - name: mustOverwriteFromIndexImage
+          value: "false"
+        - name: iibServiceAccountSecret
+          value: "test-iib-secret"
+      runAfter:
+        - setup
+
+    - name: check-result
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: internalRequestResultsFile
+          value: $(tasks.run-task.results.internalRequestResultsFile)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: pipelineRunUid
+            type: string
+          - name: internalRequestResultsFile
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
+              PIPELINE_UID="$(params.pipelineRunUid)"
+
+              echo "Checking results for multi-OCP intersecting test..."
+
+              # Verify results file exists
+              if [ ! -f "$RESULTS_FILE" ]; then
+                echo "ERROR: Results file not found at $RESULTS_FILE"
+                exit 1
+              fi
+
+              echo "Results file contents:"
+              jq . "$RESULTS_FILE"
+
+              # Expected OCP versions: v4.17, v4.18, v4.19, v4.20
+              # Expected components after deduplication (one per unique target_index):
+              # - v4.17: 1 component (comp1)
+              # - v4.18: 2 components (comp1, comp2)
+              # - v4.19: 3 components (comp1, comp2, comp3)
+              # - v4.20: 1 component (comp3)
+              # Total component instances before deduplication: 7
+              # After deduplication (keeping last per target_index): 4 (one per OCP version)
+
+              # Verify we have results for all 4 OCP versions (after deduplication)
+              component_count=$(jq '.components | length' "$RESULTS_FILE")
+              expected_count=4
+              if [ "$component_count" != "$expected_count" ]; then
+                echo "ERROR: Expected $expected_count components (after deduplication), got $component_count"
+                jq . "$RESULTS_FILE"
+                exit 1
+              fi
+
+              # Verify OCP versions are present in results
+              for ocp_version in "v4.17" "v4.18" "v4.19" "v4.20"; do
+                version_count=$(jq --arg v "$ocp_version" \
+                  '[.components[] | select(.ocp_version == $v)] | length' "$RESULTS_FILE")
+                if [ "$version_count" != "1" ]; then
+                  echo "ERROR: Expected 1 result for OCP version $ocp_version (after dedup), got $version_count"
+                  exit 1
+                fi
+                echo "SUCCESS: Found result for OCP version $ocp_version"
+              done
+
+              # Verify target indexes match expected pattern
+              for ocp_version in "v4.17" "v4.18" "v4.19" "v4.20"; do
+                target_index=$(jq -r --arg v "$ocp_version" \
+                  '.components[] | select(.ocp_version == $v) | .target_index' "$RESULTS_FILE")
+                expected_target="quay.io/test/target-index:$ocp_version"
+                if [ "$target_index" != "$expected_target" ]; then
+                  echo "ERROR: Target index mismatch for $ocp_version. Expected: $expected_target, Got: $target_index"
+                  exit 1
+                fi
+                echo "SUCCESS: Target index verified for OCP version $ocp_version: $target_index"
+              done
+
+              # Verify InternalRequests were created for each OCP version group
+              echo "Checking InternalRequests created for pipeline $PIPELINE_UID..."
+              ir_count=$(kubectl get internalrequest \
+                -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
+                --no-headers | wc -l | tr -d ' ')
+
+              # Expected: 4 InternalRequests (one batch per OCP version since we have <= maxBatchSize per group)
+              if [ "$ir_count" -lt "4" ]; then
+                echo "ERROR: Expected at least 4 InternalRequests (one per OCP version), got $ir_count"
+                kubectl get internalrequest \
+                  -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}"
+                exit 1
+              fi
+
+              echo "SUCCESS: Multi-OCP intersecting test validation passed!"
+              echo "  - Processed 3 components across 4 OCP versions"
+              echo "  - v4.17: 1 instance (comp1)"
+              echo "  - v4.18: 2 instances (comp1, comp2)"
+              echo "  - v4.19: 3 instances (comp1, comp2, comp3)"
+              echo "  - v4.20: 1 instance (comp3)"
+              echo "  - Results deduplicated to 4 final components (one per OCP version)"
+      runAfter:
+        - run-task
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests -l \
+                "internal-services.appstudio.openshift.io/pipelinerun-uid=$(context.pipelineRun.uid)" || true
+
+              echo "Multi-OCP intersecting test cleanup completed"

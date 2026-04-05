@@ -252,6 +252,28 @@ curl() {
         ]
       }]
     }'
+  # Same targetIndex test: v4.15 catalog with pub001 and pub002 published
+  elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.15%3Blast_update_date"* ]] && [[ "$*" != *"-unpublished"* ]]; then
+    echo "✅ Matched v4.15 catalog pattern - returning pub001 and pub002 as published" >&2
+    json_response='{
+      "data": [{
+        "_id": "index-v4.15-same",
+        "docker_image_digest": "sha256:index-v4.15-same-digest",
+        "docker_image_id": "quay.io/redhat-pending/catalog:v4.15",
+        "related_images": [
+          {
+            "image": "quay.io/test/bundle1@sha256:pub001",
+            "name": "bundle1",
+            "digest": "sha256:pub001"
+          },
+          {
+            "image": "quay.io/test/bundle2@sha256:pub002",
+            "name": "bundle2",
+            "digest": "sha256:pub002"
+          }
+        ]
+      }]
+    }'
   else
     # Default: return empty data (no published index)
     echo "⚠️  No curl pattern matched - returning empty data. Query was: $*" >&2
@@ -310,6 +332,11 @@ if [[ "$*" == *"inspect"* ]]; then
     ocp_version="4.14"
   elif [[ "$image" == *"@sha256:comp3v416"* ]] || [[ "$image" == *"@sha256:comp4v416"* ]]; then
     ocp_version="4.16"
+  elif [[ "$image" == *"@sha256:partial123"* ]]; then
+    # Partial filtering test: component supports BOTH v4.17 and v4.18
+    # Return as JSON array since this component has multi-version support
+    # The label should be: '["v4.17","v4.18"]'
+    ocp_version="4.17"  # Base image shows v4.17, but component supports both
   elif [[ "$image" == *"@sha256:invalidocp"* ]]; then
     # Invalid OCP version format for testing validation (three parts instead of two)
     ocp_version="4.14.1"
@@ -380,6 +407,32 @@ elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.1
       "docker_image_id": "quay.io/redhat-pending/catalog:v4.16",
       "related_images": [
         {"image": "quay.io/test/comp3@sha256:comp3v416", "digest": "sha256:comp3v416"}
+      ]
+    }]
+  }'
+elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.17%3Blast_update_date"* ]]; then
+  echo "✅ Matched v4.17 catalog - returning partial123 as published" >&2
+  json_response='{
+    "data": [{
+      "_id": "index-v4.17-partial",
+      "docker_image_id": "quay.io/redhat-pending/catalog:v4.17",
+      "related_images": [
+        {"image": "quay.io/test/multi-version-op@sha256:partial123", "digest": "sha256:partial123"}
+      ]
+    }]
+  }'
+elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.18%3Blast_update_date"* ]] && [[ "$*" != *"-bundles"* ]]; then
+  echo "✅ Matched v4.18 catalog - returning empty (partial123 NOT published)" >&2
+  json_response='{"data": []}'
+elif [[ "$*" == *"docker_image_id%3D%3Dquay.io%2Fredhat-pending%2Fcatalog%3Av4.15%3Blast_update_date"* ]] && [[ "$*" != *"-unpublished"* ]]; then
+  echo "✅ Matched v4.15 catalog - returning pub001 and pub002 as published" >&2
+  json_response='{
+    "data": [{
+      "_id": "index-v4.15-same",
+      "docker_image_id": "quay.io/redhat-pending/catalog:v4.15",
+      "related_images": [
+        {"image": "quay.io/test/bundle1@sha256:pub001", "digest": "sha256:pub001"},
+        {"image": "quay.io/test/bundle2@sha256:pub002", "digest": "sha256:pub002"}
       ]
     }]
   }'
