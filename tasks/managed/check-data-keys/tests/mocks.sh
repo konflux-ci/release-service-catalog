@@ -10,6 +10,6 @@ function curl() {
         test -s "$file_path" || { echo "Schema file is empty from configMap"; exit 1; }
         jq empty "$file_path" || { echo "Schema file is not valid JSON from configMap"; exit 1; }
     else
-        command curl -Ls --fail-with-body "$@" -o "$file_path"
+        command curl -Ls --fail-with-body --retry 3 --retry-delay 5 --retry-all-errors "$@" -o "$file_path"
     fi
 }
