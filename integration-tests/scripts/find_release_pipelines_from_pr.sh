@@ -136,13 +136,13 @@ _emit_integration_testcase_string() {
         TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
         ;;
       "process-file-updates")
-        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "push-to-addons-registry" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io")
+        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "push-to-addons-registry" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io")
         ;;
       "push-artifacts-to-cdn")
         TEMP_MANAGED_PIPELINENAMES+=("push-disk-images-to-cdn")
         ;;
       "simple-signing-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io")
         ;;
       "blob-signing-pipeline")
         TEMP_MANAGED_PIPELINENAMES+=("release-to-github")
@@ -204,7 +204,8 @@ _emit_integration_testcase_string() {
 
   ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "release-to-github" "push-to-external-registry" \
   "push-to-external-registry-self-hosted-quay" \
-  "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" "push-to-addons-registry" \
+  "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io" \
+  "rh-push-to-external-registry" "push-to-addons-registry" \
   "push-rpms-to-pulp")
 
   declare -a SELECTED_TESTCASES=()

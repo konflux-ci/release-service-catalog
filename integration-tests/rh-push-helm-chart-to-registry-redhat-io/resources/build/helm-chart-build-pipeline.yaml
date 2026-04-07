@@ -1,0 +1,179 @@
+---
+# TEMPORARY: This pipeline is bundled and referenced from component.yaml until the
+# build team publishes an official build-helm-chart-oci-ta pipeline. Remove this
+# file once the cluster build-pipeline-config includes helm chart OCI support.
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-helm-chart-oci-ta
+  labels:
+    pipelines.openshift.io/used-by: build-cloud
+    pipelines.openshift.io/runtime: generic
+    pipelines.openshift.io/strategy: helm
+spec:
+  description: |
+    Minimal Helm OCI build pipeline for release-service e2e tests.
+    Packages a Helm chart and pushes it as an OCI artifact using the
+    build-helm-chart-oci-ta task from build-definitions.
+  params:
+    - name: git-url
+      description: Source Repository URL
+      type: string
+    - name: revision
+      description: Revision of the Source Repository
+      type: string
+      default: ""
+    - name: output-image
+      description: Fully Qualified Output Image
+      type: string
+    - name: image-expires-after
+      description: Image tag expiration time
+      type: string
+      default: ""
+    - name: skip-checks
+      description: Skip checks against built image
+      type: string
+      default: "true"
+    - name: prefetch-input
+      description: Build dependencies to be prefetched
+      type: string
+      default: ""
+    - name: build-source-image
+      description: Build a source image
+      type: string
+      default: "false"
+    - name: enable-cache-proxy
+      description: Enable cache proxy configuration
+      type: string
+      default: "false"
+    - name: chart-context
+      description: Path relative to source where the chart is located
+      type: string
+      default: dist/chart/
+    - name: chart-version
+      description: Optional explicit chart version (skips git-based calculation)
+      type: string
+      default: "0.1.0+e2e001"
+  results:
+    - name: IMAGE_URL
+      value: $(tasks.build-helm-chart.results.IMAGE_URL)
+    - name: IMAGE_DIGEST
+      value: $(tasks.build-helm-chart.results.IMAGE_DIGEST)
+    - name: CHAINS-GIT_URL
+      value: $(tasks.clone-repository.results.url)
+    - name: CHAINS-GIT_COMMIT
+      value: $(tasks.clone-repository.results.commit)
+  workspaces:
+    - name: git-auth
+      optional: true
+    - name: netrc
+      optional: true
+  tasks:
+    - name: init
+      taskRef:
+        params:
+          - name: name
+            value: init
+          - name: bundle
+            value: quay.io/konflux-ci/tekton-catalog/task-init:0.4@sha256:d7f119ec69bafe990eb320daa3df9f432427513c3289e113d584963854adf237
+          - name: kind
+            value: task
+        resolver: bundles
+      params:
+        - name: enable-cache-proxy
+          value: $(params.enable-cache-proxy)
+    - name: clone-repository
+      runAfter:
+        - init
+      taskRef:
+        params:
+          - name: name
+            value: git-clone-oci-ta
+          - name: bundle
+            value: quay.io/konflux-ci/tekton-catalog/task-git-clone-oci-ta:0.1@sha256:2c388d28651457db60bb90287e7d8c3680303197196e4476878d98d81e8b6dc9
+          - name: kind
+            value: task
+        resolver: bundles
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.revision)
+        - name: ociStorage
+          value: $(params.output-image).git
+        - name: ociArtifactExpiresAfter
+          value: $(params.image-expires-after)
+        - name: fetchTags
+          value: "true"
+        - name: depth
+          value: "0"
+      workspaces:
+        - name: basic-auth
+          workspace: git-auth
+    - name: prefetch-dependencies
+      runAfter:
+        - clone-repository
+      taskRef:
+        params:
+          - name: name
+            value: prefetch-dependencies-oci-ta
+          - name: bundle
+            value: quay.io/konflux-ci/tekton-catalog/task-prefetch-dependencies-oci-ta:0.3@sha256:a56046235a9ce324d6c5a0682cdc9b822b5402f8b24d481f213035d9b0bcc3bb
+          - name: kind
+            value: task
+        resolver: bundles
+      params:
+        - name: input
+          value: $(params.prefetch-input)
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.clone-repository.results.SOURCE_ARTIFACT)
+        - name: ociStorage
+          value: $(params.output-image).prefetch
+        - name: ociArtifactExpiresAfter
+          value: $(params.image-expires-after)
+      workspaces:
+        - name: git-basic-auth
+          workspace: git-auth
+        - name: netrc
+          workspace: netrc
+    - name: build-helm-chart
+      runAfter:
+        - prefetch-dependencies
+      taskRef:
+        params:
+          - name: name
+            value: build-helm-chart-oci-ta
+          - name: bundle
+            value: quay.io/konflux-ci/tekton-catalog/task-build-helm-chart-oci-ta:0.3@sha256:23de031fcad1479aa718ddfa764ca0532452a2d75dd2f1c23161bd6142c7251a
+          - name: kind
+            value: task
+        resolver: bundles
+      params:
+        - name: IMAGE
+          value: $(params.output-image)
+        - name: COMMIT_SHA
+          value: $(tasks.clone-repository.results.commit)
+        - name: SOURCE_ARTIFACT
+          value: $(tasks.prefetch-dependencies.results.SOURCE_ARTIFACT)
+        - name: CHART_CONTEXT
+          value: $(params.chart-context)
+        - name: CHART_VERSION
+          value: $(params.chart-version)
+    - name: apply-tags
+      runAfter:
+        - build-helm-chart
+      taskRef:
+        params:
+          - name: name
+            value: apply-tags
+          - name: bundle
+            value: quay.io/konflux-ci/tekton-catalog/task-apply-tags:0.3@sha256:aa62b41861c09e2e59c69cc6e9a1f740bf0c81e6a1eb03f57f59dfda0f65840e
+          - name: kind
+            value: task
+        resolver: bundles
+      params:
+        - name: IMAGE_URL
+          value: $(tasks.build-helm-chart.results.IMAGE_URL)
+        - name: IMAGE_DIGEST
+          value: $(tasks.build-helm-chart.results.IMAGE_DIGEST)
+  finally: []
