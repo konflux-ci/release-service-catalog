@@ -655,7 +655,7 @@ cleanup_old_resources() {
 
     echo "🔍 Searching for resources with originating-tool=${originating_tool}"
 
-    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component"
+    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component imagerepository"
     for kind in $kinds; do
         local namespaces="dev-release-team-tenant managed-release-team-tenant"
         for namespace in $namespaces; do
