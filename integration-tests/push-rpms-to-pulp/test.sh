@@ -221,6 +221,22 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
+            # Verify signingKey is present on all artifacts and matches the RPA value
+            echo "Checking signingKey for all artifacts..."
+            expected_signing_key=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
+              -n "${managed_namespace}" -o jsonpath='{.spec.data.signOptions.signKeyAlias.key}')
+            echo "Expected signingKey from RPA: ${expected_signing_key}"
+            artifact_count=$(yq '.spec.content.artifacts | length' "${advisory_yaml_dir}/advisory.yaml")
+            for ((idx=0; idx<artifact_count; idx++)); do
+              signing_key=$(yq ".spec.content.artifacts[${idx}].signingKey // \"\"" "${advisory_yaml_dir}/advisory.yaml")
+              if [ "${signing_key}" = "${expected_signing_key}" ]; then
+                echo "✅️ Artifact ${idx} has correct signingKey: ${signing_key}"
+              else
+                echo "🔴 Artifact ${idx} has incorrect signingKey: '${signing_key}' (expected '${expected_signing_key}')"
+                failures=$((failures+1))
+              fi
+            done
+
             # Validate advisory description contains expected RPM grouping format
             echo "Validating advisory description RPM content..."
 
