@@ -406,7 +406,8 @@ spec:
         # === Phase 1: Extract RPMs and build purl-enriched snapshot ===
         echo "Extracting RPMs and building purl data..."
         snapshot_json="$(jq '.' "${SNAPSHOT_FILE}")"
-        TRANSFORMED_ENTRIES="[]"
+        TRANSFORMED_ENTRIES_FILE="$(mktemp)"
+        echo "[]" > "$TRANSFORMED_ENTRIES_FILE"
         COMPONENT_RPMS_MAP_FILE="$(mktemp)"
         echo "{}" > "$COMPONENT_RPMS_MAP_FILE"
 
@@ -501,7 +502,12 @@ spec:
                 '{name: $name, purl: $purl, sha256: $sha256, rpmname: $rpmname,
                   epoch: $epoch, version: $version, release: $release, arch: $arch,
                   repository_name: $repository_name, rpm: $rpm, targetRepo: $targetRepo}')
-              TRANSFORMED_ENTRIES=$(jq --argjson e "$entry" '. + [$e]' <<< "$TRANSFORMED_ENTRIES")
+              # Append entry to file to avoid ARG_MAX limit
+              entry_tmp="$(mktemp)"
+              echo "$entry" > "$entry_tmp"
+              jq --slurpfile e "$entry_tmp" '. + $e' "$TRANSFORMED_ENTRIES_FILE" > "${TRANSFORMED_ENTRIES_FILE}.tmp"
+              mv "${TRANSFORMED_ENTRIES_FILE}.tmp" "$TRANSFORMED_ENTRIES_FILE"
+              rm -f "$entry_tmp"
 
               COMPONENT_RPMS=$(jq --arg rpm "$f" --arg sha "$local_sha" \
                 --arg rpmname "$rpmname" --arg epoch "$epoch" \
@@ -513,15 +519,19 @@ spec:
             done < <(jq -c '.[]' <<< "${target_repos_json}")
           done
 
-          jq --arg name "$name" --argjson rpms "$COMPONENT_RPMS" \
-            '. + {($name): $rpms}' "$COMPONENT_RPMS_MAP_FILE" > "${COMPONENT_RPMS_MAP_FILE}.tmp"
+          # Write COMPONENT_RPMS to file to avoid ARG_MAX limit
+          COMPONENT_RPMS_TMP="$(mktemp)"
+          echo "$COMPONENT_RPMS" > "$COMPONENT_RPMS_TMP"
+          jq --arg name "$name" --slurpfile rpms "$COMPONENT_RPMS_TMP" \
+            '. + {($name): $rpms[0]}' "$COMPONENT_RPMS_MAP_FILE" > "${COMPONENT_RPMS_MAP_FILE}.tmp"
           mv "${COMPONENT_RPMS_MAP_FILE}.tmp" "$COMPONENT_RPMS_MAP_FILE"
+          rm -f "$COMPONENT_RPMS_TMP"
           rm -rf "${workdir}" "$comp_file"
         done < <(jq -c '.components[]' <<< "${snapshot_json}")
 
-        echo "Total transformed entries: $(jq 'length' <<< "$TRANSFORMED_ENTRIES")"
+        echo "Total transformed entries: $(jq 'length' "$TRANSFORMED_ENTRIES_FILE")"
 
-        if [[ "$(jq 'length' <<< "$TRANSFORMED_ENTRIES")" -eq 0 ]]; then
+        if [[ "$(jq 'length' "$TRANSFORMED_ENTRIES_FILE")" -eq 0 ]]; then
           echo "No RPMs found in any component, skipping release"
           echo -n "true" > "$(results.skip_release.path)"
           echo -n "" > "$(results.latest_advisory_url.path)"
@@ -531,7 +541,7 @@ spec:
           exit 0
         fi
 
-        transformedSnapshot=$(echo "$TRANSFORMED_ENTRIES" | gzip -c | base64 -w 0)
+        transformedSnapshot=$(gzip -c < "$TRANSFORMED_ENTRIES_FILE" | base64 -w 0)
 
         # === Phase 2: Create InternalRequest (no Pulp params) ===
         pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
@@ -685,7 +695,7 @@ spec:
         echo -n "" > "$(results.latest_advisory_url.path)"
         echo -n "" > "$(results.latest_advisory_internal_url.path)"
 
-        rm -f "$UNRELEASED_FILE" "$COMPONENT_RPMS_MAP_FILE"
+        rm -f "$UNRELEASED_FILE" "$COMPONENT_RPMS_MAP_FILE" "$TRANSFORMED_ENTRIES_FILE"
     - name: create-trusted-artifact
       computeResources:
         limits:
