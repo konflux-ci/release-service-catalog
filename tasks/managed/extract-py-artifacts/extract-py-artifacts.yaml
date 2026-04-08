@@ -6,6 +6,9 @@ metadata:
 spec:
   description: |
     Extract Python packages from OCI artifacts for signing and upload.
+    The fetch-chains-provenance step verifies and retrieves Tekton Chains SLSA provenance
+    using cosign with the public key from k8s://openshift-pipelines/public-key.
+    The pipeline service account must have get access to this secret
   params:
     - name: SNAPSHOT_PATH
       type: string
@@ -76,7 +79,6 @@ spec:
       computeResources:
         limits:
           memory: 32Mi
-          cpu: 10m
         requests:
           memory: 32Mi
           cpu: 10m
@@ -88,7 +90,6 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
-          cpu: 10m
         requests:
           memory: 64Mi
           cpu: 10m
@@ -111,7 +112,6 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
-          cpu: 10m
         requests:
           memory: 64Mi
           cpu: 10m
@@ -126,7 +126,6 @@ spec:
       computeResources:
         limits:
           memory: 256Mi
-          cpu: 100m
         requests:
           memory: 256Mi
           cpu: 100m
@@ -145,11 +144,59 @@ spec:
         echo "Extracted files:"
         ls -la "${FILES_DIR}"
 
+    - name: fetch-chains-provenance
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 100m
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        PROVENANCE_DIR="${FILES_DIR}/chains-provenance"
+        DOCKER_CONFIG="$(mktemp -d)"
+        export DOCKER_CONFIG
+        mkdir -p "${PROVENANCE_DIR}"
+
+        while read -r IMAGE; do
+          echo "Fetching Chains provenance for ${IMAGE}"
+
+          select-oci-auth "${IMAGE}" > "${DOCKER_CONFIG}/config.json"
+
+          # Use the image digest as the filename so downstream can
+          # match provenance to the image that produced it.
+          DIGEST="${IMAGE##*@}"
+          PROVENANCE_FILE="${PROVENANCE_DIR}/${DIGEST}.json"
+
+          # Chains uses AWS KMS for signing, not public Sigstore/Rekor,
+          # so transparency log and SCT verification are skipped.
+          COSIGN_STDERR="/tmp/cosign-stderr-${DIGEST}.log"
+          if cosign verify-attestation \
+            --type=slsaprovenance \
+            --insecure-ignore-tlog=true \
+            --insecure-ignore-sct=true \
+            --key k8s://openshift-pipelines/public-key \
+            "${IMAGE}" 2>"${COSIGN_STDERR}" | head -1 | jq . > "${PROVENANCE_FILE}"; then
+            echo "  Saved Chains provenance to ${PROVENANCE_FILE}"
+          else
+            echo "ERROR: Failed to fetch Chains provenance for ${IMAGE}"
+            cat "${COSIGN_STDERR}"
+            exit 1
+          fi
+          rm -f "${COSIGN_STDERR}"
+        done < "${IMAGES_TXT}"
+
+        echo "Chains provenance files:"
+        ls -la "${PROVENANCE_DIR}"
+
     - name: create-trusted-artifact
       computeResources:
         limits:
           memory: 128Mi
-          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m

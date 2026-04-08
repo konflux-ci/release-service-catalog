@@ -262,12 +262,32 @@ function skopeo() {
                   }
               '
           else
-            if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
+            if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://registry.io/helm-chart"* ]]
             then
-              echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
+              echo '{
+                      "schemaVersion": 2,
+                      "config": {
+                        "mediaType": "application/vnd.cncf.helm.config.v1+json",
+                        "digest": "sha256:helmconfigabc123",
+                        "size": 141
+                      },
+                      "layers": [
+                        {
+                          "mediaType": "application/vnd.cncf.helm.chart.content.v1.tar+gzip",
+                          "digest": "sha256:helmlayerdef456",
+                          "size": 4567
+                        }
+                      ]
+                    }
+                '
             else
-              echo Error: Unexpected call
-              exit 1
+              if [[ "$*" == "inspect --no-tags --format {{.Digest}} docker://registry.io/image"*":sha256-"*".src"* ]]
+              then
+                echo "sha256:9e8f9c7bdce16d2e9ebf93b84d3f8df9821ab74f8c2bf73446e8828f936c9db1"
+              else
+                echo Error: Unexpected call
+                exit 1
+              fi
 	    fi
 	  fi
         fi

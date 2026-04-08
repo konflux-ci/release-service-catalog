@@ -38,9 +38,15 @@ function cosign() {
 
   if [[ "$*" == "copy -f private-registry.io/image:tag "*":"* ]]
   then
-    if [[ $(cat /etc/ssl/certs/ca-custom-bundle.crt) != "mycert" ]]
+    # Verify CA certificate file exists and contains valid PEM data
+    if [[ ! -f /etc/pki/tls/certs/ca-bundle.crt ]]
     then
       echo Custom certificate not mounted
+      return 1
+    fi
+    if ! grep -q "BEGIN CERTIFICATE" /etc/pki/tls/certs/ca-bundle.crt
+    then
+      echo Custom certificate is not in valid PEM format
       return 1
     fi
   fi

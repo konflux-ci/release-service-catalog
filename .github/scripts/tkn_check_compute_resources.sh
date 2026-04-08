@@ -44,22 +44,19 @@ for file in ${CHANGED_FILES}; do
       fail=1
     fi
 
-    # Ensure limits.cpu equals requests.cpu
-    limits_cpu=$(yq '.cpu' <<< "$limits")
-    requests_cpu=$(yq '.cpu' <<< "$requests")
-    if [[ "$limits_cpu" == "null" || "$requests_cpu" == "null" || "$limits_cpu" != "$requests_cpu" ]]; then
-      echo "ERROR: $file step $step_name (index $i) limits.cpu and requests.cpu must be defined and equal"
-      fail=1
-    fi
-
     # Check no other keys exist in computeResources (order-agnostic)
     if ! yq -e 'keys | contains(["limits","requests"]) and length == 2' <<< "$compute_resources" > /dev/null 2>&1; then
       echo "ERROR: $file step $step_name (index $i) computeResources has extra or missing keys"
       fail=1
     else
-      # Check that limits has exactly cpu and memory, requests only has cpu and memory (order-agnostic)
-      if ! yq -e 'keys | contains(["cpu","memory"]) and length == 2' <<< "$limits" > /dev/null 2>&1; then
-        echo "ERROR: $file step $step_name (index $i) computeResources.limits must have exactly cpu and memory"
+      # Check that limits has memory (and optionally cpu), requests has cpu and memory (order-agnostic)
+      if ! yq -e 'has("memory")' <<< "$limits" > /dev/null 2>&1; then
+        echo "ERROR: $file step $step_name (index $i) computeResources.limits must have memory defined"
+        fail=1
+      fi
+      limits_keys_ok=$(yq -e 'keys | all_c(. == "memory" or . == "cpu")' <<< "$limits" 2>/dev/null)
+      if [[ "$limits_keys_ok" != "true" ]]; then
+        echo "ERROR: $file step $step_name (index $i) computeResources.limits has unexpected keys (only memory and cpu allowed)"
         fail=1
       fi
       if ! yq -e 'keys | contains(["cpu","memory"]) and length == 2' <<< "$requests" > /dev/null 2>&1; then

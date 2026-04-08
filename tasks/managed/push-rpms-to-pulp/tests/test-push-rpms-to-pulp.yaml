@@ -96,6 +96,8 @@ spec:
           value: "pulp-task-pulp-secret"
         - name: resultsDirPath
           value: "$(context.pipelineRun.uid)/results"
+        - name: artifactsJsonDirPath
+          value: "$(context.pipelineRun.uid)/artifacts"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -164,7 +166,7 @@ spec:
                 exit 1
               fi
 
-              # Expect domain show + 1 repo list + 9 uploads = 11 total
+              # Expect domain show + rpm repo list + 9 rpm uploads = 11
               if [ "$(wc -l < "$(params.dataDir)/mock_pulp.txt")" != 11 ]; then
                 echo Error: pulp was expected to be called 11 times. Actual calls:
                 cat "$(params.dataDir)/mock_pulp.txt"
@@ -193,9 +195,54 @@ spec:
               fi
 
               # count how source rpmfiles are in the results
-              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "source")) | length')" != 1 ]; then
+              if [ "$(echo "$results" | jq '.rpmfiles | map(select(.arch == "src")) | length')" != 1 ]; then
                 echo Error: there should be 1 source rpmfile in the results. Actual results:
                 echo "$results"
+                exit 1
+              fi
+
+              # Verify artifacts.json (pulp-tool format) was created in dedicated directory
+              artifacts=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts/artifacts.json")
+              echo "Artifacts JSON:"
+              echo "$artifacts"
+
+              # Check artifacts.json has the expected structure
+              if ! echo "$artifacts" | jq -e '.artifacts' > /dev/null; then
+                echo Error: artifacts.json is missing the artifacts field
+                exit 1
+              fi
+
+              if ! echo "$artifacts" | jq -e '.distributions' > /dev/null; then
+                echo Error: artifacts.json is missing the distributions field
+                exit 1
+              fi
+
+              # Count total artifacts (6: 4 arch-specific + 1 source + 1 noarch deduplicated)
+              # Note: rpmfiles has 9 because noarch is recorded per-arch repo, but
+              # artifacts.json deduplicates noarch to a single entry
+              artifact_count=$(echo "$artifacts" | jq '.artifacts | keys | length')
+              if [ "$artifact_count" != 6 ]; then
+                echo "Error: artifacts.json should have 6 artifacts, got $artifact_count"
+                exit 1
+              fi
+
+              # Verify each artifact has required fields
+              jq_check='.artifacts | to_entries | all(.value | has("labels") and has("url") and has("sha256"))'
+              if ! echo "$artifacts" | jq -e "$jq_check" | grep -q true; then
+                echo Error: Some artifacts are missing required fields
+                exit 1
+              fi
+
+              # Verify distributions were added (should have arch repos + source)
+              dist_count=$(echo "$artifacts" | jq '.distributions | keys | length')
+              if [ "$dist_count" -lt 2 ]; then
+                echo "Error: artifacts.json should have at least 2 distributions, got $dist_count"
+                exit 1
+              fi
+
+              # Verify source distribution exists
+              if ! echo "$artifacts" | jq -e '.distributions.source' > /dev/null; then
+                echo Error: artifacts.json is missing source distribution
                 exit 1
               fi
       runAfter:

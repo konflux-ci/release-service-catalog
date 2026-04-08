@@ -104,7 +104,6 @@ spec:
       computeResources:
         limits:
           memory: 64Mi
-          cpu: 30m
         requests:
           memory: 64Mi
           cpu: 30m
@@ -127,10 +126,9 @@ spec:
       computeResources:
         limits:
           memory: 2.5Gi
-          cpu: '2'
         requests:
           memory: 2.5Gi
-          cpu: '2'
+          cpu: "2"
       volumeMounts:
         - name: secret-vol
           mountPath: "/etc/secrets"
@@ -153,6 +151,7 @@ spec:
         set -x
 
         FILES_DIR=$(params.dataDir)/$(params.filesDir)
+        PROVENANCE_DIR="${FILES_DIR}/chains-provenance"
 
         # Get release timestamp
         RELEASE_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -166,6 +165,23 @@ spec:
             exit 1
         fi
 
+        # Load the first Chains provenance predicate. All wheels in a
+        # release come from the same build pipeline, so one is sufficient.
+        CHAINS_PREDICATE=""
+        if [ -d "${PROVENANCE_DIR}" ]; then
+            shopt -s nullglob
+            for prov_file in "${PROVENANCE_DIR}"/sha256:*.json; do
+                CHAINS_PREDICATE=$(jq '.predicate' "${prov_file}")
+                echo "Loaded Chains provenance from ${prov_file}"
+                break
+            done
+            shopt -u nullglob
+        fi
+
+        if [ -z "${CHAINS_PREDICATE}" ]; then
+            echo "WARNING: No Chains provenance found, falling back to minimal predicate"
+        fi
+
         # Function to run cosign with retries
         run_cosign() {
             local attempt=0
@@ -176,7 +192,6 @@ spec:
                     return 0
                 fi
                 sleep $backoff2
-                # Fibonacci backoff
                 local old_backoff1=$backoff1
                 backoff1=$backoff2
                 backoff2=$((old_backoff1 + backoff2))
@@ -224,44 +239,67 @@ spec:
 
           # Create SLSA provenance predicate
           PREDICATE_FILE="/tmp/${WHEEL}.predicate.json"
-          cat > "${PREDICATE_FILE}" <<EOF
-        {
-          "_type": "https://in-toto.io/Statement/v0.1",
-          "predicateType": "https://slsa.dev/provenance/v0.2",
-          "subject": [
-            {
-              "name": "${WHEEL}",
-              "digest": {
-                "sha256": "${WHEEL_SHA256}"
-              }
-            }
-          ],
-          "predicate": {
-            "builder": {
-              "id": "https://konflux-ci.dev/calunga"
-            },
-            "buildType": "https://konflux-ci.dev/PythonWheelBuild@v1",
-            "metadata": {
-              "buildFinishedOn": "${RELEASE_TIME}",
-              "completeness": {
-                "parameters": true,
-                "environment": true,
-                "materials": true
+
+          if [ -n "${CHAINS_PREDICATE}" ]; then
+            jq -n \
+              --arg release_time "${RELEASE_TIME}" \
+              --argjson chains_predicate "${CHAINS_PREDICATE}" \
+            '{
+              buildDefinition: (
+                if $chains_predicate.buildDefinition then
+                  $chains_predicate.buildDefinition
+                else {
+                  buildType: ($chains_predicate.buildType // "https://konflux-ci.dev/PythonWheelBuild@v1"),
+                  externalParameters: ($chains_predicate.invocation.parameters // {}),
+                  internalParameters: ($chains_predicate.invocation.environment // {}),
+                  resolvedDependencies: ($chains_predicate.materials // [])
+                }
+                end
+              ),
+              runDetails: (
+                if $chains_predicate.runDetails then
+                  $chains_predicate.runDetails
+                else {
+                  builder: {
+                    id: ($chains_predicate.builder.id // "https://konflux-ci.dev/calunga")
+                  },
+                  metadata: {
+                    invocationId: ($chains_predicate.metadata.buildInvocationId // null),
+                    startedOn: ($chains_predicate.metadata.buildStartedOn // null),
+                    finishedOn: ($chains_predicate.metadata.buildFinishedOn // $release_time)
+                  }
+                }
+                end
+              )
+            }' > "${PREDICATE_FILE}"
+          else
+            # Fallback: minimal v1 predicate when Chains provenance is unavailable
+            jq -n \
+              --arg release_time "${RELEASE_TIME}" \
+            '{
+              buildDefinition: {
+                buildType: "https://konflux-ci.dev/PythonWheelBuild@v1",
+                externalParameters: {},
+                resolvedDependencies: []
               },
-              "reproducible": true
-            }
-          }
-        }
-        EOF
+              runDetails: {
+                builder: {
+                  id: "https://konflux-ci.dev/calunga"
+                },
+                metadata: {
+                  finishedOn: $release_time
+                }
+              }
+            }' > "${PREDICATE_FILE}"
+          fi
 
           ATT_FILE="${WHEEL}.attestation"
           DSSE_FILE="/tmp/${WHEEL}.dsse.json"
 
-          # Sign the attestation with cosign using AWS KMS key
           echo "Signing attestation with cosign (AWS KMS)"
           if run_cosign attest-blob "${WHEEL}" \
             --predicate="${PREDICATE_FILE}" \
-            --type=https://slsa.dev/provenance/v0.2 \
+            --type=https://slsa.dev/provenance/v1 \
             --key "$SIGN_KEY" \
             --yes \
             "${REKOR_ARGS[@]}" \
@@ -290,6 +328,9 @@ spec:
           rm -f "${PREDICATE_FILE}"
         done
 
+        # Clean up the chains-provenance directory so it's not uploaded to Pulp
+        rm -rf "${PROVENANCE_DIR}"
+
         echo ""
         echo "=========================================="
         echo "Attestation Generation Summary:"
@@ -306,7 +347,6 @@ spec:
       computeResources:
         limits:
           memory: 128Mi
-          cpu: 250m
         requests:
           memory: 128Mi
           cpu: 250m
