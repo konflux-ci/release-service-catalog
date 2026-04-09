@@ -8,3 +8,4 @@
 - [ ] My commit message includes `Signed-off-by: My name <email>`
 - [ ] I read CONTRIBUTING.MD and [commit formatting](CONTRIBUTING.md#commit-message-formatting-and-standards)
 - [ ] I have run the README.md generator script in `.github/scripts/readme_generator.sh` and verified the results using `.github/scripts/check_readme.sh`
+- [ ] If an AI agent was used, I marked that via a commit footer like `Assisted-By: Cursor`

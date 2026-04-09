@@ -94,7 +94,8 @@ Before a pull request can be merged:
 * Multiple commits should be used if the PR is complex and clarity can be improved, but they should still relate to a single topic
 * For code contributions, tests have to be added/modified to ensure the code works
 * There has to be at least one approval
-* The feature branch must be rebased so it contains the latest changes from the target branch
+* Limit commits to the changes needed for the work and its tests, and split other edits into their own pull requests or commits
+* If an AI agent was used in the creation of the commit, show this with a commit footer like `Assisted-By: Cursor` or `Assisted-By: Claude`
 * The CI has to pass successfully
 * Every comment has to be addressed and resolved
 
