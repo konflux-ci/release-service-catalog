@@ -35,7 +35,7 @@ must remain `caching-helm-test-rhel9` because:
 
 - `validate-helm-chart-snapshot` checks that the OCI `org.opencontainers.image.title` matches the delivery repo basename
 - `publish-pyxis-repository` requires the delivery repo to already exist in Pyxis stage
-- The Pyxis repo (`dev-release-team-tenant/caching-helm-test-rhel9`) is defined in `pyxis-repo-configs/products/test-helm/caching-helm-test.yaml`
+- The Pyxis repo (`dev-release-team-tenant/caching-helm-test-rhel9`) is defined in [pyxis-repo-configs](https://gitlab.cee.redhat.com/releng/pyxis-repo-configs/-/blob/main/products/test-helm/caching-helm-test.yaml)
 
 To decouple the K8s name from the image basename, the test uses two mechanisms:
 
