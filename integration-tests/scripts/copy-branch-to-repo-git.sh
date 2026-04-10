@@ -30,6 +30,10 @@ if [ -n "${DEBUG}" ]; then
   echo "🐛 Debug mode enabled"
 fi
 
+# Source shared GitHub API helpers
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/github-api-helpers.sh"
+
 if [ -z $GITHUB_TOKEN ] ; then
   echo "🔴 error: missing env var GITHUB_TOKEN"
   exit 1
@@ -61,7 +65,8 @@ fi
 
 # Verify source repository exists and is accessible
 echo "Verifying source repository ${source_repo} exists and is accessible..."
-SOURCE_REPO_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${source_repo} 2> /dev/null)
+# Use simple curl for initial check; source repo should always exist
+SOURCE_REPO_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${source_repo} 2> /dev/null)
 if [ -n "${DEBUG}" ]; then
   echo "🐛 Source repo API response: ${SOURCE_REPO_RESPONSE}"
 fi
@@ -80,7 +85,8 @@ fi
 
 # Verify destination repository exists and is accessible
 echo "Verifying destination repository ${dest_repo} exists and is accessible..."
-DEST_REPO_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null)
+# Note: We use a simple curl here (no retry) because 404 is expected for new repos
+DEST_REPO_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null || true)
 if [ -n "${DEBUG}" ]; then
   echo "🐛 Destination repo API response: ${DEST_REPO_RESPONSE}"
 fi
@@ -103,36 +109,19 @@ if [ -z "${DEST_REPO_CHECK}" ]; then
     exit 1
   fi
   
-  # Verify the repository was created successfully with retry logic
-  # GitHub API may take a moment to propagate the newly created repository
+  # Verify the repository was created successfully
   echo "Re-verifying destination repository ${dest_repo}..."
-  max_attempts=5
-  attempt=1
-  verification_success=false
-
-  while [ $attempt -le $max_attempts ]; do
-    DEST_REPO_RECHECK_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null)
+  # Give GitHub a moment to propagate the new repository
+  sleep 2
+  DEST_REPO_RECHECK_RESPONSE=$(github_api_call_with_retry "reverify dest repo" curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo})
+  if [ -n "${DEBUG}" ]; then
+    echo "🐛 Destination repo recheck API response: ${DEST_REPO_RECHECK_RESPONSE}"
+  fi
+  DEST_REPO_CHECK=$(echo "${DEST_REPO_RECHECK_RESPONSE}" | jq -r '.full_name // ""')
+  if [ -z "${DEST_REPO_CHECK}" ]; then
+    echo "🔴 error: destination repository ${dest_repo} still not accessible after creation"
     if [ -n "${DEBUG}" ]; then
-      echo "🐛 Destination repo recheck API response: ${DEST_REPO_RECHECK_RESPONSE}"
-    fi
-    DEST_REPO_CHECK=$(echo "${DEST_REPO_RECHECK_RESPONSE}" | jq -r '.full_name // ""')
-    if [ -n "${DEST_REPO_CHECK}" ]; then
-      verification_success=true
-      break
-    fi
-
-    echo "⚠️  Repository not yet available (attempt ${attempt}/${max_attempts})"
-    if [ $attempt -lt $max_attempts ]; then
-      echo "Waiting 3 seconds before retry..."
-      sleep 3
-    fi
-    attempt=$((attempt + 1))
-  done
-
-  if [ "$verification_success" = false ]; then
-    echo "🔴 error: destination repository ${dest_repo} still not accessible after ${max_attempts} attempts"
-    if [ -n "${DEBUG}" ]; then
-      echo "🐛 Last response: ${DEST_REPO_RECHECK_RESPONSE}"
+      echo "🐛 Recheck response: ${DEST_REPO_RECHECK_RESPONSE}"
     fi
     exit 1
   fi

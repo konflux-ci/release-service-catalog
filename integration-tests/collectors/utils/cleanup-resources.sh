@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 #
+# NOTE: This script is specific to the collectors test suite for quick name-pattern cleanup.
+# For general cleanup across all integration tests, use: ../../scripts/cleanup-accumulated-resources.sh
+#
 # Summary:
 #   This script generates a separate cleanup shell script located at /tmp/cleanup.sh.
 #   The generated script contains a series of 'kubectl delete' commands designed to
