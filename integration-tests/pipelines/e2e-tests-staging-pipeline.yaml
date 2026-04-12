@@ -180,14 +180,11 @@ spec:
               echo "PR_GIT_REVISION: $(params.PR_GIT_REVISION)"
               if [ -n "${PR_NUMBER}" ]; then
                 echo "PR_NUMBER: ${PR_NUMBER}"
+              elif [ -n "${BRANCH_NAME}" ]; then
+                echo "This is not a PR, but a merge queue branch"
+                echo "BRANCH_NAME: ${BRANCH_NAME}"
               else
-                if [ -n "${BRANCH_NAME}" ]; then
-                  echo "This is not a PR, but a merge queue branch"
-                  echo "BRANCH_NAME: ${BRANCH_NAME}"
-                else
-                  echo "No PR_NUMBER or BRANCH_NAME environment variables found"
-                  exit 1
-                fi
+                echo "No PR_NUMBER or BRANCH_NAME; using SNAPSHOT git URL and revision (e.g. utils-e2e temp fork)"
               fi
 
               VAULT_PASSWORD_FILE=$(mktemp)
@@ -210,9 +207,17 @@ spec:
               if [ -n "${PR_NUMBER}" ]; then
                 AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
                   --repo "konflux-ci/release-service-catalog" --pull_request_number "${PR_NUMBER}")
-              else
+              elif [ -n "${BRANCH_NAME}" ]; then
                 AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
                   --repo "konflux-ci/release-service-catalog" --branch "${BRANCH_NAME}")
+              else
+                # utils-e2e: PR_GIT_URL is https://github.com/OWNER/REPO from clone-push
+                # PR_GIT_REVISION is the patched branch.
+                CATALOG_REPO_SLUG="$(params.PR_GIT_URL)"
+                CATALOG_REPO_SLUG="${CATALOG_REPO_SLUG#https://github.com/}"
+                CATALOG_REPO_SLUG="${CATALOG_REPO_SLUG%.git}"
+                AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
+                  --repo "${CATALOG_REPO_SLUG}" --branch "$(params.PR_GIT_REVISION)")
               fi
 
               # if PIPELINE_USED is set, use it, otherwise use PIPELINE_TEST_SUITE
@@ -226,11 +231,18 @@ spec:
               # check if PIPELINE is found as an affected pipeline
               if string_has_word "${PIPELINE}" "${AFFECTED_PIPELINES}" || \
                 [[ "${AFFECTED_PIPELINES}" == "release-pipelines" ]]; then
-                echo "This Test Suite is affected by changes in PR ${PR_NUMBER}"
-  
+                if [ -n "${PR_NUMBER}" ]; then
+                  echo "This Test Suite is affected by changes in PR ${PR_NUMBER}"
+                else
+                  echo "This Test Suite is in the affected set for this catalog revision (${AFFECTED_PIPELINES})"
+                fi
                 "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
               else
-                echo "This Test Suite is not affected by changes in PR ${PR_NUMBER}"
+                if [ -n "${PR_NUMBER}" ]; then
+                  echo "This Test Suite is not affected by changes in PR ${PR_NUMBER}"
+                else
+                  echo "This Test Suite is not in the affected set (${AFFECTED_PIPELINES})"
+                fi
                 exit 99
               fi
 

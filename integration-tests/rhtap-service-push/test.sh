@@ -36,9 +36,10 @@ verify_release_contents() {
       echo "Revision: ${revision}"
 
       local failures=0
-      local image_url
+      local image_url image_shasum
 
       image_url=$(jq -r '.status.artifacts.images[0].urls[0] // ""' <<< "${release_json}")
+      image_shasum=$(jq -r '.status.artifacts.images[0].shasum // ""' <<< "${release_json}")
 
       echo "Checking image_url..."
       if [ -n "${image_url}" ]; then
@@ -46,6 +47,29 @@ verify_release_contents() {
       else
         echo "🔴 image_url was empty!"
         failures=$((failures+1))
+      fi
+
+      echo "Checking image_shasum..."
+      if [ -n "${image_shasum}" ]; then
+        echo "✅️ image_shasum: ${image_shasum}"
+      else
+        echo "🔴 image_shasum was empty!"
+        failures=$((failures+1))
+      fi
+
+      echo "Verifying image pullability with skopeo..."
+      if [ -n "${image_url}" ] && [ -n "${image_shasum}" ]; then
+        set +e
+        "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
+          "${image_url}" "${image_shasum}" \
+          "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
+        skopeo_return_code=$?
+        set -e
+        if [ "${skopeo_return_code}" -ne 0 ]; then
+          failures=$((failures+1))
+        fi
+      else
+        echo "⚠️  Skipping skopeo check: image_url or image_shasum is empty."
       fi
 
       set +e
