@@ -13,3 +13,12 @@ function internal-request() {
   echo "Sync flag set to true. Waiting for the InternalRequest to be completed."
   sleep 2
 }
+
+function kubectl() {
+  if [[ "$*" == *"get internalrequest"*"jsonpath"*"status.results"* ]]
+  then
+    echo '{"requestMessage":"Index Image Published successfully"}'
+  else
+    /usr/bin/kubectl $*
+  fi
+}
