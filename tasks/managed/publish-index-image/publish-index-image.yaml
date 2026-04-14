@@ -168,6 +168,8 @@ spec:
           pipelineTimeout=$(date -u -d @"${pipelineTimeoutSeconds}" +"%Hh%Mm%Ss")
           taskTimeout=$(date -u -d @"${requestTimeout}" +"%Hh%Mm%Ss")
 
+          IR_RESULT_FILE=$(mktemp)
+
           for((x=0; x<${#publishingImages[@]}; x++ )); do
               echo "=== Creating internal request to publish image:"
               echo ""
@@ -184,8 +186,23 @@ spec:
                   -t "$(params.requestTimeout)" \
                   --pipeline-timeout "${pipelineTimeout}" \
                   --task-timeout "$taskTimeout" \
-                  -l ${pipelinerun_label}="$(params.pipelineRunUid)"
-              echo "=== done"
+                  -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
+                  | tee "$IR_RESULT_FILE" || \
+                  (grep "^\[" "$IR_RESULT_FILE" | jq . && exit 1)
+
+              internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_RESULT_FILE")
+              echo "done (${internalRequest})"
+
+              results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
+              requestMessage=$(echo "${results}" | jq -r '.requestMessage // ""')
+
+              if echo "${requestMessage}" | grep -qi "error"; then
+                echo "ERROR: Publish to ${publishingImages[$x]} failed"
+                echo "requestMessage: ${requestMessage}"
+                exit 1
+              fi
+              echo "=== published successfully (${publishingImages[$x]})"
+
               echo ""
               echo ""
           done
