@@ -200,6 +200,48 @@ if [ -z "$RELEASE_NAMESPACE" ]; then
   exit 1
 fi
 
+# Returns 0 if every failing TaskRun in a managed PipelineRun failed due to
+# TaskRunImagePullFailed — meaning the failure is purely an infra/registry blip,
+# not a real test assertion or pipeline logic error.
+is_pure_image_pull_failure() {
+  local release_json="$1"
+
+  # Extract managed PLR name and namespace from the Release status
+  # .status.managedProcessing.pipelineRun is stored as "namespace/name"
+  local plr_namespaced plr_name plr_ns
+  plr_namespaced=$(echo "$release_json" | jq -r '.status.managedProcessing.pipelineRun // empty' 2>/dev/null)
+  [ -z "$plr_namespaced" ] && return 1
+  plr_ns="${plr_namespaced%%/*}"
+  plr_name="${plr_namespaced##*/}"
+  plr_ns="${plr_ns:-managed-release-team-tenant}"
+
+  [ -z "$plr_name" ] && return 1  # can't determine — assume real failure
+
+  # Collect reasons for all failed TaskRuns in this PLR
+  local failed_reasons
+  failed_reasons=$(kubectl get taskrun -n "$plr_ns" \
+    -l "tekton.dev/pipelineRun=${plr_name}" \
+    -o jsonpath='{.items[?(@.status.conditions[0].status=="False")].status.conditions[0].reason}' \
+    2>/dev/null)
+
+  [ -z "$failed_reasons" ] && return 1  # no failed tasks found — unexpected, assume real failure
+
+  # If every failure reason is TaskRunImagePullFailed, it's a pure infra issue
+  local non_imagepull
+  non_imagepull=$(echo "$failed_reasons" | tr ' ' '\n' | grep -v "^TaskRunImagePullFailed$" || true)
+  [ -z "$non_imagepull" ]
+}
+
+# MAX_RELEASE_RETRIES: how many times to re-create a Release CR when it fails
+# due to pure TaskRunImagePullFailed (default 1). Export to override.
+RELEASE_RETRIES_LEFT="${MAX_RELEASE_RETRIES:-1}"
+
+# If set, the final effective release name (which may differ from RELEASE_NAME
+# when a retry Release CR was created) is written to this file so callers can
+# read the correct name for artifact verification.
+# Usage: export RELEASE_NAME_OUTPUT_FILE=/tmp/my-release-name
+RELEASE_NAME_OUTPUT_FILE="${RELEASE_NAME_OUTPUT_FILE:-}"
+
 CONSOLEURL=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson | jq -r '.data."custom-console-url"')
 
 echo "======================================="
@@ -315,11 +357,48 @@ ${overAllStatusLine}"
   fi
 
   if [ "${RELEASED_STATUS}" == "\"False\"" ] && [ "${RELEASED_REASON}" == "\"Failed\"" ]; then
+    RELEASE_JSON=$(kubectl get release/${RELEASE_NAME} -n ${RELEASE_NAMESPACE} -ojson)
+
+    # --- Retry on pure image-pull infra failures ---
+    if [ "${RELEASE_RETRIES_LEFT}" -gt 0 ] && is_pure_image_pull_failure "${RELEASE_JSON}"; then
+      echo ""
+      echo "⚠️  Release ${RELEASE_NAME} failed due to TaskRunImagePullFailed (transient registry issue)."
+      local retry_delay="${RELEASE_RETRY_DELAY:-60}"
+      echo "   Retrying (${RELEASE_RETRIES_LEFT} attempt(s) left) — waiting ${retry_delay}s for registry to recover..."
+      sleep "${retry_delay}"
+
+      local_snapshot=$(jq -r '.spec.snapshot' <<< "${RELEASE_JSON}")
+      local_plan=$(jq -r '.spec.releasePlan' <<< "${RELEASE_JSON}")
+
+      # Create a fresh Release CR against the same snapshot + releasePlan
+      NEW_RELEASE_NAME=$(kubectl create -f - 2>/dev/null <<EOF | grep -oP '(?<=release\.appstudio\.redhat\.com/)[\w-]+'
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Release
+metadata:
+  generateName: retry-
+  namespace: ${RELEASE_NAMESPACE}
+spec:
+  snapshot: ${local_snapshot}
+  releasePlan: ${local_plan}
+EOF
+)
+      if [ -z "${NEW_RELEASE_NAME}" ]; then
+        echo "🔴 Failed to create retry Release CR — falling through to failure."
+      else
+        RELEASE_RETRIES_LEFT=$(( RELEASE_RETRIES_LEFT - 1 ))
+        RELEASE_NAME="${NEW_RELEASE_NAME}"
+        echo "↩️  Monitoring retry Release: ${RELEASE_NAME}"
+        echo "======================================="
+        echo "Release           : ${RELEASE_NAME}"
+        echo "======================================="
+        continue
+      fi
+    fi
+
+    # --- Real failure (not an image pull issue, or retries exhausted) ---
     echo ""
     echo "❌ Error: Release failed!"
     echo ""
-
-    RELEASE_JSON=$(kubectl get release/${RELEASE_NAME} -n ${RELEASE_NAMESPACE} -ojson)
 
     getLogs "${RELEASE_JSON}" "collectorsProcessing?.tenantCollectorsProcessing?"
     getLogs "${RELEASE_JSON}" "collectorsProcessing?.managedCollectorsProcessing?"
@@ -334,6 +413,7 @@ ${overAllStatusLine}"
 
   if [ "${RELEASED_STATUS}" == "\"True\"" ] && [ "${RELEASED_REASON}" == "\"Succeeded\"" ]; then
     echo "✅ Release for ${RELEASE_PLAN} succeeded!"
+    [ -n "${RELEASE_NAME_OUTPUT_FILE}" ] && echo "${RELEASE_NAME}" > "${RELEASE_NAME_OUTPUT_FILE}"
     exit 0
   fi
   sleep 5
