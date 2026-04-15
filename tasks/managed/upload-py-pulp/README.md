@@ -19,3 +19,4 @@ Upload Python packages (with attestations) to a Pulp repository.
 | trustedArtifactsDebug       | Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable                | Yes      | ""                           |
 | taskGitUrl                  | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored | No       | -                            |
 | taskGitRevision             | The revision in the taskGitUrl repo to be used                                                        | No       | -                            |
+| ociStorage                  | The OCI repository where the Trusted Artifacts are stored                                             | No       | -                            |

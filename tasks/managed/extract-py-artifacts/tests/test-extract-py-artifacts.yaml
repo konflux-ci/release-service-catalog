@@ -67,6 +67,19 @@ spec:
                 ]
               }
               EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "releaseNotes": {
+                  "product_id": [123],
+                  "type": "RHBA",
+                  "synopsis": "Test advisory",
+                  "content": {
+                    "artifacts": []
+                  }
+                }
+              }
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -101,6 +114,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
       runAfter:
         - setup
     - name: check-result
@@ -182,10 +197,28 @@ spec:
                 fi
               done
 
+              # Check that releaseNotes artifacts were populated in data.json
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              ARTIFACT_COUNT=$(jq '[.releaseNotes.content.artifacts[] ] | length' "$DATA_FILE")
+              if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+                echo "ERROR: No artifacts populated in releaseNotes"
+                jq . "$DATA_FILE"
+                exit 1
+              fi
+
+              # Verify the artifact has expected fields
+              PURL=$(jq -r '.releaseNotes.content.artifacts[0].purl' "$DATA_FILE")
+              if [[ "$PURL" != pkg:pypi/* ]]; then
+                echo "ERROR: Expected pkg:pypi PURL, got: $PURL"
+                exit 1
+              fi
+
               echo "Files extracted:"
               ls -la "${FILES_DIR}"
               echo "Chains provenance:"
               ls -la "${FILES_DIR}/chains-provenance"
+              echo "Release notes artifacts:"
+              jq '.releaseNotes.content.artifacts' "$DATA_FILE"
 
               echo "All checks passed!"
       runAfter:

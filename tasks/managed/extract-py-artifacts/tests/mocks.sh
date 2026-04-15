@@ -33,13 +33,45 @@ function oras() {
 
     if [[ -n "$output_dir" ]]; then
       # Create mock Python package files
-      echo "mock wheel content" > "${output_dir}/test_package-1.0.0-py3-none-any.whl"
-      echo "mock sdist content" > "${output_dir}/test_package-1.0.0.tar.gz"
-      echo "Created mock files in ${output_dir}"
+      # If the .mock_no_wheels marker exists, only create sdist (no wheels)
+      if [[ -f "${TRUSTED_ARTIFACTS_EXTRACT_DIR}/.mock_no_wheels" ]]; then
+        echo "mock sdist content" > "${output_dir}/test_package-1.0.0.tar.gz"
+        echo "Created mock files (no wheels) in ${output_dir}"
+      else
+        echo "mock wheel content" > "${output_dir}/test_package-1.0.0-py3-none-any.whl"
+        echo "mock sdist content" > "${output_dir}/test_package-1.0.0.tar.gz"
+        echo "Created mock files in ${output_dir}"
+      fi
     fi
     return 0
   fi
 
+  return 0
+}
+
+function unzip() {
+  echo "Mock unzip called with: $*" >&2
+  if [[ "$1" == "-p" ]]; then
+    # Return a mock SPDX SBOM with a pkg:pypi PURL
+    cat << 'SBOM_EOF'
+{
+  "spdxVersion": "SPDX-2.3",
+  "packages": [
+    {
+      "name": "test-package",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:pypi/test_package@1.0.0"
+        }
+      ]
+    }
+  ]
+}
+SBOM_EOF
+    return 0
+  fi
   return 0
 }
 
