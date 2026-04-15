@@ -165,22 +165,29 @@ spec:
             exit 1
         fi
 
-        # Load the first Chains provenance predicate. All wheels in a
-        # release come from the same build pipeline, so one is sufficient.
-        CHAINS_PREDICATE=""
+        # Load the first Chains provenance predicate into a temp file.
+        # All wheels in a release come from the same build pipeline, so
+        # one is sufficient. Storing in a file avoids shell-expansion
+        # problems (xtrace verbosity and ARG_MAX limits) when the
+        # predicate is large.
+        CHAINS_PREDICATE_FILE=/tmp/chains_predicate.json
+        HAS_CHAINS_PREDICATE=false
         if [ -d "${PROVENANCE_DIR}" ]; then
             shopt -s nullglob
             for prov_file in "${PROVENANCE_DIR}"/sha256:*.json; do
-                CHAINS_PREDICATE=$(jq '.predicate' "${prov_file}")
-                echo "Loaded Chains provenance from ${prov_file}"
+                jq '.predicate' "${prov_file}" > "${CHAINS_PREDICATE_FILE}"
+                if [ -s "${CHAINS_PREDICATE_FILE}" ] && \
+                   [ "$(jq -r 'type' "${CHAINS_PREDICATE_FILE}" 2>/dev/null)" = "object" ]; then
+                    HAS_CHAINS_PREDICATE=true
+                    echo "Loaded Chains provenance from ${prov_file}"
+                fi
                 break
             done
             shopt -u nullglob
         fi
 
-        if [ -z "${CHAINS_PREDICATE}" ] || [ "${CHAINS_PREDICATE}" = "null" ]; then
+        if [ "${HAS_CHAINS_PREDICATE}" = "false" ]; then
             echo "WARNING: No Chains provenance found, falling back to minimal predicate"
-            CHAINS_PREDICATE=""
         fi
 
         # Function to run cosign with retries
@@ -241,33 +248,33 @@ spec:
           # Create SLSA provenance predicate
           PREDICATE_FILE="/tmp/${WHEEL}.predicate.json"
 
-          if [ -n "${CHAINS_PREDICATE}" ]; then
+          if [ "${HAS_CHAINS_PREDICATE}" = "true" ]; then
             jq -n \
               --arg release_time "${RELEASE_TIME}" \
-              --argjson chains_predicate "${CHAINS_PREDICATE}" \
+              --slurpfile chains_predicate "${CHAINS_PREDICATE_FILE}" \
             '{
               buildDefinition: (
-                if $chains_predicate.buildDefinition then
-                  $chains_predicate.buildDefinition
+                if $chains_predicate[0].buildDefinition then
+                  $chains_predicate[0].buildDefinition
                 else {
-                  buildType: ($chains_predicate.buildType // "https://konflux-ci.dev/PythonWheelBuild@v1"),
-                  externalParameters: ($chains_predicate.invocation.parameters // {}),
-                  internalParameters: ($chains_predicate.invocation.environment // {}),
-                  resolvedDependencies: ($chains_predicate.materials // [])
+                  buildType: ($chains_predicate[0].buildType // "https://konflux-ci.dev/PythonWheelBuild@v1"),
+                  externalParameters: ($chains_predicate[0].invocation.parameters // {}),
+                  internalParameters: ($chains_predicate[0].invocation.environment // {}),
+                  resolvedDependencies: ($chains_predicate[0].materials // [])
                 }
                 end
               ),
               runDetails: (
-                if $chains_predicate.runDetails then
-                  $chains_predicate.runDetails
+                if $chains_predicate[0].runDetails then
+                  $chains_predicate[0].runDetails
                 else {
                   builder: {
-                    id: ($chains_predicate.builder.id // "https://konflux-ci.dev/calunga")
+                    id: ($chains_predicate[0].builder.id // "https://konflux-ci.dev/calunga")
                   },
                   metadata: {
-                    invocationId: ($chains_predicate.metadata.buildInvocationId // null),
-                    startedOn: ($chains_predicate.metadata.buildStartedOn // null),
-                    finishedOn: ($chains_predicate.metadata.buildFinishedOn // $release_time)
+                    invocationId: ($chains_predicate[0].metadata.buildInvocationId // null),
+                    startedOn: ($chains_predicate[0].metadata.buildStartedOn // null),
+                    finishedOn: ($chains_predicate[0].metadata.buildFinishedOn // $release_time)
                   }
                 }
                 end
