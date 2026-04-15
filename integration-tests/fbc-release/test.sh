@@ -21,6 +21,7 @@ declare -gA GLOBAL_TEST_MATRIX=(
     ["single-staged"]="disabled"
     ["single-prega"]="disabled"
     ["single-hotfix"]="disabled"
+    ["single-optin"]="disabled"
     ["multi-happy"]="disabled"
     ["multi-staged"]="disabled"
     # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
@@ -29,6 +30,22 @@ declare -gA GLOBAL_TEST_MATRIX=(
 
 # Global tracking for releases to verify
 declare -gA RELEASES_TO_VERIFY=()
+
+# Small function to show which scenarios are enabled
+show_enabled_scenarios(){
+    local description=$1
+    local -n scenarios_ref=$2
+
+    echo -en "  ${description}: "
+    for scenario in "${!scenarios_ref[@]}"; do
+        if [ ${scenarios_ref[$scenario]} == "enabled" ]; then
+            echo -en "${scenario} "
+        fi
+    done
+
+    # echoes one empty line
+    echo ""
+}
 
 # --- GitHub API Integration (Works within existing pipeline) ---
 
@@ -61,6 +78,7 @@ configure_test_matrix() {
         ["single-staged"]="disabled" 
         ["single-prega"]="disabled"
         ["single-hotfix"]="disabled"
+        ["single-optin"]="disabled"
         ["multi-happy"]="disabled"
         ["multi-staged"]="disabled"
         # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
@@ -85,8 +103,10 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
         GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
+        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
         tests_enabled=true
-        echo "  Signing changes enabled: single-happy, single-staged"
+
+        show_enabled_scenarios "Signing changes enabled" GLOBAL_TEST_MATRIX
     fi
     
     if [[ "$changed_files" =~ pipelines/managed/fbc-release ]] || \
@@ -102,10 +122,12 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
         GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
+        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
         GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
         GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
         tests_enabled=true
-        echo "  Batching changes enabled: single-happy, single-staged, multi-happy, multi-staged"
+
+        show_enabled_scenarios "Batching changes enabled" GLOBAL_TEST_MATRIX
     fi
     
     # If no specific patterns matched, enable all standard tests (fallback)
@@ -116,9 +138,11 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
         GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
+        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
         GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
         GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
-        echo "  Enabled: single-happy, single-staged, single-prega, single-hotfix, multi-happy, multi-staged"
+
+        show_enabled_scenarios "Enabled" GLOBAL_TEST_MATRIX
     fi
     
     echo "📋 Final test matrix:"
@@ -129,7 +153,7 @@ configure_test_matrix() {
 
 # --- Component Build Management ---
 
-# Always create both repositories for simplicity and reliability
+# Always create all repositories for simplicity and reliability
 create_github_repository() {
     echo "🔨 Creating repositories (always dual for reliability)..."
 
@@ -143,11 +167,17 @@ create_github_repository() {
     "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
         "${component_base_repo_name}" "${component2_base_branch}" \
         "${component2_repo_name}" "${component2_branch}"
+
+    # Create opt-in component
+    echo "  Creating opt-in component repository..."
+    "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+        "${opt_in_component_base_repo_name}" "${opt_in_component_base_branch}" \
+        "${opt_in_component_repo_name}" "${opt_in_component_branch}"
 }
 
 # Always initialize both components for simplicity and reliability
 wait_for_component_initialization() {
-    echo "⏳ Waiting for both components to initialize (always dual for reliability)..."
+    echo "⏳ Waiting for components to initialize (always dual for reliability)..."
     
     # Always wait for component 1
     wait_for_single_component_initialization "${component_name}"
@@ -158,6 +188,12 @@ wait_for_component_initialization() {
     wait_for_single_component_initialization "${component2_name}"
     component2_pr="${component_pr}"
     component2_pr_number="${pr_number}"
+
+    # Always wait for opt_in_component
+    wait_for_single_component_initialization "${opt_in_component_name}"
+    opt_in_component_pr="${component_pr}"
+    opt_in_component_pr_number="${pr_number}"
+
 }
 
 # Always merge PRs for both components for simplicity and reliability
@@ -171,6 +207,10 @@ merge_github_pr() {
     # Always merge component 2
     merge_single_component_pr "${component2_pr_number}" "${component2_repo_name}" "${NO_CVE}"
     component2_sha="${SHA}"
+
+    # Always merge opt in component
+    merge_single_component_pr "${opt_in_component_pr_number}" "${opt_in_component_repo_name}" "${NO_CVE}"
+    opt_in_component_sha="${SHA}"
 
     SHA="${component_sha}"  # Primary SHA for framework compatibility
 }
@@ -186,8 +226,12 @@ wait_for_plr_to_appear() {
     # Always wait for component 2 PLR
     comp2_plr_name=$(wait_for_single_plr_to_appear "${component2_sha}")
     component2_push_plr_name="${comp2_plr_name}"
-}
 
+    # Always wait for opt component PLR
+    opt_in_comp_plr_name=$(wait_for_single_plr_to_appear "${opt_in_component_sha}")
+    opt_in_component_push_plr_name="${opt_in_comp_plr_name}"
+
+}
 
 # Wait for PLR completion for both components in parallel to avoid race conditions
 wait_for_plr_to_complete() {
@@ -195,18 +239,25 @@ wait_for_plr_to_complete() {
 
     local comp1_plr="${component_push_plr_name}"
     local comp2_plr="${component2_push_plr_name}"
+    local opt_in_comp_plr="${opt_in_component_push_plr_name}"
+
     local comp1_name="${component_name}"
     local comp2_name="${component2_name}"
+    local opt_in_comp_name="${opt_in_component_name}"
+
     local comp1_sha="${component_sha}"
     local comp2_sha="${component2_sha}"
+    local opt_in_comp_sha="${opt_in_component_sha}"
 
     echo "🔄 Starting parallel monitoring of:"
     echo "  - Component 1 PLR: ${comp1_plr} (${comp1_name})"
     echo "  - Component 2 PLR: ${comp2_plr} (${comp2_name})"
+    echo "  - Opt In Component PLR: ${opt_in_comp_plr} (${opt_in_comp_name})"
 
     # Create temporary files to capture results from background processes
     local comp1_result=$(mktemp)
     local comp2_result=$(mktemp)
+    local opt_in_comp_result=$(mktemp)
 
     # Start monitoring both PLRs in parallel
     (
@@ -231,28 +282,44 @@ wait_for_plr_to_complete() {
     ) &
     local pid2=$!
 
+    (
+        if wait_for_single_plr_to_complete "${opt_in_comp_plr}" "${opt_in_comp_name}" "${opt_in_comp_sha}"; then
+            echo "success" > "${opt_in_comp_result}"
+            echo "✅ Opt In Component (${opt_in_comp_name}) PipelineRun completed: ${opt_in_comp_plr}" >&2
+        else
+            echo "failure" > "${opt_in_comp_result}"
+            echo "🔴 Opt In Component (${opt_in_comp_name}) PipelineRun failed: ${opt_in_comp_plr}" >&2
+        fi
+    ) &
+    local pid3=$!
+
     # Wait for both background processes to complete
     echo "⏳ Waiting for both components to complete..."
     wait $pid1
     local exit1=$?
     wait $pid2
     local exit2=$?
+    wait $pid3
+    local exit3=$?
+
 
     # Check results
     local comp1_status=$(cat "${comp1_result}" 2>/dev/null || echo "unknown")
     local comp2_status=$(cat "${comp2_result}" 2>/dev/null || echo "unknown")
+    local opt_in_comp_status=$(cat "${opt_in_comp_result}" 2>/dev/null || echo "unknown")
 
     # Cleanup temp files
-    rm -f "${comp1_result}" "${comp2_result}"
+    rm -f "${comp1_result}" "${comp2_result}" "${opt_in_comp_result}"
 
     # Report results
-    if [ "${comp1_status}" = "success" ] && [ "${comp2_status}" = "success" ]; then
+    if [ "${comp1_status}" = "success" ] && [ "${comp2_status}" = "success" ] && [ "${opt_in_comp_status}" == "success" ]; then
         echo "🎉 All PipelineRuns completed successfully in parallel"
         return 0
     else
         echo "🔴 One or more PipelineRuns failed:"
         echo "  - Component 1 (${comp1_name}): ${comp1_status}"
         echo "  - Component 2 (${comp2_name}): ${comp2_status}"
+        echo "  - Opt In Component (${opt_in_comp_name}): ${opt_in_comp_status}"
         return 1
     fi
 }
@@ -363,11 +430,15 @@ trigger_configured_releases() {
             # Get appropriate snapshot
             local snapshot_name
             if [ "$mode" = "single" ]; then
-                snapshot_name=$(wait_for_single_component_snapshot)
+                if [ "$scenario" = "optin" ]; then
+                    snapshot_name=$(wait_for_single_component_snapshot $opt_in_application_name)
+                else
+                    snapshot_name=$(wait_for_single_component_snapshot)
+                fi
             elif [ "$mode" = "multi" ]; then
                 snapshot_name=$(wait_for_multi_component_snapshot)  
             fi
-            
+
             if [ -z "$snapshot_name" ]; then
                 echo "🔴 Failed to find snapshot for $mode-$scenario"
                 exit 1
@@ -558,24 +629,31 @@ verify_multi_component_release() {
 }
 
 # Scenario-specific verification functions
-verify_staging_behavior() {
+verify_staged() {
     local release_name=$1
-    echo "🔍 Verifying staging behavior for: $release_name"
+    echo "🔍 Verifying staged scenario for: $release_name"
     # Add staging-specific verification logic here
     return 0
 }
 
-verify_prega_tagging() {
+verify_prega() {
     local release_name=$1
-    echo "🔍 Verifying prega tagging for: $release_name"
+    echo "🔍 Verifying prega scenario for: $release_name"
     # Add prega-specific verification logic here
     return 0
 }
 
-verify_hotfix_tagging() {
+verify_hotfix() {
     local release_name=$1
-    echo "🔍 Verifying hotfix tagging for: $release_name"
+    echo "🔍 Verifying hotfix scenario for: $release_name"
     # Add hotfix-specific verification logic here
+    return 0
+}
+
+verify_optin() {
+    local release_name=$1
+    echo "🔍 Verifying optin scenario for: $release_name"
+    # Add optin-specific verification logic here
     return 0
 }
 
@@ -631,15 +709,19 @@ verify_release_contents() {
         local scenario_result=0
         case "$scenario" in
             "staged") 
-                verify_staging_behavior "$release_name" 
+                verify_staged "$release_name"
                 scenario_result=$?
                 ;;
             "prega") 
-                verify_prega_tagging "$release_name"
+                verify_prega "$release_name"
                 scenario_result=$?
                 ;;  
             "hotfix") 
-                verify_hotfix_tagging "$release_name"
+                verify_hotfix "$release_name"
+                scenario_result=$?
+                ;;
+            "optin")
+                verify_optin "$release_name"
                 scenario_result=$?
                 ;;
         esac
