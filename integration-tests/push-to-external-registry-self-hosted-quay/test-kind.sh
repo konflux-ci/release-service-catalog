@@ -357,6 +357,26 @@ while true; do
     fi
 done
 
+# --- Step 7b: Dump task logs for debugging ---
+echo "=== PipelineRun task logs ==="
+taskruns=$(kubectl get taskruns -n "${managed_namespace}" \
+    -l "tekton.dev/pipelineRun=${plr_name}" \
+    -o jsonpath='{range .items[*]}{.metadata.labels.tekton\.dev/pipelineTask}{" "}{.status.podName}{"\n"}{end}' \
+    2>/dev/null || true)
+
+while IFS=' ' read -r task_name pod_name; do
+    [ -z "$task_name" ] && continue
+    echo "--- Task: ${task_name} (pod: ${pod_name}) ---"
+    containers=$(kubectl get pod "${pod_name}" -n "${managed_namespace}" \
+        -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null || true)
+    for container in ${containers}; do
+        echo "  [${container}]"
+        kubectl logs "${pod_name}" -n "${managed_namespace}" -c "${container}" 2>/dev/null \
+            | tail -80 | sed 's/^/    /' || true
+    done
+    echo ""
+done <<< "$taskruns"
+
 # --- Step 8: Verify Release status and artifacts ---
 echo "=== Verifying Release status and artifacts ==="
 
