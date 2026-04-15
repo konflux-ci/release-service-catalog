@@ -62,6 +62,17 @@ Overall explanation of what this commit is achieving and the motivation behind i
 
 Signed-off-by: Your Name <your-name@your-email.com>
 ```
+
+### AI tools in commits
+
+If you used an AI tool to help with your contribution, add an `Assisted-by` trailer to your commit message
+
+```
+Assisted-by: Claude
+```
+
+Do not use `Co-Authored-By` for AI tools. This is enforced by gitlint and your commit will be rejected if it includes something like `Co-Authored-By: Claude <noreply@anthropic.com>`.
+
 ### Pull Request Title Prefixes
 
 The title prefix should be one of (`chore`|`docs`|`feat`|`fix`|`refactor`|`revert`|`style`|`test`) followed by a colon (`:`) and lowercase title. Optionally, you can include a Jira key.
@@ -144,7 +155,7 @@ Running `.github/scripts/check_readme.sh` locally is recommended to find these e
 If you wish to update a task, pipeline, or task/pipeline parameter description, do **not** manually change the README.md file.
 
 Instead, you should change the descriptions in the `yaml` file associated with the task/pipeline, and then run `.github/scripts/readme_generator.sh`
-with the changed task/pipeline directories as arguments. This is because the task/pipeline `yaml` file is considered the source of truth for each 
+with the changed task/pipeline directories as arguments. This is because the task/pipeline `yaml` file is considered the source of truth for each
 task/pipeline README.md file. If you manually change the README.md file without updating the yaml, `check_readme.sh` will fail and `readme_generator.sh`
 will overwrite your changes. You should never have to update the README.md file manually.
 
@@ -327,7 +338,7 @@ source .env.testing
 
 # Run tests
 ./scripts/run-local-tests.sh                              # Auto-detect changes
-./scripts/run-local-tests.sh --pr-mode                    # Test PR changes  
+./scripts/run-local-tests.sh --pr-mode                    # Test PR changes
 ./scripts/run-local-tests.sh tasks/managed/add-fbc-contribution  # Specific task
 ```
 
