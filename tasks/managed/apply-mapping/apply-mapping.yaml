@@ -157,7 +157,7 @@ spec:
         - name: caCertPath
           value: $(params.caCertPath)
     - name: apply-mapping
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image:  quay.io/konflux-ci/release-service-utils@sha256:a83b2d395899cf74ac38383ad58af059323736a9688f9d7d26149890622872bd
       computeResources:
         limits:
           memory: 64Mi
@@ -171,6 +171,18 @@ spec:
         if [ -f "/mnt/trusted-ca/ca-bundle.crt" ]; then
             export SSL_CERT_FILE="/mnt/trusted-ca/ca-bundle.crt"
         fi
+        # Array to track temporary files for cleanup
+        cleanup_files=()
+        trap_cleanup() {
+            if [ "${#cleanup_files[@]}" -gt 0 ]; then
+                rm -f "${cleanup_files[@]}"
+            fi
+            if [ -n "${_inc_cache_dir:-}" ] && [ -d "${_inc_cache_dir}" ]; then
+                rm -rf "${_inc_cache_dir}"
+            fi
+        }
+
+        trap trap_cleanup EXIT
 
         SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
         DATA_FILE="$(params.dataDir)/$(params.dataPath)"
@@ -208,7 +220,7 @@ spec:
 
             # Remove `{{ incrementer }}` placeholder to get the version prefix for regex pattern
             # shellcheck disable=SC2001
-            version_prefix=$(echo "${tag_template}" | sed 's/{{ incrementer }}//g')
+            version_prefix=$(echo "${tag_template}" | sed 's/{{ *incrementer *}}//g')
             # Match tags with 1–6 digit increments only. Ignore 7+ digit tags to avoid
             # treating short commit SHAs as incrementer values
             tag_pattern="^${version_prefix}[0-9]{1,6}$"
@@ -347,66 +359,43 @@ spec:
         # Expected arguments are [tags, substitute_map, labels_map, repo, all_repos_json]
         # The tags argument is a json array
         translate_tags () {
-            local tags=$1
-            local substitute_map=$2
-            local labels_map=$3
-            local repo=$4
-            local all_repos_json="${5:-[]}"
-            if [ "$tags" = '' ] ; then
-                echo ''
-                return
-            fi
+          tags=$1 substitute_map=$2 labels_map=$3 repo=$4
+          local all_repos_json="${5:-[]}"
+          [[ -z "$tags" ]] && return
+          input_data=$(mktemp)
+          cleanup_files+=("$input_data")
+          jq -n --argjson labels "${labels_map}" \
+                --argjson substitute "${substitute_map}" '$substitute + {"labels": $labels}' > "$input_data"
 
-            local translated_tags='[]'
-            local NUM_TAGS
-            NUM_TAGS="$(jq 'length' <<< "${tags}")"
-            local i tag var_name replacement
-            for ((i = 0; i < NUM_TAGS; i++)); do
-                tag="$(jq -r --argjson i "$i" '.[$i]' <<< "${tags}")"
+          translated=$(\
+          awk '{gsub(/\{\{ *component-incrementer *\}\}/, "{{ \x27{{ component-incrementer }}\x27 }}"); print}'\
+          <<< "$tags")
+          translated=$(\
+          awk '{gsub(/\{\{ *incrementer *\}\}/, "{{ \x27{{ incrementer }}\x27 }}"); print}'\
+          <<< "$translated")
+          if ! tags=$(subst_template.py --data "$input_data" --strict --labels-ext <<< "${translated}"); then
+            >&2 echo "Error: Tag substitution failed in translate_tags"
+            >&2 echo "Input tags: ${translated}"
+            >&2 echo "Repository: $repo"
+            return 1
+          fi
 
-                # Repeatedly translate {{}} references until none are left
-                while [[ $tag =~ \{\{\ *([[:alnum:]_\.-]+)\ *\}\} ]]; do
-                  # Extract the variable name (e.g., timestamp), trimming any surrounding spaces
-                  var_name="${BASH_REMATCH[1]}"
+          incremented_tags=()
+          while IFS= read -r tag; do
+            if grep -q "{{ *incrementer *}}" <<< "$tag"; then incremented_tags+=("$(increment_tag "$tag" "$repo")")
+            elif grep -q "{{ *component-incrementer *}}" <<< "$tag";
+            then incremented_tags+=("$(component_increment_tag "$tag" "$all_repos_json")")
+            else incremented_tags+=("$tag"); fi
+          done <<< "$(jq -r '.[]' <<< "$tags")"
+          tags=$(jq -nc '$ARGS.positional' --args "${incremented_tags[@]}")
 
-                  # Sanity check of the template variable name
-                  if [[ ! "$var_name" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-                    echo "Error: Invalid variable name in tag definition: $var_name" >&2
-                    exit 1
-                  fi
-
-                  # Handle incrementer logic
-                  if [[ "$var_name" == "incrementer" ]]; then
-                      tag=$(increment_tag "$tag" "$repo")
-                  elif [[ "$var_name" == "component-incrementer" ]]; then
-                      tag=$(component_increment_tag "$tag" "$all_repos_json")
-                  else
-                      replacement=$(substitute "$var_name" "$substitute_map" "$labels_map")
-                      if [ -z "$replacement" ]; then
-                          echo Error: Substitution variable unknown or empty: "$var_name" >&2
-                          exit 1
-                      fi
-                      # Shellcheck suggests ${var//find/replace}, but
-                      # that won't work here - we need to match arbitrary amount of spaces
-                      # shellcheck disable=SC2001
-                      tag="$(sed "s/{{ *$var_name *}}/$replacement/" <<< "$tag")"
-                  fi
-                done
-
-                # Sanity check of the resulting tag value
-                if [[ ! "$tag" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-                  echo "Error: Invalid tag format: $tag" >&2
-                  exit 1
-                fi
-
-                # Avoid duplicate tags - only add a tag if not already present
-                if [ "$(jq -c --arg tag "$tag" 'index($tag)' <<< "$translated_tags")" = null ]
-                then
-                  translated_tags="$(jq -c --arg tag "$tag" '. + [$tag]' <<< "$translated_tags")"
-                fi
-            done
-
-            echo "$translated_tags"
+          # Sanity check of the resulting tag values
+          >&2 echo "Debug: Translated tags for repo $repo: $tags"
+          while IFS= read -r tag; do  # Sanity check of the resulting tag value
+            [[ -z "$tag" ]] && continue
+            [[ ! "$tag" =~ ^[a-zA-Z0-9._-]+$ ]] && { >&2 echo "Error: Invalid tag format: $tag"; exit 1; }
+          done <<< "$(jq -r '.[]' <<< "$tags")"
+          echo "$tags" | jq -c 'unique'  # Deduplicate tags after translation
         }
 
         convert_to_quay () { # Convert the registry.redhat.io URL to the quay.io format
@@ -505,10 +494,53 @@ spec:
           exit 1
         fi
 
+        prepare_component_template_data() {
+          local component=$1
+          local mapping=$2
+          local build_date=$3
+          local oci_version=$4
+          local timestamp=$5
+          # This function prepares the data needed for tag translation and variable substitution in the mapping.
+          # It gathers default tags, timestamp format, current timestamp, and content gateway settings from the mapping,
+          # as well as image metadata for each component to construct a substitute map that is used for tag translation.
+
+          local defaultTimestampFormat
+          local passedTimestampFormat
+          local IMAGE_REF
+          local git_sha
+          local build_sha
+          local currentTimestamp
+          local release_timestamp
+          local arch_json
+          local substitute_map
+
+          defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< "$mapping")
+          passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
+            '.timestampFormat // $default' <<< "$component")
+
+          IMAGE_REF=$(jq -r '.containerImage' <<< "$component")
+
+          git_sha=$(jq -r '.source.git.revision' <<< "$component") # this sets the value to "null" if it doesn't exist
+          build_sha=${IMAGE_REF##*:}
+          currentTimestamp="$(date "+%Y%m%d %T")"
+          release_timestamp="$(date -d "$currentTimestamp" "+$passedTimestampFormat")"
+          arch_json="$(get-image-architectures "${IMAGE_REF}")"
+
+          substitute_map="$(jq -nc \
+            --arg timestamp "${timestamp}" \
+            --arg release_timestamp "${release_timestamp}" \
+            --arg git_sha "${git_sha}" \
+            --arg git_short_sha "${git_sha:0:7}" \
+            --arg digest_sha "${build_sha}" \
+            --arg oci_version "${oci_version}" \
+            '$ARGS.named')"
+          echo "$substitute_map"
+        }
+
+        defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< "$MAPPING")
+
         # Expand the tags in the data file
         defaultTags=$(jq '.defaults.tags // []' <<< "$MAPPING")
-        defaultTimestampFormat=$(jq -r '.defaults.timestampFormat // "%s"' <<< "$MAPPING")
-        currentTimestamp="$(date "+%Y%m%d %T")"
         defaultCGWSettings=$(jq -c '.defaults.contentGateway // {}' <<< "$MAPPING")
         NUM_MAPPED_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
 
@@ -517,7 +549,6 @@ spec:
         # $(...) subshells (via translate_tags), so bash associative array writes
         # would be lost on subshell exit. Files persist across subshell boundaries.
         _inc_cache_dir=$(mktemp -d)
-        trap 'rm -rf "${_inc_cache_dir}"' EXIT
 
         for ((i = 0; i < NUM_MAPPED_COMPONENTS; i++)) ; do
             # Clear the cache at the start of each component so that different
@@ -528,6 +559,9 @@ spec:
             defaultComponentTags=$(jq -n --argjson defaults "$defaultTags" --argjson componentTags \
               "$componentTags" '$defaults? + $componentTags? | unique')
 
+            passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
+              '.timestampFormat // $default' <<< "$component")
+
             # images are required to use sha reference - check this
             NAME=$(jq -r '.name' <<< "$component")
             IMAGE_REF=$(jq -r '.containerImage' <<< "$component")
@@ -535,13 +569,8 @@ spec:
               echo "Component ${NAME} contains an invalid containerImage value. sha reference is required: ${IMAGE_REF}"
               exit 1
             fi
-
-            git_sha=$(jq -r '.source.git.revision' <<< "$component") # this sets the value to "null" if it doesn't exist
-            build_sha=${IMAGE_REF##*:}
-            passedTimestampFormat=$(jq -r --arg default "$defaultTimestampFormat" \
-              '.timestampFormat // $default' <<< "$component")
-            release_timestamp="$(date -d "$currentTimestamp" "+$passedTimestampFormat")"
             arch_json="$(get-image-architectures "${IMAGE_REF}")"
+
             # The build-date label and Created values are not the same per architecture, but we don't support separate
             # tags per arch. So, we just use the first digest listed.
             arch="$(jq -rs 'map(.platform.architecture) | .[0]' <<< "$arch_json")"
@@ -562,8 +591,6 @@ spec:
 
             # Get image metadata for labels, env, build_date
             # Only standard container images support skopeo inspect without --raw
-            # Standard config types are:
-            #   - application/vnd.oci.image.config.v1+json (OCI images)
             #   - application/vnd.docker.container.image.v1+json (Docker images)
             # All other artifacts (Helm charts, ML models, empty configs, etc.) don't have
             # labels/env and would fail with skopeo inspect
@@ -584,15 +611,26 @@ spec:
                 labels="{}"
             fi
 
+            if [ "${build_date}" = "" ] ; then
+              timestamp=""
+            else
+              timestamp="$(date -d "${build_date}" "+$passedTimestampFormat")"
+            fi
+
             # Get oci_version_raw from annotations, fallback to labels
             oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$annotations")"
             if [ -z "$oci_version_raw" ]; then
               oci_version_raw="$(jq -r '.["org.opencontainers.image.version"] // ""' <<< "$labels")"
             fi
+            # Transform version to OCI tag format: replace + with _ (convention for OCI compliance)
+            # Set default value if empty (common for regular container images without OCI annotations)
+            oci_version="${oci_version_raw//+/_}"
+            oci_version="${oci_version:-unknown}"
 
             # Add image env_variables metadata to component
             if [ "$(jq 'length' <<< "$env_variables")" -ne 0 ] ; then
               env_file=$(mktemp)
+              cleanup_files+=("$env_file")
               echo "$env_variables" > "$env_file"
               jq --argjson i "$i" --slurpfile env "$env_file" \
                 '.components[$i].metadata = (.components[$i].metadata // {}) * {env_variables: $env[0]}' \
@@ -602,6 +640,7 @@ spec:
             # Add image annotations metadata to component
             if [ "$(jq 'length' <<< "$annotations")" -ne 0 ] ; then
               annotations_file=$(mktemp)
+              cleanup_files+=("$annotations_file")
               # Convert annotations from {key: value} to [{name: key, value: value}]
               jq -c 'if . then to_entries | map({name: .key, value: .value}) else [] end' \
                <<< "$annotations" > "$annotations_file"
@@ -613,6 +652,7 @@ spec:
             # Add image labels metadata to component
             if [ "$(jq 'length' <<< "$labels")" -ne 0 ] ; then
               labels_file=$(mktemp)
+              cleanup_files+=("$labels_file")
               # Convert labels from {key: value} to [{name: key, value: value}]
               jq -c 'if . then to_entries | map({name: .key, value: .value}) else [] end' \
                <<< "$labels" > "$labels_file"
@@ -628,25 +668,8 @@ spec:
                 "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             fi
 
-            # Transform version to OCI tag format: replace + with _ (convention for OCI compliance)
-            # Set default value if empty (common for regular container images without OCI annotations)
-            oci_version="${oci_version_raw//+/_}"
-            oci_version="${oci_version:-unknown}"
-
-            if [ "${build_date}" = "" ] ; then
-              timestamp=""
-            else
-              timestamp="$(date -d "${build_date}" "+$passedTimestampFormat")"
-            fi
-
-            substitute_map="$(jq -n -c \
-              --arg timestamp "${timestamp}" \
-              --arg release_timestamp "${release_timestamp}" \
-              --arg git_sha "${git_sha}" \
-              --arg git_short_sha "${git_sha:0:7}" \
-              --arg digest_sha "${build_sha}" \
-              --arg oci_version "${oci_version}" \
-              '$ARGS.named')"
+            substitute_map=$(prepare_component_template_data "$component" "$MAPPING" \
+                                                             "$build_date" "$oci_version" "$timestamp")
 
             # Also substitute filename values in the staged section of components
             STAGED_FILES=$(jq '.staged.files | length' <<< "$component")
@@ -731,6 +754,23 @@ spec:
                   "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
                 fi
             done
+
+            # substitute rest of the component
+            input_data=$(mktemp)
+            cleanup_files+=("$input_data")
+            jq -n --argjson labels "${labels}" \
+                  --argjson substitute "${substitute_map}" '$substitute + {"labels": $labels}' > "$input_data"
+            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
+            if ! component=$(subst_template.py --data "$input_data" --labels-ext <<< "${component}"); then
+              >&2 echo "Error: Component-level substitution failed for component $NAME (index $i)"
+              >&2 echo "This likely means a template variable in the component cannot be resolved"
+              >&2 echo "Check your mapping configuration for undefined variables"
+              exit 1
+            fi
+            jq --argjson i "$i" --argjson updated "$component" \
+              '.components[$i] = $updated' "${SNAPSHOT_SPEC_FILE}" > /tmp/temp \
+              && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
+
         done
     - name: create-trusted-artifact
       computeResources:
