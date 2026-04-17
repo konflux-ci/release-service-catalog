@@ -76,9 +76,9 @@ verify_release_contents() {
     advisory_url=$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}")
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
 
-    # first 2 arches are specified in the pipelinerun templates, the last one is src.
-    # When the release includes noarch RPMs, fanout adds extra rpmfiles (one per default arch).
-    arches=("x86_64" "src")
+    # All 4 binary arches are built by rpmbuild-pipeline, plus src.
+    # Noarch RPMs (hello-data) are fanned out to all default arch repos, adding extra rpmfiles.
+    arches=("x86_64" "aarch64" "s390x" "ppc64le" "src")
     echo "Checking RPM files count..."
     local rpmfiles=$(jq -c '.status.artifacts.rpmfiles // []' <<< "${release_json}")
     local rpmfiles_count=$(jq -r '. | length' <<< "${rpmfiles}")
@@ -96,6 +96,19 @@ verify_release_contents() {
         echo "✅️ rpmfiles for ${arch}: ${arch_rpmfiles}"
       else
         echo "🔴 rpmfiles for ${arch} was empty"
+        failures=$((failures+1))
+      fi
+      local expected_repo="${arch}"
+      if [ "${arch}" == "src" ]; then
+        expected_repo="source"
+      fi
+      local expected_pulprepo="konflux-release-integration-tests/${expected_repo}"
+      local actual_pulprepo
+      actual_pulprepo=$(jq -r '.[]? | select(.arch == "'"${arch}"'") | .pulprepo // ""' <<< "${rpmfiles}")
+      if [ "${actual_pulprepo}" == "${expected_pulprepo}" ]; then
+        echo "✅️ pulprepo for ${arch}: ${actual_pulprepo}"
+      else
+        echo "🔴 pulprepo for ${arch} was '${actual_pulprepo}', expected '${expected_pulprepo}'"
         failures=$((failures+1))
       fi
     done
@@ -240,14 +253,15 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
-            # Check for binary RPM entry with arch (e.g., "hello-2.12.1-xxx (x86_64)")
-            # Use pattern that doesn't match the .src entry
-            if echo "${description}" | grep -E "hello-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
-              echo "✅️ Found binary RPM entry with x86_64 arch in description"
-            else
-              echo "🔴 Missing binary RPM entry with x86_64 arch in description"
-              failures=$((failures+1))
-            fi
+            # Check for binary RPM entries for all architectures
+            for binary_arch in x86_64 aarch64 s390x ppc64le; do
+              if echo "${description}" | grep -E "hello-[0-9].*\(.*${binary_arch}" | grep -qv "\.src"; then
+                echo "✅️ Found binary RPM entry with ${binary_arch} arch in description"
+              else
+                echo "🔴 Missing binary RPM entry with ${binary_arch} arch in description"
+                failures=$((failures+1))
+              fi
+            done
 
             # Check for noarch RPM entry (e.g., "hello-data-2.12.1-xxx (noarch)")
             if echo "${description}" | grep -q "hello-data-.* (noarch)"; then
