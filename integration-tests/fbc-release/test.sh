@@ -132,16 +132,16 @@ configure_test_matrix() {
 # Always create both repositories for simplicity and reliability
 create_github_repository() {
     echo "🔨 Creating repositories (always dual for reliability)..."
-    
+
     # Always create component 1 repo
     "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
         "${component_base_repo_name}" "${component_base_branch}" \
         "${component_repo_name}" "${component_branch}"
-    
-    # Always create component 2 repo
+
+    # Always create component 2 repo (using different base branch to avoid duplicate packages)
     echo "  Creating component 2 repository..."
     "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
-        "${component_base_repo_name}" "${component_base_branch}" \
+        "${component_base_repo_name}" "${component2_base_branch}" \
         "${component2_repo_name}" "${component2_branch}"
 }
 
@@ -583,7 +583,14 @@ verify_hotfix_tagging() {
 wait_for_release() {
     local release_name=$1
     echo "⏳ Waiting for release $release_name to complete..."
-    
+
+    # Add labels to the release CR for cleanup tracking
+    # - originating-tool: identifies which test suite created it (for cleanup)
+    # - test-run-uuid: unique ID from test.env (supports concurrent test runs)
+    kubectl patch release "${release_name}" -n "${tenant_namespace}" \
+      --type merge \
+      -p "{\"metadata\":{\"labels\":{\"originating-tool\":\"${originating_tool}\",\"test-run-uuid\":\"${uuid}\"}}}"
+
     export RELEASE_NAME=${release_name}
     export RELEASE_NAMESPACE=${tenant_namespace}
     "${SUITE_DIR}/../scripts/wait-for-release.sh"

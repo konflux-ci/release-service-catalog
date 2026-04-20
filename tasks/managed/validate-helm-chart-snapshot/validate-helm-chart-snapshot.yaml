@@ -1,0 +1,193 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: validate-helm-chart-snapshot
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Validates that each component in the mapped snapshot is a Helm OCI artifact and that release tags and
+    destination repository names match chart metadata from the OCI manifest (annotations). Compares
+    org.opencontainers.image.version to each repository tag using Helm's OCI convention (first underscore in a
+    tag corresponds to SemVer build-metadata plus). Compares org.opencontainers.image.title to the basename of
+    each mapped repository URL (path after converting ---- to /).
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 30m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: validate-helm-chart-snapshot
+      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 500m
+        requests:
+          memory: 256Mi
+          cpu: 500m
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        if [ ! -f "${SNAPSHOT_FILE}" ]; then
+          echo "No snapshot file at ${SNAPSHOT_FILE}" >&2
+          exit 1
+        fi
+
+        # Basename of delivery repo path (after ---- to /), last segment.
+        delivery_repo_basename() {
+          local url="$1"
+          local path
+          path="${url#*/}"
+          path="${path//----/\/}"
+          echo "${path##*/}"
+        }
+
+        num_components=$(jq '.components | length' "${SNAPSHOT_FILE}")
+        for ((i = 0; i < num_components; i++)); do
+          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
+          name=$(jq -r '.name' <<< "$component")
+          container_image=$(jq -r '.containerImage' <<< "$component")
+
+          raw=$(skopeo inspect --retry-times 3 --raw "docker://${container_image}")
+          config_mt=$(jq -r '.config.mediaType // empty' <<< "$raw")
+          if [[ "$config_mt" != "application/vnd.cncf.helm.config.v1+json" ]]; then
+            echo "Error: component (${name}) is not a Helm OCI artifact (mediaType: ${config_mt})" >&2
+            exit 1
+          fi
+
+          title=$(jq -r '.annotations["org.opencontainers.image.title"] // empty' <<< "$raw")
+          version=$(jq -r '.annotations["org.opencontainers.image.version"] // empty' <<< "$raw")
+          if [[ -z "$title" || -z "$version" ]]; then
+            echo "Error: component (${name}) Helm manifest missing org.opencontainers.image.title" \
+              "(${title}) or org.opencontainers.image.version (${version}) annotations" >&2
+            exit 1
+          fi
+
+          num_repos=$(jq '.repositories | length' <<< "$component")
+          if [[ "$num_repos" -eq 0 ]]; then
+            echo "Error: component (${name}) has no repositories" >&2
+            exit 1
+          fi
+          for ((j = 0; j < num_repos; j++)); do
+            repo=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
+            url=$(jq -r '.url' <<< "$repo")
+            url="${url%:*}"
+
+            expected_basename=$(delivery_repo_basename "$url")
+            if [[ "$title" != "$expected_basename" ]]; then
+              echo "Error: component (${name}) chart title (${title}) does not match delivery" \
+                "repository basename (${expected_basename})" >&2
+              exit 1
+            fi
+
+            num_tags=$(jq '.tags | length' <<< "$repo")
+            if [[ "$num_tags" -eq 0 ]]; then
+              echo "Error: component (${name}) repository (${url}) has no tags" >&2
+              exit 1
+            fi
+            {
+              read -r version_found
+              read -r all_tags
+            } < <(jq -r --arg ver "$version" '
+              ([.tags[] | sub("_"; "+") == $ver] | any),
+              (.tags | join(", "))
+            ' <<< "$repo")
+            if [[ "$version_found" != "true" ]]; then
+              echo "Error: component (${name}) repository (${url}) — none of the tags" \
+                "[${all_tags}] match chart version (${version})" >&2
+              exit 1
+            fi
+          done
+          echo "Validated Helm OCI artifact for component (${name}) chart (${title}) version (${version})"
+        done

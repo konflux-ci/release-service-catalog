@@ -45,7 +45,7 @@ spec:
     - name: mobster_tasks_git_revision
       type: string
       description: The git revision to be used when consuming Mobster tasks for SBOM processing
-      default: 7ab0595b86af591b040883c448166463b14d8c12
+      default: fb3aaa43fb938f05c3f175a7e4c699da63c5f34b
     - name: taskGitUrl
       type: string
       description: The url to the git repo where the release-service-catalog tasks to be used are stored
@@ -290,10 +290,14 @@ spec:
           value: "$(tasks.collect-data.results.snapshotSpec)"
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"
+        - name: releasePlanAdmissionPath
+          value: "$(tasks.collect-data.results.releasePlanAdmission)"
         - name: PULP_DOMAIN
           value: "$(tasks.collect-task-params.results.extractedValues[0])"
         - name: PULP_SECRET_NAME
           value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
@@ -360,7 +364,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)"
+          value: "$(tasks.upload-src-rpm-sbom-attestation.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -381,7 +385,7 @@ spec:
             value: tasks/managed/populate-release-notes/populate-release-notes.yaml
         resolver: git
       runAfter:
-        - filter-already-released-advisory-rpms
+        - upload-src-rpm-sbom-attestation
         - verify-conforma
     - name: embargo-check
       when:
@@ -398,7 +402,7 @@ spec:
         - name: jiraSecretName
           value: "$(tasks.collect-task-params.results.extractedValues[3])"
         - name: sourceDataArtifact
-          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -417,8 +421,43 @@ spec:
             value: tasks/managed/embargo-check/embargo-check.yaml
         resolver: git
       runAfter:
-        - check-data-keys
-        - populate-release-notes
+        - filter-already-released-advisory-rpms
+        - verify-conforma
+    - name: upload-src-rpm-sbom-attestation
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/upload-src-rpm-sbom-attestation/upload-src-rpm-sbom-attestation.yaml
+      params:
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: PULP_DOMAIN
+          value: "$(tasks.collect-task-params.results.extractedValues[0])"
+        - name: PULP_SECRET_NAME
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: sourceDataArtifact
+          value: "$(tasks.embargo-check.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - embargo-check
     - name: set-advisory-severity
       timeout: "2h0m0s"
       when:
@@ -433,7 +472,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.embargo-check.results.sourceDataArtifact)"
+          value: "$(tasks.populate-release-notes.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -453,7 +492,6 @@ spec:
         resolver: git
       runAfter:
         - populate-release-notes
-        - embargo-check
         - push-rpms-to-pulp
     - name: push-rpms-to-pulp
       when:
@@ -478,8 +516,10 @@ spec:
           value: "$(tasks.collect-task-params.results.extractedValues[1])"
         - name: resultsDirPath
           value: $(tasks.collect-data.results.resultsDir)
+        - name: artifactsJsonDirPath
+          value: $(tasks.collect-data.results.subdirectory)/artifacts
         - name: sourceDataArtifact
-          value: "$(tasks.filter-already-released-advisory-rpms.results.sourceDataArtifact)=$(params.dataDir)"
+          value: "$(tasks.upload-src-rpm-sbom-attestation.results.sourceDataArtifact)=$(params.dataDir)"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: dataDir
@@ -491,7 +531,7 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - embargo-check
+        - check-data-keys
     - name: process-component-sbom
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
@@ -646,7 +686,7 @@ spec:
           - name: revision
             value: $(params.taskGitRevision)
           - name: pathInRepo
-            value: tasks/managed/collect-atlas-params/collect-atlas-params.yaml
+            value: tasks/managed/collect-tpa-params/collect-tpa-params.yaml
       params:
         - name: dataPath
           value: "$(tasks.collect-data.results.data)"

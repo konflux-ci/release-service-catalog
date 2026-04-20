@@ -1,0 +1,252 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: filter-already-released-advisory-rpms-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    Filters out RPMs from a snapshot if they are already published in an advisory
+    stored in the GitLab advisory repo. Returns lists of unreleased RPMs and
+    RPMs found in advisories (for digest validation by the calling task).
+  params:
+    - name: transformedSnapshot
+      type: string
+      description: Base64 string of gzipped JSON array of RPM entries with purls
+    - name: origin
+      description: The origin workspace for the release CR
+      type: string
+    - name: advisory_secret_name
+      description: Name of the secret containing advisory GitLab metadata
+      type: string
+    - name: internalRequestPipelineRunName
+      description: Name of the PipelineRun that requested this task
+      type: string
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: result
+      description: Success or error message
+    - name: internalRequestPipelineRunName
+      description: The name of the InternalRequest PipelineRun
+    - name: internalRequestTaskRunName
+      description: The name of the InternalRequest TaskRun
+    - name: unreleased_rpms
+      description: RPMs not found in any advisory (gzipped base64 JSON array)
+    - name: in_advisory_rpms
+      description: RPMs found in advisories, need digest validation (gzipped base64 JSON array)
+    - name: advisory_url
+      description: URL of the latest matching advisory when all components are already released
+    - name: advisory_internal_url
+      description: Internal URL of the latest matching advisory when all components are already released
+  volumes:
+    - name: advisory-secret
+      secret:
+        secretName: $(params.advisory_secret_name)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: filter-rpms
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: '1'
+        requests:
+          memory: 512Mi
+          cpu: '1'
+      volumeMounts:
+        - name: advisory-secret
+          mountPath: /mnt/advisory_secret
+      env:
+        - name: TRANSFORMED_SNAPSHOT
+          value: "$(params.transformedSnapshot)"
+      script: |
+        #!/usr/bin/env bash
+        set -eo pipefail
+
+        GITLAB_HOST="$(cat /mnt/advisory_secret/gitlab_host)"
+        ACCESS_TOKEN="$(cat /mnt/advisory_secret/gitlab_access_token)"
+        GIT_AUTHOR_NAME="$(cat /mnt/advisory_secret/git_author_name)"
+        GIT_AUTHOR_EMAIL="$(cat /mnt/advisory_secret/git_author_email)"
+        GIT_REPO="$(cat /mnt/advisory_secret/git_repo)"
+
+        export GITLAB_HOST ACCESS_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
+
+        STDERR_FILE=/tmp/stderr.txt
+        echo -n "$(params.internalRequestPipelineRunName)" \
+          > "$(results.internalRequestPipelineRunName.path)"
+        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
+
+        exitfunc() {
+          local err=$1
+          local line=$2
+          local cmd=$3
+          if [ "$err" -eq 0 ]; then
+            echo -n "Success" > "$(results.result.path)"
+          else
+            echo -n "$0: ERROR '$cmd' failed at line $line - exited with status $err" \
+              > "$(results.result.path)"
+            if [ -f "$STDERR_FILE" ]; then
+              tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+            fi
+          fi
+          exit 0
+        }
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        # === Phase 1: Decode transformed snapshot ===
+        TRANSFORMED_SNAPSHOT_JSON=$(base64 -d <<< "$TRANSFORMED_SNAPSHOT" | gunzip)
+        echo "Transformed Snapshot JSON: $TRANSFORMED_SNAPSHOT_JSON"
+
+        ORIGIN="$(params.origin)"
+        ADVISORY_BASE_DIR="data/advisories/${ORIGIN}"
+
+        cd /tmp
+
+        # === Phase 2: Clone advisory repo (sparse checkout for performance) ===
+        echo "Cloning $GIT_REPO..."
+        git clone --depth=1 --filter=blob:none --no-checkout "$GIT_REPO" repo
+        cd repo
+        git sparse-checkout set "$ADVISORY_BASE_DIR"
+        git checkout
+
+        # === Phase 3: Find existing advisories (newest first) ===
+        echo "Checking existing advisories in ${ADVISORY_BASE_DIR}..."
+        EXISTING_ADVISORIES=""
+        if [ -d "${ADVISORY_BASE_DIR}" ]; then
+          EXISTING_ADVISORIES=$(
+            find "${ADVISORY_BASE_DIR}" -mindepth 2 -type d -printf "%T@ %p\n" |
+            sort -nr | cut -d' ' -f2- | sed "s|^${ADVISORY_BASE_DIR}/||"
+          )
+        fi
+
+        if [[ -z "$EXISTING_ADVISORIES" ]]; then
+          echo "No existing advisories found. All RPMs are unreleased."
+          # All RPMs are unreleased
+          UNRELEASED=$(echo "$TRANSFORMED_SNAPSHOT_JSON" | gzip -c | base64 -w 0)
+          IN_ADVISORY=$(echo "[]" | gzip -c | base64 -w 0)
+          echo -n "$UNRELEASED" > "$(results.unreleased_rpms.path)"
+          echo -n "$IN_ADVISORY" > "$(results.in_advisory_rpms.path)"
+          echo -n "" > "$(results.advisory_url.path)"
+          echo -n "" > "$(results.advisory_internal_url.path)"
+          echo -n "Success" > "$(results.result.path)"
+          exit 0
+        fi
+
+        # === Phase 4: Extract all purls from all advisories (batch) ===
+        echo "Extracting purls from advisories..."
+        ALL_ADVISORY_PURLS_FILE=/tmp/all_advisory_purls.json
+        echo "[]" > "$ALL_ADVISORY_PURLS_FILE"
+
+        LATEST_ADVISORY_FILE=""
+        for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
+          ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
+          if [[ -f "$ADVISORY_FILE" ]]; then
+            ADVISORY_PURLS=$(yq -o=json \
+              '.spec.content.artifacts // [] | [.[].purl] | map(select(. != null))' \
+              "$ADVISORY_FILE")
+            MERGED=$(jq --argjson new "$ADVISORY_PURLS" \
+              '. + $new | unique' "$ALL_ADVISORY_PURLS_FILE")
+            echo "$MERGED" > "$ALL_ADVISORY_PURLS_FILE"
+
+            if [[ -z "$LATEST_ADVISORY_FILE" ]]; then
+              if [[ "$(jq 'length' <<< "$ADVISORY_PURLS")" -gt 0 ]]; then
+                LATEST_ADVISORY_FILE="$ADVISORY_FILE"
+              fi
+            fi
+          fi
+        done
+
+        echo "Total unique purls from advisories: $(jq 'length' "$ALL_ADVISORY_PURLS_FILE")"
+
+        # === Phase 5: Categorize RPMs ===
+        echo "Categorizing RPMs by advisory presence..."
+
+        SNAPSHOT_FILE=/tmp/snapshot.json
+        echo "$TRANSFORMED_SNAPSHOT_JSON" > "$SNAPSHOT_FILE"
+
+        UNRELEASED_FILE=/tmp/unreleased.json
+        IN_ADVISORY_FILE=/tmp/in_advisory.json
+        echo "[]" > "$UNRELEASED_FILE"
+        echo "[]" > "$IN_ADVISORY_FILE"
+
+        while IFS= read -r entry; do
+          entry_file=/tmp/current_entry.json
+          echo "$entry" > "$entry_file"
+
+          purl=$(jq -r '.purl' "$entry_file")
+
+          IN_ADVISORY=$(jq --arg purl "$purl" \
+            'map(select(. == $purl)) | length > 0' "$ALL_ADVISORY_PURLS_FILE")
+
+          if [[ "$IN_ADVISORY" == "true" ]]; then
+            # RPM found in advisory - add to in_advisory list for digest validation
+            UPDATED=$(jq --slurpfile e "$entry_file" '. + $e' "$IN_ADVISORY_FILE")
+            echo "$UPDATED" > "$IN_ADVISORY_FILE"
+          else
+            # RPM not in any advisory - unreleased
+            UPDATED=$(jq --slurpfile e "$entry_file" '. + $e' "$UNRELEASED_FILE")
+            echo "$UPDATED" > "$UNRELEASED_FILE"
+          fi
+
+          rm -f "$entry_file"
+        done < <(jq -c '.[]' "$SNAPSHOT_FILE")
+
+        # === Phase 6: Output results ===
+        UNRELEASED_COUNT=$(jq 'length' "$UNRELEASED_FILE")
+        IN_ADVISORY_COUNT=$(jq 'length' "$IN_ADVISORY_FILE")
+        echo "Unreleased RPMs: $UNRELEASED_COUNT"
+        echo "In-advisory RPMs (need digest validation): $IN_ADVISORY_COUNT"
+
+        # Encode results
+        UNRELEASED_ENCODED=$(jq -c '.' "$UNRELEASED_FILE" | gzip -c | base64 -w 0)
+        IN_ADVISORY_ENCODED=$(jq -c '.' "$IN_ADVISORY_FILE" | gzip -c | base64 -w 0)
+
+        echo -n "$UNRELEASED_ENCODED" > "$(results.unreleased_rpms.path)"
+        echo -n "$IN_ADVISORY_ENCODED" > "$(results.in_advisory_rpms.path)"
+
+        # Set advisory URL if all RPMs were in advisories
+        if [[ "$UNRELEASED_COUNT" -eq 0 ]] && [[ -n "$LATEST_ADVISORY_FILE" ]]; then
+          echo "All RPMs found in advisories."
+          ADVISORY_TYPE=$(yq -r '.spec.type' "$LATEST_ADVISORY_FILE")
+          ADVISORY_NAME=$(yq -r '.metadata.name' "$LATEST_ADVISORY_FILE")
+
+          if [[ "${GIT_REPO}" == *"/rhtap-release/"* ]]; then
+            ADVISORY_URL_PREFIX="https://access.stage.redhat.com/errata"
+          else
+            ADVISORY_URL_PREFIX="https://access.redhat.com/errata"
+          fi
+
+          LATEST_ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
+          LATEST_ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${LATEST_ADVISORY_FILE}"
+
+          echo -n "$LATEST_ADVISORY_URL" > "$(results.advisory_url.path)"
+          echo -n "$LATEST_ADVISORY_INTERNAL_URL" > "$(results.advisory_internal_url.path)"
+        else
+          echo -n "" > "$(results.advisory_url.path)"
+          echo -n "" > "$(results.advisory_internal_url.path)"
+        fi
+
+        echo -n "Success" > "$(results.result.path)"

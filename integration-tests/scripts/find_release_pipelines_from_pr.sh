@@ -48,9 +48,13 @@ _find_and_process_pipelines() {
   # Find all tasks and pipelines and save them to arrays
   find_changed_tekton_tasks_pipelines
 
+  _emit_integration_testcase_string
+  cleanup_workspace
+}
+
+_emit_integration_testcase_string() {
   if [ "$SELECT_ALL_TESTCASES" = true ]; then
     echo -n "release-pipelines"
-    cleanup_workspace
     return 0
   fi
 
@@ -115,7 +119,7 @@ _find_and_process_pipelines() {
     done <<< $TEKTON_COLLECTOR_PIPELINES
   fi
 
-  declare -a TEMP_MANAGED_PIPELINENAMES
+  declare -a TEMP_MANAGED_PIPELINENAMES=()
 
   # Map internal and collector pipelines to managed pipelines
   for pipeline_name in "${FOUND_INTERNAL_PIPELINENAMES[@]} ${FOUND_COLLECTOR_PIPELINENAMES[@]}"; do
@@ -132,13 +136,13 @@ _find_and_process_pipelines() {
         TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
         ;;
       "process-file-updates")
-        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "push-to-addons-registry" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io")
+        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "push-to-addons-registry" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io")
         ;;
       "push-artifacts-to-cdn")
         TEMP_MANAGED_PIPELINENAMES+=("push-disk-images-to-cdn")
         ;;
       "simple-signing-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io")
         ;;
       "blob-signing-pipeline")
         TEMP_MANAGED_PIPELINENAMES+=("release-to-github")
@@ -199,10 +203,12 @@ _find_and_process_pipelines() {
   fi
 
   ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "release-to-github" "push-to-external-registry" \
-  "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-to-external-registry" "push-to-addons-registry" \
+  "push-to-external-registry-self-hosted-quay" \
+  "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io" \
+  "rh-push-to-external-registry" "push-to-addons-registry" \
   "push-rpms-to-pulp")
 
-  SELECTED_TESTCASES=()
+  declare -a SELECTED_TESTCASES=()
 
   for pplname in "${FOUND_PIPELINENAMES[@]}"; do
     for tc in "${ALL_TESTCASES[@]}"; do
@@ -211,13 +217,17 @@ _find_and_process_pipelines() {
         fi
     done
   done
+
+  # push-to-external-registry has extra test suites defined for it
+  if [[ " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry " ]]; then
+    SELECTED_TESTCASES+=("push-to-external-registry-self-hosted-quay")
+    SELECTED_TESTCASES+=("push-to-external-registry-idempotent")
+  fi
   if (( ${#SELECTED_TESTCASES[@]} > 0 )); then
     echo -n "${SELECTED_TESTCASES[*]}"
   else
     echo -n "no-test-case"
   fi
-
-  cleanup_workspace
 }
 
 setup_workspace() {
@@ -263,6 +273,65 @@ clone_and_checkout_branch() {
   fi
 }
 
+# Classify one repo-relative path (git diff line or stdin line) into the TEKTON_* / INTEGRATION_SUITES
+# globals. Trims whitespace and strips a leading ./. Expects cwd = catalog repo root.
+# Returns 1 if the caller should stop processing further paths (SELECT_ALL_TESTCASES); 0 otherwise.
+_accumulate_one_catalog_changed_path() {
+  local file=$1
+  file="${file#"${file%%[![:space:]]*}"}"
+  file="${file%"${file##*[![:space:]]}"}"
+  [ -z "$file" ] && return 0
+  file="${file#./}"
+
+  # match the files under stepactions
+  if echo "$file" | grep -q "^stepactions/"; then
+    SELECT_ALL_TESTCASES=true
+    return 1
+  elif [[ "$file" =~ ^schema/dataKeys.json$ ]] && [ -f "$file" ]; then
+    SELECT_ALL_TESTCASES=true
+    return 1
+  elif echo "$file" | grep -q "^integration-tests/"; then
+    # Check if the file is in lib/, scripts/, or is run-test.sh - these should trigger all test suites
+    if echo "$file" | grep -q -E "^integration-tests/(lib|scripts)/|^integration-tests/run-test\.sh$"; then
+      SELECT_ALL_TESTCASES=true
+      return 1
+    else
+      local filename
+      filename=$(basename "$file")
+      if [[ ! $filename =~ \.md$ ]]; then
+        local -a parts
+        IFS='/' read -ra parts <<< "$file"
+        INTEGRATION_SUITES+=("${parts[1]}")
+      fi
+    fi
+  elif [[ "$file" =~ ^tasks/internal/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
+    if grep -q -E 'kind: *Task' "$file"; then
+      TEKTON_INTERNAL_TASKS+=("$file")
+    fi
+  elif [[ "$file" =~ ^tasks/collectors/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
+    if grep -q -E 'kind: *Task' "$file"; then
+      TEKTON_COLLECTOR_TASKS+=("$file")
+    fi
+  elif [[ "$file" =~ ^tasks/managed/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
+    if grep -q -E 'kind: *Task' "$file"; then
+      TEKTON_MANAGED_TASKS+=("$file")
+    fi
+  elif [[ "$file" =~ ^pipelines/managed/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
+    if grep -q -E 'kind: *Pipeline' "$file"; then
+      TEKTON_MANAGED_PIPELINES+=("$file")
+    fi
+  elif [[ "$file" =~ ^pipelines/internal/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
+    if grep -q -E 'kind: *Pipeline' "$file"; then
+      TEKTON_INTERNAL_PIPELINES+=("$file")
+    fi
+  elif [[ "$file" =~ ^pipelines/run-collectors/run-collectors.yaml$ ]] && [ -f "$file" ]; then
+    if grep -q -E 'kind: *Pipeline' "$file"; then
+      TEKTON_COLLECTOR_PIPELINES+=("$file")
+    fi
+  fi
+  return 0
+}
+
 find_changed_tekton_tasks_pipelines() {
   local FILES
   FILES=$(git diff --name-only origin/development...HEAD)
@@ -273,51 +342,43 @@ find_changed_tekton_tasks_pipelines() {
   fi
 
   while IFS= read -r file; do
-    # match the files under stepactions
-    if echo "$file" | grep -q "^stepactions/"; then
-      SELECT_ALL_TESTCASES=true
-      break
-    elif [[ "$file" =~ ^schema/dataKeys.json$ ]] && [ -f "$file" ]; then
-      SELECT_ALL_TESTCASES=true
-      break
-    elif echo "$file" | grep -q "^integration-tests/"; then
-      # Check if the file is in lib/, scripts/, or is run-test.sh - these should trigger all test suites
-      if echo "$file" | grep -q -E "^integration-tests/(lib|scripts)/|^integration-tests/run-test\.sh$"; then
-        SELECT_ALL_TESTCASES=true
-        break
-      else
-        filename=$(basename "$file")
-        if [[ ! $filename =~ \.md$ ]]; then
-          IFS='/' read -ra parts <<< "$file"
-          INTEGRATION_SUITES+=("${parts[1]}")
-        fi
-      fi
-    elif [[ "$file" =~ ^tasks/internal/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
-      if grep -q -E 'kind: *Task' "$file"; then
-        TEKTON_INTERNAL_TASKS+=("$file")
-      fi
-    elif [[ "$file" =~ ^tasks/collectors/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
-      if grep -q -E 'kind: *Task' "$file"; then
-        TEKTON_COLLECTOR_TASKS+=("$file")
-      fi
-    elif [[ "$file" =~ ^tasks/managed/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
-      if grep -q -E 'kind: *Task' "$file"; then
-        TEKTON_MANAGED_TASKS+=("$file")
-      fi
-    elif [[ "$file" =~ ^pipelines/managed/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
-      if grep -q -E 'kind: *Pipeline' "$file"; then
-        TEKTON_MANAGED_PIPELINES+=("$file")
-      fi
-    elif [[ "$file" =~ ^pipelines/internal/[^/]+/[^/]+\.ya?ml$ ]] && [ -f "$file" ]; then
-      if grep -q -E 'kind: *Pipeline' "$file"; then
-        TEKTON_INTERNAL_PIPELINES+=("$file")
-      fi
-    elif [[ "$file" =~ ^pipelines/run-collectors/run-collectors.yaml$ ]] && [ -f "$file" ]; then
-      if grep -q -E 'kind: *Pipeline' "$file"; then
-        TEKTON_COLLECTOR_PIPELINES+=("$file")
-      fi
-    fi
+    _accumulate_one_catalog_changed_path "$file" || break
   done <<< "$FILES"
+}
+
+# Paths come from stdin (one repo-relative path per line). Expects cwd = catalog repo root.
+find_changed_tekton_tasks_pipelines_from_stdin() {
+  local file
+  while IFS= read -r file; do
+    _accumulate_one_catalog_changed_path "$file" || break
+  done
+}
+
+# Internal: read catalog Task/pipeline paths on stdin (one per line). Prints testcase tokens in the
+# same format as the PR/branch workflow (via _emit_integration_testcase_string): space-separated,
+# or no-test-case. First argument: catalog root. Source this file, then call (or use from tooling).
+_catalog_stdin_task_paths_to_testcase_tokens() {
+  local CATALOG_ROOT=$1
+  if [ -z "${CATALOG_ROOT}" ] || [ ! -d "${CATALOG_ROOT}" ]; then
+    echo "_catalog_stdin_task_paths_to_testcase_tokens: catalog root not found: ${CATALOG_ROOT:-}" >&2
+    return 1
+  fi
+  (
+    cd "${CATALOG_ROOT}" || exit 1
+    declare -a FOUND_PIPELINENAMES=()
+    declare -a FOUND_INTERNAL_PIPELINENAMES=()
+    declare -a FOUND_COLLECTOR_PIPELINENAMES=()
+    declare -a TEKTON_INTERNAL_TASKS=()
+    declare -a TEKTON_COLLECTOR_TASKS=()
+    declare -a TEKTON_MANAGED_TASKS=()
+    declare -a TEKTON_MANAGED_PIPELINES=()
+    declare -a TEKTON_INTERNAL_PIPELINES=()
+    declare -a TEKTON_COLLECTOR_PIPELINES=()
+    declare -a INTEGRATION_SUITES=()
+    declare SELECT_ALL_TESTCASES=false
+    find_changed_tekton_tasks_pipelines_from_stdin
+    _emit_integration_testcase_string
+  )
 }
 
 find_pipelines_using_task() {
@@ -470,5 +531,7 @@ main() {
   fi
 }
 
-# Execute main function with all arguments
-main "$@"
+# Run CLI only when this file is executed; when sourced, library functions are loaded and main is skipped.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

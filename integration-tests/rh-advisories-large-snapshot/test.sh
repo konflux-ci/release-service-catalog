@@ -557,11 +557,20 @@ wait_for_releases() {
     : "${large_snapshot_name:?large_snapshot_name must be set}"
     : "${tenant_namespace:?tenant_namespace must be set}"
 
+    local release_name="${large_snapshot_name}-release"
+
+    # Add labels to the release CR for cleanup tracking
+    # - originating-tool: identifies which test suite created it (for cleanup)
+    # - test-run-uuid: unique ID from test.env (supports concurrent test runs)
+    kubectl patch release "${release_name}" -n "${tenant_namespace}" \
+      --type merge \
+      -p "{\"metadata\":{\"labels\":{\"originating-tool\":\"${originating_tool}\",\"test-run-uuid\":\"${uuid}\"}}}"
+
     echo "Waiting for release to start processing..." >&2
     wait_for_release_to_start || log_error "Failed to wait for release to start"
 
     # Export variables expected by verify_release_contents
-    export RELEASE_NAME="${large_snapshot_name}-release"
+    export RELEASE_NAME="${release_name}"
     export RELEASE_NAMESPACE="${tenant_namespace}"
     export RELEASE_NAMES="${RELEASE_NAME}"
 }

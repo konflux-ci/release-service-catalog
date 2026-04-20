@@ -53,10 +53,49 @@ spec:
               set -eux
 
               mkdir -p "$(params.dataDir)/files"
+              mkdir -p "$(params.dataDir)/files/chains-provenance"
 
               # Create mock wheel and sdist files
               echo "mock wheel content" > "$(params.dataDir)/files/my_package-1.0.0-py3-none-any.whl"
               echo "mock sdist content" > "$(params.dataDir)/files/my_package-1.0.0.tar.gz"
+
+              # Create mock Chains provenance (SLSA v1 format)
+              cat > "$(params.dataDir)/files/chains-provenance/sha256:abc123.json" << 'PROVEOF'
+              {
+                "predicateType": "https://slsa.dev/provenance/v1",
+                "predicate": {
+                  "buildDefinition": {
+                    "buildType": "https://tekton.dev/chains/v2/slsa",
+                    "externalParameters": {
+                      "runSpec": {
+                        "pipelineRef": {"name": "build-python-wheels-oci-ta"},
+                        "params": [{"name": "PACKAGES", "value": ["my_package==1.0.0"]}]
+                      }
+                    },
+                    "internalParameters": {
+                      "tekton-pipelines-feature-flags": {"EnableStepActions": "true"}
+                    },
+                    "resolvedDependencies": [
+                      {
+                        "uri": "git+https://github.com/calungaproject/index.git",
+                        "digest": {"sha1": "abc123def456"},
+                        "name": "pipelineTask"
+                      }
+                    ]
+                  },
+                  "runDetails": {
+                    "builder": {
+                      "id": "https://konflux-ci.dev/chains/v2"
+                    },
+                    "metadata": {
+                      "invocationId": "calunga-tenant/build-run-12345",
+                      "startedOn": "2026-02-19T21:40:00Z",
+                      "finishedOn": "2026-02-19T21:51:09Z"
+                    }
+                  }
+                }
+              }
+              PROVEOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -162,7 +201,37 @@ spec:
                   echo "ERROR: Attestation file ${att_file} does not have envelope field"
                   exit 1
                 fi
+
+                # Decode the DSSE payload and verify SLSA v1 predicate structure
+                STATEMENT=$(jq -r '.envelope.statement' "${att_file}" | base64 -d 2>/dev/null || true)
+                if [ -n "${STATEMENT}" ]; then
+                  echo "  Checking SLSA v1 predicate structure..."
+                  if ! echo "${STATEMENT}" | jq -e '.predicate | has("buildDefinition")' > /dev/null 2>&1; then
+                    echo "ERROR: Predicate missing buildDefinition"
+                    exit 1
+                  fi
+                  if ! echo "${STATEMENT}" | jq -e '.predicate | has("runDetails")' > /dev/null 2>&1; then
+                    echo "ERROR: Predicate missing runDetails"
+                    exit 1
+                  fi
+                  if ! echo "${STATEMENT}" | jq -e '.predicate.runDetails | has("builder")' > /dev/null 2>&1; then
+                    echo "ERROR: Predicate missing runDetails.builder"
+                    exit 1
+                  fi
+                  BD='.predicate.buildDefinition'
+                  if ! echo "${STATEMENT}" | jq -e "$BD | has(\"buildType\")" > /dev/null 2>&1; then
+                    echo "ERROR: Predicate missing buildDefinition.buildType"
+                    exit 1
+                  fi
+                  echo "  SLSA v1 predicate structure OK"
+                fi
               done
+
+              # Verify chains-provenance directory was cleaned up
+              if [ -d "${FILES_DIR}/chains-provenance" ]; then
+                echo "ERROR: chains-provenance directory should have been removed"
+                exit 1
+              fi
 
               echo "All checks passed!"
       runAfter:

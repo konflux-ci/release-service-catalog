@@ -151,7 +151,7 @@ get_build_pipeline_run_url() { # args are ns, app, name
 
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
-# Optional variables: component2_repo_name (for multi-component tests)
+# Optional variables: component2_repo_name (for multi-component tests), uuid (from test.env), tenant_namespace
 cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
@@ -192,6 +192,18 @@ cleanup_resources() {
         rm -rf "${tmpDir}"
     else
         echo "tmpDir not set or not a directory, skipping k8s resource cleanup." | tee -a "${cleanup_log_file}"
+    fi
+
+    # Clean up Release CRs created by this specific test run
+    # Use uuid (from test.env) to support concurrent test execution
+    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ]; then
+        echo "Deleting Release CRs with test-run-uuid=${uuid} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
+        kubectl delete release -n "${tenant_namespace}" \
+            -l test-run-uuid="${uuid}" \
+            --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
+            echo "Warning: Failed to delete some Release CRs" | tee -a "${cleanup_log_file}"
+    else
+        echo "Skipping Release CR cleanup: uuid or tenant_namespace not set" | tee -a "${cleanup_log_file}"
     fi
 
     if [ -n "$advisory_yaml_dir" ] && [ -d "$advisory_yaml_dir" ]; then
@@ -523,6 +535,70 @@ wait_for_plr_to_complete() {
     echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${component_push_plr_name}")"
 }
 
+# Function to diagnose a failed PipelineRun by printing conditions, TaskRun summaries,
+# and logs from failed TaskRuns.
+# Arguments:
+#   $1: PipelineRun name
+#   $2: namespace
+diagnose_failed_pipelinerun() {
+    local plr_name="$1"
+    local namespace="$2"
+
+    echo ""
+    echo "=== Diagnosing failed PipelineRun: ${plr_name} ==="
+
+    echo "  PipelineRun conditions:"
+    kubectl get pipelinerun "${plr_name}" -n "${namespace}" \
+        -o jsonpath='{range .status.conditions[*]}    Type={.type}  Status={.status}  Reason={.reason}{"\n"}    Message={.message}{"\n"}{end}' \
+        2>/dev/null || true
+
+    echo ""
+    echo "  TaskRun summary:"
+    kubectl get taskruns -n "${namespace}" \
+        -l "tekton.dev/pipelineRun=${plr_name}" \
+        -o custom-columns='TASK:.metadata.labels.tekton\.dev/pipelineTask,STATUS:.status.conditions[0].reason,MESSAGE:.status.conditions[0].message' \
+        2>/dev/null || true
+
+    echo ""
+    local failed_taskruns
+    failed_taskruns=$(kubectl get taskruns -n "${namespace}" \
+        -l "tekton.dev/pipelineRun=${plr_name}" \
+        -o jsonpath='{.items[?(@.status.conditions[0].status=="False")].metadata.name}' \
+        2>/dev/null || true)
+
+    if [ -z "${failed_taskruns}" ]; then
+        echo "  No individually failed TaskRuns found. Check PipelineRun conditions above."
+        return
+    fi
+
+    for tr_name in ${failed_taskruns}; do
+        local task_label
+        task_label=$(kubectl get taskrun "${tr_name}" -n "${namespace}" \
+            -o jsonpath='{.metadata.labels.tekton\.dev/pipelineTask}' 2>/dev/null || echo "unknown")
+
+        echo "  --- Failed task: ${task_label} (TaskRun: ${tr_name}) ---"
+
+        local error_msg
+        error_msg=$(kubectl get taskrun "${tr_name}" -n "${namespace}" \
+            -o jsonpath='{.status.conditions[0].message}' 2>/dev/null || true)
+        echo "  Error: ${error_msg}"
+
+        echo "  Logs (last 50 lines):"
+        if command -v tkn &>/dev/null; then
+            tkn taskrun logs "${tr_name}" -n "${namespace}" 2>/dev/null | tail -50 | sed 's/^/    /' || true
+        else
+            local pod_name
+            pod_name=$(kubectl get taskrun "${tr_name}" -n "${namespace}" \
+                -o jsonpath='{.status.podName}' 2>/dev/null || true)
+            if [ -n "${pod_name}" ]; then
+                kubectl logs "${pod_name}" -n "${namespace}" --all-containers --tail=50 \
+                    2>/dev/null | sed 's/^/    /' || true
+            fi
+        fi
+        echo ""
+    done
+}
+
 # Function to wait for Releases to complete
 # Relies on global variables: component_push_plr_name, tenant_namespace, SUITE_DIR
 wait_for_releases() {
@@ -556,6 +632,13 @@ wait_for_releases() {
     export RELEASE_NAMESPACE=${tenant_namespace}
     for release in ${release_names};
     do
+      # Add labels to the release CR for cleanup tracking
+      # - originating-tool: identifies which test suite created it (for periodic cleanup)
+      # - test-run-uuid: unique ID from test.env (supports concurrent test runs)
+      kubectl patch release "${release}" -n "${tenant_namespace}" \
+        --type merge \
+        -p "{\"metadata\":{\"labels\":{\"originating-tool\":\"${originating_tool}\",\"test-run-uuid\":\"${uuid}\"}}}"
+
       export RELEASE_NAME=${release}
       "${SUITE_DIR}/../scripts/wait-for-release.sh" &
     done
@@ -591,7 +674,7 @@ cleanup_old_resources() {
 
     echo "🔍 Searching for resources with originating-tool=${originating_tool}"
 
-    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component"
+    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component imagerepository release"
     for kind in $kinds; do
         local namespaces="dev-release-team-tenant managed-release-team-tenant"
         for namespace in $namespaces; do
