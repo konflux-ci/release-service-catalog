@@ -8,10 +8,13 @@ metadata:
     tekton.dev/tags: release
 spec:
   description: |-
-    Filters snapshot to remove already-released FBC fragments by querying Pyxis index images.
-    Queries for index images and checks if fragments are present in their bundles/related_images fields.
-    Components already published are filtered out to prevent EC validation failures.
-    Additionally, extracts and attaches ocpVersion field to each component for downstream tasks.
+    Filters already-published FBC fragments from the Snapshot before release.
+    Queries previous Release CRs in the tenant namespace (identified via releaseName)
+    to find FBC fragments that were already successfully published to the same target
+    index. Components whose fbc_fragment digest matches a previously-released artifact
+    are removed; all others are kept. Also attaches ocpVersion to every remaining
+    component for downstream tasks. If the Release CR lookup fails or releaseName is
+    not provided, all components are kept (safe fallback).
   params:
     - name: snapshotPath
       type: string
@@ -19,9 +22,13 @@ spec:
     - name: dataPath
       type: string
       description: Path to the JSON string of the merged data to use in the data workspace
-    - name: pyxisSecret
+    - name: releaseName
       type: string
-      description: The kubernetes secret to use to authenticate to Pyxis. It needs to contain two keys - cert and key
+      description: >-
+        The namespaced name (namespace/name) of the current Release CR. Used to look
+        up previously completed releases for the same application to identify already-
+        published FBC fragments. If empty, idempotence filtering is skipped
+      default: ""
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
@@ -64,10 +71,6 @@ spec:
   volumes:
     - name: workdir
       emptyDir: {}
-    - name: pyxis-secret-vol
-      secret:
-        secretName: $(params.pyxisSecret)
-        defaultMode: 0400
   stepTemplate:
     volumeMounts:
       - mountPath: /var/workdir
@@ -101,26 +104,6 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: setup-pyxis-cert
-      image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
-      computeResources:
-        limits:
-          memory: 64Mi
-        requests:
-          memory: 64Mi
-          cpu: 30m
-      volumeMounts:
-        - name: pyxis-secret-vol
-          mountPath: /etc/secrets
-      script: |
-        #!/usr/bin/env bash
-        set -eu
-        
-        echo "Extracting Pyxis credentials from mounted secret"
-        PYXIS_CERT="$(cat /etc/secrets/cert)"
-        PYXIS_KEY="$(cat /etc/secrets/key)"
-        echo "${PYXIS_CERT}" > /var/workdir/crt
-        echo "${PYXIS_KEY}" > /var/workdir/key
     - name: filter-already-released-images
       image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
       computeResources:
@@ -147,12 +130,11 @@ spec:
             exit 1
         fi
 
-        echo "==============================================================="
-        echo "Filtering Already-Released FBC Fragments via Pyxis Index Query"
-        echo "==============================================================="
+        echo "================================================================"
+        echo "Filtering Already-Released FBC Fragments via Release CR Lookup"
+        echo "================================================================"
         echo ""
 
-        pyxis_server=$(jq -r '.pyxis.server // "production"' "${DATA_FILE}")
         staged_index=$(jq -r '.fbc.stagedIndex // false' "${DATA_FILE}")
 
         component_count=$(jq '.components | length' "${SNAPSHOT_FILE}")
@@ -311,186 +293,113 @@ spec:
         echo ""
         echo "Found $unique_count unique resolved targetIndex value(s)"
         echo ""
-        
-        case "$pyxis_server" in
-          production)
-            PYXIS_URL="https://pyxis.api.redhat.com/"
-            ;;
-          stage)
-            PYXIS_URL="https://pyxis.preprod.api.redhat.com/"
-            ;;
-          production-internal)
-            PYXIS_URL="https://pyxis.engineering.redhat.com/"
-            ;;
-          stage-internal)
-            PYXIS_URL="https://pyxis.stage.engineering.redhat.com/"
-            ;;
-          *)
-            echo "ERROR: Invalid pyxis server: $pyxis_server"
-            exit 1
-            ;;
-        esac
 
-        echo "Pyxis server: $PYXIS_URL"
+        # Get the tenant namespace and current release name from the releaseName parameter
+        RELEASE_NAME_PARAM="$(params.releaseName)"
+        if [ -z "${RELEASE_NAME_PARAM}" ]; then
+          echo "ℹ️  No releaseName parameter provided"
+          echo "  → Skipping idempotence filtering (keeping all components)"
+          echo ""
+          attach_ocp_versions_to_all "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+
+        TENANT_NAMESPACE=$(cut -d'/' -f1 <<< "${RELEASE_NAME_PARAM}")
+        CURRENT_RELEASE=$(cut -d'/' -f2 <<< "${RELEASE_NAME_PARAM}")
+
+        echo "Release namespace : ${TENANT_NAMESPACE}"
+        echo "Current release   : ${CURRENT_RELEASE}"
+
+        # Resolve application name from the current Release CR label
+        APPLICATION=$(kubectl get release "${CURRENT_RELEASE}" \
+          -n "${TENANT_NAMESPACE}" \
+          -o jsonpath='{.metadata.labels.appstudio\.openshift\.io/application}' \
+          2>/dev/null || echo "")
+
+        if [ -z "${APPLICATION}" ]; then
+          echo "WARNING: Could not determine application name from Release CR"
+          echo "  → Skipping idempotence filtering (keeping all components)"
+          echo ""
+          attach_ocp_versions_to_all "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
+          echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
+          exit 0
+        fi
+
+        echo "Application       : ${APPLICATION}"
         echo ""
-        
-        # Calculate date filter (30 days ago) for Pyxis query optimization
-        # Format: YYYY-MM-DD (Pyxis expects ISO 8601 date format)
-        # 30 days covers realistic re-release scenarios while keeping queries fast
-        date_filter=$(date -u -d '30 days ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-30d '+%Y-%m-%d')
-        echo "Date filter: last_update_date>=$date_filter (last 30 days)"
-        echo ""
-        
-        # Function to query Pyxis and extract published fragments for a targetIndex
-        query_pyxis_for_target_index() {
+
+        # Query Release CRs to find previously-published FBC fragment digests
+        # for a given resolved targetIndex.
+        # Diagnostic output goes to stderr; only sha256:... digests are printed to stdout.
+        query_releases_for_published_fragments() {
           local target_index="$1"
-          local max_retries=3
-          local retry_count=0
-          local index_response=""
-          local http_code=""
-          
-          echo "  Querying Pyxis for targetIndex: ${target_index}"
-          
-          while [ $retry_count -le $max_retries ]; do
-            if [ $retry_count -gt 0 ]; then
-              echo "  Retry attempt $retry_count/$max_retries..."
-              sleep $((retry_count * 2))  # Exponential backoff: 2s, 4s, 6s
-            fi
-            
-            local response_file
-            local http_code_output
-            response_file=$(mktemp)
-            http_code_output=$(mktemp)
-            
-            # Build Pyxis query URL with optimization parameters:
-            # - docker_image_id filter: find indices for this catalog
-            # - last_update_date filter: only check indices updated in last 30 days
-            # - page_size=500: retrieve up to 500 results (Pyxis API maximum)
-            # URL-encode the entire filter value to handle special characters (/, :, ;, =)
-            local filter_value="docker_image_id==${target_index};last_update_date>=${date_filter}"
-            local encoded_filter
-            encoded_filter=$(printf '%s' "${filter_value}" | jq -sRr @uri)
-            local pyxis_query_url="${PYXIS_URL}v1/images?filter=${encoded_filter}&page_size=500"
-            
-            set +e  # Temporarily disable exit on error
-            curl -s \
-              --cert /var/workdir/crt \
-              --key /var/workdir/key \
-              --max-time 60 \
-              --connect-timeout 10 \
-              -X GET \
-              "$pyxis_query_url" \
-              -H "Content-Type: application/json" \
-              -w "%{http_code}" \
-              -o "$response_file" \
-              > "$http_code_output"
-            local curl_exit=$?
-            set -e  # Re-enable exit on error
-            
-            http_code=$(cat "$http_code_output")
-            index_response=$(cat "$response_file")
-            
-            rm -f "$response_file" "$http_code_output"
-            
-            if [ $curl_exit -eq 0 ] && [[ "$http_code" =~ ^2[0-9]{2}$ ]]; then
-              echo "  ✓ Pyxis query successful (HTTP $http_code)"
-              break
-            else
-              echo "  ✗ Pyxis query failed (HTTP $http_code, curl exit: $curl_exit)"
-              retry_count=$((retry_count + 1))
-              
-              if [ $retry_count -gt $max_retries ]; then
-                echo ""
-                echo "WARNING: Failed to query Pyxis API after $max_retries retries"
-                echo ""
-                echo "Details:"
-                echo "  - HTTP code: $http_code"
-                echo "  - curl exit code: $curl_exit"
-                echo "  - Pyxis URL: ${PYXIS_URL}"
-                echo "  - Target index: ${target_index}"
-                echo ""
-                echo "Possible causes:"
-                echo "  - Invalid or expired Pyxis certificates"
-                echo "  - Network connectivity issues"
-                echo "  - Pyxis API service unavailable"
-                echo "  - Incorrect Pyxis server configuration"
-                echo ""
-                echo "Cannot verify already-published fragments. Will keep all components for release."
-                echo "If there's a real registry issue, the actual release task will fail."
-                return 1
-              fi
-            fi
-          done
-          
-          if ! jq -e '.data' <<< "$index_response" > /dev/null 2>&1; then
-            echo "WARNING: Invalid JSON response from Pyxis API"
-            echo "  Expected JSON with '.data' field"
-            echo "  Response:"
-            echo "$index_response"
-            echo "Cannot verify already-published fragments. Will keep all components for release."
+
+          echo "  Querying Release CRs for previously-published fragments..." >&2
+          echo "  target index : ${target_index}" >&2
+
+          local releases_json
+          local kubectl_err
+          if ! kubectl_err=$(kubectl get release \
+              -n "${TENANT_NAMESPACE}" \
+              -l "appstudio.openshift.io/application=${APPLICATION}" \
+              -o json 2>&1 >/tmp/releases_json_out); then
+            echo "  WARNING: Failed to list Release CRs: ${kubectl_err}" >&2
             return 1
           fi
-          
-          local index_count
-          index_count=$(jq '.data | length' <<< "$index_response")
-          
-          if [ "$index_count" -eq 0 ]; then
-            echo "  ℹ️  No index images found (first release to this catalog)"
-            echo ""
-            return 0
-          fi
-          
-          echo "  Found $index_count existing index image(s)"
-          
-          # Extract published fragments from this targetIndex
+          releases_json=$(cat /tmp/releases_json_out)
+
+          # Extract fbc_fragment digests from successfully completed Releases
+          # that targeted this same index, excluding the current (in-flight) release.
           local published_fragments
-          published_fragments=$(jq -r '
+          published_fragments=$(jq -r \
+            --arg target "${target_index}" \
+            --arg current "${CURRENT_RELEASE}" '
             [
-              .data[] |
-              (
-                (.related_images[]?.digest // empty),
-                (.related_images[]?.image | split("@")[1] // empty),
-                (.bundles[]?.related_images[]?.digest // empty),
-                (.bundles[]?.related_images[]?.image | split("@")[1] // empty)
-              )
+              .items[] |
+              select(.metadata.name != $current) |
+              select(
+                .status.conditions != null and
+                any(.status.conditions[]; .type == "Released" and .status == "True")
+              ) |
+              (.status.artifacts.components // [])[] |
+              select(.target_index == $target) |
+              .fbc_fragment |
+              split("@")[1]
             ] | unique | .[]
-          ' <<< "$index_response" 2>/dev/null || echo "")
-          
-          if [ -n "$published_fragments" ]; then
-            local fragment_count
-            fragment_count=$(echo "$published_fragments" | wc -l)
-            echo "  Extracted $fragment_count unique fragment digest(s)"
-          else
-            echo "  ⚠️  No fragments found in published index"
+          ' <<< "${releases_json}" 2>/dev/null || echo "")
+
+          local frag_count=0
+          if [ -n "${published_fragments}" ]; then
+            frag_count=$(echo "${published_fragments}" | wc -l)
           fi
-          echo ""
-          
-          # Store fragments for this targetIndex (return via stdout)
-          echo "$published_fragments"
+          echo "  Found ${frag_count} previously-published fragment digest(s)" >&2
+          echo "" >&2
+
+          echo "${published_fragments}"
         }
-        
-        # Query Pyxis for each unique targetIndex and build fragment map
-        declare -A target_index_fragments  # targetIndex -> newline-separated fragment digests
-        
-        echo "Querying Pyxis for each targetIndex..."
+
+        # Build published-fragments map for each unique targetIndex
+        declare -A target_index_fragments
+
+        echo "Querying Release CRs for each targetIndex..."
         echo ""
-        
+
         for target_index in "${unique_target_indices[@]}"; do
           echo "--- targetIndex: ${target_index} ---"
-          if ! fragments=$(query_pyxis_for_target_index "$target_index"); then
+          if ! fragments=$(query_releases_for_published_fragments "${target_index}"); then
             echo ""
             echo "================================================================"
-            echo "Pyxis query failed - skipping idempotence filtering"
+            echo "Release CR query failed - skipping idempotence filtering"
             echo "================================================================"
             echo ""
             echo "Keeping all components for release (fail-safe behavior)."
-            echo "If there are real registry issues, they will be caught during actual release."
             echo ""
             attach_ocp_versions_to_all "${SNAPSHOT_FILE}" "${FILTERED_SNAPSHOT_FILE}"
             echo -n "filtered-snapshot.json" > "$(results.filteredSnapshotPath.path)"
             exit 0
           fi
-          target_index_fragments[$target_index]="$fragments"
+          target_index_fragments[$target_index]="${fragments}"
         done
 
         echo "================================================================"

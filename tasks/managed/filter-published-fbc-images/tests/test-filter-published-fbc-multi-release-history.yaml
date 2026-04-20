@@ -2,34 +2,34 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-filter-published-fbc-all-published
+  name: test-filter-published-fbc-multi-release-history
 spec:
   description: |
-    Negative test: Verify that filter-published-fbc-images correctly handles the case where
-    all components are already released (found in a prior successful Release CR),
-    resulting in an empty filtered snapshot.
+    Verify that published fragments are accumulated across MULTIPLE prior Release CRs
+    targeting the same index (union semantics).
+
+    Two prior successful Release CRs exist for the same target index:
+      - Release A recorded sha256:F1 (comp1)
+      - Release B recorded sha256:F3 (comp3)
+
+    The new snapshot has four components: comp1 (F1), comp2 (F2), comp3 (F3), comp4 (F4).
+    Expected: F1 and F3 are filtered (from different prior Releases); F2 and F4 are kept.
+
+    This tests the .items[] iteration in the jq query — if only the last Release's
+    fragments were used, comp1 would incorrectly survive the filter.
   params:
     - name: ociStorage
-      description: The OCI repository where the Trusted Artifacts are stored.
       type: string
     - name: ociArtifactExpiresAfter
-      description: >-
-        Expiration date for the trusted artifacts created in the OCI repository.
-        An empty string means the artifacts do not expire.
       type: string
       default: "1d"
     - name: orasOptions
-      description: oras options to pass to Trusted Artifacts calls
       type: string
       default: "--insecure"
     - name: trustedArtifactsDebug
-      description: >-
-        Flag to enable debug logging in trusted artifacts.
-        Set to a non-empty string to enable.
       type: string
       default: ""
     - name: dataDir
-      description: The location where data will be stored
       type: string
   tasks:
     - name: setup
@@ -70,32 +70,34 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create test snapshot with all components already published
-              # All fragments (sha256:mno345, sha256:pqr678) are in published index
-              # Result: empty snapshot
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << 'EOF'
               {
                 "application": "test-app",
                 "components": [
                   {
-                    "name": "comp1-all-published",
-                    "containerImage": "quay.io/test/comp1@sha256:mno345"
+                    "name": "comp1-from-release-A",
+                    "containerImage": "quay.io/test/comp1@sha256:F1"
                   },
                   {
-                    "name": "comp2-all-published",
-                    "containerImage": "quay.io/test/comp2@sha256:pqr678"
+                    "name": "comp2-new",
+                    "containerImage": "quay.io/test/comp2@sha256:F2"
+                  },
+                  {
+                    "name": "comp3-from-release-B",
+                    "containerImage": "quay.io/test/comp3@sha256:F3"
+                  },
+                  {
+                    "name": "comp4-new",
+                    "containerImage": "quay.io/test/comp4@sha256:F4"
                   }
                 ]
               }
               EOF
 
-              # Create data file with FBC targetIndex
-              # Mock will return index with both sha256:mno345 and sha256:pqr678
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
                 "fbc": {
-                  "targetIndex": "quay.io/redhat-pending/catalog:v4.16-all",
-                  "publishingCredentials": "test-publishing-creds"
+                  "targetIndex": "quay.io/redhat-pending/catalog:v4.15"
                 }
               }
               EOF
@@ -120,7 +122,7 @@ spec:
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
         - name: releaseName
-          value: "test-ns/current-release-all"
+          value: "test-ns/current-release-history"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -180,19 +182,41 @@ spec:
 
               FILTERED_SNAPSHOT="$(params.dataDir)/filtered-snapshot.json"
 
-              if [ ! -f "${FILTERED_SNAPSHOT}" ]; then
-                echo "ERROR: Filtered snapshot not found at ${FILTERED_SNAPSHOT}"
-                exit 1
-              fi
-
-              echo "Filtered snapshot contents:"
+              echo "Filtered snapshot:"
               jq . "${FILTERED_SNAPSHOT}"
 
               COUNT=$(jq '.components | length' "${FILTERED_SNAPSHOT}")
-              echo "Component count: ${COUNT}"
 
-              # Expected: 0 components (all are already published)
-              if [ "${COUNT}" -ne 0 ]; then
-                echo "ERROR: Expected 0 components (all published), got ${COUNT}"
+              # Expect exactly 2: comp2 and comp4 (comp1 from Release A, comp3 from Release B filtered)
+              if [ "${COUNT}" -ne 2 ]; then
+                echo "ERROR: Expected 2 components (union of Release A+B fragments), got ${COUNT}"
+                echo "  If count=3: Release A's sha256:F1 was not accumulated (only Release B used)"
                 exit 1
               fi
+
+              # comp1 (sha256:F1) must be filtered — in Release A
+              if jq -e '.components[] | select(.name == "comp1-from-release-A")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "ERROR: comp1-from-release-A should have been filtered (sha256:F1 in Release A)"
+                exit 1
+              fi
+
+              # comp3 (sha256:F3) must be filtered — in Release B
+              if jq -e '.components[] | select(.name == "comp3-from-release-B")' \
+                  "${FILTERED_SNAPSHOT}" > /dev/null; then
+                echo "ERROR: comp3-from-release-B should have been filtered (sha256:F3 in Release B)"
+                exit 1
+              fi
+
+              # comp2 and comp4 must be kept
+              for name in comp2-new comp4-new; do
+                if ! jq -e --arg n "$name" '.components[] | select(.name == $n)' \
+                    "${FILTERED_SNAPSHOT}" > /dev/null; then
+                  echo "ERROR: $name should be present (not in any prior Release CR)"
+                  exit 1
+                fi
+              done
+
+              echo "✓ sha256:F1 (Release A) + sha256:F3 (Release B) both filtered via union"
+              echo "✓ comp2 and comp4 kept as expected"
+              echo "✓ Multi-release history accumulation: PASSED"

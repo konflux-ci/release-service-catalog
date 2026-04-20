@@ -680,15 +680,11 @@ validate_pipeline_results() {
     
     local failures=0
     
-    # Get release artifacts from the tenant namespace (populated by release service from managed pipeline)
     local release_json
-    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
-    
-    if [ $? -ne 0 ] || [ -z "$release_json" ]; then
-        echo "🔴 Could not retrieve release ${release_name} from namespace ${RELEASE_NAMESPACE}"
+    release_json=$(get_release_json "${release_name}") || {
+        echo "🔴 Could not retrieve release ${release_name}"
         return 1
-    fi
-    
+    }
     echo "🔍 DEBUG: Release JSON retrieved successfully"
     
     local index_image_artifacts
@@ -719,8 +715,8 @@ verify_single_component_release() {
     echo "🔍 Verifying single-component release: $release_name"
     
     local release_json
-    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
-    
+    release_json=$(get_release_json "${release_name}")
+
     local failures=0
     local fbc_fragment ocp_version iib_log index_image_artifacts
 
@@ -768,8 +764,8 @@ verify_multi_component_release() {
     echo "🔍 Verifying multi-component release: $release_name"
     
     local release_json
-    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
-    
+    release_json=$(get_release_json "${release_name}")
+
     local failures=0
     
     # After deduplication, we expect exactly 1 component per unique target_index

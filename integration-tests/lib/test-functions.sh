@@ -214,7 +214,9 @@ cleanup_resources() {
     echo "Skipping cleanup as per --skip-cleanup flag."
   fi
 
-  echo "Killing any child processes..." >> "${cleanup_log_file}"
+  if [ -n "${cleanup_log_file}" ]; then
+    echo "Killing any child processes..." >> "${cleanup_log_file}"
+  fi
   pkill -e  -P $$
 
   if [ "$err" -ne 0 ]; then
@@ -719,4 +721,136 @@ patch_component_source() {
 patch_component_source_before_merge() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
      "to patch the component source BEFORE MERGE in their test.sh file"
+}
+
+# ---------------------------------------------------------------------------
+# Release / PipelineRun inspection helpers
+# ---------------------------------------------------------------------------
+
+# Return the managed PipelineRun name for a Release CR.
+# Arguments:
+#   $1: release name
+# Relies on globals: tenant_namespace
+get_pipelinerun_name_from_release() {
+    local release_name=$1
+    local pipelinerun_full
+    pipelinerun_full=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null)
+    [ -z "${pipelinerun_full}" ] && return 1
+    basename "${pipelinerun_full}"
+}
+
+# Return the Release CR as JSON.
+# Arguments:
+#   $1: release name
+# Relies on globals: tenant_namespace
+get_release_json() {
+    local release_name=$1
+    kubectl get release "${release_name}" -n "${tenant_namespace}" -o json
+}
+
+# Wait for a named Release to complete (wraps wait-for-release.sh).
+# Arguments:
+#   $1: release name
+# Relies on globals: tenant_namespace, SUITE_DIR
+wait_for_release() {
+    local release_name=$1
+    echo "⏳ Waiting for release ${release_name} to complete..."
+    export RELEASE_NAME=${release_name}
+    export RELEASE_NAMESPACE=${tenant_namespace}
+    "${SUITE_DIR}/../scripts/wait-for-release.sh"
+}
+
+# Check whether a named task was skipped in the managed PipelineRun for a Release.
+# Returns 0 (true) if skipped, 1 otherwise.
+# Arguments:
+#   $1: release name
+#   $2: pipeline task name
+# Relies on globals: tenant_namespace, managed_namespace
+is_managed_task_skipped() {
+    local release_name=$1
+    local task_name=$2
+    local pipelinerun_name
+    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+    local skipped
+    skipped=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}" \
+        2>/dev/null)
+    [[ -n "${skipped}" ]]
+}
+
+# Wait for a specific task in the managed PipelineRun for a Release to reach a
+# terminal state (Succeeded / Failed / Cancelled). Prints dots while waiting.
+# Arguments:
+#   $1: release name
+#   $2: pipeline task name
+#   $3: timeout in seconds (default 300)
+# Relies on globals: tenant_namespace, managed_namespace
+wait_for_managed_pipeline_task() {
+    local release_name=$1
+    local task_name=$2
+    local timeout=${3:-300}
+    local pipelinerun_name
+    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || {
+        echo "⚠️  Could not resolve PipelineRun for release ${release_name}"
+        return 1
+    }
+
+    echo "Waiting for ${task_name} in ${pipelinerun_name}..."
+    local start_time
+    start_time=$(date +%s)
+
+    while true; do
+        local status
+        status=$(kubectl get taskrun -n "${managed_namespace}" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name}" \
+            -l "tekton.dev/pipelineTask=${task_name}" \
+            -o jsonpath='{.items[0].status.conditions[0].reason}' 2>/dev/null)
+
+        case "${status}" in
+            Succeeded)
+                echo ""
+                echo "✅ ${task_name} completed successfully"
+                return 0
+                ;;
+            Failed|TaskRunCancelled)
+                echo ""
+                echo "⚠️  ${task_name} ended with status: ${status}"
+                return 1
+                ;;
+        esac
+
+        if [ $(($(date +%s) - start_time)) -ge "${timeout}" ]; then
+            echo ""
+            echo "⚠️  Timed out waiting for ${task_name} (${timeout}s)"
+            return 1
+        fi
+        echo -n "."
+        sleep 10
+    done
+}
+
+# Fetch logs from a named step/container of a specific task in a managed PipelineRun.
+# Arguments:
+#   $1: managed pipelinerun name
+#   $2: pipeline task name
+#   $3: container / step name
+#   $4: number of tail lines (default 200)
+# Relies on global: managed_namespace
+get_managed_task_logs() {
+    local pipelinerun_name=$1
+    local task_name=$2
+    local container=$3
+    local tail=${4:-200}
+    local taskrun pod_name
+    taskrun=$(kubectl get taskrun -n "${managed_namespace}" \
+        -l "tekton.dev/pipelineRun=${pipelinerun_name}" \
+        -l "tekton.dev/pipelineTask=${task_name}" \
+        -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || return 1
+    [ -z "${taskrun}" ] && return 1
+    pod_name=$(kubectl get taskrun "${taskrun}" -n "${managed_namespace}" \
+        -o jsonpath='{.status.podName}' 2>/dev/null) || return 1
+    [ -z "${pod_name}" ] && return 1
+    kubectl logs -n "${managed_namespace}" "${pod_name}" \
+        -c "${container}" --tail="${tail}" 2>/dev/null
 }
