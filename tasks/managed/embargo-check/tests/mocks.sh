@@ -6,6 +6,7 @@ function curl-with-retry() {
   echo Mock curl called with: $* >&2
   mkdir -p "$(params.dataDir)"
   echo $* >> "$(params.dataDir)/mock_curl.txt"
+  echo "${CURL_WITH_RETRY_RETRY_404:-}" >> "$(params.dataDir)/mock_curl_retry404.txt"
 
   if [[ "$*" == "--retry 3 https://jira.atlassian.com/rest/api/2/issue/ISSUE-123" ]]
   then
