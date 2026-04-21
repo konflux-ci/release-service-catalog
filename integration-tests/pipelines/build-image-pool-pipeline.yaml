@@ -1,0 +1,175 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-image-pool-pipeline
+spec:
+  description: |-
+    Pipeline to build and maintain the image pool used by the rh-advisories large snapshot test.
+    Creates Konflux components and triggers builds until the target count is reached.
+    Runs incrementally by default (adds only missing components). Behaviour can be tuned via
+    pipeline params: COMPONENT_COUNT, FORCE_REBUILD, BUILD_ARCH_MODE, COMPONENT_NAME_PREFIX.
+    See integration-tests/build-image-pool/README.md for details.
+  params:
+    - name: SNAPSHOT
+      type: string
+    - name: GITHUB_TOKEN_SECRET_NAME
+      default: 'e2e-test-github-token'
+      type: string
+    - name: KUBECONFIG_SECRET_NAME
+      default: 'e2e-test-service-account-kubeconfig'
+      type: string
+    - name: COMPONENT_COUNT
+      default: '200'
+      description: 'Target total number of components to create'
+      type: string
+    - name: FORCE_REBUILD
+      default: 'false'
+      description: 'Force fresh builds, disable image reuse (true/false)'
+      type: string
+    - name: COMPONENT_NAME_PREFIX
+      default: 'ls'
+      description: 'Prefix for generated component names (e.g. "ls" → ls-v4-15-apiserver-watcher-01)'
+      type: string
+    - name: BUILD_ARCH_MODE
+      default: 'single'
+      description: 'Architecture mode: "multi" (amd64/arm64/s390x/ppc64le) or "single" (amd64 only)'
+      type: string
+  tasks:
+    - name: get-snapshot-data
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: SNAPSHOT
+        results:
+          - name: CONTAINER_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+        steps:
+          - name: get-container-image
+            image: quay.io/konflux-ci/release-service-utils@sha256:e852a62497c4537059bb1f4c3ddf5c1a813b2b22bd9f4bb826cffb36af7d5f65  # yamllint disable-line
+            computeResources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 200m
+                memory: 256Mi
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            script: |
+              #!/usr/bin/env bash
+              containerImage=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+              gitUrl=$(jq -r '.components[0].source.git.url // ""' <<< "${SNAPSHOT}")
+              gitRevision=$(jq -r '.components[0].source.git.revision // ""' <<< "${SNAPSHOT}")
+              echo "${SNAPSHOT}"
+              echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
+              echo -n "${gitUrl}" | tee "$(results.PR_GIT_URL.path)"
+              echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
+
+    - name: create-builds
+      timeout: "20h0m0s"
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: COMPONENT_COUNT
+          value: $(params.COMPONENT_COUNT)
+        - name: FORCE_REBUILD
+          value: $(params.FORCE_REBUILD)
+        - name: COMPONENT_NAME_PREFIX
+          value: $(params.COMPONENT_NAME_PREFIX)
+        - name: BUILD_ARCH_MODE
+          value: $(params.BUILD_ARCH_MODE)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: KUBECONFIG_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: COMPONENT_COUNT
+          - name: FORCE_REBUILD
+          - name: COMPONENT_NAME_PREFIX
+          - name: BUILD_ARCH_MODE
+        results:
+          - name: BUILD_OUTPUT
+            description: Build creation output
+        steps:
+          - name: create-builds
+            image: $(params.STEP_IMAGE)
+            imagePullPolicy: Always
+            computeResources:
+              requests:
+                cpu: 500m
+                memory: 1Gi
+              limits:
+                cpu: "1"
+                memory: 2Gi
+            env:
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+            script: |
+              #!/usr/bin/env bash
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+
+              KUBECONFIG_FILE=$(mktemp)
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "🚀 Creating Components and Builds"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "  Target components: $(params.COMPONENT_COUNT)"
+              echo "  Namespace: dev-release-team-tenant"
+              echo ""
+              
+              # Use build-images.sh to create components and builds
+              # This script already handles:
+              # - Creating applications/components with proper naming
+              # - Tracking existing components (continues from where left off)
+              # - Smart reuse of existing builds (FORCE_REBUILD=false)
+
+              BUILD_SCRIPT="/home/e2e/tests/build-image-pool/utils/build-images.sh"
+
+              if [ ! -f "${BUILD_SCRIPT}" ]; then
+                echo "❌ ERROR: Script not found: ${BUILD_SCRIPT}"
+                exit 1
+              fi
+
+              COMPONENT_COUNT="$(params.COMPONENT_COUNT)"
+              FORCE_REBUILD="$(params.FORCE_REBUILD)"
+              COMPONENT_NAME_PREFIX="$(params.COMPONENT_NAME_PREFIX)"
+              BUILD_ARCH_MODE="$(params.BUILD_ARCH_MODE)"
+              export COMPONENT_COUNT FORCE_REBUILD COMPONENT_NAME_PREFIX BUILD_ARCH_MODE
+              export NAMESPACE="dev-release-team-tenant"
+              # Search Quay for existing images first; reuse digest if found instead of rebuilding.
+              export DISABLE_QUAY_REUSE="false"
+              # Use our own template branch (complete independence from other automation)
+              # Template provides multi-arch PAC config; build-images.sh then customizes:
+              #   - Branch name, component name, Dockerfile size
+              export PAC_TEMPLATE_BRANCH="konflux-v4-15-apiserver-watcher-01"
+              # GITHUB_TOKEN is already set from env above
+              
+              "${BUILD_SCRIPT}" "${COMPONENT_COUNT:?}" "${NAMESPACE}" \
+                "/tmp/fresh-builds-$$.txt" "${FORCE_REBUILD}"
+
+              # Return summary
+              echo -n "Components and builds created successfully" | tee "$(results.BUILD_OUTPUT.path)"
+      runAfter:
+        - get-snapshot-data
