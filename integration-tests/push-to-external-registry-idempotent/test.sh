@@ -13,55 +13,13 @@
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
 
-# Helper: Get PipelineRun name from Release CR
-# Returns just the PipelineRun name (without namespace prefix)
-get_pipelinerun_name_from_release() {
-    local release_name=$1
-
-    # Get the actual PipelineRun name from the Release CR
-    # Format is: namespace/name, we need just the name part
-    local pipelinerun_full
-    pipelinerun_full=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
-        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null)
-
-    if [ -z "${pipelinerun_full}" ]; then
-        return 1
-    fi
-
-    # Extract and return just the name part after the /
-    basename "${pipelinerun_full}"
-}
-
-# Helper: Get release as JSON
-get_release_json() {
-    local release_name=$1
-    kubectl get release "${release_name}" -n "${tenant_namespace}" -o json
-}
-
 # Check if all components were filtered (idempotency validation)
 # Returns 0 (true) if push-snapshot task was skipped, 1 (false) otherwise
 were_all_components_filtered() {
     local release_name=$1
 
     # Check if all components were filtered by seeing if push-snapshot was skipped
-    is_taskrun_skipped "${release_name}" "push-snapshot"
-}
-
-# Check if a specific task was skipped in the pipeline
-# Returns 0 (true) if task was skipped, 1 (false) otherwise
-is_taskrun_skipped() {
-    local release_name=$1
-    local task_name=$2
-
-    local pipelinerun_name
-    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
-
-    # Check if task appears in PipelineRun's skippedTasks list
-    local skipped_task
-    skipped_task=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
-        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}" 2>/dev/null)
-
-    [[ -n "${skipped_task}" ]]
+    is_task_skipped "${release_name}" "push-snapshot"
 }
 
 # Verify a single release has valid artifacts and image can be pulled

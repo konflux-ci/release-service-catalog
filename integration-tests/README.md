@@ -7,6 +7,8 @@ This directory contains end-to-end integration tests for the Release Service Cat
 The following integration test suites are available:
 
 - **[collectors](collectors/)** - Tests for advisory data collection and processing
+- **[collectors-no-cve](collectors-no-cve/)** - Tests for the no-CVE path of advisory data collection
+- **[rh-advisories-idempotent](rh-advisories-idempotent/)** - Tests idempotent re-release behavior for the rh-advisories pipeline: verifies that a second release with the same snapshot detects the existing advisory, skips all downstream tasks, and correctly populates `advisory.url` in the Release CR status
 - **[fbc-release](fbc-release/)** - Tests for File-Based Catalog (FBC) release pipeline
 - **[push-to-addons-registry](push-to-addons-registry/)** - Tests for pushing to addon registries
 - **[rh-push-helm-chart-to-registry-redhat-io](rh-push-helm-chart-to-registry-redhat-io/)** - Tests for Helm OCI chart release pipeline
