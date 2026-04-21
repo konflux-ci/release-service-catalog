@@ -905,6 +905,60 @@ cleanup_old_resources() {
     set -e
 }
 
+# --- Release / PipelineRun Query Helpers ---
+# These helpers are available to all test suites via this shared library.
+
+# Return the short PipelineRun name (no namespace prefix) for the managed
+# pipeline associated with a Release CR.
+get_pipelinerun_name_from_release() {
+    local release_name=$1
+
+    local pipelinerun_full
+    pipelinerun_full=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}')
+
+    if [ -z "${pipelinerun_full}" ]; then
+        return 1
+    fi
+
+    basename "${pipelinerun_full}"
+}
+
+# Return the full Release CR as JSON.
+get_release_json() {
+    local release_name=$1
+    kubectl get release "${release_name}" -n "${tenant_namespace}" -o json
+}
+
+# Return 0 (true) if the named task appears in the PipelineRun's skippedTasks
+# list, 1 (false) otherwise.
+is_task_skipped() {
+    local release_name=$1
+    local task_name=$2
+
+    local pipelinerun_name
+    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+
+    local skipped_task
+    skipped_task=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")
+
+    [[ -n "${skipped_task}" ]]
+}
+
+# Return the value of a named pipeline-level result from the managed PipelineRun
+# associated with a Release CR.
+get_pipelinerun_result() {
+    local release_name=$1
+    local result_name=$2
+
+    local pipelinerun_name
+    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+
+    kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.results[?(@.name=='${result_name}')].value}"
+}
+
 # Function to verify Release contents
 verify_release_contents() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
