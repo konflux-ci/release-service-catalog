@@ -12,6 +12,19 @@ spec:
     This is a copy of v3.0.0 of the rh-push-to-registry-redhat-io pipeline, but with the advisory
     tasks added in. The plan is for this pipeline to eventually be deleted and take the place of
     the rh-push-to-registry-redhat-io pipeline.
+
+    ## Idempotent re-release behavior
+
+    When the same snapshot is released a second time, the filter-already-released-advisory-images
+    task detects that all images are already published in an existing advisory and sets
+    skip_release=true. In this case all normal release tasks (signing, pushing, advisory creation,
+    etc.) are skipped.
+
+    To ensure release.status.artifacts.advisory.url is still populated after an idempotent
+    re-release, the pipeline includes a dedicated update-cr-status-skipped task that runs only
+    when skip_release=true. It reads the advisory URL written to the results directory by
+    filter-already-released-advisory-images and patches the Release CR status in the same way
+    the normal update-cr-status task does on the first release.
   params:
     - name: release
       type: string
@@ -1120,6 +1133,41 @@ spec:
             value: tasks/managed/update-cr-status/update-cr-status.yaml
       runAfter:
         - create-advisory
+    - name: update-cr-status-skipped
+      when:
+        - input: "$(tasks.filter-already-released-advisory-images.results.skip_release)"
+          operator: in
+          values: ["true"]
+      params:
+        - name: resource
+          value: $(params.release)
+        - name: resultsDirPath
+          value: $(tasks.collect-data.results.resultsDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: resultArtifacts
+          value:
+            - "$(tasks.filter-already-released-advisory-images.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/update-cr-status/update-cr-status.yaml
+      runAfter:
+        - filter-already-released-advisory-images
+        - collect-data
   finally:
     - name: cleanup-internal-requests
       taskRef:

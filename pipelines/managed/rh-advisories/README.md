@@ -5,6 +5,19 @@ This is a copy of v3.0.0 of the rh-push-to-registry-redhat-io pipeline, but with
 tasks added in. The plan is for this pipeline to eventually be deleted and take the place of
 the rh-push-to-registry-redhat-io pipeline.
 
+## Idempotent re-release behavior
+
+When the same snapshot is released a second time, the filter-already-released-advisory-images
+task detects that all images are already published in an existing advisory and sets
+skip_release=true. In this case all normal release tasks (signing, pushing, advisory creation,
+etc.) are skipped.
+
+To ensure release.status.artifacts.advisory.url is still populated after an idempotent
+re-release, the pipeline includes a dedicated update-cr-status-skipped task that runs only
+when skip_release=true. It reads the advisory URL written to the results directory by
+filter-already-released-advisory-images and patches the Release CR status in the same way
+the normal update-cr-status task does on the first release.
+
 ## Parameters
 
 | Name                            | Description                                                                                                                        | Optional | Default value                                             |

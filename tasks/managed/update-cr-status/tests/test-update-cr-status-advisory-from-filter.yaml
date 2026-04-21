@@ -1,0 +1,151 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-cr-status-advisory-from-filter
+spec:
+  description: |
+    Run the update-cr-status task with a single resultArtifact that contains only
+    the filter-already-released-advisory-images results file — the same setup used
+    by the update-cr-status-skipped pipeline task on the idempotent re-release path
+    (skip_release=true). The task should patch the Release CR status with
+    advisory.url and advisory.internal_url.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              RESULTS_DIR="$(params.dataDir)/$(context.pipelineRun.uid)/results"
+              mkdir -p "$RESULTS_DIR"
+
+              # Simulate the results file written by filter-already-released-advisory-images
+              # when all snapshot images are already published in an existing advisory
+              FILTER_RESULTS="$RESULTS_DIR/filter-already-released-advisory-images-results.json"
+              cat > "$FILTER_RESULTS" << EOF
+              {
+                  "advisory": {
+                      "url": "https://access.redhat.com/errata/RHSA-2024:12345",
+                      "internal_url": "https://errata.devel.redhat.com/advisory/12345"
+                  }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release" << EOF
+              apiVersion: appstudio.redhat.com/v1alpha1
+              kind: Release
+              metadata:
+                name: release-cr-status-advisory
+                namespace: default
+              spec:
+                snapshot: foo
+                releasePlan: foo
+              EOF
+              kubectl apply -f "$(params.dataDir)/$(context.pipelineRun.uid)/release"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: update-cr-status
+      params:
+        - name: resource
+          value: default/release-cr-status-advisory
+        - name: resultsDirPath
+          value: $(context.pipelineRun.uid)/results
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: resultArtifacts
+          value:
+            - "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              echo Test that Release.Status contains advisory.url from the filter task results
+              test "$(kubectl get release release-cr-status-advisory -n default \
+                -o jsonpath='{.status.artifacts.advisory.url}')" \
+                == "https://access.redhat.com/errata/RHSA-2024:12345"
+
+              echo Test that Release.Status contains advisory.internal_url from the filter task results
+              test "$(kubectl get release release-cr-status-advisory -n default \
+                -o jsonpath='{.status.artifacts.advisory.internal_url}')" \
+                == "https://errata.devel.redhat.com/advisory/12345"
+      runAfter:
+        - run-task
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env sh
+              set -eux
+
+              kubectl delete release release-cr-status-advisory
