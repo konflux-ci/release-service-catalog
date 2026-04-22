@@ -31,7 +31,7 @@ function git() {
 		  }
 		}
 		EOF
-    
+
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2025/1602
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2025/1601
     mkdir -p "$gitRepo"/data/advisories/dev-tenant/2024/1452
@@ -67,7 +67,7 @@ function yq() {
 
     # Check that tags are preserved correctly in json/yaml conversion.
     product_name=$(jq -r '.spec.product_name' "$json_file")
-    if [[ "$product_name" == "preserves tags" ]]; then
+    if [[ "$product_name" == "preserves data" ]]; then
       json_tags=$(jq -r '.spec.content.images[].tags[]' "$json_file")
       yaml_tags=$(command yq '.spec.content.images[].tags[]' "$yaml_tmpfile")
       while IFS= read -r tag; do
@@ -77,6 +77,20 @@ function yq() {
         fi
       done <<< "$json_tags"
       echo "Tags are preserved correctly" >&2
+
+      # Check that version is not truncated e.g. 1.20 not 1.2
+      yaml_version=$(command yq '.spec.product_version' "$yaml_tmpfile")
+      if [ "$yaml_version" != "1.20" ]; then
+        echo "Error: product_version truncated from '1.20' to '$yaml_version'" >&2
+        exit 1
+      fi
+
+      yaml_stream=$(command yq '.spec.product_stream' "$yaml_tmpfile")
+      if [ "$yaml_stream" != "preserver-data-1.20" ]; then
+        echo "Error: product_stream expected 'preserver-data-1.20' got '$yaml_stream'" >&2
+        exit 1
+      fi
+      echo "Quoted fields are preserved correctly" >&2
     fi
     return
   fi
