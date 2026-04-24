@@ -15,6 +15,77 @@ shopt -s nullglob
 
 WORKSPACE_TEMPLATE=${BASH_SOURCE%/*/*}/resources/workspace-template.yaml
 
+# For tasks that use a step command/args referencing a .py file, merge test mocks
+# into that step: prefer tests/mocks.yaml (render_python_task_mocks_from_yaml.py)
+# else tests/mocks.sh (legacy: body after shebang). Task-specific hooks still run after.
+apply_python_command_mocks_merge() {
+  local task_copy="$1"
+  local tests_dir="$2"
+  local mocks_sh="${tests_dir}/mocks.sh"
+  local mocks_yaml="${tests_dir}/mocks.yaml"
+  local step_count i merged_tmp w joined _tt_scripts_dir
+  local -a command_from_task args_from_task entrypoint_argv
+
+  [[ -f "$mocks_yaml" ]] || [[ -f "$mocks_sh" ]] || return 0
+
+  _tt_scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+  step_count=$(yq '.spec.steps | length' "$task_copy")
+
+  for ((i = 0; i < step_count; i++)); do
+    command_from_task=()
+    args_from_task=()
+    mapfile -t command_from_task < <(
+      yq -r ".spec.steps[$i].command // [] | .[]?" "$task_copy" 2>/dev/null
+    )
+    [[ ${#command_from_task[@]} -gt 0 ]] || continue
+
+    mapfile -t args_from_task < <(
+      yq -r ".spec.steps[$i].args // [] | .[]?" "$task_copy" 2>/dev/null
+    )
+
+    entrypoint_argv=("${command_from_task[@]}" "${args_from_task[@]}")
+    joined=""
+    for w in "${entrypoint_argv[@]}"; do
+      joined+=" $w"
+    done
+    [[ "$joined" == *".py"* ]] || continue
+
+    if [[ -f "$mocks_yaml" ]]; then
+      echo "  Merging tests/mocks.yaml into step $i (Python entrypoint) for task tests"
+    else
+      echo "  Merging tests/mocks.sh into step $i (Python entrypoint) for task tests"
+    fi
+
+    merged_tmp=$(mktemp)
+    {
+      echo '#!/usr/bin/env bash'
+      echo "TASK_ENTRYPOINT=("
+      for w in "${entrypoint_argv[@]}"; do
+        # Do not use printf %q for Tekton placeholders: single-quoted %q output
+        # prevents Tekton from rewriting $(params.*) inside spec.steps[].script.
+        if [[ "$w" == *'$('* ]]; then
+          printf '  "%s"\n' "$w"
+        else
+          printf '  %q\n' "$w"
+        fi
+      done
+      echo ")"
+      if [[ -f "$mocks_yaml" ]]; then
+        python3 "${_tt_scripts_dir}/render_python_task_mocks_from_yaml.py" "$tests_dir"
+      else
+        tail -n +2 "$mocks_sh"
+      fi
+    } >"$merged_tmp"
+
+    yq -i ".spec.steps[$i].script = load_str(\"$merged_tmp\")" "$task_copy"
+    rm -f "$merged_tmp"
+
+    yq -i "del(.spec.steps[$i].command)" "$task_copy"
+    yq -i "del(.spec.steps[$i].args)" "$task_copy"
+  done
+}
+
 show_help() {
   echo "Usage: $0 [--remove-compute-resources] [--no-cleanup] [item1] [item2] [...]"
   echo
@@ -198,6 +269,8 @@ do
   # Use a copy of the task file to prevent modifying to original task file
   TASK_COPY=$(mktemp)
   cp "$TASK_PATH" "$TASK_COPY"
+
+  apply_python_command_mocks_merge "$TASK_COPY" "$TESTS_DIR"
 
   if [ -f ${TESTS_DIR}/pre-apply-task-hook.sh ]
   then
