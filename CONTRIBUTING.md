@@ -315,6 +315,12 @@ Note: The approach described above shows the recommended approach. But there may
 depending on your needs. For example, you could have several mocks files and inject different
 files to different steps in your task.
 
+Tasks whose step uses `command` with a `.py` entrypoint (release-service-utils scripts) are handled
+by `test_tekton_tasks.sh`: it prepends a generated wrapper. Prefer `tests/mocks.yaml` in that
+directory for mocked external services (see `.github/scripts/render_python_task_mocks_from_yaml.py`),
+and add one script file per mocked binary under `tests/mocks/<name>` (e.g. `tests/mocks/kinit`).
+If only `tests/mocks.sh` exists, its body (after the shebang) is still merged the same way as before.
+
 #### Running Tekton Task tests locally
 
 Local testing provides fast feedback and mirrors the CI environment exactly. Test your changes before submitting PRs to avoid CI failures.
