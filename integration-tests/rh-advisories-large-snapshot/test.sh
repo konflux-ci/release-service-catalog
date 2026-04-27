@@ -724,41 +724,34 @@ wait_for_release_to_start() {
     return 0
 }
 
-# Override: GitHub repo creation
-create_github_repository() {
-    echo "Creating minimal GitHub repository for test metadata..."
-    "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
-        "${component_base_repo_name}" "${component_base_branch}" \
-        "${component_repo_name}" "${component_branch}"
-}
 
 # Override: Skip component source patching
-patch_component_source() {
+patch_components_source() {
     echo "⏩ Skipping component source patch - no builds needed"
 }
 
 # Override: Skip component initialization
-wait_for_component_initialization() {
+wait_for_components_initialization() {
     echo "⏩ Skipping component initialization - using pre-built images"
 }
 
 # Override: Skip pre-merge patching
-patch_component_source_before_merge() {
+patch_components_source_before_merge() {
     echo "⏩ Skipping component source patch - no builds needed"
 }
 
 # Override: Skip PR merge
-merge_github_pr() {
+merge_github_prs() {
     echo "⏩ Skipping PR merge - using pre-built images"
 }
 
 # Override: Skip PLR wait
-wait_for_plr_to_appear() {
+wait_for_plrs_to_appear() {
     echo "⏩ Skipping PLR wait - no builds triggered"
 }
 
 # Override: Skip PLR completion
-wait_for_plr_to_complete() {
+wait_for_plrs_to_complete() {
     echo "⏩ Skipping PLR completion - no builds needed"
 }
 

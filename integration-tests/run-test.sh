@@ -115,6 +115,28 @@ else
     exit 1
 fi
 
+PTSV_BUILD_PIPELINE=""
+PTSV_BUILD_PIPELINE_BUNDLE="latest"
+if [ -z "$PTSV_COMPONENTS" ]; then
+    PTSV_COMPONENTS="component"
+fi
+
+if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIPELINE_TEST_SUITE_VARS}"; then
+    # Only allow PTSV_* keys from the JSON object
+    source <(
+        jq -r 'to_entries[]
+               | select(.key | startswith("PTSV_"))
+               | "export \(.key)=\(.value|@sh)"' <<<"${PIPELINE_TEST_SUITE_VARS}"
+    )
+fi
+
+# If custom pipeline is specified, set annotation variable for later use in component patching
+if [[ -n "${PTSV_BUILD_PIPELINE}" ]]; then
+    export PTSV_BUILD_PIPELINE_VALUE=$(
+        printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}"
+    )
+fi
+
 # --- Main Script Execution ---
 
 # Trap EXIT signal to call cleanup function
@@ -125,18 +147,18 @@ check_env_vars "$@" # Pass all args for consistency, though check_env_vars doesn
 parse_options "$@" # Parses options and sets CLEANUP, NO_CVE
 
 decrypt_secrets "${SUITE_DIR}"
-create_github_repository
-patch_component_source
+create_github_repositories
+patch_components_source
 setup_namespaces # Ensures correct context before resource creation
 cleanup_old_resources "${originating_tool}"
 create_kubernetes_resources # tmpDir is set here
 
-wait_for_component_initialization # component_pr and pr_number are set here
-patch_component_source_before_merge
-merge_github_pr # SHA is set here
+wait_for_components_initialization # component_pr and pr_number are set here
+patch_components_source_before_merge
+merge_github_prs # SHA is set here
 
-wait_for_plr_to_appear # component_push_plr_name is set here
-wait_for_plr_to_complete
+wait_for_plrs_to_appear
+wait_for_plrs_to_complete
 
 wait_for_releases # RELEASE_NAME, RELEASE_NAMESPACE are set and exported here
 verify_release_contents
