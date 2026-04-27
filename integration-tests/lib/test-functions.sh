@@ -14,6 +14,7 @@ log_warning() {
 }
 
 # Function to check for required environment variables
+# depends on global variables: PTSV_COMPONENTS
 check_env_vars() {
     echo "Checking required environment variables..."
     local missing_vars=0
@@ -36,20 +37,22 @@ check_env_vars() {
     echo "Checking test environment variables..."
     local -a test_env_vars=(
         "application_name"
-        "component_github_org"
         "appstudio_component_branch"
-        "component_base_repo_name"
-        "component_base_branch"
-        "component_branch"
-        "component_git_url"
-        "component_name"
-        "component_repo_name"
-        "component_type"
         "managed_namespace"
         "managed_sa_name"
         "originating_tool"
         "tenant_namespace"
     )
+    for component in ${PTSV_COMPONENTS}; do
+        test_env_vars+=("${component}_base_repo_name")
+        test_env_vars+=("${component}_base_branch")
+        test_env_vars+=("${component}_branch")
+        test_env_vars+=("${component}_github_org")
+        test_env_vars+=("${component}_git_url")
+        test_env_vars+=("${component}_name")
+        test_env_vars+=("${component}_repo_name")
+        test_env_vars+=("${component}_type")
+    done
     for var_name in "${test_env_vars[@]}"; do
         # Check if variable is set
         if [ -z "${!var_name}" ]; then
@@ -57,20 +60,6 @@ check_env_vars() {
             missing_vars=$((missing_vars + 1))
         else
             echo "✅ $var_name is set"
-        fi
-    done
-
-    # Check for optional component2 variables (for multi-component tests)
-    local optional_component2_vars=(
-        "component2_name"
-        "component2_branch"
-        "component2_repo_name"
-        "component2_git_url"
-    )
-    
-    for var_name in "${optional_component2_vars[@]}"; do
-        if [ -n "${!var_name}" ]; then
-            echo "✅ $var_name is set (optional multi-component variable)"
         fi
     done
 
@@ -257,11 +246,25 @@ decrypt_secrets() {
     fi
     echo "Secret decryption check complete."
 }
+create_github_repositories() {
+    echo "🔨 Creating repositories (always dual for reliability)..."
+    for component in ${PTSV_COMPONENTS}; do
+        local _v="${component}_repo_name"
+        local _component_repo_name="${!_v}"
+        _v="${component}_branch"
+        local _component_branch="${!_v}"
+        _v="${component}_base_repo_name"
+        local _component_base_repo_name="${!_v}"
+        _v="${component}_base_branch"
+        local _component_base_branch="${!_v}"
 
-create_github_repository() {
-    echo "Creating component repository ${component_repo_name} branch ${component_branch} from ${component_base_repo_name} branch ${component_base_branch}"
-    "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" "${component_base_repo_name}" "${component_base_branch}" "${component_repo_name}" "${component_branch}"
+        echo "Creating component repository ${_component_repo_name} branch ${_component_branch} from ${_component_base_repo_name} branch ${_component_base_branch}"
+        "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+          "${_component_base_repo_name}" "${_component_base_branch}" \
+          "${_component_repo_name}" "${_component_branch}"
+    done
 }
+
 
 # Function to set up Kubernetes namespaces
 # Relies on global variables: managed_namespace, tenant_namespace
@@ -355,9 +358,10 @@ fetch_component_build_status_annotation() {
 
 # Function to wait for component initialization and get PR details
 # Modifies global variables: component_pr, pr_number
-# Relies on global variables: component_name, tenant_namespace
-wait_for_component_initialization() {
-    echo "Waiting for component ${component_name} in namespace ${tenant_namespace} to be initialized..."
+# Relies on local scope variables: _component_name
+# Relies on global variables: tenant_namespace
+_wait_for_component_initialization() {
+    echo "Waiting for component ${_component_name} in namespace ${tenant_namespace} to be initialized..."
 
     local max_attempts=60  # 10 minutes with 10-second intervals
     local attempt=1
@@ -367,8 +371,8 @@ wait_for_component_initialization() {
     while [ $attempt -le $max_attempts ]; do
       echo "Initialization check attempt ${attempt}/${max_attempts}..."
 
-      if ! component_annotations=$(fetch_component_build_status_annotation "${component_name}"); then
-        log_warning "Could not reach component ${component_name} (kubectl get failed); retrying..."
+      if ! component_annotations=$(fetch_component_build_status_annotation "${_component_name}"); then
+        log_warning "Could not reach component ${_component_name} (kubectl get failed); retrying..."
         if [ $attempt -lt $max_attempts ]; then
           echo "Waiting 10 seconds before retry..."
           sleep 10
@@ -379,16 +383,21 @@ wait_for_component_initialization() {
 
       if [ -n "${component_annotations}" ]; then
         # component_pr is made global by not declaring it local
-        component_pr=$(jq -r '.pac."merge-url" // ""' <<< "${component_annotations}")
+        local component_pr=$(jq -r '.pac."merge-url" // ""' <<< "${component_annotations}")
+
         if [ -n "${component_pr}" ]; then
             echo "✅ Component initialized successfully"
             initialization_success=true
+            local _v="${component}_component_pr"
+            echo "Setting $_v=$component_pr"
+            declare -g "$_v=$component_pr"
             break
         else
             log_warning "Could not get component PR from annotations: ${component_annotations}"
             echo "Waiting 10 seconds before retry..."
             sleep 10
         fi
+
 
       else
         log_warning "Component not yet initialized (attempt ${attempt}/${max_attempts})"
@@ -405,28 +414,42 @@ wait_for_component_initialization() {
 
     # Check if initialization ultimately succeeded
     if [ "$initialization_success" = false ]; then
-      echo "🔴 error: component ${component_name} failed to initialize after ${max_attempts} attempts ($(($max_attempts * 10 / 60)) minutes)"
+      echo "🔴 error: component ${_component_name} failed to initialize after ${max_attempts} attempts ($(($max_attempts * 10 / 60)) minutes)"
       echo "   - Component may not exist in namespace ${tenant_namespace}"
       echo "   - Component creation may have failed"
       exit 1
     fi
 
     # pr_number is made global by not declaring it local
-    pr_number=$(cut -f7 -d/ <<< "${component_pr}")
+    local pr_number=$(cut -f7 -d/ <<< "${component_pr}")
+    local _v="${component}_pr_number"
+    echo "Setting $_v=$pr_number"
+    declare -g "$_v=$pr_number"
     if [ -z "${pr_number}" ]; then
         log_error "Could not extract PR number from ${component_pr}"
     fi
     echo "Found PR: ${component_pr} (Number: ${pr_number})"
 }
 
+wait_for_components_initialization() {
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_name"
+        local _component_name="${!_v}"
+        _wait_for_component_initialization # This sets the global variables :
+         # ${component}_component_pr and ${component}_pr_number used for merging the PR
+    done
+}
+
+
 # Function to merge the GitHub PR
 # Modifies global variable: SHA
-# Relies on global variables: pr_number, component_repo_name, NO_CVE, GITHUB_TOKEN
-merge_github_pr() {
-    echo "Merging PR ${pr_number} in repo ${component_repo_name}..."
+# Relies on local scope variables: component, _pr_number, _component_repo_name
+# Relies on global scope variables: NO_CVE, GITHUB_TOKEN
+_merge_github_pr() {
+    echo "Merging PR ${_pr_number} in repo ${_component_repo_name}..."
     local commit_message="This fixes CVE-2024-8260"
     if [ "${NO_CVE}" == "true" ]; then
-      echo "(Note: NOT Adding a CVE to the commit message)"
+        echo "(Note: NOT Adding a CVE to the commit message)"
       commit_message="e2e test"
     else
       echo "(Note: Adding CVE-2024-8260 to the commit message)"
@@ -448,7 +471,7 @@ merge_github_pr() {
           -H "Accept: application/vnd.github+json" \
           -H "Authorization: Bearer $GITHUB_TOKEN" \
           -H "X-GitHub-Api-Version: 2022-11-28" \
-          "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}/merge" \
+          "https://api.github.com/repos/${_component_repo_name}/pulls/${_pr_number}/merge" \
           -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" --silent --show-error --fail-with-body)
 
         if [ $? -eq 0 ]; then
@@ -471,25 +494,58 @@ merge_github_pr() {
         log_error "Failed to merge PR after ${max_attempts} attempts. Last response: ${merge_result}"
     fi
 
-    # SHA is made global by not declaring it local
-    SHA=$(jq -r '.sha' <<< "${merge_result}")
+    local SHA=$(jq -r '.sha' <<< "${merge_result}")
+    local _v="${component}_SHA"
+    echo "Setting $_v=$SHA"
+    declare -g "$_v=$SHA"
+
     if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
         log_error "Could not get SHA from merge result: ${merge_result}"
     fi
     echo "PR merged. Commit SHA: ${SHA}"
 }
 
+merge_github_prs() {
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_repo_name"
+        local _component_repo_name="${!_v}"
+        _v="${component}_branch"
+        local _component_branch="${!_v}"
+        _v="${component}_base_repo_name"
+        local _component_base_repo="${!_v}"
+        _v="${component}_base_branch"
+        local _component_base_branch="${!_v}"
+        _v="${component}_pr_number"
+        local _pr_number="${!_v}"
+
+        _merge_github_pr # This sets the global variable SHA used for waiting for the PipelineRun
+    done
+}
+
+
+_get_plr()
+{
+    local component=$1
+    local SHA_VAR="${component}_SHA"
+    local SHA="${!SHA_VAR}"
+    local _component_push_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$SHA" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
+    if [ -z "$_component_push_plr_name" ]; then
+        return 0
+    fi
+    echo "$_component_push_plr_name"
+}
+
 # Function to wait for a PipelineRun to appear
-# Sets global variable: component_push_plr_name
-wait_for_plr_to_appear() {
+wait_for_plrs_to_appear() {
     local timeout=300  # 5 minutes timeout
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
+    declare -gA appeared_plrs=()
+    local count=$(echo "$PTSV_COMPONENTS" | wc -w)
 
     echo -n "Waiting for PipelineRun to appear"
-    component_push_plr_name=""
-    while [ -z "$component_push_plr_name" ]; do
+    while [ $(echo ${appeared_plrs[@]} | wc -w) -lt $count ]; do
         current_time=$(date +%s)
         elapsed_time=$((current_time - start_time))
 
@@ -502,27 +558,46 @@ wait_for_plr_to_appear() {
         sleep 5
         echo -n "."
         # get only running pipelines
-        component_push_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$SHA" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
+        for component in $PTSV_COMPONENTS; do
+            # Only update if we found a PLR and haven't already recorded this component
+            if [ -z "${appeared_plrs["$component"]}" ]; then
+                local _plr=$(_get_plr "$component")
+                appeared_plrs["$component"]="$_plr"
+                local _v="${component}_push_plr_name"
+                >&2 echo "Setting $_v=$_plr"
+                declare -g "$_v=$_plr"
+            fi
+        done
     done
     echo
-    echo "✅ Found PipelineRun: ${component_push_plr_name}"
-    echo "   PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${component_push_plr_name}")"
+    for appeared in "${appeared_plrs[@]}"; do
+        echo "✅ Found PipelineRun for component: ${appeared}"
+        echo "   PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${appeared}")"
+    done
 }
 
-# Function to wait for PipelineRun to complete
-# Relies on global variables: component_push_plr_name, tenant_namespace
-wait_for_plr_to_complete() {
+# Function to wait for PipelineRuns to complete
+# Relies on global variables: ${component}_push_plr_name, tenant_namespace, PTSV_COMPONENTS, appeared_plrs
+wait_for_plrs_to_complete() {
     local timeout=1800  # 30 minutes timeout
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
-    local completed=""
-    local retry_attempted="false"
+    declare -A retry_attempted=() # Track retry attempts for each component
+    declare -A completed_plrs=() # Track completion status for each component
     local taskStatus="" # taskrun status from last output
     local previousTaskStatus="" # to avoid duplicate output
+    local count=$(echo "$PTSV_COMPONENTS" | wc -w)
 
-    echo "Waiting for PipelineRun ${component_push_plr_name} to complete"
-    while [ -z "$completed" ]; do
+    for component in $PTSV_COMPONENTS; do
+        #local _v="${component}_push_plr_name"
+        #local _component_push_plr_name="${!_v}"
+        #echo "Waiting for PipelineRun ${_component_push_plr_name} to complete"
+        retry_attempted["$component"]="false"
+        completed_plrs["$component"]="false"
+    done
+
+    while [ ${#completed_plrs[@]} -lt $count ] || [[ " ${completed_plrs[@]} " =~ " false " ]]; do
         current_time=$(date +%s)
         elapsed_time=$((current_time - start_time))
 
@@ -534,37 +609,58 @@ wait_for_plr_to_complete() {
 
         sleep 5
 
-        # Check if the pipeline run is completed
-        completed=$(kubectl get pipelinerun "${component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null)
-
-        # If completed, check the status
-        if [ -n "$completed" ]; then
-          taskStatus=$("${SUITE_DIR}/../scripts/print-taskrun-status.sh" "${component_push_plr_name}" "${tenant_namespace}" compact)
-          if [ "${taskStatus}" != "${previousTaskStatus}" ]; then
-            echo -e "${taskStatus}"
-            previousTaskStatus="${taskStatus}"
-          fi
-          if [ "$completed" == "True" ]; then
-            echo ""
-            echo "✅ PipelineRun completed successfully"
-            break
-          elif [ "$completed" == "False" ]; then
-            echo ""
-            echo "❌ PipelineRun failed"
-            if [ "${retry_attempted}" == "false" ]; then
-                echo "Attempting retry for PR ${pr_number} in repo ${component_repo_name}..."
-                kubectl annotate components/${component_name} build.appstudio.openshift.io/request=trigger-pac-build -n "${tenant_namespace}"
-                wait_for_plr_to_appear # component_push_plr_name is set here
-                retry_attempted="true"
-            else
-                echo "Retry already attempted. Exiting."
-                exit 1
+        for component in $PTSV_COMPONENTS; do
+            # Skip if already completed
+            if [ "${completed_plrs["$component"]}" == "true" ]; then
+                continue
             fi
-          fi
-          completed=""
-        fi
+            local _v="${component}_push_plr_name"
+            local _component_push_plr_name="${!_v}"
+            _v="${component}_repo_name"
+            local _component_repo_name="${!_v}"
+            _v="${component}_name"
+            local _component_name="${!_v}"
+            _v="${component}_pr_number"
+            local _pr_number="${!_v}"
+            echo "Component ${component} waiting for PipelineRun ${_component_push_plr_name} to complete"
+
+            # Check if the pipeline run is completed
+            local completed=$(kubectl get pipelinerun "${_component_push_plr_name}" -n "${tenant_namespace}" -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].status}' 2>/dev/null)
+
+            # If completed, check the status
+            if [ -n "$completed" ]; then
+              taskStatus=$("${SUITE_DIR}/../scripts/print-taskrun-status.sh" "${_component_push_plr_name}" "${tenant_namespace}" compact)
+              if [ "${taskStatus}" != "${previousTaskStatus}" ]; then
+                echo -e "${taskStatus}"
+                previousTaskStatus="${taskStatus}"
+              fi
+              if [ "$completed" == "True" ]; then
+                echo ""
+                echo "✅ PipelineRun for component ${_component_name} completed successfully"
+                completed_plrs["$component"]="true"
+              elif [ "$completed" == "False" ]; then
+                echo ""
+                echo "❌ PipelineRun for component ${_component_name} failed"
+                if [ "${retry_attempted["$component"]}" == "false" ]; then
+                    echo "Attempting retry for PR ${_pr_number} in repo ${_component_repo_name}..."
+                    kubectl annotate components/${_component_name} build.appstudio.openshift.io/request=trigger-pac-build -n "${tenant_namespace}"
+                    appeared_plrs["$component"]="" # Reset to wait for new PLR
+                    wait_for_plrs_to_appear
+                    retry_attempted["$component"]="true"
+                else
+                    echo "Retry already attempted. Exiting."
+                    exit 1
+                fi
+              fi
+            fi
+        done
     done
-    echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${component_push_plr_name}")"
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_push_plr_name"
+        local _component_push_plr_name="${!_v}"
+        echo "PipelineRun ${_component_push_plr_name}"
+        echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${_component_push_plr_name}")"
+    done
 }
 
 # Function to diagnose a failed PipelineRun by printing conditions, TaskRun summaries,
@@ -632,47 +728,61 @@ diagnose_failed_pipelinerun() {
 }
 
 # Function to wait for Releases to complete
-# Relies on global variables: component_push_plr_name, tenant_namespace, SUITE_DIR
+# Relies on global variables: tenant_namespace, SUITE_DIR
 wait_for_releases() {
     local timeout=300  # 5 minutes timeout
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
     local release_names=""
+    local all_release_names=""
 
-    echo -n "Waiting for Releases associated with PLR ${component_push_plr_name} in namespace ${tenant_namespace}: "
-    while [ -z "${release_names}" ]; do
-      current_time=$(date +%s)
-      elapsed_time=$((current_time - start_time))
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_push_plr_name"
+        local _component_push_plr_name="${!_v}"
+        local _v_rns="${component}_release_names"
+        echo -n "Waiting for Releases associated with PLR ${_component_push_plr_name} in namespace ${tenant_namespace}: "
+        while [ -z "${!_v_rns}" ]; do
+            current_time=$(date +%s)
+            elapsed_time=$((current_time - start_time))
 
-      if [ $elapsed_time -ge $timeout ]; then
-          echo
-          echo "🔴 Timeout waiting for Release to appear after ${timeout} seconds"
-          exit 1
-      fi
+            if [ $elapsed_time -ge $timeout ]; then
+                echo
+                echo "🔴 Timeout waiting for Release to appear after ${timeout} seconds"
+                exit 1
+            fi
 
-      sleep 5
-      echo -n "."
-      release_names=$(kubectl get release -l "appstudio.openshift.io/build-pipelinerun=${component_push_plr_name}"  \
-        -n "${tenant_namespace}" -ojson 2>/dev/null | jq -r '.items[].metadata.name // ""' | xargs)
+            sleep 5
+            echo -n "."
+            declare -g "$_v_rns=$(kubectl get release \
+                -l "appstudio.openshift.io/build-pipelinerun=${_component_push_plr_name}"  \
+                -n "${tenant_namespace}" -ojson 2>/dev/null | \
+                jq -r '.items[].metadata.name // ""' | xargs)"
+        done
     done
+
     echo ""
     echo "✅ Found: $release_names"
 
     RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
 
     export RELEASE_NAMESPACE=${tenant_namespace}
-    for release in ${release_names};
-    do
-      # Add labels to the release CR for cleanup tracking
-      # - originating-tool: identifies which test suite created it (for periodic cleanup)
-      # - test-run-uuid: unique ID from test.env (supports concurrent test runs)
-      kubectl patch release "${release}" -n "${tenant_namespace}" \
-        --type merge \
-        -p "{\"metadata\":{\"labels\":{\"originating-tool\":\"${originating_tool}\",\"test-run-uuid\":\"${uuid}\"}}}"
+    for component in $PTSV_COMPONENTS; do
+        local _v_rns="${component}_release_names"
+        release_names="${!_v_rns}"
+        for release in ${release_names};
+        do
+          # Add labels to the release CR for cleanup tracking
+          # - originating-tool: identifies which test suite created it (for periodic cleanup)
+          # - test-run-uuid: unique ID from test.env (supports concurrent test runs)
+          kubectl patch release "${release}" -n "${tenant_namespace}" \
+            --type merge \
+            -p "{\"metadata\":{\"labels\":{\"originating-tool\":\"${originating_tool}\",\"test-run-uuid\":\"${uuid}\"}}}"
 
-      export RELEASE_NAME=${release}
-      "${SUITE_DIR}/../scripts/wait-for-release.sh" &
+          all_release_names="${all_release_names} ${release}"
+          export RELEASE_NAME=${release}
+          "${SUITE_DIR}/../scripts/wait-for-release.sh" &
+        done
     done
 
     # Wait for remaining processes to finish
@@ -680,7 +790,7 @@ wait_for_releases() {
         wait -n
     done
 
-    export RELEASE_NAMES="$release_names"
+    export RELEASE_NAMES="$all_release_names"
 }
 
 # Function to clean up old resources based on originating tool label
@@ -747,261 +857,44 @@ patch_component_source() {
      "to patch the component source BEFORE Component creation in their test.sh file"
 }
 
+patch_components_source() {
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_name"
+        local component_name="${!_v}"
+        _v="${component}_repo_name"
+        local component_repo_name="${!_v}"
+        _v="${component}_pr_number"
+        local pr_number="${!_v}"
+
+        echo "Patching component source:"
+        echo "  Component: ${component_name}"
+        echo "  Repository: ${component_repo_name}"
+
+        patch_component_source
+    done
+}
+
 # Function to patch the component source BEFORE MERGE
 patch_component_source_before_merge() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
      "to patch the component source BEFORE MERGE in their test.sh file"
 }
 
-# --- Multi-Component Support Functions ---
-# These functions support both single and multi-component test scenarios
+patch_components_source_before_merge() {
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_name"
+        local component_name="${!_v}"
+        _v="${component}_repo_name"
+        local component_repo_name="${!_v}"
+        _v="${component}_pr_number"
+        local pr_number="${!_v}"
+        echo "Patching component source BEFORE MERGE:"
+        echo "  Component: ${component_name}"
+        echo "  Repository: ${component_repo_name}"
+        echo "  PR Number: ${pr_number}"
 
-# Helper function for single component initialization
-wait_for_single_component_initialization() {
-    local comp_name=$1
-    local max_attempts=60  # 10 minutes with 10-second intervals
-    local attempt=1
-    local component_annotations=""
-    local initialization_success=false
-
-    while [ $attempt -le $max_attempts ]; do
-      echo "Initialization check attempt ${attempt}/${max_attempts} for ${comp_name}..."
-
-      if ! component_annotations=$(fetch_component_build_status_annotation "${comp_name}"); then
-        echo "⚠️  Could not reach component ${comp_name} (kubectl get failed); retrying..."
-        if [ $attempt -lt $max_attempts ]; then
-          echo "Waiting 10 seconds before retry..."
-          sleep 10
-        fi
-        attempt=$((attempt + 1))
-        continue
-      fi
-
-      if [ -n "${component_annotations}" ]; then
-        # component_pr is made global by not declaring it local
-        component_pr=$(jq -r '.pac."merge-url" // ""' <<< "${component_annotations}")
-        if [ -n "${component_pr}" ]; then
-            echo "✅ Component ${comp_name} initialized successfully"
-            initialization_success=true
-            break
-        else
-            echo "⚠️  Could not get component PR from annotations for ${comp_name}: ${component_annotations}"
-            echo "Waiting 10 seconds before retry..."
-            sleep 10
-        fi
-
-      else
-        echo "⚠️  Component ${comp_name} not yet initialized (attempt ${attempt}/${max_attempts})"
-
-        # Wait before retrying (except on the last attempt)
-        if [ $attempt -lt $max_attempts ]; then
-          echo "Waiting 10 seconds before retry..."
-          sleep 10
-        fi
-      fi
-
-      attempt=$((attempt + 1))
+        patch_component_source_before_merge
     done
-
-    # Check if initialization ultimately succeeded
-    if [ "$initialization_success" = false ]; then
-      echo "🔴 error: component ${comp_name} failed to initialize after ${max_attempts} attempts ($(($max_attempts * 10 / 60)) minutes)"
-      echo "   - Component may not exist in namespace ${tenant_namespace}"
-      echo "   - Component creation may have failed"
-      exit 1
-    fi
-
-    # pr_number is made global by not declaring it local
-    pr_number=$(cut -f7 -d/ <<< "${component_pr}")
-    if [ -z "${pr_number}" ]; then
-        echo "🔴 error: Could not extract PR number from ${component_pr}"
-        exit 1
-    fi
-    echo "Found PR for ${comp_name}: ${component_pr} (Number: ${pr_number})"
-}
-
-# Helper function for single component PR merge
-merge_single_component_pr() {
-    local pr_num=$1
-    local repo_name=$2
-    local no_cve=$3
-    local commit_message="This fixes CVE-2024-8260"
-
-    if [ "${no_cve}" == "true" ]; then
-      echo "(Note: NOT Adding a CVE to the commit message)"
-      commit_message="e2e test"
-    else
-      echo "(Note: Adding CVE-2024-8260 to the commit message)"
-    fi
-    echo "Commit message: \"${commit_message}\""
-
-    local merge_result
-    local attempt=1
-    local max_attempts=3
-    local success=false
-
-    # Retry loop for PR merge
-    while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
-        echo "Merge attempt ${attempt}/${max_attempts} for ${repo_name}..."
-
-        set +e
-        merge_result=$(curl -L \
-          -X PUT \
-          -H "Accept: application/vnd.github+json" \
-          -H "Authorization: Bearer $GITHUB_TOKEN" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "https://api.github.com/repos/${repo_name}/pulls/${pr_num}/merge" \
-          -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" --silent --show-error --fail-with-body)
-
-        if [ $? -eq 0 ]; then
-            success=true
-            echo "✅ PR merge succeeded on attempt ${attempt} for ${repo_name}"
-        else
-            echo "❌ PR merge failed on attempt ${attempt} for ${repo_name}. Response: ${merge_result}"
-            if [ $attempt -lt $max_attempts ]; then
-                echo "Waiting 5 seconds before retry..."
-                sleep 5
-            fi
-        fi
-        set -e
-
-        attempt=$((attempt + 1))
-    done
-
-    # Check if all attempts failed
-    if [ "$success" = false ]; then
-        echo "🔴 error: Failed to merge PR for ${repo_name} after ${max_attempts} attempts. Last response: ${merge_result}"
-        exit 1
-    fi
-
-    # SHA is made global by not declaring it local
-    SHA=$(jq -r '.sha' <<< "${merge_result}")
-    if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
-        echo "🔴 error: Could not get SHA from merge result for ${repo_name}: ${merge_result}"
-        exit 1
-    fi
-    echo "PR merged for ${repo_name}. Commit SHA: ${SHA}"
-}
-
-# Helper function for single PLR appearance
-wait_for_single_plr_to_appear() {
-    local sha=$1
-    local timeout=300  # 5 minutes timeout
-    local start_time=$(date +%s)
-    local current_time
-    local elapsed_time
-    local found_plr_name=""
-
-    echo -n "Waiting for PipelineRun to appear for SHA ${sha}" >&2
-    while [ -z "$found_plr_name" ]; do
-        current_time=$(date +%s)
-        elapsed_time=$((current_time - start_time))
-
-        if [ $elapsed_time -ge $timeout ]; then
-            echo >&2
-            echo "🔴 Timeout waiting for PipelineRun to appear after ${timeout} seconds for SHA ${sha}" >&2
-            exit 1
-        fi
-
-        sleep 5
-        echo -n "." >&2
-        # get only running pipelines
-        found_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$sha" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
-    done
-    echo >&2
-    echo "✅ Found PipelineRun for SHA ${sha}: ${found_plr_name}" >&2
-    echo "   PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${found_plr_name}")" >&2
-
-    # Set global variable for backward compatibility AND return the value
-    component_push_plr_name="${found_plr_name}"
-    # Only echo the PLR name to stdout for capture
-    echo "${found_plr_name}"
-}
-
-# Helper function for single PLR completion
-# Parameters:
-#   $1: plr_name - name of the PipelineRun to wait for
-#   $2: comp_name - component name for display and annotation
-#   $3: comp_sha - (optional) component SHA for retry logic
-wait_for_single_plr_to_complete() {
-    local plr_name=$1
-    local comp_name=$2
-    local comp_sha=$3
-    local timeout=2100  # 35 minutes timeout
-    local start_time=$(date +%s)
-    local current_time
-    local elapsed_time
-    local completed=""
-    local retry_attempted="false"
-    local taskStatus="" # taskrun status from last output
-    local previousTaskStatus="" # to avoid duplicate output
-
-    echo "Waiting for PipelineRun ${plr_name} (${comp_name}) to complete"
-    echo "🔍 DEBUG: Checking if PipelineRun ${plr_name} exists..."
-
-    # First verify the PipelineRun exists
-    if ! kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" >/dev/null 2>&1; then
-        echo "🔴 ERROR: PipelineRun ${plr_name} does not exist in namespace ${tenant_namespace}"
-        echo "Available PipelineRuns:"
-        kubectl get pipelinerun -n "${tenant_namespace}" --no-headers 2>/dev/null || echo "No PipelineRuns found"
-        exit 1
-    fi
-
-    while [ -z "$completed" ]; do
-        current_time=$(date +%s)
-        elapsed_time=$((current_time - start_time))
-
-        if [ $elapsed_time -ge $timeout ]; then
-            echo
-            echo "🔴 Timeout waiting for PipelineRun ${plr_name} to complete after ${timeout} seconds"
-            exit 1
-        fi
-
-        sleep 5
-
-        # Check if the pipeline run is completed - use a more robust approach
-        local plr_status
-        plr_status=$(kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
-        if [ $? -eq 0 ] && [ -n "$plr_status" ]; then
-            completed=$(echo "$plr_status" | jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' 2>/dev/null || echo "")
-        else
-            echo "🔍 DEBUG: Failed to get PipelineRun status for ${plr_name}"
-            continue
-        fi
-
-        # If completed, check the status
-        if [ -n "$completed" ]; then
-          taskStatus=$("${SUITE_DIR}/../scripts/print-taskrun-status.sh" "${plr_name}" "${tenant_namespace}" compact)
-          if [ "${taskStatus}" != "${previousTaskStatus}" ]; then
-            echo -e "${taskStatus}"
-            previousTaskStatus="${taskStatus}"
-          fi
-          if [ "$completed" == "True" ]; then
-            echo ""
-            echo "✅ PipelineRun ${plr_name} (${comp_name}) completed successfully"
-            break
-          elif [ "$completed" == "False" ]; then
-            echo ""
-            echo "❌ PipelineRun ${plr_name} (${comp_name}) failed"
-            if [ "${retry_attempted}" == "false" ] && [ -n "${comp_sha}" ]; then
-                echo "Attempting retry for component ${comp_name}..."
-                kubectl annotate components/${comp_name} build.appstudio.openshift.io/request=trigger-pac-build -n "${tenant_namespace}"
-                # Wait for new PLR to appear using the provided SHA
-                plr_name=$(wait_for_single_plr_to_appear "${comp_sha}")
-                retry_attempted="true"
-            else
-                if [ -z "${comp_sha}" ]; then
-                    echo "No SHA provided for retry. Exiting."
-                else
-                    echo "Retry already attempted for ${comp_name}. Exiting."
-                fi
-                exit 1
-            fi
-          fi
-          completed=""
-        fi
-    done
-    echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${plr_name}")"
 }
 
 # Simple snapshot discovery (no race conditions in controlled test environment)

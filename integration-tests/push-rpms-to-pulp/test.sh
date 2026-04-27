@@ -18,106 +18,6 @@ create_github_repository() {
         "${component2_repo_name}" "${component2_branch}"
 }
 
-wait_for_component_initialization() {
-    echo "Waiting for both components to initialize..."
-
-    wait_for_single_component_initialization "${component_name}"
-    component_pr_number="${pr_number}"
-
-    wait_for_single_component_initialization "${component2_name}"
-    component2_pr_number="${pr_number}"
-}
-
-merge_github_pr() {
-    local commit_message="This fixes CVE-2024-8260. Fixes RELEASE-1502"
-    if [ "${NO_CVE}" == "true" ]; then
-      commit_message="e2e test. Fixes RELEASE-1502"
-    fi
-
-    _merge_pr() {
-        local pr_num=$1 repo_name=$2
-        local merge_result attempt=1 max_attempts=3 success=false
-
-        while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
-            set +e
-            merge_result=$(curl -L -X PUT \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer $GITHUB_TOKEN" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${repo_name}/pulls/${pr_num}/merge" \
-              -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" \
-              --silent --show-error --fail-with-body)
-            if [ $? -eq 0 ]; then
-                success=true
-            else
-                [ $attempt -lt $max_attempts ] && sleep 5
-            fi
-            set -e
-            attempt=$((attempt + 1))
-        done
-        if [ "$success" = false ]; then
-            log_error "Failed to merge PR for ${repo_name} after ${max_attempts} attempts."
-        fi
-        SHA=$(jq -r '.sha' <<< "${merge_result}")
-        if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
-            log_error "Failed to get SHA from merge response: ${merge_result}"
-        fi
-    }
-
-    _merge_pr "${component_pr_number}" "${component_repo_name}"
-    component_sha="${SHA}"
-
-    _merge_pr "${component2_pr_number}" "${component2_repo_name}"
-    component2_sha="${SHA}"
-
-    SHA="${component_sha}"
-}
-
-wait_for_plr_to_appear() {
-    comp1_plr_name=$(wait_for_single_plr_to_appear "${component_sha}")
-    component_push_plr_name="${comp1_plr_name}"
-
-    comp2_plr_name=$(wait_for_single_plr_to_appear "${component2_sha}")
-    component2_push_plr_name="${comp2_plr_name}"
-}
-
-wait_for_plr_to_complete() {
-    local comp1_result=$(mktemp)
-    local comp2_result=$(mktemp)
-
-    (
-        if wait_for_single_plr_to_complete "${component_push_plr_name}" "${component_name}" "${component_sha}"; then
-            echo "success" > "${comp1_result}"
-        else
-            echo "failure" > "${comp1_result}"
-        fi
-    ) &
-    local pid1=$!
-
-    (
-        if wait_for_single_plr_to_complete "${component2_push_plr_name}" "${component2_name}" "${component2_sha}"; then
-            echo "success" > "${comp2_result}"
-        else
-            echo "failure" > "${comp2_result}"
-        fi
-    ) &
-    local pid2=$!
-
-    wait $pid1
-    wait $pid2
-
-    local comp1_status=$(cat "${comp1_result}" 2>/dev/null || echo "unknown")
-    local comp2_status=$(cat "${comp2_result}" 2>/dev/null || echo "unknown")
-    rm -f "${comp1_result}" "${comp2_result}"
-
-    if [ "${comp1_status}" = "success" ] && [ "${comp2_status}" = "success" ]; then
-        return 0
-    else
-        echo "PipelineRun failures: comp1=${comp1_status}, comp2=${comp2_status}"
-        return 1
-    fi
-}
-
 # --- Snapshot and Release Management ---
 
 wait_for_multi_component_snapshot() {
@@ -711,6 +611,47 @@ EOF
   fi
 }
 
+# Relies on "${component}_name", "${component}_repo_name" and "${component}_pr_number" variables being set for each component.
+patch_components_source_before_merge() {
+
+    # Component 1: hello package (all arches)
+    local component=component
+    local _v="${component}_name"
+    local component_name="${!_v}"
+    _v="${component}_repo_name"
+    local component_repo_name="${!_v}"
+    _v="${component}_pr_number"
+    local pr_number="${!_v}"
+    echo "Patching component source BEFORE MERGE:"
+    echo "  Component: ${component_name}"
+    echo "  Repository: ${component_repo_name}"
+    echo "  PR Number: ${pr_number}"
+    local push_template_file="push-template.yaml"
+    local pull_template_file="pull-request-template.yaml"
+    local hello_index=
+
+    patch_component_source_before_merge
+
+    # Component 2: hello2 package (x86_64 only)
+    local component=component2
+    local _v="${component}_name"
+    local component_name="${!_v}"
+    _v="${component}_repo_name"
+    local component_repo_name="${!_v}"
+    _v="${component}_pr_number"
+    local pr_number="${!_v}"
+    echo "Patching component source BEFORE MERGE:"
+    echo "  Component: ${component_name}"
+    echo "  Repository: ${component_repo_name}"
+    echo "  PR Number: ${pr_number}"
+    local push_template_file="push-template-comp2.yaml"
+    local pull_template_file="pull-request-template-comp2.yaml"
+    local hello_index=2
+
+    patch_component_source_before_merge
+}
+
+# Relies on component_name, component_repo_name, pr_number, push_template_file, pull_template_file, and hello_index variables being set.
 patch_component_source_before_merge() {
   set +x
   secret_value=$(yq '. | select(.metadata.name == "pipelines-as-code-secret-${component_name}") | .stringData.password' \
@@ -756,14 +697,7 @@ patch_component_source_before_merge() {
         "${encoded_contents}"
   }
 
-  # Component 1: hello package (all arches)
-  _patch_tekton_templates "${component_repo_name}" "${component_pr_number}" \
-    "${component_name}" "pull-request-template.yaml" "push-template.yaml"
-  _patch_spec_file "${component_repo_name}" "${component_pr_number}" "hello.spec" "hello.spec"
-
-  # Component 2: hello2 noarch-only package (only *.noarch.rpm + *.src.rpm in the artifact).
-  # Uses package-name=hello so dist-git-client downloads from the real Fedora hello lookaside cache.
-  _patch_tekton_templates "${component2_repo_name}" "${component2_pr_number}" \
-    "${component2_name}" "pull-request-template-comp2.yaml" "push-template-comp2.yaml"
-  _patch_spec_file "${component2_repo_name}" "${component2_pr_number}" "hello2.spec" "hello.spec"
+  _patch_tekton_templates "${component_repo_name}" "${pr_number}" \
+    "${component_name}" "${pull_template_file}" "${push_template_file}"
+  _patch_spec_file "${component_repo_name}" "${pr_number}" "hello${hello_index}.spec" "hello.spec"
 }
