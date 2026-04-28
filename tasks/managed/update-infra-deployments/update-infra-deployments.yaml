@@ -181,6 +181,10 @@ spec:
         echo "origin repo: $originRepo"
         echo "$originRepo" > ../originRepo.txt
 
+        containerImage="$(jq -r .components[0].containerImage "$(params.dataDir)/$(params.snapshotPath)")"
+        echo "container image: $containerImage"
+        echo "$containerImage" > ../containerImage.txt
+
         # Get SCRIPT from Data
         echo "data: $(params.dataDir)/$(params.dataJsonPath)"
         SCRIPT="$(jq -r '."infra-deployment-update-script" // empty' "$(params.dataDir)/$(params.dataJsonPath)")"
@@ -196,6 +200,10 @@ spec:
         echo "patched script:"
         echo "$PATCHED_SCRIPT"
         echo "$PATCHED_SCRIPT" | sh
+
+        OLD_REVISION=$(git diff | grep -E '^-\s+(newTag|digest):' | head -1 | awk '{print $NF}' || true)
+        echo "$OLD_REVISION" > ../old_revision.txt
+        echo "old revision: ${OLD_REVISION:-<none>}"
     - name: get-diff-files
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
@@ -243,6 +251,7 @@ spec:
         #!/usr/bin/env python3
         import json
         import os
+        import re
         import sys
         import time
         import base64
@@ -276,6 +285,54 @@ spec:
           originRepo = fileA.read().rstrip()
         with open('revision.txt', 'r') as fileB:
           revision = fileB.read().rstrip()
+
+        old_revision = ''
+        old_revision_path = 'old_revision.txt'
+        if os.path.exists(old_revision_path):
+            with open(old_revision_path, 'r') as f:
+                old_revision = f.read().rstrip()
+
+        container_image = ''
+        if os.path.exists('containerImage.txt'):
+            with open('containerImage.txt', 'r') as f:
+                container_image = f.read().rstrip()
+
+        def resolve_digest_to_git_sha(digest, container_image):
+            """Resolve an image digest to a git commit SHA via the Quay public API.
+
+            Returns None if resolution fails (private repo, no matching tag, etc).
+            """
+            try:
+                # container_image: "quay.io/konflux-ci/kyverno/kyverno@sha256:abc..."
+                repo_url = container_image.split('@')[0]
+                if not repo_url.startswith('quay.io/'):
+                    print(f"Not a quay.io image, skipping digest resolution")
+                    return None
+                repo_path = repo_url.removeprefix('quay.io/')
+                page = 1
+                max_pages = 50
+                while page <= max_pages:
+                    resp = requests.get(
+                        f"https://quay.io/api/v1/repository/{repo_path}/tag/",
+                        params={"limit": 100, "page": page},
+                        timeout=10,
+                    )
+                    if resp.status_code != 200:
+                        print(f"Quay API returned {resp.status_code}, skipping digest resolution")
+                        return None
+                    data = resp.json()
+                    for tag in data.get("tags", []):
+                        if tag.get("manifest_digest") == digest and re.fullmatch(r'[0-9a-f]{40}', tag["name"]):
+                            print(f"Resolved {digest[:19]}... to git SHA {tag['name']}")
+                            return tag["name"]
+                    if not data.get("has_additional", False):
+                        break
+                    page += 1
+                print(f"No git SHA tag found for digest {digest[:19]}...")
+                return None
+            except Exception as e:
+                print(f"Failed to resolve digest to git SHA: {e}")
+                return None
 
         class GitHub():
             token = None
@@ -426,6 +483,35 @@ spec:
                     })
                 return req.json()["items"][0]["pull_request"]["html_url"]
 
+            def get_changelog(self, source_repo, old_rev, new_rev):
+                try:
+                    owner_repo = '/'.join(source_repo.rstrip('/').split('/')[-2:])
+                    req = self._request(
+                        "GET",
+                        f"/repos/{owner_repo}/compare/{old_rev}...{new_rev}",
+                        headers={"Accept": "application/vnd.github.v3+json"})
+                    if req.status_code != 200:
+                        print(f"Compare API returned {req.status_code}, skipping changelog")
+                        return ""
+                    commits = req.json().get("commits", [])
+                    if not commits:
+                        return ""
+                    lines = ["## Changelog"]
+                    for c in commits:
+                        sha = c["sha"][:7]
+                        url = c["html_url"]
+                        msg = c["commit"]["message"].split('\n')[0]
+                        author = c.get("author", {}).get("login") if c.get("author") else None
+                        if author:
+                            lines.append(f"- [`{sha}`]({url}) {msg} - @{author}")
+                        else:
+                            author_name = c["commit"]["author"]["name"]
+                            lines.append(f"- [`{sha}`]({url}) {msg} - {author_name}")
+                    return '\n'.join(lines)
+                except Exception as e:
+                    print(f"Failed to get changelog: {e}")
+                    return ""
+
             def update_mr_description(self, pr_url, description):
                 req = self._request(
                     "PATCH",
@@ -470,7 +556,24 @@ spec:
                 if description is None:
                     description = "Included PRs:"
                 new_pr_link = github_app.get_pr_url_from_sha(revision)
+                changelog_idx = description.find("\r\n\r\n## Changelog")
+                if changelog_idx != -1:
+                    description = description[:changelog_idx]
                 new_description = f"{description}\r\n- {new_pr_link}"
+
+                changelog_rev = old_revision
+                if changelog_rev and changelog_rev.startswith('sha256:'):
+                    resolved = resolve_digest_to_git_sha(changelog_rev, container_image)
+                    if resolved:
+                        changelog_rev = resolved
+                    else:
+                        changelog_rev = ''
+
+                if changelog_rev:
+                    changelog = github_app.get_changelog(originRepo, changelog_rev, revision)
+                    if changelog:
+                        new_description = f"{new_description}\r\n\r\n{changelog}"
+
                 github_app.update_mr_description(infra_pr["url"], new_description)
             else:
                 if "message" in infra_pr:
