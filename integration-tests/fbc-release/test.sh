@@ -653,8 +653,55 @@ verify_hotfix() {
 verify_optin() {
     local release_name=$1
     echo "🔍 Verifying optin scenario for: $release_name"
-    # Add optin-specific verification logic here
-    return 0
+
+    local release_json
+    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
+
+    local failures=0
+
+    local ocp_version
+    ocp_version=$(jq -r '.status.artifacts.components[0].ocp_version // ""' <<< "${release_json}")
+
+    local expected_ocp_version="v4.13"
+    echo "Checking OCP version matches expected ${expected_ocp_version}..."
+    if [ "${ocp_version}" = "${expected_ocp_version}" ]; then
+      echo "✅️ OCP version matches expected: ${ocp_version}"
+    else
+      echo "🔴 OCP version mismatch! Expected ${expected_ocp_version}, got ${ocp_version}"
+      failures=$((failures+1))
+    fi
+
+    local target_index
+    target_index=$(jq -r '.status.artifacts.components[0].target_index // ""' <<< "${release_json}")
+    echo "Checking target_index contains expected OCP version..."
+    if [[ "${target_index}" == *"${expected_ocp_version}"* ]]; then
+      echo "✅️ target_index contains ${expected_ocp_version}: ${target_index}"
+    else
+      echo "🔴 target_index does not contain ${expected_ocp_version}: ${target_index}"
+      failures=$((failures+1))
+    fi
+
+    local image_digests_count
+    image_digests_count=$(jq '.status.artifacts.components[0].image_digests | length' <<< "${release_json}")
+    echo "Checking image_digests..."
+    if [ "${image_digests_count}" -gt 0 ]; then
+      echo "✅️ Found ${image_digests_count} image digest(s)"
+    else
+      echo "🔴 image_digests was empty (index build may have failed)!"
+      failures=$((failures+1))
+    fi
+
+    local index_image_resolved
+    index_image_resolved=$(jq -r '.status.artifacts.components[0].index_image_resolved // ""' <<< "${release_json}")
+    echo "Checking index_image_resolved..."
+    if [[ "${index_image_resolved}" == *"@sha256:"* ]]; then
+      echo "✅️ index_image_resolved is pinned: ${index_image_resolved}"
+    else
+      echo "🔴 index_image_resolved is not a valid digest reference: ${index_image_resolved}"
+      failures=$((failures+1))
+    fi
+
+    return $failures
 }
 
 # Wait for a single release to complete
