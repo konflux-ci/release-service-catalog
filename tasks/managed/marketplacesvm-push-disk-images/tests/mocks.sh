@@ -21,6 +21,9 @@ function oras() {
         echo Error: Unexpected call to oras
         exit 1
     fi
+
+    # Simulate downloaded artifact: create a compressed disk image
+    echo "dummy disk image content" | gzip > disk.raw.gz
 }
 
 function marketplacesvm_push_wrapper() {
