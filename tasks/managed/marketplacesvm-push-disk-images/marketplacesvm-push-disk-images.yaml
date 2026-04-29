@@ -19,7 +19,11 @@ spec:
         It must be processed by the "apply-mapping" task first
     - name: cloudMarketplacesSecret
       type: string
-      description: Env specific secret containing the marketplaces credentials
+      description: >
+        The name of the Kubernetes Secret containing the marketplaces credentials.
+        Each key in the secret must be a .json file with the required fields
+        "marketplace_account" and "auth". See credentials format documentation:
+        https://release-engineering.github.io/pubtools-marketplacesvm/common/credentials.html#auth-format
     - name: prePush
       type: string
       description: Whether perform a pre-push (true) or not (false). When true it will not publish PROD
@@ -145,14 +149,25 @@ spec:
           value: $(params.uploadContainerName)
       script: |
         #!/usr/bin/env bash
-        set -eu
+        set -eux
 
-        CLOUD_CREDENTIALS="$(cat /etc/secrets/key)"
+        echo "DEBUG: Sanity validation of credentials"
+        JSON_FILES=(/etc/secrets/*.json)
+        if [[ ! -f "${JSON_FILES[0]}" ]]; then
+            echo "ERROR: No credential files found in /etc/secrets/" >&2
+            exit 1
+        fi
+        for file in "${JSON_FILES[@]}"; do
+            if ! jq -e 'has("marketplace_account") and has("auth")' "$file" > /dev/null 2>&1; then
+                echo "ERROR: Validation failed for credential file: '$file'"  >&2
+                echo "The file is missing required keys ('marketplace_account' or 'auth')."  >&2
+                exit 1
+            fi
+        done
 
         # export variables required by the script "marketplacesvm_push_wrapper" in release-service-utils
+        CLOUD_CREDENTIALS=$(IFS=,; echo "${JSON_FILES[*]}")
         export CLOUD_CREDENTIALS
-
-        set -x
 
         # Setup required variables
         SNAPSHOT_JSON=$(jq -c '.' "$(params.dataDir)/$(params.snapshotPath)")
