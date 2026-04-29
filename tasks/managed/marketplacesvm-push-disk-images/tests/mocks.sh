@@ -23,8 +23,9 @@ function oras() {
 }
 
 function marketplacesvm_push_wrapper() {
-  echo Mock imarketplacesvm_push_wrapper called with: $*
+  echo Mock marketplacesvm_push_wrapper called with: $*
   echo $* > "$(params.dataDir)/mock_wrapper.txt"
+  echo "$CLOUD_CREDENTIALS" > "$(params.dataDir)/mock_cloud_credentials.txt"
 
   /home/pubtools-marketplacesvm-wrapper/marketplacesvm_push_wrapper "$@" --dry-run
 
