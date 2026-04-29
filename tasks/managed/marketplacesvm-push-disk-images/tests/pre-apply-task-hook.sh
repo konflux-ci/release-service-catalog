@@ -73,3 +73,12 @@ kubectl create secret generic "$MARKETPLACE_SECRET" \
         "AZURE_STORAGE_CONNECTION_STRING": "DefaultEndpointsProtocol=https;AccountName=dummyname;AccountKey=redacted"
     }
 }'
+
+# Create a secret with invalid credentials (missing "auth" key) for failure testing
+MARKETPLACE_SECRET="marketplacesvm-invalid-test-secret"
+kubectl delete secret "$MARKETPLACE_SECRET" --ignore-not-found
+kubectl create secret generic "$MARKETPLACE_SECRET" \
+  --from-literal=invalid.json='{
+    "marketplace_account": "test-invalid",
+    "wrong_key": "value"
+}'
