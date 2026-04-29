@@ -70,6 +70,18 @@ verify_release_contents() {
             echo "🔴 imageId: ${result_image_id} did not match expected imageId: ${imageId}"
             failures=$((failures+1))
         fi
+
+        # Verify RPM manifest was pushed to Pyxis for this image (validates push-rpm-data-to-pyxis ran)
+        result_rpm_json="$(curl --cert /tmp/cert --key /tmp/key \
+            "${pyxis_url}v1/images/id/${imageId}/rpm-manifest")"
+        rpm_manifest_id=$(jq -r '._id // ""' <<< "${result_rpm_json}")
+        if [ -n "${rpm_manifest_id}" ]; then
+            echo "✅️ Found RPM manifest for imageId: ${imageId} in pyxis"
+        else
+            echo "🔴 No RPM manifest found for imageId: ${imageId}"
+            failures=$((failures+1))
+        fi
+
         imageIdsFound=true
     done
 

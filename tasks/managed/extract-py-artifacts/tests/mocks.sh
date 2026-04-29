@@ -43,3 +43,19 @@ function oras() {
   return 0
 }
 
+function cosign() {
+  echo "Mock cosign called with: $*" >&2
+
+  if [[ "$1" == "verify-attestation" ]]; then
+    # Real cosign verify-attestation outputs a DSSE envelope with a base64-encoded payload.
+    # The payload decodes to the in-toto Statement containing predicateType and predicate
+    local statement='{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"https://slsa.dev/provenance/v1","subject":[{"name":"test","digest":{"sha256":"abc123"}}],"predicate":{"buildDefinition":{"buildType":"https://tekton.dev/chains/v2/slsa","externalParameters":{"runSpec":{"pipelineRef":{"name":"build-python-wheels-oci-ta"},"params":[{"name":"PACKAGES","value":["test_package==1.0.0"]}]}},"internalParameters":{},"resolvedDependencies":[{"uri":"git+https://github.com/calungaproject/index.git","digest":{"sha1":"abc123def456"}}]},"runDetails":{"builder":{"id":"https://konflux-ci.dev/chains/v2"},"metadata":{"invocationId":"calunga-tenant/build-run-mock","startedOn":"2026-02-19T21:40:00Z","finishedOn":"2026-02-19T21:51:09Z"}}}}'
+    local payload
+    payload=$(echo -n "${statement}" | base64 -w0)
+    echo "{\"payloadType\":\"application/vnd.in-toto+json\",\"payload\":\"${payload}\",\"signatures\":[{\"keyid\":\"\",\"sig\":\"mock-signature\"}]}"
+    return 0
+  fi
+
+  return 0
+}
+

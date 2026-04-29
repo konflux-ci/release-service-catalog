@@ -9,13 +9,34 @@ if [ "$COMMAND" = "pull" ]; then
 elif [ "$COMMAND" = "push" ]; then
     echo "Mock 'oras push' called. Validating arguments..."
     EXPECTED_TARGET="mock.registry/test-repo/my-artifact"
-    if [ "$6" != "$EXPECTED_TARGET" ]; then
-        echo "ERROR: Mock oras expected target '$EXPECTED_TARGET' (at \$6) but got '$6'"
+    EXPECTED_SOURCE_NAME="sourceDataArtifact"
+    shift # remove "push"
+    POSITIONAL_ARGS=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --registry-config|--ca-file|--annotation)
+                shift 2
+                ;;
+            --*=*)
+                shift
+                ;;
+            --*)
+                shift
+                ;;
+            *)
+                POSITIONAL_ARGS="$POSITIONAL_ARGS $1"
+                shift
+                ;;
+        esac
+    done
+    ACTUAL_TARGET=$(echo $POSITIONAL_ARGS | awk '{print $1}')
+    ACTUAL_SOURCE=$(echo $POSITIONAL_ARGS | awk '{print $2}')
+    if [ "$ACTUAL_TARGET" != "$EXPECTED_TARGET" ]; then
+        echo "ERROR: Mock oras expected target '$EXPECTED_TARGET' but got '$ACTUAL_TARGET'"
         exit 1
     fi
-    EXPECTED_SOURCE_NAME="sourceDataArtifact"
-    if [ "$7" != "$EXPECTED_SOURCE_NAME" ]; then
-        echo "ERROR: Mock oras expected source '$EXPECTED_SOURCE_NAME' (at \$7) but got '$7'"
+    if [ "$ACTUAL_SOURCE" != "$EXPECTED_SOURCE_NAME" ]; then
+        echo "ERROR: Mock oras expected source '$EXPECTED_SOURCE_NAME' but got '$ACTUAL_SOURCE'"
         exit 1
     fi
     echo "SUCCESS: Mock oras push validated."

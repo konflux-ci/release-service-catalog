@@ -94,7 +94,8 @@ Before a pull request can be merged:
 * Multiple commits should be used if the PR is complex and clarity can be improved, but they should still relate to a single topic
 * For code contributions, tests have to be added/modified to ensure the code works
 * There has to be at least one approval
-* The feature branch must be rebased so it contains the latest changes from the target branch
+* Limit commits to the changes needed for the work and its tests, and split other edits into their own pull requests or commits
+* If an AI agent was used in the creation of the commit, show this with a commit footer like `Assisted-By: Cursor` or `Assisted-By: Claude`
 * The CI has to pass successfully
 * Every comment has to be addressed and resolved
 
@@ -114,17 +115,13 @@ All steps in the [managed](tasks/managed) and [internal](tasks/internal) tasks h
 If you are contributing a new managed or internal task (or adding a step to an existing one), you must provide appropriate `computeResources`. If you do not do this, your PR will fail
 the linting check due to the check defined in [this script](.github/scripts/tkn_check_compute_resources.sh).
 
-When setting `computeResources`, you should set:
-- `limits.memory` and `requests.memory` to the same value
-- `limits.cpu` and `requests.cpu` to the same value
-
-Here is an example:
+When setting `computeResources`, you should set the `limits.memory` and `requests.memory` to the same value. No `limits.cpu` should be defined, but a `requests.cpu` should be.
+Here is an example
 ```yaml
 - name: my-new-step
   computeResources:
     limits:
       memory: 256Mi
-      cpu: 250m
     requests:
       memory: 256Mi
       cpu: 250m
