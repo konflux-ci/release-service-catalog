@@ -26,6 +26,19 @@ function oras() {
     echo "dummy disk image content" | gzip > disk.raw.gz
 }
 
+function pushsource-ls() {
+    # Capture the staged directory contents before running pushsource-ls
+    for arg in "$@"; do
+        if [[ "$arg" == staged:* ]]; then
+            local staged_dir="${arg#staged:}"
+            find "$staged_dir" -type f -o -type d | sort > "$(params.dataDir)/mock_staged_dir.txt"
+            break
+        fi
+    done
+    command pushsource-ls "$@" 2>&1 | tee "$(params.dataDir)/mock_pushsource_ls.txt"
+    return "${PIPESTATUS[0]}"
+}
+
 function marketplacesvm_push_wrapper() {
   echo Mock marketplacesvm_push_wrapper called with: $*
   echo $* > "$(params.dataDir)/mock_wrapper.txt"
