@@ -21,6 +21,12 @@ function kubectl() {
     exit 1
   fi
 
+  # If marker file exists, simulate IR failure (empty payload)
+  if [ -f "$(params.dataDir)/mock_empty_payload" ]; then
+    echo -n ""
+    return
+  fi
+
   echo -n "dummy-payload" | base64
 }
 
@@ -39,8 +45,12 @@ function gpg() {
       return 0
     fi
   elif [[ "$*" == *"--dearmor"* ]]; then
-    # For signature creation, just pass through the input
-    echo -n "dummy-payload"
+    # For signature creation, pass through stdin
+    local input
+    input=$(cat)
+    if [ -n "$input" ]; then
+      echo -n "dummy-payload"
+    fi
   else
     echo -n "dummy-payload"
   fi
