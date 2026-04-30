@@ -23,7 +23,12 @@ function oras() {
     fi
 
     # Simulate downloaded artifact: create a compressed disk image
-    echo "dummy disk image content" | gzip > disk.raw.gz
+    # Determine the disk format from the pullspec
+    if [[ "$*" == *"azure"* ]]; then
+        echo "dummy disk image content" | gzip > disk.vhd.gz
+    else
+        echo "dummy disk image content" | gzip > disk.raw.gz
+    fi
 }
 
 function pushsource-ls() {
