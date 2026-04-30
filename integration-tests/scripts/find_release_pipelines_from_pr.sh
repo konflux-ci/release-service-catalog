@@ -126,35 +126,59 @@ _emit_integration_testcase_string() {
     # remove leading spaces
     pipeline_name="${pipeline_name//[[:space:]]/}"
     case "$pipeline_name" in
-      "create-advisory")
-        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "release-to-github")
-        ;;
-      "check-embargoed-cves"|"get-advisory-severity"|"filter-already-released-advisory-images")
-        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
-        ;;
-      "update-fbc-catalog"|"publish-index-image-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
-        ;;
-      "process-file-updates")
-        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories" "push-to-addons-registry" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io")
-        ;;
-      "push-artifacts-to-cdn")
-        TEMP_MANAGED_PIPELINENAMES+=("push-disk-images-to-cdn")
-        ;;
-      "simple-signing-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" "rh-push-to-external-registry" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io")
-        ;;
       "blob-signing-pipeline")
         TEMP_MANAGED_PIPELINENAMES+=("release-to-github")
         ;;
+      "check-embargoed-cves")
+        TEMP_MANAGED_PIPELINENAMES+=("push-artifacts-to-cdn" "push-disk-images-to-marketplaces" \
+          "push-rpms-to-pulp" "release-to-github" "rh-advisories")
+        ;;
+      "check-fbc-opt-in")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
+        ;;
+      "create-advisory")
+        TEMP_MANAGED_PIPELINENAMES+=("calunga-push-to-pulp" "push-artifacts-to-cdn" \
+          "push-disk-images-to-marketplaces" "push-rpms-to-pulp" "release-to-github" \
+          "rh-advisories")
+        ;;
+      "create-advisory-oci-artifact")
+        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
+        ;;
+      "filter-already-released-advisory-images")
+        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
+        ;;
+      "filter-already-released-advisory-rpms")
+        TEMP_MANAGED_PIPELINENAMES+=("push-rpms-to-pulp")
+        ;;
+      "get-advisory-severity")
+        TEMP_MANAGED_PIPELINENAMES+=("push-rpms-to-pulp" "rh-advisories")
+        ;;
+      "process-file-updates")
+        TEMP_MANAGED_PIPELINENAMES+=("push-to-addons-registry" "rh-advisories" \
+          "rh-push-to-external-registry" "rh-push-helm-chart-to-registry-redhat-io" \
+          "rh-push-to-registry-redhat-io")
+        ;;
+      "publish-index-image-pipeline")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
+        ;;
+      "push-artifacts-to-cdn")
+        TEMP_MANAGED_PIPELINENAMES+=("push-artifacts-to-cdn")
+        ;;
       "push-disk-images")
-        TEMP_MANAGED_PIPELINENAMES+=("push-disk-images-to-cdn" "push-disk-images-to-marketplaces")
+        TEMP_MANAGED_PIPELINENAMES+=("push-disk-images-to-cdn")
+        ;;
+      "request-advisory-oci-artifact")
+        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
         ;;
       "run-collectors")
         TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
         ;;
-      "request-advisory-oci-artifact"|"create-advisory-oci-artifact")
-        TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
+      "simple-signing-pipeline")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" \
+          "rh-push-helm-chart-to-registry-redhat-io" "rh-push-to-registry-redhat-io")
+        ;;
+      "update-fbc-catalog")
+        TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
         ;;
       *)
         continue
