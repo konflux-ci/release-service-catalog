@@ -100,6 +100,18 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: failOnSignatureLookupError
+      type: string
+      default: "true"
+      description: |
+        Fail the task when any Pyxis find_signatures lookup fails; when set to "false", log a warning
+        and submit every planned image row for signing without skipping already-signed references
+    - name: signatureLookupMaxAttempts
+      type: string
+      default: "3"
+      description: |
+        Maximum number of attempts per Pyxis find_signatures lookup including the first; waits
+        (attempt-1)*2 seconds before each retry after the first; use "1" to disable retries
   results:
     - name: sourceDataArtifact
       type: string
@@ -219,6 +231,24 @@ spec:
         export PYXIS_CERT_PATH=/tmp/crt
         export PYXIS_KEY_PATH=/tmp/key
 
+        if [[ "$(params.pyxisServer)" == "production" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql-pyxis.api.redhat.com/graphql/"
+        elif [[ "$(params.pyxisServer)" == "stage" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql-pyxis.preprod.api.redhat.com/graphql/"
+        elif [[ "$(params.pyxisServer)" == "production-internal" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql.pyxis.engineering.redhat.com/graphql/"
+        elif [[ "$(params.pyxisServer)" == "stage-internal" ]]
+        then
+          PYXIS_GRAPHQL_URL="https://graphql.pyxis.stage.engineering.redhat.com/graphql/"
+        else
+          echo "Invalid pyxisServer parameter. Only 'production','production-internal,'stage-internal' \
+              and 'stage' allowed."
+          exit 1
+        fi
+
         jqquery='.data|if has ("SIG_KEY_NAMES")
         then (.SIG_KEY_NAMES|split(",")|.[]|gsub("^\\s+|\\s+$";"")) else .SIG_KEY_NAME end'
         config_map_name=$(jq -r '.sign.configMapName // "signing-config-map"' "${DATA_FILE}")
@@ -262,6 +292,7 @@ spec:
 
         declare -a to_sign_references=()
         declare -a to_sign_digests=()
+        declare -a to_sign_repos=()
 
         component_count=$(jq '.components | length' "$RESULTS_FILE")
         for ((i = 0; i < component_count; i++)); do
@@ -272,23 +303,159 @@ spec:
           reference_image=$(translate-delivery-repo "$reference_image" \
             | jq -r '.[] | select(.repo=="redhat.io") | .url')
 
+          rh_registry_repo=$(jq -r ".components[$i].\"rh-registry-repo\" // empty" "$RESULTS_FILE")
+          repository="${rh_registry_repo#*/}"
+
           digest_count=$(jq ".components[$i].image_digests | length" "$RESULTS_FILE")
           for ((j = 0; j < digest_count; j++)); do
             manifest_digest=$(jq -r ".components[$i].image_digests[$j]" "$RESULTS_FILE")
 
             to_sign_references+=("${reference_image}")
             to_sign_digests+=("${manifest_digest}")
+            to_sign_repos+=("${repository}")
 
           done
         done
 
+        # Query Pyxis for existing signatures before creating signing requests.
+        # Output path is per (digest, repository) so concurrent jobs never clobber the same file.
+        declare -a find_signatures_files=()
+        declare -a find_signatures_jobs=()
+        FIND_SIGNATURES_SUCCESS=true
+        FIND_SIGNATURES_JOB_COUNT=0
+        fs_jobs_spawned=0
+        fs_jobs_collected=0
+        declare -A seen_digest_repo=()
+
+        for i in "${!to_sign_digests[@]}"; do
+          pair="${to_sign_digests[$i]}|${to_sign_repos[$i]}"
+          if [[ -n "${seen_digest_repo[$pair]+x}" ]]; then
+            continue
+          fi
+          seen_digest_repo[$pair]=1
+
+          manifest_digest="${to_sign_digests[$i]}"
+          repository="${to_sign_repos[$i]}"
+          repo_suffix="$(echo "${repository}" | tr '/:' '__')"
+          sig_out="/tmp/${manifest_digest//:/_}__${repo_suffix}"
+
+          wait_for_memory 80
+          while (( ${RUNNING_JOBS@P} >= "$CONCURRENT_LIMIT" )); do
+            wait -n || FIND_SIGNATURES_SUCCESS=false
+            fs_jobs_collected=$((fs_jobs_collected + 1))
+          done
+
+          digest_filename="${manifest_digest//:/_}__${repo_suffix}"
+          ((++FIND_SIGNATURES_JOB_COUNT))
+          find_signatures_files+=("${digest_filename}")
+          echo "Starting find_signatures job for manifest digest: ${manifest_digest} repository: ${repository}"
+          (
+            set +e
+            max_attempts=$(params.signatureLookupMaxAttempts)
+            if ! [[ "${max_attempts}" =~ ^[0-9]+$ ]] || [ "${max_attempts}" -lt 1 ]; then
+              max_attempts=3
+            fi
+            attempt=1
+            last_exit=1
+            while [ "${attempt}" -le "${max_attempts}" ]; do
+              if [ "${attempt}" -gt 1 ]; then
+                echo "find_signatures retry $((attempt - 1))/$((max_attempts - 1)) for" \
+                  "manifest_digest=${manifest_digest} repository=${repository}"
+                sleep $(( (attempt - 1) * 2 ))
+              fi
+              rm -f "${sig_out}"
+              find_signatures --pyxis-graphql-api "${PYXIS_GRAPHQL_URL}" \
+                --manifest_digest "${manifest_digest}" \
+                --repository "${repository}" \
+                --output_file "${sig_out}"
+              last_exit=$?
+              if [ "${last_exit}" -eq 0 ]; then
+                exit 0
+              fi
+              attempt=$((attempt + 1))
+            done
+            exit "${last_exit}"
+          ) > "/tmp/find_sig_${digest_filename}.out" 2> "/tmp/find_sig_${digest_filename}.err" &
+          find_signatures_jobs+=($!)
+          fs_jobs_spawned=$((fs_jobs_spawned + 1))
+
+          if (( fs_jobs_spawned % BURST_SIZE == 0 )); then
+            sleep $STABILIZATION_DELAY
+          fi
+        done
+
+        echo "Waiting for ${FIND_SIGNATURES_JOB_COUNT} find_signatures jobs to complete..."
+        while (( fs_jobs_collected < fs_jobs_spawned )); do
+          wait -n || FIND_SIGNATURES_SUCCESS=false
+          fs_jobs_collected=$((fs_jobs_collected + 1))
+        done
+        echo "All find_signatures jobs completed (spawned: $fs_jobs_spawned, collected: $fs_jobs_collected)"
+
+        for digest_filename in "${find_signatures_files[@]}"; do
+            if [ -f "/tmp/find_sig_${digest_filename}.out" ]; then
+                echo "=== find_signatures Output (${digest_filename}) ==="
+                cat "/tmp/find_sig_${digest_filename}.out"
+                echo
+            fi
+            if [ -f "/tmp/find_sig_${digest_filename}.err" ] && \
+               [ -s "/tmp/find_sig_${digest_filename}.err" ]; then
+                echo "=== find_signatures Errors (${digest_filename}) ==="
+                cat "/tmp/find_sig_${digest_filename}.err"
+                echo
+            fi
+        done
+        if [ "$FIND_SIGNATURES_SUCCESS" != true ]; then
+          if [ "$(params.failOnSignatureLookupError)" = "true" ]; then
+            echo "One or more find_signatures jobs failed. Please check the logs above for details."
+            exit 1
+          fi
+          echo "WARNING: find_signatures had one or more failures; failOnSignatureLookupError is false."
+          echo "WARNING: Continuing without signature filtering (all rows will be submitted for signing)."
+        fi
+
+        if [ "$FIND_SIGNATURES_SUCCESS" = true ]; then
+          declare -a filtered_references=()
+          declare -a filtered_digests=()
+          declare -a filtered_repos=()
+
+          for i in "${!to_sign_references[@]}"; do
+            ref="${to_sign_references[$i]}"
+            dig="${to_sign_digests[$i]}"
+            repo="${to_sign_repos[$i]}"
+            repo_suffix="$(echo "${repo}" | tr '/:' '__')"
+            sigfile="/tmp/${dig//:/_}__${repo_suffix}"
+            skip_signing=true
+            for sig_key in ${SIG_KEY_NAMES}; do
+              if ! grep -q "^${ref} ${sig_key}$" "${sigfile}" 2>/dev/null; then
+                skip_signing=false
+                break
+              fi
+            done
+            if [ "$skip_signing" = true ]; then
+              echo "Signature already exists for:"
+              echo "- reference=${ref}"
+              echo "- manifest_digest=${dig}"
+            else
+              filtered_references+=("${ref}")
+              filtered_digests+=("${dig}")
+              filtered_repos+=("${to_sign_repos[$i]}")
+            fi
+          done
+
+          to_sign_references=("${filtered_references[@]}")
+          to_sign_digests=("${filtered_digests[@]}")
+          to_sign_repos=("${filtered_repos[@]}")
+        fi
+
         references_batch=""
         digests_batch=""
+        repos_batch=""
 
         # Process to sign arrays in batches
         for i in "${!to_sign_references[@]}"; do
           new_references_batch="${references_batch}${to_sign_references[$i]} "
           new_digests_batch="${digests_batch}${to_sign_digests[$i]} "
+          new_repos_batch="${repos_batch}${to_sign_repos[$i]} "
 
           # if batches are too big, send the request
           if [[ ${#new_references_batch} -gt $BATCH_LIMIT || ${#new_digests_batch} -gt $BATCH_LIMIT ]]; then
@@ -304,6 +471,8 @@ spec:
             ${requestType} --pipeline "${request}" \
               -p references="${references_batch}" \
               -p manifest_digests="${digests_batch}" \
+              -p repositories="${repos_batch}" \
+              -p config_map_name="${config_map_name}" \
               -p requester="$(params.requester)" \
               -p umb_listen_topic="${umb_listen_topic}" \
               -p umb_publish_topic="${umb_publish_topic}" \
@@ -332,10 +501,12 @@ spec:
             # next batches consist of values which didn't fit in the previous batches
             references_batch="${to_sign_references[$i]} "
             digests_batch="${to_sign_digests[$i]} "
+            repos_batch="${to_sign_repos[$i]} "
           else
             # if batches are still small enough, add the values to the batches
             references_batch="${new_references_batch}"
             digests_batch="${new_digests_batch}"
+            repos_batch="${new_repos_batch}"
           fi
         done
 
@@ -353,6 +524,8 @@ spec:
             --pipeline "${request}" \
             -p references="${references_batch[*]}" \
             -p manifest_digests="${digests_batch[*]}" \
+            -p repositories="${repos_batch[*]}" \
+            -p config_map_name="${config_map_name}" \
             -p umb_listen_topic="${umb_listen_topic}" \
             -p umb_publish_topic="${umb_publish_topic}" \
             -p pyxis_url="${signing_pyxis_url}" \
@@ -369,7 +542,14 @@ spec:
             -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
             -t "$(params.requestTimeout)" --pipeline-timeout "0h30m0s" --task-timeout "0h25m0s" \
             "${EXTRA_ARGS[@]}" -s true &
+          ((++REQUEST_COUNT))
+          echo "Request Count: $REQUEST_COUNT"
           jobs_spawned=$((jobs_spawned + 1))
+
+          # Allow memory usage to stabilize every BURST_SIZE spawns
+          if (( jobs_spawned % BURST_SIZE == 0 )); then
+            sleep $STABILIZATION_DELAY
+          fi
         fi
 
         echo "Waiting for remaining processes to finish..."
