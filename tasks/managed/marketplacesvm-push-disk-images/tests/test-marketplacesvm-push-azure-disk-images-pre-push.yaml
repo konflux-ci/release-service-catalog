@@ -1,0 +1,355 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-marketplacesvm-push-azure-disk-images-pre-push
+spec:
+  description: |
+    Run the marketplacesvm-push-disk-images task in pre-push mode with Azure VHD data
+    and ensure it succeeds
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          securityContext:
+            runAsUser: 1001
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/results"
+              cat > "$(params.dataDir)/snapshot_spec.json" << EOF
+              {
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/workload/tenant/test-product/bootc-cuda-azure-disk-image-1-3@sha256:123456",
+                    "name": "bootc-cuda-azure-disk-image-1-3",
+                    "source": {
+                      "git": {
+                        "revision": "14d9540d3a6005942c46afb1dbf33ca44e86e176",
+                        "url": "https://gitlab.com/konflux/test-product/disk-images/amd-bootc"
+                      }
+                    },
+                    "contentType": "disk-image",
+                    "productInfo": {
+                      "filePrefix": "test-product-cuda-azure-1.3",
+                      "productCode": "TESTPRDOCUT",
+                      "productName": "Test Product",
+                      "productVersionName": "1.3"
+                    },
+                    "pushSourceContainer": false,
+                    "staged": {
+                      "destination": "test-product-1_DOT_3-x86_64-isos",
+                      "files": [
+                        {
+                          "filename": "test-product-cuda-azure-1.3-1776700966-x86_64.vhd.gz",
+                          "source": "disk.vhd.gz"
+                        }
+                      ],
+                      "version": "1.3"
+                    },
+                    "starmap": [
+                      {
+                        "cloud": "azure",
+                        "mappings": {
+                          "azure-emea": {
+                            "destinations": [
+                              {
+                                "architecture": "x86_64",
+                                "destination": "test-offer/test-plan-1gpu",
+                                "overwrite": false,
+                                "restrict_version": false,
+                                "vhd_check_base_sas_only": false
+                              },
+                              {
+                                "architecture": "x86_64",
+                                "destination": "test-offer/test-plan-1gpu",
+                                "overwrite": false,
+                                "restrict_version": false,
+                                "vhd_check_base_sas_only": false
+                              }
+                            ]
+                          },
+                          "azure-na": {
+                            "destinations": [
+                              {
+                                "architecture": "x86_64",
+                                "destination": "test-offer/test-plan-1gpu",
+                                "overwrite": false,
+                                "restrict_version": false,
+                                "vhd_check_base_sas_only": false
+                              },
+                              {
+                                "architecture": "x86_64",
+                                "destination": "test-offer/test-plan-1gpu",
+                                "overwrite": false,
+                                "restrict_version": false,
+                                "vhd_check_base_sas_only": false
+                              }
+                            ]
+                          }
+                        },
+                        "meta": {
+                          "generation": "V2",
+                          "support_legacy": true
+                        },
+                        "name": "test-product-cuda-azure",
+                        "workflow": "stratosphere"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: marketplacesvm-push-disk-images
+      params:
+        - name: snapshotPath
+          value: "snapshot_spec.json"
+        - name: cloudMarketplacesSecret
+          value: marketplacesvm-azure-test-secret
+        - name: prePush
+          value: true
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            workingDir: $(params.dataDir)
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              # Single component fixture: Expected "prepare_component" to be called once
+              expected_pullspec="quay.io/workload/tenant/test-product/bootc-cuda-azure-disk-image-1-3@sha256:123456"
+              if [[ $(wc -l < "$(params.dataDir)/mock_select-oci-auth.txt") != 1 ]]; then
+                  echo "Error: select-oci-auth was expected to be called a 1 time. Actual calls:"
+                  cat "$(params.dataDir)/mock_select-oci-auth.txt"
+                  exit 1
+              elif [[ $(<"$(params.dataDir)/mock_select-oci-auth.txt") != "$expected_pullspec" ]]; then
+                  echo "Error: select-oci-auth was expected to be called with $expected_pullspec. Actual: "
+                  cat "$(params.dataDir)/mock_select-oci-auth.txt"
+                  exit 1
+              fi
+              if [[ $(wc -l < "$(params.dataDir)/mock_oras.txt") != 1 ]]; then
+                  echo "Error: oras was expected to be called a 1 time. Actual calls:"
+                  cat "$(params.dataDir)/mock_oras.txt"
+                  exit 1
+              elif [[ $(<"$(params.dataDir)/mock_oras.txt") != *"$expected_pullspec" ]]; then
+                  echo "Error: oras was expected to be called pullspec $expected_pullspec. Actual: "
+                  cat "$(params.dataDir)/mock_oras.txt"
+                  exit 1
+              fi
+
+              if [[ $(wc -l < "$(params.dataDir)/mock_wrapper.txt") != 1 ]]; then
+                  echo "Error: wrapper was expected to be called a 1 time. Actual calls:"
+                  cat "$(params.dataDir)/mock_wrapper.txt"
+                  exit 1
+              elif [[ $(<"$(params.dataDir)/mock_wrapper.txt") != *"--nochannel"* ]]; then
+                  echo "Error: wrapper was expected to be called with '--nochannel'. Actual call:"
+                  cat "$(params.dataDir)/mock_wrapper.txt"
+                  exit 1
+              fi
+
+              # Verify CLOUD_CREDENTIALS is a comma-separated list of Azure JSON file paths
+              CLOUD_CREDS=$(<"$(params.dataDir)/mock_cloud_credentials.txt")
+              EXPECTED_CREDS="/etc/secrets/azure-emea.json,/etc/secrets/azure-na.json"
+              if [[ "$CLOUD_CREDS" != "$EXPECTED_CREDS" ]]; then
+                  echo "Error: CLOUD_CREDENTIALS mismatch."
+                  echo "Expected: $EXPECTED_CREDS"
+                  echo "Actual: $CLOUD_CREDS"
+                  exit 1
+              fi
+
+              # Verify temp directories are created under /var/workdir
+              WRAPPER_ARGS=$(<"$(params.dataDir)/mock_wrapper.txt")
+              if [[ "$WRAPPER_ARGS" != *"--source /var/workdir/tmp."* ]]; then
+                  echo "Error: BASE_DIR should be under /var/workdir/tmp.*"
+                  echo "Actual wrapper args: $WRAPPER_ARGS"
+                  exit 1
+              fi
+              ORAS_WORKDIR=$(<"$(params.dataDir)/mock_oras_workdir.txt")
+              if [[ "$ORAS_WORKDIR" != /var/workdir/tmp.* ]]; then
+                  echo "Error: DOWNLOAD_DIR should be under /var/workdir/tmp.*"
+                  echo "Actual: $ORAS_WORKDIR"
+                  exit 1
+              fi
+
+              # Verify pushsource-ls output && staged directory contents
+              STAGED_DIR_OUTPUT="$(params.dataDir)/mock_staged_dir.txt"
+              PUSHSOURCE_OUTPUT="$(params.dataDir)/mock_pushsource_ls.txt"
+              EXPECTED_RESOURCES_COUNT=$(grep -c "resources.yaml" "$STAGED_DIR_OUTPUT")
+              if [[ "$EXPECTED_RESOURCES_COUNT" != 1 ]]; then
+                  echo "Error: resources.yaml should appear exactly once. Found: $EXPECTED_RESOURCES_COUNT"
+                  cat "$STAGED_DIR_OUTPUT"
+                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+
+              EXPECTED_ITEMS=$(jq '[.components[].staged.files | length] | add' \
+                  "$(params.dataDir)/snapshot_spec.json")
+              if ! grep -q "# ${EXPECTED_ITEMS} item(s) found in source" "$PUSHSOURCE_OUTPUT"; then
+                  echo "Error: pushsource-ls should find ${EXPECTED_ITEMS} item(s). Actual output:"
+                  cat "$STAGED_DIR_OUTPUT"
+                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+
+              VHD_PI_COUNT=$(grep -c "VHDPushItem" "$PUSHSOURCE_OUTPUT")
+              if [[ "$VHD_PI_COUNT" != "$EXPECTED_ITEMS" ]]; then
+                  echo "Error: VHDPushItem should appear ${EXPECTED_ITEMS} time(s). Found: $VHD_PI_COUNT"
+                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+
+              STARMAP_NAMES=$(jq -r '[.components[].starmap[].name] | unique | .[]' \
+                  "$(params.dataDir)/snapshot_spec.json")
+              BUILD_INFO_NAME=$(grep -oP "KojiBuildInfo\(name='\K[^']*" "$PUSHSOURCE_OUTPUT")
+              if ! echo "$STARMAP_NAMES" | grep -qx "$BUILD_INFO_NAME"; then
+                  echo "Error: build_info.name '$BUILD_INFO_NAME' not found in starmap names:"
+                  echo "$STARMAP_NAMES"
+                  exit 1
+              fi
+              expected_patterns=(
+                  "VHDPushItem"
+                  "name='test-product-cuda-azure-1\.3-1776700966-x86_64\.vhd'"
+                  "src='.*/CLOUD_IMAGES/bootc-cuda-azure-disk-image-1-3/test-product-cuda-azure-1\.3-1776700966-x86_64\.vhd'"
+                  "name='test-product-cuda-azure'"
+                  "version='1\.3'"
+                  "respin=1776700966"
+                  # date is derived from BUILD_RESPIN: date -d @1776700966 +%Y%m%d -> 20260420
+                  "date=datetime\.date\(2026, 4, 20\)"
+                  "arch='x86_64'"
+              )
+              for pattern in "${expected_patterns[@]}"; do
+                  if ! grep -qE "$pattern" "$PUSHSOURCE_OUTPUT"; then
+                      echo "Error: pushsource-ls output missing expected pattern: $pattern"
+                      cat "$PUSHSOURCE_OUTPUT"
+                      exit 1
+                  fi
+              done
+
+              # Verify staged directory contents
+              PUSHSOURCE_SRC=$(grep -oP "src='\\K[^']*" "$PUSHSOURCE_OUTPUT")
+              if ! grep -q "$PUSHSOURCE_SRC" "$STAGED_DIR_OUTPUT" ; then
+                  echo "Error: staged file path does not match pushsource-ls src value."
+                  echo "pushsource-ls src: $PUSHSOURCE_SRC"
+                  cat "$STAGED_DIR_OUTPUT"
+                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+
+              # Verify wrapper artifacts were collected
+              ARTIFACTS_DIR="$(params.dataDir)/artifacts"
+              if [[ ! -d "$ARTIFACTS_DIR" ]]; then
+                  echo "Error: artifacts directory not found at $ARTIFACTS_DIR"
+                  ls -laR "$(params.dataDir)"
+                  exit 1
+              fi
+              ARTIFACTS_COUNT=$(find "$ARTIFACTS_DIR" -name "clouds.json" | wc -l)
+              if [[ "$ARTIFACTS_COUNT" -ne 1 ]]; then
+                  echo "Error: expected 1 clouds.json in artifacts, found: $ARTIFACTS_COUNT"
+                  find "$ARTIFACTS_DIR" -type f
+                  exit 1
+              fi
