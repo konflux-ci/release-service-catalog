@@ -21,6 +21,11 @@ services:                     # optional list
         body: '{"ok": true}'
       - path_contains: /api/v1/widgets
         body: '{}'
+    # Task reads its API base URL from this env var (e.g. PYXIS_URL in the Task
+    # spec). http_json only starts the mock server; mock_server_for_env_var sets
+    # that var to http://BIND:PORT/v1 so requests hit the mock, not production.
+    # If the URL lives in a secret mount file instead, use rewrite_secret_mount.
+    mock_server_for_env_var: PYXIS_URL
     rewrite_secret_mount:     # optional; after server is listening
       source: /mnt/osidb-service-account
       env_var: OSIDB_SERVICE_ACCOUNT_MOUNT
@@ -141,6 +146,16 @@ def _render_http_json(svc: dict[str, Any]) -> str:
         r"done",
         "",
     ]
+    mock_server_for_env_var = svc.get("mock_server_for_env_var")
+    if mock_server_for_env_var is not None:
+        if not isinstance(mock_server_for_env_var, str) or not _ENV_SAFE.match(
+            mock_server_for_env_var
+        ):
+            _die(f"invalid mock_server_for_env_var: {mock_server_for_env_var!r}")
+        lines += [
+            f'export {mock_server_for_env_var}="http://${{BIND}}:${{PORT}}/v1"',
+            "",
+        ]
     rw = svc.get("rewrite_secret_mount")
     if rw:
         if not isinstance(rw, dict):
