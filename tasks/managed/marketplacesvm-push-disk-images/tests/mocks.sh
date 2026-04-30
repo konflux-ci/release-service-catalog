@@ -50,5 +50,10 @@ function marketplacesvm_push_wrapper() {
         echo Unexpected call to marketplacesvm_push_wrapper
         exit 1
     fi
+
+    # create fake artifacts which would be created by pubtools-marketplacesvm-marketplace-push
+    mkdir -p artifacts/20260430181240/
+    touch artifacts/20260430181240/pushitems.jsonl
+    touch artifacts/20260430181240/clouds.json
 }
 
