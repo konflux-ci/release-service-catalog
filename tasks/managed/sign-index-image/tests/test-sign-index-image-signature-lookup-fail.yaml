@@ -2,11 +2,12 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-sign-index-image-multicomponent
+  name: test-sign-index-image-signature-lookup-fail
+  annotations:
+    test/assert-task-failure: "run-task"
 spec:
   description: |
-    Test creating a internal request to sign an image.
-    In this scenario there will be multiple index images to sign.
+    When failOnSignatureLookupError is true (default) and find_signatures always fails, the task must fail
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -92,23 +93,17 @@ spec:
               {
                   "components": [
                       {
-                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.15",
-                          "rh-registry-repo": "registry.redhat.io/redhat",
+                          "target_index": "quay.io/testrepo/testimage:tag",
+                          "rh-registry-repo": "registry.redhat.io/testrepo",
                           "image_digests": [
                               "sha256:6f9a420f660e73a",
                               "sha256:6f9a420f660e73b"
-                          ]
-                      },
-                      {
-                          "target_index": "registry.redhat.io/redhat/redhat-operator-index:v4.16",
-                          "rh-registry-repo": "registry.redhat.io/redhat",
-                          "image_digests": [
-                              "sha256:6f9a420f660e73c"
                           ]
                       }
                   ]
               }
               EOF
+              touch "$(params.dataDir)/.mock_find_signatures_always_fail"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -149,54 +144,10 @@ spec:
           value: "main"
         - name: pyxisSecret
           value: test-create-pyxis-image-cert
+        - name: signatureLookupMaxAttempts
+          value: "1"
       runAfter:
         - setup
-    - name: check-result
-      taskSpec:
-        steps:
-          - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
-              internalRequestsCount=$(echo "$internalRequests" | wc -w)
-
-              if [ "$internalRequestsCount" != "1" ] ; then
-                echo "incorrect number of internalRequests created. Expected 1"
-                exit 1
-              fi
-
-              expected_references=$(cat << EOF
-              registry.redhat.io/redhat/redhat-operator-index:v4.15
-              registry.redhat.io/redhat/redhat-operator-index:v4.15
-              registry.redhat.io/redhat/redhat-operator-index:v4.16
-              EOF
-              )
-              for internalRequest in ${internalRequests};
-              do
-                params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-
-                if [[ "$(jq -r '.references' <<< "${params}")" \
-                    != $(echo "${expected_references}" | tr '\n' ' ') ]]; then
-                  echo "reference image does not match"
-                  exit 1
-                fi
-
-                if [ "$(jq -r '.pyxis_url' <<< "${params}")" != "https://pyxis.stage.engineering.redhat.com" ]; then
-                  echo "pyxis_url does not match"; exit 1; fi
-                if [ "$(jq -r '.signer_type' <<< "${params}")" != "batch" ]; then
-                  echo "signer_type does not match"; exit 1; fi
-
-                if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
-                then
-                  echo "requester does not match"
-                  exit 1
-                fi
-              done
-      runAfter:
-        - run-task
   finally:
     - name: cleanup
       taskSpec:
