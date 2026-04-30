@@ -40,15 +40,15 @@ function pushsource-ls() {
 }
 
 function marketplacesvm_push_wrapper() {
-  echo Mock marketplacesvm_push_wrapper called with: $*
-  echo $* > "$(params.dataDir)/mock_wrapper.txt"
-  echo "$CLOUD_CREDENTIALS" > "$(params.dataDir)/mock_cloud_credentials.txt"
+    echo Mock marketplacesvm_push_wrapper called with: $*
+    echo $* > "$(params.dataDir)/mock_wrapper.txt"
+    echo "$CLOUD_CREDENTIALS" > "$(params.dataDir)/mock_cloud_credentials.txt"
 
-  /home/pubtools-marketplacesvm-wrapper/marketplacesvm_push_wrapper "$@" --dry-run
+    /home/pubtools-marketplacesvm-wrapper/marketplacesvm_push_wrapper "$@" --dry-run
 
-  if ! [[ "$?" -eq 0 ]]; then
-      echo Unexpected call to marketplacesvm_push_wrapper
-      exit 1
-  fi
+    if ! [[ "$?" -eq 0 ]]; then
+        echo Unexpected call to marketplacesvm_push_wrapper
+        exit 1
+    fi
 }
 
