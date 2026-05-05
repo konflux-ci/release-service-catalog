@@ -2,6 +2,9 @@
 
 This test validates the addon registry push pipeline functionality.
 
+The Konflux build is configured for a **multi-arch manifest list** (amd64 and arm64), matching common OSD addon index images.
+**Note:** This test patches the component’s PaC templates in the PR *before merge* to ensure the `build-platforms` param 
+includes `linux/amd64` and `linux/arm64`, so the push pipeline produces a multi-arch index for verification.
 ## Test-Specific Configuration
 
 ### Files Structure
