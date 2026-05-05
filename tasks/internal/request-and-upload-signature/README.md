@@ -3,6 +3,8 @@
 Tekton task to request and upload a simple signature.
 - This task is meant to be used in an internal pipeline that can be triggered frequently
   and is expected to complete as quickly as possible.
+- Note: This task uses an emptyDir volume for inter-step data sharing. Tests inject
+  a workspace for verification purposes via pre-apply-task-hook.
 
 ## Parameters
 
