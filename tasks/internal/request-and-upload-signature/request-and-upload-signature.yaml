@@ -11,6 +11,8 @@ spec:
     Tekton task to request and upload a simple signature.
     - This task is meant to be used in an internal pipeline that can be triggered frequently
       and is expected to complete as quickly as possible.
+    - Note: This task uses an emptyDir volume for inter-step data sharing. Tests inject
+      a workspace for verification purposes via pre-apply-task-hook.
   params:
     - description: |
         List of space separated manifest digests for the signed content, usually in the format sha256:xxx
@@ -84,6 +86,8 @@ spec:
           - key: $(params.caTrustConfigMapKey)
             path: ca-bundle.crt
         optional: true
+    - name: workspace-data
+      emptyDir: {}
   results:
     - name: certificate-issuer
       description: issuer uid extracted from the certificate
@@ -92,6 +96,8 @@ spec:
       - name: trusted-ca
         mountPath: /mnt/trusted-ca
         readOnly: true
+      - name: workspace-data
+        mountPath: /workspace/data
   steps:
     - name: check-certificates
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
@@ -142,7 +148,7 @@ spec:
         requests:
           memory: 128Mi
           cpu: 100m
-      workingDir: "$(workspaces.data.path)"
+      workingDir: "/workspace/data"
       volumeMounts:
         - name: umb-ssl-cert-secret
           mountPath: /mnt/umb_ssl_cert_secret
@@ -166,7 +172,7 @@ spec:
         requests:
           memory: 128Mi
           cpu: 100m
-      workingDir: "$(workspaces.data.path)"
+      workingDir: "/workspace/data"
       env:
         - name: UMB_CERT_PATH
           value: "/tmp/crt"
@@ -196,7 +202,7 @@ spec:
           creator="{creator}"
         fi
 
-        cat <<EOF > "$(workspaces.data.path)/pubtools-sign-config.yaml"
+        cat <<EOF > "/workspace/data/pubtools-sign-config.yaml"
         msg_signer:
           messaging_brokers:
             - "amqps://${umb_url}:5671"
@@ -228,7 +234,7 @@ spec:
           chunk_size: 200
         EOF
         echo "Using signing config:"
-        cat "$(workspaces.data.path)/pubtools-sign-config.yaml"
+        cat "/workspace/data/pubtools-sign-config.yaml"
     - name: check-umb-connection
       image: "quay.io/konflux-ci/release-service-utils:13e379cb498293f8f7b8b9c84c57d9e8ab141be2"
       computeResources:
@@ -237,7 +243,7 @@ spec:
         requests:
           memory: 128Mi
           cpu: 100m
-      workingDir: "$(workspaces.data.path)"
+      workingDir: "/workspace/data"
       volumeMounts:
         - name: umb-ssl-cert-secret
           mountPath: /mnt/umb_ssl_cert_secret
@@ -269,7 +275,7 @@ spec:
         requests:
           memory: 128Mi
           cpu: 100m
-      workingDir: "$(workspaces.data.path)"
+      workingDir: "/workspace/data"
       volumeMounts:
         - name: umb-ssl-cert-secret
           mountPath: /mnt/umb_ssl_cert_secret
@@ -329,12 +335,12 @@ spec:
         done
 
         echo "Running pubtools-sign-msg-container-sign "
-        echo "${signing_key_args[@]}" " --config-file $(workspaces.data.path)/pubtools-sign-config.yaml "
+        echo "${signing_key_args[@]}" " --config-file /workspace/data/pubtools-sign-config.yaml "
         echo "${reference_args[@]}" " " "${digest_args[@]}" "--task-id $task_id"
 
         pubtools-sign-msg-container-sign \
           --requester "${requester}" \
-          --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" \
+          --config-file "/workspace/data/pubtools-sign-config.yaml" \
           "${reference_args[@]}" \
           "${digest_args[@]}" \
           --signer-type "${signer_type}" \
@@ -351,7 +357,7 @@ spec:
         requests:
           memory: 128Mi
           cpu: 100m
-      workingDir: "$(workspaces.data.path)"
+      workingDir: "/workspace/data"
       env:
         - name: signature_data_file
           value: "$(params.signature_data_file)"
@@ -360,13 +366,13 @@ spec:
       script: |
         #!/usr/bin/env /bin/bash
         set -xe
-        STATUS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.status" | tr -d \")
-        ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" | jq ".signer_result.error_message")
+        STATUS=$(cat "/workspace/data/${signature_data_file}" | jq ".signer_result.status" | tr -d \")
+        ERRORS=$(cat "/workspace/data/${signature_data_file}" | jq ".signer_result.error_message")
         if [ "${STATUS}" != "ok" ]; then
           echo "Signing failed with error: ${ERRORS}"
           exit 1
         fi
-        SIGNATURE_ERRORS=$(cat "$(workspaces.data.path)/${signature_data_file}" |\
+        SIGNATURE_ERRORS=$(cat "/workspace/data/${signature_data_file}" |\
           jq -c '[.operation_results[]?[0]?.msg?.errors? // [] | select(length > 0)]')
         if [ "$SIGNATURE_ERRORS" != "[]" ]; then
           echo "Signing failed with errors:"
@@ -376,7 +382,7 @@ spec:
 
         if [ "$signer_type" == "single" ]; then
           SIGNATURE_DATA=$(
-            cat "$(workspaces.data.path)/${signature_data_file}" | \
+            cat "/workspace/data/${signature_data_file}" | \
             jq -cM "[
               [.operation_results, .operation.references]|
               transpose|
@@ -389,7 +395,7 @@ spec:
             ]")
         elif [ "$signer_type" == "batch" ]; then
           SIGNATURE_DATA=$(
-            cat "$(workspaces.data.path)/${signature_data_file}" | \
+            cat "/workspace/data/${signature_data_file}" | \
             jq -cM '[
               (.operation_results|.[]|.[0].msg.claims)
               |.[]
@@ -414,7 +420,7 @@ spec:
         requests:
           memory: 56Mi
           cpu: 25m
-      workingDir: "$(workspaces.data.path)"
+      workingDir: "/workspace/data"
       volumeMounts:
         - name: pyxis-ssl-cert-secret
           mountPath: /mnt/pyxis_ssl_cert_secret
@@ -448,5 +454,3 @@ spec:
           --pyxis-ssl-keyfile "${PYXIS_KEY_PATH}" \
           --request-threads "${pyxis_threads}" \
           --signatures @"${signature_data_file}"
-  workspaces:
-    - name: data
