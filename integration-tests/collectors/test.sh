@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
-NO_CVE="false" # Default to false
+NO_CVE="${NO_CVE:-false}"
 
 
 verify_atlas_url() {

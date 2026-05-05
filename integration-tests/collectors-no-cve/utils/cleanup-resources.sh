@@ -1,0 +1,1 @@
+../../collectors/utils/cleanup-resources.sh
