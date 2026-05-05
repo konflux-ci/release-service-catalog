@@ -453,6 +453,52 @@ spec:
         # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
         trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
 
+        # Supplementary file classification (e.g. readme, license, changelog)
+        # Files matching this are moved out before signing and restored afterward so that
+        # signing tools don't attempt to sign them. Non-allowed supplementary, non-binary files that
+        # reach the Windows signing host will cause signtool to fail. On Mac, xcrun codesign
+        # will sign them without error, so there is less gating control on that side.
+        SUPPLEMENTARY_NAMES="readme license changelog" # Allowed base names (case-insensitive)
+        SUPPLEMENTARY_EXTS=".md .txt" # Allowed extensions (case-insensitive)
+
+        is_supplementary_file() {
+          local lower
+          lower="$(basename "$1")"
+          lower="${lower,,}"
+          local base ext
+          if [[ "$lower" == *.* ]]; then
+            base="${lower%.*}"
+            ext=".${lower##*.}"
+          else
+            base="$lower"
+            ext=""
+          fi
+          for name in $SUPPLEMENTARY_NAMES; do
+            if [[ "$base" == "$name" ]]; then
+              [[ -z "$ext" ]] && return 0
+              for allowed_ext in $SUPPLEMENTARY_EXTS; do
+                [[ "$ext" == "$allowed_ext" ]] && return 0
+              done
+            fi
+          done
+          return 1
+        }
+
+        move_supplementary_out() {
+          local src_root="$1"
+          local hold_root="$2"
+          [ -d "$src_root" ] || return 0
+          while IFS= read -r -d '' file; do
+            if is_supplementary_file "$file"; then
+              local rel="${file#"$src_root"/}"
+              local dest="$hold_root/$rel"
+              mkdir -p "$(dirname "$dest")"
+              mv "$file" "$dest"
+              echo "  Held supplementary file: $rel"
+            fi
+          done < <(find "$src_root" -type f -print0)
+        }
+
         CONTENT_DIR=/shared/artifacts
 
         echo "Logging into Quay..."
@@ -571,6 +617,11 @@ spec:
 
             rm -f "$ARCHIVE_PATH"
           done
+
+          SUPP_HOLD="$COMPONENT_DIR/supplementary"
+          echo "Moving supplementary files out of signing directories..."
+          move_supplementary_out "$UNSIGNED_DIR/macos" "$SUPP_HOLD/macos"
+          move_supplementary_out "$UNSIGNED_DIR/windows" "$SUPP_HOLD/windows"
 
           # Push unsigned Mac content
           if [ -f "$COMPONENT_DIR/has_mac" ]; then
@@ -722,7 +773,7 @@ spec:
           security unlock-keychain -p $KEYCHAIN_PASSWORD login.keychain
           set -x
           echo "Signing files in the \$CONTENT_DIR_MAC directory..."
-          find "\$CONTENT_DIR_MAC" -type f | while read file; do
+          find "\$CONTENT_DIR_MAC" -type f | while IFS= read -r file; do
               echo "Signing: \$file"
               if ! xcrun codesign --sign "Developer ID Application: $SIGNING_IDENTITY" \
                   --options runtime --timestamp --force "\$file"; then
@@ -898,11 +949,6 @@ spec:
               echo Verification of %%f failed
               exit /B %ERRORLEVEL%
             )
-          )
-
-          if errorlevel 1 (
-            echo Verification of binaries failed
-            exit /B %ERRORLEVEL%
           )
 
           echo [%DATE% %TIME%] Signing of Windows binaries for ${COMPONENT_NAME} completed successfully
@@ -1091,7 +1137,22 @@ spec:
             oras pull "$(params.quayURL)/signed/${COMPONENT_NAME}@${signed_windows_digest}"
           fi
 
-          # Generate checksums for all binaries
+          # Restore supplementary files that were held during the extract step.
+          # They were moved out before signing and now rejoin the signed
+          # binaries for checksums, compression, and publishing.
+          SUPP_HOLD="$COMPONENT_DIR/supplementary"
+          for os_name in macos windows; do
+            [ -d "$SUPP_HOLD/$os_name" ] || continue
+            while IFS= read -r -d '' file; do
+              rel="${file#"$SUPP_HOLD/$os_name"/}"
+              dest="$SIGNED_DIR/$os_name/$rel"
+              mkdir -p "$(dirname "$dest")"
+              mv "$file" "$dest"
+              echo "  Restored supplementary file: $os_name/$rel"
+            done < <(find "$SUPP_HOLD/$os_name" -type f -print0)
+          done
+
+          # Generate checksums for all files (binaries + supplementary).
           # Linux files remain in $COMPONENT_DIR/linux/ (not signed), while Mac/Windows are in $SIGNED_DIR/
           # The structure is os/arch/ so we recursively find all files
           SHA_SUM_PATH="$SIGNED_DIR/sha256sum.txt"
@@ -1652,7 +1713,11 @@ spec:
             push_component_to_pulp "$COMPONENT_NAME" 2> >(tee "$STDERR_FILE" >&2)
           elif [[ "$HAS_CGW" == "true" ]]; then
             # Only push to CDN when NOT pushing to pulp
-            push_component_to_cdn "$COMPONENT_NAME" > >(tee "$STDERR_FILE") 2>&1 || true
+            push_component_to_cdn "$COMPONENT_NAME" 2>&1 | tee "$STDERR_FILE"
+            cdn_exit=${PIPESTATUS[0]}
+            if [ "$cdn_exit" -ne 0 ]; then
+              exit "$cdn_exit"
+            fi
           fi
 
           if [[ "$HAS_CGW" == "true" ]]; then

@@ -1,0 +1,206 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: extract-and-upload-python-wheel-sboms-to-atlas
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    Extract Fromager-generated SBOMs from Python wheels and upload them to
+    Atlas (TPA) using the Mobster CLI
+  params:
+    - name: atlasApiUrl
+      type: string
+      description: URL of the Atlas/TPA API server
+    - name: ssoTokenUrl
+      type: string
+      description: URL of the SSO token issuer for TPA authentication
+    - name: atlasSecretName
+      type: string
+      description: Name of the K8s secret containing TPA SSO credentials (keys sso_account, sso_token)
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact containing the extracted wheels and release data
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: /var/workdir/content
+    - name: filesDir
+      type: string
+      description: The relative path within dataDir where wheel files are located
+      default: files
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for the trusted artifacts created
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: atlas-secret
+      secret:
+        secretName: $(params.atlasSecretName)
+        defaultMode: 0444
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: prepare-workdir
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 32Mi
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      command:
+        - mkdir
+        - -p
+        - $(params.dataDir)
+
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+
+    - name: extract-sboms-from-wheels
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      env:
+        - name: WHEELS_DIR
+          value: $(params.dataDir)/$(params.filesDir)
+        - name: SBOMS_DIR
+          value: $(params.dataDir)/sboms
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        mkdir -p "${SBOMS_DIR}"
+        found=0
+
+        for wheel in "${WHEELS_DIR}"/*.whl; do
+          [ -f "$wheel" ] || continue
+          wheel_name=$(basename "$wheel" .whl)
+
+          # Wheels are zip archives; list SBOM files inside .dist-info/sboms/
+          sbom_paths=$(unzip -l "$wheel" 2>/dev/null \
+            | grep -o '[^ ]*\.dist-info/sboms/[^ ]*[^/]' || true)
+
+          if [ -z "$sbom_paths" ]; then
+            echo "  No SBOMs found in ${wheel_name}"
+            continue
+          fi
+
+          while IFS= read -r sbom_path; do
+            sbom_filename=$(basename "$sbom_path")
+            output_name="${wheel_name}-${sbom_filename}"
+            unzip -p "$wheel" "$sbom_path" > "${SBOMS_DIR}/${output_name}"
+            echo "  Extracted ${sbom_path} -> ${output_name}"
+            found=$((found + 1))
+          done <<< "$sbom_paths"
+        done
+
+        if [ "$found" -eq 0 ]; then
+          echo "ERROR: No SBOMs found in any wheel"
+          exit 1
+        fi
+
+        echo ""
+        echo "Extracted ${found} SBOM(s):"
+        ls -la "${SBOMS_DIR}"
+
+    - name: upload-sboms-to-atlas
+      image: quay.io/konflux-ci/mobster@sha256:3584f2cbcfee9d9eec0c6d34309d6c436a347f303e697f888b7bdf693b515908
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      volumeMounts:
+        - name: atlas-secret
+          mountPath: /etc/atlas-secret
+          readOnly: true
+      env:
+        - name: MOBSTER_TPA_SSO_TOKEN_URL
+          value: $(params.ssoTokenUrl)
+        - name: SBOMS_DIR
+          value: $(params.dataDir)/sboms
+        - name: ATLAS_API_URL
+          value: $(params.atlasApiUrl)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        if [ ! -f /etc/atlas-secret/sso_account ] || [ ! -f /etc/atlas-secret/sso_token ]; then
+          echo "ERROR: Atlas secret not found or missing keys (sso_account, sso_token)"
+          exit 1
+        fi
+        MOBSTER_TPA_SSO_ACCOUNT="$(cat /etc/atlas-secret/sso_account)"
+        MOBSTER_TPA_SSO_TOKEN="$(cat /etc/atlas-secret/sso_token)"
+        export MOBSTER_TPA_SSO_ACCOUNT MOBSTER_TPA_SSO_TOKEN
+
+        sbom_count=$(find "${SBOMS_DIR}" -name '*.json' | wc -l)
+        if [ "$sbom_count" -eq 0 ]; then
+          echo "ERROR: No SBOMs found in ${SBOMS_DIR}"
+          exit 1
+        fi
+
+        echo "Uploading ${sbom_count} SBOM(s) to Atlas at ${ATLAS_API_URL}..."
+        mobster upload tpa \
+          --tpa-base-url "${ATLAS_API_URL}" \
+          --from-dir "${SBOMS_DIR}" \
+          --report \
+          --retries 3
+
+        echo "SBOM upload complete."

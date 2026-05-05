@@ -15,6 +15,24 @@ spec:
   applications:
     - ${application_name}
   data:
+    # Skip idempotency filtering for test releases
+    skipFilter: true
+    atlas:
+      server: stage
+      atlas-sso-secret-name: atlas-staging-sso-secret-${component_name}
+      atlas-retry-aws-secret-name: atlas-retry-s3-staging-secret-${component_name}
+    releaseNotes:
+      product_id:
+        - 999
+      product_name: "rh-advisories-large-test"
+      product_version: "1.0"
+      product_stream: "rh-advisories-large-test-1.0"
+      cpe: "cpe:/a:redhat:rh_advisories_large_test:1.0::el9"
+      type: "RHBA"
+      synopsis: "rh-advisories-large-test 1.0 release for large snapshot testing"
+      topic: "Large snapshot test with 200 components"
+      description: "Test release for rh-advisories pipeline with large snapshot (200 components)"
+      solution: "Update to rh-advisories-large-test 1.0"
     pyxis:
       server: stage
       secret: pyxis-${component_name}
@@ -23,16 +41,33 @@ spec:
       cosignSecretName: "konflux-cosign-signing-stage-${component_name}"
     mapping:
       defaults:
-        tags:
-          - latest
+        # tags: placeholder value for initial RPA creation only.
+        # patch_rpa_with_snapshot_components() replaces spec.data.mapping.components
+        # with per-component entries that each carry their own repositories[].tags
+        # (e.g. <name>-<uuid>, <name>-v1.0.<uuid>, <name>-v1.0, …).  Per-component tags take precedence
+        # over defaults.tags in apply-mapping, so the default below is never used
+        # after patching.  An empty list avoids accidental shared-tag pushes if the
+        # placeholder "*" component were ever processed before the patch runs.
+        tags: []
         pushSourceContainer: false
+        # Using staging/pending repository (quay.io/redhat-pending) for safe testing.
+        # environment="stage" → skips close-advisory-issues (avoids touching Jira issues).
+        # To enable close-advisory-issues: switch to quay.io/redhat/… (no -pending).
+        repositories:
+          - url: quay.io/redhat-pending/rhtap----rh-advisories-component
       components:
-        # For large snapshot test, we configure all components
-        # The actual snapshot will contain the component definitions
-        # This mapping ensures they are all processed
-        - name: '*'
+        # apply-mapping does NOT support wildcard "*" patterns; it uses exact string
+        # matching via group_by(.name).
+        #
+        # This placeholder is replaced before release creation:
+        #   1. Snapshot is built with 200 components.
+        #   2. patch_rpa_with_snapshot_components() reads component names from the
+        #      snapshot and patches the RPA with an exact list.  Each component entry
+        #      carries four per-component tags (e.g. <name>-<uuid>, <name>-v1.0.<uuid>, <name>-v1.0 …)
+        #      so no two components share a (repo, tag) pair.
+        - name: "*"
           repositories:
-            - url: quay.io/redhat-pending/rhtap----rh-advisories-large-test
+            - url: quay.io/redhat-pending/rhtap----rh-advisories-component
     fileUpdates:
       - paths:
           - path: data/teams/stonesoup/users/shebert.yml
@@ -43,6 +78,8 @@ spec:
         repo: 'https://gitlab.cee.redhat.com/hacbs-release-tests/app-interface/'
         upstream_repo: 'https://gitlab.cee.redhat.com/hacbs-release-tests/app-interface/'
         ref: 'master'
+    jira:
+      jiraAdvisorySecret: advisory-jira-secret-${component_name}
   origin: ${tenant_namespace}
   pipeline:
     pipelineRef:
@@ -57,7 +94,6 @@ spec:
     serviceAccountName: ${managed_sa_name}
     timeouts:
       # Timeout for large snapshot processing (configurable via LARGE_SNAPSHOT_TIMEOUT in test.env)
-      # Default: 8h0m0s for processing ~200 components
       pipeline: ${LARGE_SNAPSHOT_TIMEOUT}
       tasks: ${LARGE_SNAPSHOT_TIMEOUT}
   policy: standard-${component_name}

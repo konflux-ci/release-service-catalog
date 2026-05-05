@@ -124,16 +124,6 @@ spec:
           exit 1
         fi
 
-        # Map OCI tag to SemVer: registry tags cannot contain '+'; Helm uses first '_' as build-metadata separator.
-        oci_tag_to_version() {
-          local t="$1"
-          if [[ "$t" == *_* ]]; then
-            echo "${t/_/+}"
-          else
-            echo "$t"
-          fi
-        }
-
         # Basename of delivery repo path (after ---- to /), last segment.
         delivery_repo_basename() {
           local url="$1"
@@ -186,15 +176,18 @@ spec:
               echo "Error: component (${name}) repository (${url}) has no tags" >&2
               exit 1
             fi
-            for ((k = 0; k < num_tags; k++)); do
-              tag=$(jq -r --argjson k "$k" '.tags[$k]' <<< "$repo")
-              mapped=$(oci_tag_to_version "$tag")
-              if [[ "$mapped" != "$version" ]]; then
-                echo "Error: component (${name}) tag (${tag}) normalized to (${mapped}) does not match" \
-                  "chart version (${version})" >&2
-                exit 1
-              fi
-            done
+            {
+              read -r version_found
+              read -r all_tags
+            } < <(jq -r --arg ver "$version" '
+              ([.tags[] | sub("_"; "+") == $ver] | any),
+              (.tags | join(", "))
+            ' <<< "$repo")
+            if [[ "$version_found" != "true" ]]; then
+              echo "Error: component (${name}) repository (${url}) — none of the tags" \
+                "[${all_tags}] match chart version (${version})" >&2
+              exit 1
+            fi
           done
           echo "Validated Helm OCI artifact for component (${name}) chart (${title}) version (${version})"
         done

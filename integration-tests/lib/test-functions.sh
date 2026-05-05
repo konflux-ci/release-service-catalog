@@ -151,7 +151,7 @@ get_build_pipeline_run_url() { # args are ns, app, name
 
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
-# Optional variables: component2_repo_name (for multi-component tests)
+# Optional variables: component2_repo_name (for multi-component tests), uuid (from test.env), tenant_namespace
 cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
@@ -192,6 +192,18 @@ cleanup_resources() {
         rm -rf "${tmpDir}"
     else
         echo "tmpDir not set or not a directory, skipping k8s resource cleanup." | tee -a "${cleanup_log_file}"
+    fi
+
+    # Clean up Release CRs created by this specific test run
+    # Use uuid (from test.env) to support concurrent test execution
+    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ]; then
+        echo "Deleting Release CRs with test-run-uuid=${uuid} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
+        kubectl delete release -n "${tenant_namespace}" \
+            -l test-run-uuid="${uuid}" \
+            --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
+            echo "Warning: Failed to delete some Release CRs" | tee -a "${cleanup_log_file}"
+    else
+        echo "Skipping Release CR cleanup: uuid or tenant_namespace not set" | tee -a "${cleanup_log_file}"
     fi
 
     if [ -n "$advisory_yaml_dir" ] && [ -d "$advisory_yaml_dir" ]; then
@@ -620,6 +632,13 @@ wait_for_releases() {
     export RELEASE_NAMESPACE=${tenant_namespace}
     for release in ${release_names};
     do
+      # Add labels to the release CR for cleanup tracking
+      # - originating-tool: identifies which test suite created it (for periodic cleanup)
+      # - test-run-uuid: unique ID from test.env (supports concurrent test runs)
+      kubectl patch release "${release}" -n "${tenant_namespace}" \
+        --type merge \
+        -p "{\"metadata\":{\"labels\":{\"originating-tool\":\"${originating_tool}\",\"test-run-uuid\":\"${uuid}\"}}}"
+
       export RELEASE_NAME=${release}
       "${SUITE_DIR}/../scripts/wait-for-release.sh" &
     done
@@ -655,7 +674,7 @@ cleanup_old_resources() {
 
     echo "🔍 Searching for resources with originating-tool=${originating_tool}"
 
-    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component"
+    local kinds="enterprisecontractpolicy rp rpa rolebinding sa clusterrole secret application component imagerepository release"
     for kind in $kinds; do
         local namespaces="dev-release-team-tenant managed-release-team-tenant"
         for namespace in $namespaces; do
@@ -700,4 +719,281 @@ patch_component_source() {
 patch_component_source_before_merge() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
      "to patch the component source BEFORE MERGE in their test.sh file"
+}
+
+# --- Multi-Component Support Functions ---
+# These functions support both single and multi-component test scenarios
+
+# Helper function for single component initialization
+wait_for_single_component_initialization() {
+    local comp_name=$1
+    local max_attempts=60  # 10 minutes with 10-second intervals
+    local attempt=1
+    local component_annotations=""
+    local initialization_success=false
+
+    while [ $attempt -le $max_attempts ]; do
+      echo "Initialization check attempt ${attempt}/${max_attempts} for ${comp_name}..."
+
+      # Try to get component annotations
+      component_annotations=$(kubectl get component/"${comp_name}" -n "${tenant_namespace}" -ojson 2>/dev/null | \
+        jq -r --arg k "build.appstudio.openshift.io/status" '.metadata.annotations[$k] // ""')
+
+      if [ -n "${component_annotations}" ]; then
+        # component_pr is made global by not declaring it local
+        component_pr=$(jq -r '.pac."merge-url" // ""' <<< "${component_annotations}")
+        if [ -n "${component_pr}" ]; then
+            echo "✅ Component ${comp_name} initialized successfully"
+            initialization_success=true
+            break
+        else
+            echo "⚠️  Could not get component PR from annotations for ${comp_name}: ${component_annotations}"
+            echo "Waiting 10 seconds before retry..."
+            sleep 10
+        fi
+
+      else
+        echo "⚠️  Component ${comp_name} not yet initialized (attempt ${attempt}/${max_attempts})"
+
+        # Wait before retrying (except on the last attempt)
+        if [ $attempt -lt $max_attempts ]; then
+          echo "Waiting 10 seconds before retry..."
+          sleep 10
+        fi
+      fi
+
+      attempt=$((attempt + 1))
+    done
+
+    # Check if initialization ultimately succeeded
+    if [ "$initialization_success" = false ]; then
+      echo "🔴 error: component ${comp_name} failed to initialize after ${max_attempts} attempts ($(($max_attempts * 10 / 60)) minutes)"
+      echo "   - Component may not exist in namespace ${tenant_namespace}"
+      echo "   - Component creation may have failed"
+      exit 1
+    fi
+
+    # pr_number is made global by not declaring it local
+    pr_number=$(cut -f7 -d/ <<< "${component_pr}")
+    if [ -z "${pr_number}" ]; then
+        echo "🔴 error: Could not extract PR number from ${component_pr}"
+        exit 1
+    fi
+    echo "Found PR for ${comp_name}: ${component_pr} (Number: ${pr_number})"
+}
+
+# Helper function for single component PR merge
+merge_single_component_pr() {
+    local pr_num=$1
+    local repo_name=$2
+    local no_cve=$3
+    local commit_message="This fixes CVE-2024-8260"
+
+    if [ "${no_cve}" == "true" ]; then
+      echo "(Note: NOT Adding a CVE to the commit message)"
+      commit_message="e2e test"
+    else
+      echo "(Note: Adding CVE-2024-8260 to the commit message)"
+    fi
+    echo "Commit message: \"${commit_message}\""
+
+    local merge_result
+    local attempt=1
+    local max_attempts=3
+    local success=false
+
+    # Retry loop for PR merge
+    while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
+        echo "Merge attempt ${attempt}/${max_attempts} for ${repo_name}..."
+
+        set +e
+        merge_result=$(curl -L \
+          -X PUT \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer $GITHUB_TOKEN" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          "https://api.github.com/repos/${repo_name}/pulls/${pr_num}/merge" \
+          -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" --silent --show-error --fail-with-body)
+
+        if [ $? -eq 0 ]; then
+            success=true
+            echo "✅ PR merge succeeded on attempt ${attempt} for ${repo_name}"
+        else
+            echo "❌ PR merge failed on attempt ${attempt} for ${repo_name}. Response: ${merge_result}"
+            if [ $attempt -lt $max_attempts ]; then
+                echo "Waiting 5 seconds before retry..."
+                sleep 5
+            fi
+        fi
+        set -e
+
+        attempt=$((attempt + 1))
+    done
+
+    # Check if all attempts failed
+    if [ "$success" = false ]; then
+        echo "🔴 error: Failed to merge PR for ${repo_name} after ${max_attempts} attempts. Last response: ${merge_result}"
+        exit 1
+    fi
+
+    # SHA is made global by not declaring it local
+    SHA=$(jq -r '.sha' <<< "${merge_result}")
+    if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
+        echo "🔴 error: Could not get SHA from merge result for ${repo_name}: ${merge_result}"
+        exit 1
+    fi
+    echo "PR merged for ${repo_name}. Commit SHA: ${SHA}"
+}
+
+# Helper function for single PLR appearance
+wait_for_single_plr_to_appear() {
+    local sha=$1
+    local timeout=300  # 5 minutes timeout
+    local start_time=$(date +%s)
+    local current_time
+    local elapsed_time
+    local found_plr_name=""
+
+    echo -n "Waiting for PipelineRun to appear for SHA ${sha}" >&2
+    while [ -z "$found_plr_name" ]; do
+        current_time=$(date +%s)
+        elapsed_time=$((current_time - start_time))
+
+        if [ $elapsed_time -ge $timeout ]; then
+            echo >&2
+            echo "🔴 Timeout waiting for PipelineRun to appear after ${timeout} seconds for SHA ${sha}" >&2
+            exit 1
+        fi
+
+        sleep 5
+        echo -n "." >&2
+        # get only running pipelines
+        found_plr_name=$(kubectl get pr -l "pipelinesascode.tekton.dev/sha=$sha" -n "${tenant_namespace}" --no-headers 2>/dev/null | { grep "Running" || true; } | awk '{print $1}')
+    done
+    echo >&2
+    echo "✅ Found PipelineRun for SHA ${sha}: ${found_plr_name}" >&2
+    echo "   PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${found_plr_name}")" >&2
+
+    # Set global variable for backward compatibility AND return the value
+    component_push_plr_name="${found_plr_name}"
+    # Only echo the PLR name to stdout for capture
+    echo "${found_plr_name}"
+}
+
+# Helper function for single PLR completion
+# Parameters:
+#   $1: plr_name - name of the PipelineRun to wait for
+#   $2: comp_name - component name for display and annotation
+#   $3: comp_sha - (optional) component SHA for retry logic
+wait_for_single_plr_to_complete() {
+    local plr_name=$1
+    local comp_name=$2
+    local comp_sha=$3
+    local timeout=2100  # 35 minutes timeout
+    local start_time=$(date +%s)
+    local current_time
+    local elapsed_time
+    local completed=""
+    local retry_attempted="false"
+    local taskStatus="" # taskrun status from last output
+    local previousTaskStatus="" # to avoid duplicate output
+
+    echo "Waiting for PipelineRun ${plr_name} (${comp_name}) to complete"
+    echo "🔍 DEBUG: Checking if PipelineRun ${plr_name} exists..."
+
+    # First verify the PipelineRun exists
+    if ! kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" >/dev/null 2>&1; then
+        echo "🔴 ERROR: PipelineRun ${plr_name} does not exist in namespace ${tenant_namespace}"
+        echo "Available PipelineRuns:"
+        kubectl get pipelinerun -n "${tenant_namespace}" --no-headers 2>/dev/null || echo "No PipelineRuns found"
+        exit 1
+    fi
+
+    while [ -z "$completed" ]; do
+        current_time=$(date +%s)
+        elapsed_time=$((current_time - start_time))
+
+        if [ $elapsed_time -ge $timeout ]; then
+            echo
+            echo "🔴 Timeout waiting for PipelineRun ${plr_name} to complete after ${timeout} seconds"
+            exit 1
+        fi
+
+        sleep 5
+
+        # Check if the pipeline run is completed - use a more robust approach
+        local plr_status
+        plr_status=$(kubectl get pipelinerun "${plr_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+        if [ $? -eq 0 ] && [ -n "$plr_status" ]; then
+            completed=$(echo "$plr_status" | jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' 2>/dev/null || echo "")
+        else
+            echo "🔍 DEBUG: Failed to get PipelineRun status for ${plr_name}"
+            continue
+        fi
+
+        # If completed, check the status
+        if [ -n "$completed" ]; then
+          taskStatus=$("${SUITE_DIR}/../scripts/print-taskrun-status.sh" "${plr_name}" "${tenant_namespace}" compact)
+          if [ "${taskStatus}" != "${previousTaskStatus}" ]; then
+            echo -e "${taskStatus}"
+            previousTaskStatus="${taskStatus}"
+          fi
+          if [ "$completed" == "True" ]; then
+            echo ""
+            echo "✅ PipelineRun ${plr_name} (${comp_name}) completed successfully"
+            break
+          elif [ "$completed" == "False" ]; then
+            echo ""
+            echo "❌ PipelineRun ${plr_name} (${comp_name}) failed"
+            if [ "${retry_attempted}" == "false" ] && [ -n "${comp_sha}" ]; then
+                echo "Attempting retry for component ${comp_name}..."
+                kubectl annotate components/${comp_name} build.appstudio.openshift.io/request=trigger-pac-build -n "${tenant_namespace}"
+                # Wait for new PLR to appear using the provided SHA
+                plr_name=$(wait_for_single_plr_to_appear "${comp_sha}")
+                retry_attempted="true"
+            else
+                if [ -z "${comp_sha}" ]; then
+                    echo "No SHA provided for retry. Exiting."
+                else
+                    echo "Retry already attempted for ${comp_name}. Exiting."
+                fi
+                exit 1
+            fi
+          fi
+          completed=""
+        fi
+    done
+    echo "PipelineRun URL: $(get_build_pipeline_run_url "${tenant_namespace}" "${application_name}" "${plr_name}")"
+}
+
+# Simple snapshot discovery (no race conditions in controlled test environment)
+wait_for_single_component_snapshot() {
+    echo "📸 Looking for single-component snapshot..." >&2
+    echo "🔍 DEBUG: Search context - namespace: ${tenant_namespace}, application: ${application_name}" >&2
+
+    local snapshot_name
+    snapshot_name=$(kubectl get snapshots -n "$tenant_namespace" \
+        -l "appstudio.openshift.io/application=${application_name}" \
+        --sort-by=.metadata.creationTimestamp \
+        -o json 2>/dev/null | jq -r '.items[] | select(.spec.components | length == 1) | .metadata.name' | tail -1)
+
+    if [ -n "$snapshot_name" ]; then
+        echo "🔍 DEBUG: Found single-component snapshot: $snapshot_name" >&2
+    else
+        echo "🔍 DEBUG: No single-component snapshot found" >&2
+
+        # Show what snapshots are available for debugging
+        local all_snapshots
+        all_snapshots=$(kubectl get snapshots -n "$tenant_namespace" \
+            -l "appstudio.openshift.io/application=${application_name}" \
+            --sort-by=.metadata.creationTimestamp \
+            -o json 2>/dev/null)
+
+        if [ -n "$all_snapshots" ]; then
+            echo "🔍 DEBUG: Available snapshots:" >&2
+            echo "$all_snapshots" | jq -r '.items[] | "  - Name: \(.metadata.name), Created: \(.metadata.creationTimestamp), Components: \(.spec.components | length) (\(.spec.components | map(.name // "unknown") | join(", ")))"' >&2
+        fi
+    fi
+
+    echo "$snapshot_name"
 }

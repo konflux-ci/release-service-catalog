@@ -107,34 +107,13 @@ verify_single_release() {
     fi
 
     echo "Verifying image pullability with skopeo..."
-    local ORIGINAL_PULLSPEC="${image_url}"
-    local STRIPPED_PULLSPEC
-
-    if [[ "$ORIGINAL_PULLSPEC" == *":"* && "$ORIGINAL_PULLSPEC" != *"@"* ]]; then
-        STRIPPED_PULLSPEC="${ORIGINAL_PULLSPEC%:*}"
-        echo "Stripped tag from: $ORIGINAL_PULLSPEC -> $STRIPPED_PULLSPEC"
-    elif [[ "$ORIGINAL_PULLSPEC" == *"@"* ]]; then
-        STRIPPED_PULLSPEC="${ORIGINAL_PULLSPEC%@*}"
-        echo "Stripped digest from: $ORIGINAL_PULLSPEC -> $STRIPPED_PULLSPEC"
-    else
-        STRIPPED_PULLSPEC="$ORIGINAL_PULLSPEC"
-        echo "No tag or digest found, using original as is: $STRIPPED_PULLSPEC"
-    fi
-
-    local COMPLETE_PULLSPEC="${STRIPPED_PULLSPEC}@${image_shasum}"
-    echo "New complete pullspec: $COMPLETE_PULLSPEC"
-
-    DOCKER_CONFIG="$(mktemp -d)"
-    export DOCKER_CONFIG
-
-    yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
-        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${DOCKER_CONFIG}/config.json"
-
-    if skopeo inspect --tls-verify=true "docker://${COMPLETE_PULLSPEC}" &>/dev/null; then
-        echo "✅️ Image '$COMPLETE_PULLSPEC' can be pulled using skopeo."
-    else
-        echo "🔴 Failed to pull or inspect image '$COMPLETE_PULLSPEC'."
-        skopeo inspect --tls-verify=true "docker://${COMPLETE_PULLSPEC}"
+    set +e
+    "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
+        "${image_url}" "${image_shasum}" \
+        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
+    skopeo_return_code=$?
+    set -e
+    if [ "${skopeo_return_code}" -ne 0 ]; then
         failures=$((failures+1))
     fi
 

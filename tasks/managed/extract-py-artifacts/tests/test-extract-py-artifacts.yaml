@@ -67,6 +67,26 @@ spec:
                 ]
               }
               EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test_package"
+                    }
+                  ]
+                },
+                "releaseNotes": {
+                  "product_id": [123],
+                  "type": "RHBA",
+                  "synopsis": "Test advisory",
+                  "content": {
+                    "artifacts": []
+                  }
+                }
+              }
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -101,6 +121,8 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
       runAfter:
         - setup
     - name: check-result
@@ -182,10 +204,50 @@ spec:
                 fi
               done
 
+              # Check that releaseNotes artifacts were populated in data.json
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              ARTIFACT_COUNT=$(jq '[.releaseNotes.content.artifacts[] ] | length' "$DATA_FILE")
+              if [ "$ARTIFACT_COUNT" -eq 0 ]; then
+                echo "ERROR: No artifacts populated in releaseNotes"
+                jq . "$DATA_FILE"
+                exit 1
+              fi
+
+              # Verify the artifact has expected fields
+              PURL=$(jq -r '.releaseNotes.content.artifacts[0].purl' "$DATA_FILE")
+              if [[ "$PURL" != pkg:pypi/* ]]; then
+                echo "ERROR: Expected pkg:pypi PURL, got: $PURL"
+                exit 1
+              fi
+
+              # Verify existing mapping entry was patched with contentType
+              MAPPING_COUNT=$(jq '.mapping.components | length' "$DATA_FILE")
+              if [ "$MAPPING_COUNT" -ne 1 ]; then
+                echo "ERROR: Expected 1 mapping component (patched, not duplicated), got: $MAPPING_COUNT"
+                jq '.mapping.components' "$DATA_FILE"
+                exit 1
+              fi
+
+              MAPPED_NAME=$(jq -r '.mapping.components[0].name' "$DATA_FILE")
+              if [ "$MAPPED_NAME" != "test_package" ]; then
+                echo "ERROR: Expected mapping component name 'test_package', got: $MAPPED_NAME"
+                exit 1
+              fi
+
+              MAPPED_TYPE=$(jq -r '.mapping.components[0].contentType' "$DATA_FILE")
+              if [ "$MAPPED_TYPE" != "generic" ]; then
+                echo "ERROR: Expected contentType 'generic', got: $MAPPED_TYPE"
+                exit 1
+              fi
+
               echo "Files extracted:"
               ls -la "${FILES_DIR}"
               echo "Chains provenance:"
               ls -la "${FILES_DIR}/chains-provenance"
+              echo "Release notes artifacts:"
+              jq '.releaseNotes.content.artifacts' "$DATA_FILE"
+              echo "Mapping components:"
+              jq '.mapping.components' "$DATA_FILE"
 
               echo "All checks passed!"
       runAfter:

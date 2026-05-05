@@ -7,21 +7,27 @@ metadata:
     build.appstudio.redhat.com/commit_sha: '{{revision}}'
     build.appstudio.redhat.com/pull_request_number: '{{pull_request_number}}'
     build.appstudio.redhat.com/target_branch: '{{target_branch}}'
-    pipelinesascode.tekton.dev/max-keep-runs: "2"
-    # Only trigger on specific comment (not on edits)
-    # Uses regex to allow trailing whitespace for better UX
+    pipelinesascode.tekton.dev/max-keep-runs: "5"
+    pipelinesascode.tekton.dev/on-event: "[]"
+    pipelinesascode.tekton.dev/on-comment: "^/test-large-snapshot\\s*$"
     pipelinesascode.tekton.dev/on-cel-expression: |
-      event == "issue_comment" && body.action == "created" && body.comment.body.matches("^/test-large-snapshot\\s*$")
+      target_branch == "development" &&
+      event == "issue_comment" &&
+      body.action == "created" &&
+      has(body.comment) &&
+      body.comment.body.matches("^/test-large-snapshot\\s*$")
+    pac.test.appstudio.openshift.io/branch: '{{source_branch}}'
   creationTimestamp:
   labels:
     appstudio.openshift.io/application: release-service-catalog
     appstudio.openshift.io/component: release-service-catalog
     pipelines.appstudio.openshift.io/type: test
+    pac.test.appstudio.openshift.io/pull-request: '{{pull_request_number}}'
+    test.appstudio.openshift.io/scenario: rh-advisories-large-snapshot-test
+    test.appstudio.openshift.io/type: component
   name: rh-advisories-large-snapshot-test
-  # IMPORTANT: Hardcoded namespace for staging cluster (stg-rh01)
+  # IMPORTANT: Hardcoded namespace for production cluster (stone-prd-rh01)
   # This test MUST run in rhtap-release-2-tenant where secrets exist
-  # Required permissions: PipelineRun creation, secret access
-  # Do NOT modify unless coordinating with Release Service team
   namespace: rhtap-release-2-tenant
 spec:
   params:
@@ -32,8 +38,9 @@ spec:
           "artifacts": {},
           "components": [
             {
-              "containerImage": "quay.io/centos/centos:stream9",
-              "name": "test-component",
+              "containerImage":
+                "quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-catalog:on-pr-{{revision}}",
+              "name": "release-service-catalog",
               "source": {
                 "git": {
                   "revision": "{{revision}}",
@@ -45,18 +52,17 @@ spec:
         }
     - name: PIPELINE_TEST_SUITE
       value: "rh-advisories-large-snapshot"
-    # IMPORTANT: Hardcoded secret names (must exist in rhtap-release-2-tenant)
-    # These secrets are pre-created and managed by the Release Service team
-    # vault-password-secret: Ansible vault password for decrypting test secrets
-    # github-token-secret: GitHub PAT for repository operations
-    # kubeconfig-secret: Kubeconfig for staging cluster access
     - name: VAULT_PASSWORD_SECRET_NAME
-      value: 'vault-password-secret'
+      value: "e2e-test-vault-password"
     - name: GITHUB_TOKEN_SECRET_NAME
-      value: 'github-token-secret'
+      value: "e2e-test-github-token"
     - name: KUBECONFIG_SECRET_NAME
-      value: 'kubeconfig-secret'
-  
+      value: "e2e-test-service-account-kubeconfig"
+    - name: GIT_URL
+      value: "https://github.com/konflux-ci/release-service-catalog"
+    - name: GIT_REVISION
+      value: "{{revision}}"
+  serviceAccountName: build-pipeline-release-service-catalog
   pipelineRef:
     resolver: git
     params:
@@ -65,18 +71,7 @@ spec:
       - name: revision
         value: '{{revision}}'
       - name: pathInRepo
-        value: integration-tests/pipelines/e2e-tests-staging-pipeline.yaml
-  
-  workspaces:
-    - name: workspace
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          resources:
-            requests:
-              storage: 2Gi
-  
-  # Extended timeout for large snapshot tests (8 hours)
+        value: integration-tests/pipelines/rh-advisories-large-snapshot-pipeline.yaml
   timeouts:
-    pipeline: 8h0m0s
+    pipeline: 2h30m0s
+    tasks: 2h0m0s

@@ -11,6 +11,7 @@ kubectl create secret generic rhtl-pulp-credentials-secret \
 #   [0] prepare-workdir (command - no mock needed)
 #   [1] use-trusted-artifact (StepAction ref - no mock needed)
 #   [2] upload (command - replace with mock script)
+#   [3] create-trusted-artifact (StepAction ref - no mock needed)
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 

@@ -78,6 +78,40 @@ EOF
             rm -rf "$temp_bin_dir"
         }
 
+        create_mock_tgz_with_non_binary_files() {
+            local filename="$1"
+            local binary_name="${filename%.tar.gz}"
+
+            local temp_bin_dir=$(mktemp -d)
+            echo "Mock binary content for $binary_name" > "$temp_bin_dir/$binary_name"
+            chmod +x "$temp_bin_dir/$binary_name"
+            echo "README for $binary_name" > "$temp_bin_dir/README.md"
+            echo "License text for $binary_name" > "$temp_bin_dir/LICENSE"
+            echo "Changelog for $binary_name" > "$temp_bin_dir/CHANGELOG.txt"
+
+            tar -czf "temp_releases/releases/$filename" -C "$temp_bin_dir" \
+                "$binary_name" "README.md" "LICENSE" "CHANGELOG.txt"
+            rm -rf "$temp_bin_dir"
+        }
+
+        create_mock_tgz_with_invalid_files() {
+            local filename="$1"
+            local binary_name="${filename%.tar.gz}"
+
+            local temp_bin_dir=$(mktemp -d)
+            echo "Mock binary content for $binary_name" > "$temp_bin_dir/$binary_name"
+            chmod +x "$temp_bin_dir/$binary_name"
+            echo "README" > "$temp_bin_dir/README.md"
+            echo "License" > "$temp_bin_dir/LICENSE"
+            echo "changelog" > "$temp_bin_dir/CHANGELOG.md"
+            # Invalid: space in filename — used by unsafe-filenames test.
+            echo "bad" > "$temp_bin_dir/bad file.txt"
+
+            tar -czf "temp_releases/releases/$filename" -C "$temp_bin_dir" \
+                "$binary_name" "README.md" "LICENSE" "CHANGELOG.md" "bad file.txt"
+            rm -rf "$temp_bin_dir"
+        }
+
         create_mock_tar() {
             local filename="$1"
             local binary_name="${filename%.tar}"
@@ -93,7 +127,17 @@ EOF
             rm -rf "$temp_bin_dir"
         }
         
-        if [[ "$*" =~ tarinput12345 ]]; then
+        if [[ "$*" =~ unsafefiles456 ]]; then
+            # Test component with invalid filenames.
+            create_mock_tgz_with_invalid_files "unsafefiles-binary-windows-amd64.tar.gz"
+            create_mock_tgz_with_invalid_files "unsafefiles-binary-darwin-amd64.tar.gz"
+            create_mock_tgz_with_invalid_files "unsafefiles-binary-linux-amd64.tar.gz"
+        elif [[ "$*" =~ readmetest789 ]]; then
+            # Test component with mixed-case docs and LICENSE alongside binaries
+            create_mock_tgz_with_non_binary_files "readmetest-binary-windows-amd64.tar.gz"
+            create_mock_tgz_with_non_binary_files "readmetest-binary-darwin-amd64.tar.gz"
+            create_mock_tgz_with_non_binary_files "readmetest-binary-linux-amd64.tar.gz"
+        elif [[ "$*" =~ tarinput12345 ]]; then
             # Test component with uncompressed .tar input files
             create_mock_tar "tartest-binary-windows-amd64.tar"
             create_mock_tar "tartest-binary-darwin-amd64.tar"
@@ -147,6 +191,18 @@ function oras() {
         exit 1
     elif [[ "$*" == "pull --registry-config"* ]]; then
         echo "Mocking pulling files"
+        if [[ "$4" =~ "unsafefiles456" ]]; then
+            touch unsafefiles-binary-windows-amd64.zip
+            touch unsafefiles-binary-darwin-amd64.tar.gz
+            touch unsafefiles-binary-linux-amd64.tar.gz
+        fi
+
+        if [[ "$4" =~ "readmetest789" ]]; then
+            touch readmetest-binary-windows-amd64.zip
+            touch readmetest-binary-darwin-amd64.tar.gz
+            touch readmetest-binary-linux-amd64.tar.gz
+        fi
+
         if [[ "$4" =~ "ghijkl67890" ]]; then
             touch testproduct2-binary-windows-amd64.zip
             touch testproduct2-binary-darwin-amd64.tar.gz
@@ -185,7 +241,15 @@ function oras() {
             mkdir -p "$output_dir"
             # Determine component from the pull URL
             # Files should be in os/arch/ structure within the output directory
-            if [[ "$*" =~ testproduct2/signed ]]; then
+            if [[ "$*" =~ unsafefiles/signed ]]; then
+                mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
+                touch "$output_dir/macos/amd64/unsafefiles-binary-darwin-amd64"
+                touch "$output_dir/windows/amd64/unsafefiles-binary-windows-amd64.exe"
+            elif [[ "$*" =~ readmetest/signed ]]; then
+                mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
+                touch "$output_dir/macos/amd64/readmetest-binary-darwin-amd64"
+                touch "$output_dir/windows/amd64/readmetest-binary-windows-amd64.exe"
+            elif [[ "$*" =~ testproduct2/signed ]]; then
                 mkdir -p "$output_dir/macos/amd64" "$output_dir/windows/amd64"
                 touch "$output_dir/macos/amd64/testproduct2-binary-darwin-amd64"
                 touch "$output_dir/windows/amd64/testproduct2-binary-windows-amd64.exe"
@@ -208,7 +272,15 @@ function oras() {
         echo Simulating oras pull
         # Determine component from the pull URL and create appropriate files
         # Files should be in os/arch/ structure (e.g., windows/amd64/, macos/amd64/)
-        if [[ "$*" =~ testproduct2/signed ]] || [[ "$*" =~ testproduct2/unsigned ]]; then
+        if [[ "$*" =~ unsafefiles/signed ]] || [[ "$*" =~ unsafefiles/unsigned ]]; then
+            mkdir -p windows/amd64 macos/amd64
+            touch windows/amd64/unsafefiles-binary-windows-amd64.exe
+            touch macos/amd64/unsafefiles-binary-darwin-amd64
+        elif [[ "$*" =~ readmetest/signed ]] || [[ "$*" =~ readmetest/unsigned ]]; then
+            mkdir -p windows/amd64 macos/amd64
+            touch windows/amd64/readmetest-binary-windows-amd64.exe
+            touch macos/amd64/readmetest-binary-darwin-amd64
+        elif [[ "$*" =~ testproduct2/signed ]] || [[ "$*" =~ testproduct2/unsigned ]]; then
             mkdir -p windows/amd64 macos/amd64
             touch windows/amd64/testproduct2-binary-windows-amd64.exe
             touch macos/amd64/testproduct2-binary-darwin-amd64
@@ -259,6 +331,18 @@ function pulp_push_wrapper() {
             cat "$source_dir/staged.yaml"
             exit 1
         fi
+
+        if grep -q "readmetest-binary" "$source_dir/staged.yaml"; then
+            # Ensure supplementary files were preserved through hold-out and restore.
+            for expected in "README.md" "LICENSE" "CHANGELOG.txt"; do
+                if ! grep -q "$expected" "$source_dir/staged.yaml"; then
+                    echo "ERROR: expected supplementary file '$expected' in staged.yaml for readmetest"
+                    cat "$source_dir/staged.yaml"
+                    exit 1
+                fi
+            done
+        fi
+
         echo "staged.yaml structure verified - relative_path includes pulp repo path"
     fi
 }
@@ -268,7 +352,7 @@ function rsync() {
 
     if [[ "$3" = "testproduct3-binary-linux-amd64.tar.gz" ]]; then
         printf "Mocked failure of exodus-rsync"
-        exit 1
+        return 1
     fi
 }
 

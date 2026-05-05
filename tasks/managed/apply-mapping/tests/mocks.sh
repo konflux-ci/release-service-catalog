@@ -46,6 +46,12 @@ function skopeo() {
       return
   fi
 
+  # mixed timestamp and incrementer tags: timestamps ignored, increments from 135
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-timestamp-mixed ]]; then
+      echo '{"Tags": ["1.2.1", "1.2.1-26", "1.2.1-67", "1.2.1-135", "1.2.1-1737653481", "1.2.1-1740048934", "1.2.1-1745398585"]}'
+      return
+  fi
+  
   # 7 digit tags: ignored by {1,6} regex, incrementer starts at 1
   if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-leadingzero ]]; then
       echo '{"Tags": ["v0.7.0-0760387", "v0.7.0-0760386"]}'

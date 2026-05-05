@@ -9,6 +9,7 @@ The following integration test suites are available:
 - **[collectors](collectors/)** - Tests for advisory data collection and processing
 - **[fbc-release](fbc-release/)** - Tests for File-Based Catalog (FBC) release pipeline
 - **[push-to-addons-registry](push-to-addons-registry/)** - Tests for pushing to addon registries
+- **[rh-push-helm-chart-to-registry-redhat-io](rh-push-helm-chart-to-registry-redhat-io/)** - Tests for Helm OCI chart release pipeline
 - **[rh-push-to-external-registry](rh-push-to-external-registry/)** - Tests for pushing to external registries
 - **[release-to-github](release-to-github/)** - Tests for GitHub release pipeline
 - **[rhtap-service-push](rhtap-service-push/)** - Tests for RHTAP service push pipeline

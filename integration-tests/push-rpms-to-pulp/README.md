@@ -1,6 +1,13 @@
 # push-rpms-to-pulp Test
 
-This test validates the pushing of rpms to pulp pipeline. When the release includes noarch RPMs, the integration test asserts they are published to all default arch repos (x86_64, aarch64, s390x, ppc64le). Task-level test `tasks/managed/push-rpms-to-pulp/tests/test-push-rpms-to-pulp-noarch-all-default-arches.yaml` covers the same noarch fanout behavior in isolation.
+This test validates the push-rpms-to-pulp pipeline with two components:
+
+- **Component A (hello)**: builds for all 4 architectures (x86_64, aarch64, s390x, ppc64le)
+- **Component B (hello2)**: builds for x86_64 only
+
+Both components produce binary, source, and noarch RPMs. The test verifies that each RPM is pushed to the correct Pulp repository and validates noarch fanout behavior.
+
+Auto-release is disabled. The test waits for both component builds to complete, then manually creates a Release against the multi-component Snapshot. It also verifies idempotency by retriggering the release and checking that all RPMs are filtered as already published.
 
 ## Test-Specific Dependencies
 

@@ -1,0 +1,565 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rh-advisories-large-snapshot-pipeline
+spec:
+  params:
+    - name: SNAPSHOT
+      type: string
+    - name: PIPELINE_TEST_SUITE
+      type: string
+      description: 'The name of the test corresponding to a defined Konflux integration test.'
+    - name: VAULT_PASSWORD_SECRET_NAME
+      default: 'vault-password-secret'
+      type: string
+    - name: GITHUB_TOKEN_SECRET_NAME
+      default: 'github-token-secret'
+      type: string
+    - name: KUBECONFIG_SECRET_NAME
+      default: 'kubeconfig-secret'
+      type: string
+    - name: GIT_URL
+      type: string
+      default: 'https://github.com/konflux-ci/release-service-catalog'
+      description: 'Git repository URL for resolving tasks'
+    - name: GIT_REVISION
+      type: string
+      default: 'main'
+      description: 'Git revision/branch for resolving tasks'
+  tasks:
+    - name: get-snapshot-data
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: SNAPSHOT
+        results:
+          - name: CONTAINER_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+        stepTemplate:
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: get-container-image
+            # yamllint disable-next-line rule:line-length
+            image: quay.io/konflux-ci/release-service-utils@sha256:e852a62497c4537059bb1f4c3ddf5c1a813b2b22bd9f4bb826cffb36af7d5f65
+            computeResources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 50m
+                memory: 64Mi
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              containerImage=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+              gitUrl=$(jq -r '.components[0].source.git.url // ""' <<< "${SNAPSHOT}")
+              gitRevision=$(jq -r '.components[0].source.git.revision // ""' <<< "${SNAPSHOT}")
+
+              # Fail early with a clear message rather than letting downstream tasks
+              # fail with a confusing "invalid image reference" or empty-param error.
+              if [[ -z "${containerImage}" ]]; then
+                echo "ERROR: SNAPSHOT is missing components[0].containerImage" >&2
+                echo "SNAPSHOT content:" >&2
+                echo "${SNAPSHOT}" >&2
+                exit 1
+              fi
+              if [[ -z "${gitUrl}" ]]; then
+                echo "ERROR: SNAPSHOT is missing components[0].source.git.url" >&2
+                exit 1
+              fi
+              if [[ -z "${gitRevision}" ]]; then
+                echo "ERROR: SNAPSHOT is missing components[0].source.git.revision" >&2
+                exit 1
+              fi
+
+              echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
+              echo -n "${gitUrl}" | tee "$(results.PR_GIT_URL.path)"
+              echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
+
+    - name: run-test
+      timeout: "2h0m0s"
+      runAfter:
+        - get-snapshot-data
+      params:
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: PR_GIT_URL
+          value: $(tasks.get-snapshot-data.results.PR_GIT_URL)
+        - name: PR_GIT_REVISION
+          value: $(tasks.get-snapshot-data.results.PR_GIT_REVISION)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: PIPELINE_TEST_SUITE
+          - name: STEP_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+          - name: SNAPSHOT
+        stepTemplate:
+          securityContext:
+            runAsUser: 1001
+        results:
+          - name: TEST_OUTPUT
+            description: Test output
+          - name: VERIFICATION_SUMMARY
+            description: >-
+              One-line pass/fail summary from verify_release_contents, always
+              visible in the Tekton UI regardless of step-log truncation.
+          - name: FAILURE_CONTEXT
+            description: >-
+              Short failure summary written by generate-large-snapshot.sh on
+              error, capturing the component, step, and command that failed.
+              Surfaced in the test-report finally task for quick triage.
+        steps:
+          - name: run-test
+            image: $(params.STEP_IMAGE)
+            computeResources:
+              requests:
+                cpu: 100m
+                memory: 512Mi
+              limits:
+                cpu: '1'
+                memory: 512Mi
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+              - name: BASE_REPO
+                value: "hacbs-release-tests/e2e-base"
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+              - name: PR_NUMBER
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['pac.test.appstudio.openshift.io/pull-request']
+              - name: BRANCH_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['pac.test.appstudio.openshift.io/branch']
+            script: |
+              #!/usr/bin/env bash
+
+              set -o errexit
+              set -o nounset
+              set -o pipefail
+
+              # Defined first so exitfunc can call it.  SC2317: reachable via trap.
+              # shellcheck disable=SC2317
+              _cleanup_cred_files() {
+                printf '' > "${VAULT_PASSWORD_FILE:-/dev/null}" 2>/dev/null || true
+                rm -f "${VAULT_PASSWORD_FILE:-}" "${KUBECONFIG_FILE:-}"
+              }
+
+              # shellcheck disable=SC2317
+              exitfunc() {
+                local err=$1
+                local line=$2
+                local command="$3"
+
+                # Zeroize and remove credential temp files before writing results.
+                _cleanup_cred_files
+
+                successcount=0
+                failurecount=0
+                if [ "$err" -eq 0 ] ; then
+                  RESULT="SUCCESS"
+                  successcount=1
+                else
+                  echo "$0: ERROR $command failed at line $line - exited with status $err"
+                  RESULT="FAILURE"
+                  failurecount=1
+                fi
+                # shellcheck disable=SC2086
+                TEST_OUTPUT=$(jq -rc --arg date "$(date -u --iso-8601=seconds)" --arg RESULT "${RESULT}" \
+                  --argjson successcount ${successcount} --argjson failurecount ${failurecount} --null-input \
+                  '{result: $RESULT, timestamp: $date, failures: $failurecount, successes: $successcount, warnings: 0}')
+                echo -n "${TEST_OUTPUT}" | tee "$(results.TEST_OUTPUT.path)"
+                # Surface the verification summary written by verify_release_contents
+                # in test.sh as a separate result so it is always visible in the
+                # Tekton UI, even when the step log is truncated by the log-size limit.
+                if [ -s /tmp/verification-summary.txt ]; then
+                    cp /tmp/verification-summary.txt "$(results.VERIFICATION_SUMMARY.path)"
+                else
+                    echo "N/A — test did not reach verify_release_contents" \
+                        > "$(results.VERIFICATION_SUMMARY.path)"
+                fi
+                # Surface the failure context written by generate-large-snapshot.sh or
+                # diagnose_managed_pipeline_failure() in test.sh so the test-report
+                # task can show which step/task failed even when the run-test log
+                # is truncated by the Tekton API limit.
+                if [ -s /tmp/generate-snapshot-error.txt ]; then
+                    cp /tmp/generate-snapshot-error.txt "$(results.FAILURE_CONTEXT.path)"
+                elif [ "$err" -ne 0 ]; then
+                    printf 'Failed at line %s: %s (exit %s)\n' \
+                        "${line}" "${command}" "${err}" \
+                        > "$(results.FAILURE_CONTEXT.path)"
+                else
+                    printf 'none\n' > "$(results.FAILURE_CONTEXT.path)"
+                fi
+                exit "$err"
+              }
+              trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+              echo "PR_GIT_URL: $(params.PR_GIT_URL)"
+              echo "PR_GIT_REVISION: $(params.PR_GIT_REVISION)"
+              echo "PR_NUMBER: ${PR_NUMBER}"
+
+              # Create credential files with restricted permissions.
+              # _cleanup_cred_files (defined above) removes them via the EXIT trap.
+              umask 077
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              printf '%s' "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              chmod 0600 "${VAULT_PASSWORD_FILE}"
+
+              KUBECONFIG_FILE=$(mktemp)
+              printf '%s' "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              chmod 0600 "${KUBECONFIG_FILE}"
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              RELEASE_CATALOG_GIT_URL="$(params.PR_GIT_URL)"
+              RELEASE_CATALOG_GIT_REVISION="$(params.PR_GIT_REVISION)"
+              export RELEASE_CATALOG_GIT_URL
+              export RELEASE_CATALOG_GIT_REVISION
+
+              # For manual trigger via /test-large-snapshot, ALWAYS run the test
+              # Skip the affected pipelines check that other tests use
+              echo "Manual trigger: Running test unconditionally"
+
+              export CI=true
+
+              # Run test and capture result
+              set +e
+              "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
+              TEST_RESULT=$?
+              set -e
+
+              # Exit with test result — diagnostics and retry summary are in
+              # the test-report finally task which has its own short, focused log.
+              exit ${TEST_RESULT}
+
+  finally:
+    - name: test-report
+      timeout: "15m0s"
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: TEST_OUTPUT
+          value: $(tasks.run-test.results.TEST_OUTPUT)
+        - name: VERIFICATION_SUMMARY
+          value: $(tasks.run-test.results.VERIFICATION_SUMMARY)
+        - name: FAILURE_CONTEXT
+          value: $(tasks.run-test.results.FAILURE_CONTEXT)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: PIPELINE_TEST_SUITE
+          - name: KUBECONFIG_SECRET_NAME
+          - name: TEST_OUTPUT
+          - name: VERIFICATION_SUMMARY
+          - name: FAILURE_CONTEXT
+        stepTemplate:
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: test-report
+            image: $(params.STEP_IMAGE)
+            computeResources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+            env:
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+              - name: PLR_NAME
+                value: $(context.pipelineRun.name)
+              - name: PLR_NAMESPACE
+                value: $(context.pipelineRun.namespace)
+              - name: TEST_OUTPUT
+                value: $(params.TEST_OUTPUT)
+              - name: VERIFICATION_SUMMARY
+                value: $(params.VERIFICATION_SUMMARY)
+              - name: FAILURE_CONTEXT
+                value: $(params.FAILURE_CONTEXT)
+            script: |
+              #!/usr/bin/env bash
+              set +e
+
+              umask 077
+              KUBECONFIG_FILE=$(mktemp)
+              printf '%s' "${KUBECONFIG}" > "${KUBECONFIG_FILE}"
+              chmod 0600 "${KUBECONFIG_FILE}"
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+              trap 'printf "" > "${KUBECONFIG_FILE}"; rm -f "${KUBECONFIG_FILE}"' EXIT
+
+              # shellcheck disable=SC1090
+              . "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+              tenant_namespace="${tenant_namespace:-dev-release-team-tenant}"
+              # Variables set by test.env; explicit fallbacks silence SC2154 for shellcheck.
+              large_snapshot_name="${large_snapshot_name:-rh-advisories-large-snapshot-${uuid:0:8}}"
+              managed_namespace="${managed_namespace:-managed-release-team-tenant}"
+
+              # ── helpers ────────────────────────────────────────────────────────
+              hr() { echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; }
+
+              # Diagnose a failed managed PipelineRun:
+              # prints which tasks failed, their condition messages, and any
+              # error lines still retrievable from the pod logs.
+              diagnose_managed_plr() {
+                local plr_name="$1"
+                local ns="$2"
+
+                echo ""
+                echo "❌ Managed Pipeline Failure (${plr_name}):"
+
+                local failed_rows
+                failed_rows=$(kubectl get taskrun -n "${ns}" \
+                  -l "tekton.dev/pipelineRun=${plr_name}" \
+                  -o json 2>/dev/null \
+                  | jq -r '
+                      .items[]
+                      | select(.status.conditions[0].status == "False")
+                      | [
+                          .metadata.labels["tekton.dev/pipelineTask"],
+                          .metadata.name,
+                          (.status.podName // ""),
+                          (.status.conditions[0].reason // ""),
+                          (.status.conditions[0].message // "")
+                        ] | @tsv') || true
+
+                if [ -z "${failed_rows}" ]; then
+                  echo "   (no failed taskruns found — may already be garbage-collected)"
+                  return
+                fi
+
+                while IFS=$'\t' read -r task_name taskrun_name pod_name reason msg; do
+                  echo ""
+                  echo "   Task    : ${task_name}"
+                  echo "   TaskRun : ${taskrun_name}"
+                  echo "   Reason  : ${reason}"
+                  echo "   Message : ${msg}"
+                  # Grab last error lines from pod log if the pod still exists.
+                  if [ -n "${pod_name}" ] && [ "${pod_name}" != "null" ]; then
+                    local log_errors
+                    log_errors=$(kubectl logs "${pod_name}" -n "${ns}" \
+                      --all-containers 2>/dev/null \
+                      | grep -iE 'level=fatal|level=error|ERROR:|FAILED|403|404|Forbidden|Not Found' \
+                      | tail -5 || true)
+                    if [ -n "${log_errors}" ]; then
+                      echo "   Error lines from pod log:"
+                      echo "${log_errors}" | while IFS= read -r l; do echo "     ${l}"; done
+                    else
+                      echo "   (pod log unavailable or no error lines matched)"
+                    fi
+                  fi
+                done <<< "${failed_rows}"
+              }
+              # ── report ─────────────────────────────────────────────────────────
+
+              hr
+              echo "📋 Test Report"
+              hr
+              echo ""
+
+              # If TEST_OUTPUT is empty the run-test task was killed before it could
+              # write results (e.g. TaskRunTimeout). Detect that case explicitly.
+              if [ -z "${TEST_OUTPUT}" ]; then
+                # shellcheck disable=SC2153
+                RUN_TEST_REASON=$(kubectl get taskrun \
+                  -n "${PLR_NAMESPACE}" \
+                  -l "tekton.dev/pipelineRun=${PLR_NAME},tekton.dev/pipelineTask=run-test" \
+                  -o jsonpath='{.items[0].status.conditions[0].reason}' 2>/dev/null || echo "")
+                if [ "${RUN_TEST_REASON}" = "TaskRunTimeout" ]; then
+                  echo "🏁 Result:  ⏰ TIMED OUT (run-test task exceeded its 2h limit)"
+                else
+                  echo "🏁 Result:  ⚠️  unknown (run-test was cancelled or killed before writing results)"
+                fi
+              else
+                echo "🏁 Result:  ${TEST_OUTPUT}"
+              fi
+              echo ""
+
+              # Show pre-pipeline failure context (generate-large-snapshot.sh or
+              # diagnose_managed_pipeline_failure() in test.sh) only when it contains
+              # something meaningful beyond the generic "Failed at line N" message.
+              if [ -n "${FAILURE_CONTEXT}" ] \
+                  && [ "${FAILURE_CONTEXT}" != "none" ] \
+                  && [[ "${FAILURE_CONTEXT}" != "Failed at line"* ]]; then
+                echo "❌ Pre-pipeline Failure Context:"
+                echo "${FAILURE_CONTEXT}"
+                echo ""
+              fi
+
+              echo "📝 Verification Summary:"
+              echo "${VERIFICATION_SUMMARY}"
+              echo ""
+
+              # Look up the automated Release by snapshot label (not the originating-tool
+              # label, which is deleted by cleanup before this finally task runs).
+              RELEASE_NAME=$(kubectl get release \
+                -n "${tenant_namespace}" \
+                -l "release.appstudio.openshift.io/snapshot=${large_snapshot_name}" \
+                --sort-by=.metadata.creationTimestamp \
+                -o json 2>/dev/null \
+                | jq -r '.items[-1].metadata.name // ""')
+
+              if [ -z "${RELEASE_NAME}" ]; then
+                echo "⚠️  No Release found for snapshot=${large_snapshot_name}"
+              else
+                echo "🔍 Release: ${RELEASE_NAME}"
+                RELEASE_JSON=$(kubectl get release "${RELEASE_NAME}" \
+                  -n "${tenant_namespace}" -o json 2>/dev/null || echo "{}")
+
+                # Show Release conditions compactly.
+                echo "${RELEASE_JSON}" | jq -r '
+                  .status.conditions[]?
+                  | "   \(.type)=\(.status) (\(.reason // "-"))\(
+                      if .message and .message != "" then ": " + .message else "" end)"' \
+                  2>/dev/null || true
+
+                # If the managed pipeline ran, show its name and diagnose any failures.
+                MANAGED_PLR=$(echo "${RELEASE_JSON}" \
+                  | jq -r '.status.managedProcessing.pipelineRun // ""' 2>/dev/null || true)
+                MANAGED_PLR_NAME="${MANAGED_PLR##*/}"
+                if [ -n "${MANAGED_PLR_NAME}" ] && [ "${MANAGED_PLR_NAME}" != "null" ]; then
+                  echo "   Managed PipelineRun: ${MANAGED_PLR_NAME}"
+                  # Diagnose on failure or when TEST_OUTPUT is empty (run-test was killed/timed out).
+                  if [ -z "${TEST_OUTPUT}" ] || echo "${TEST_OUTPUT}" | grep -q '"FAILURE"'; then
+                    diagnose_managed_plr "${MANAGED_PLR_NAME}" "${managed_namespace}"
+                  fi
+                fi
+              fi
+              echo ""
+              hr
+
+    - name: cleanup-resources
+      timeout: "15m0s"
+      params:
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: KUBECONFIG_SECRET_NAME
+          value: $(params.KUBECONFIG_SECRET_NAME)
+      taskSpec:
+        params:
+          - name: PIPELINE_TEST_SUITE
+          - name: STEP_IMAGE
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: KUBECONFIG_SECRET_NAME
+        stepTemplate:
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: cleanup-resources
+            image: $(params.STEP_IMAGE)
+            computeResources:
+              requests:
+                cpu: 100m
+                memory: 128Mi
+              limits:
+                cpu: 100m
+                memory: 128Mi
+            env:
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: KUBECONFIG
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.KUBECONFIG_SECRET_NAME)
+                    key: kubeconfig
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+            script: |
+              # shellcheck source=/dev/null
+              . "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+
+              # shellcheck source=/dev/null
+              . "/home/e2e/tests/lib/test-functions.sh"
+
+              "/home/e2e/tests/scripts/delete-repository.sh" "${component_repo_name:?}"
+
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+              KUBECONFIG_FILE=$(mktemp)
+              set +x
+              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
+              set -x
+              KUBECONFIG="${KUBECONFIG_FILE}"
+              export KUBECONFIG
+
+              decrypt_secrets "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)"
+
+              tmpDir=$(mktemp -d)
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant" \
+                | envsubst > "$tmpDir/tenant-resources.yaml"
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed" \
+                | envsubst > "$tmpDir/managed-resources.yaml"
+
+              kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found
+              kubectl delete -f "$tmpDir/managed-resources.yaml" --ignore-not-found

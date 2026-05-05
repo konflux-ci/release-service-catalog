@@ -6,6 +6,9 @@ metadata:
 spec:
   description: |
     Extract Python packages from OCI artifacts for signing and upload.
+    The populate-release-notes step parses wheel SBOMs for pkg:pypi PURLs,
+    populates releaseNotes.content.artifacts, and ensures mapping.components
+    entries have contentType set to "generic" for downstream advisory creation.
     The fetch-chains-provenance step verifies and retrieves Tekton Chains SLSA provenance
     using cosign with the public key from k8s://openshift-pipelines/public-key.
     The pipeline service account must have get access to this secret
@@ -45,6 +48,9 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
+    - name: dataPath
+      type: string
+      description: Path to data.json relative to dataDir
   results:
     - name: sourceDataArtifact
       description: Produced trusted data artifact
@@ -144,6 +150,153 @@ spec:
         echo "Extracted files:"
         ls -la "${FILES_DIR}"
 
+    - name: populate-release-notes
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+
+        parse_wheel_platform() {
+          local platform="$1"
+
+          if [[ "$platform" == "any" || "$platform" == "none" ]]; then
+            echo "noarch any"
+            return
+          fi
+
+          # Extract arch from platform tag (last underscore-separated segment)
+          local arch="${platform##*_}"
+
+          # Derive OS from platform prefix
+          local os="any"
+          if [[ "$platform" == manylinux* || "$platform" == musllinux* || "$platform" == linux* ]]; then
+            os="linux"
+          elif [[ "$platform" == macosx* ]]; then
+            os="macos"
+          elif [[ "$platform" == win* ]]; then
+            os="windows"
+          fi
+
+          echo "$arch $os"
+        }
+
+        # Collect artifact entries as JSON lines for later deduplication
+        ARTIFACTS_JSONL=$(mktemp)
+
+        for whl in "${FILES_DIR}"/*.whl; do
+          [ -f "$whl" ] || continue
+          filename=$(basename "$whl")
+          echo "Processing wheel: $filename"
+
+          # Parse PEP 427 filename: {name}-{version}(-{build})?-{python}-{abi}-{platform}.whl
+          stem="${filename%.whl}"
+          IFS='-' read -ra parts <<< "$stem"
+          num_parts=${#parts[@]}
+
+          if [[ $num_parts -lt 5 || $num_parts -gt 6 ]]; then
+            echo "ERROR: Cannot parse wheel filename: $filename"
+            exit 1
+          fi
+
+          name="${parts[0]}"
+          version="${parts[1]}"
+          platform="${parts[$((num_parts - 1))]}"
+
+          # Extract SBOM from wheel zip
+          dist_info="${name}-${version}.dist-info"
+          sbom_path="${dist_info}/sboms/redhat.spdx.json"
+          echo "  Extracting SBOM: $sbom_path"
+          sbom_json=$(unzip -p "$whl" "$sbom_path" 2>/dev/null) || {
+            echo "ERROR: SBOM not found in wheel: $sbom_path"
+            exit 1
+          }
+
+          # Find pkg:pypi PURL from SPDX SBOM
+          purl=$(jq -r '
+            [.packages[]?.externalRefs[]?
+              | select(.referenceType == "purl")
+              | .referenceLocator
+              | select(startswith("pkg:pypi/"))] | first // empty
+          ' <<< "$sbom_json")
+
+          if [[ -z "$purl" ]]; then
+            echo "ERROR: No pkg:pypi PURL found in SBOM for wheel: $filename"
+            exit 1
+          fi
+          echo "  Found PURL: $purl"
+
+          # Parse platform tag
+          read -r arch os <<< "$(parse_wheel_platform "$platform")"
+          echo "  Platform: $platform -> arch=$arch, os=$os"
+
+          # Build artifact entry as JSON line
+          jq -nc \
+            --arg component "$name" \
+            --arg purl "$purl" \
+            --arg architecture "$arch" \
+            --arg os "$os" \
+            '{component: $component, purl: $purl, architecture: $architecture, os: $os}' \
+            >> "$ARTIFACTS_JSONL"
+        done
+
+        # Deduplicate by (name, version, architecture, os).
+        # Since purl encodes name@version, deduplicating by (component, purl, arch, os) is equivalent.
+        DEDUPED=$(jq -sc '
+          group_by(.component + "|" + .purl + "|" + .architecture + "|" + .os)
+          | map(.[0])
+        ' "$ARTIFACTS_JSONL")
+        rm -f "$ARTIFACTS_JSONL"
+
+        ARTIFACT_COUNT=$(jq 'length' <<< "$DEDUPED")
+        if [[ "$ARTIFACT_COUNT" -eq 0 ]]; then
+          echo "ERROR: No .whl files found in ${FILES_DIR}"
+          exit 1
+        fi
+        echo "Adding $ARTIFACT_COUNT artifact(s) to releaseNotes.content.artifacts"
+
+        # Append entries to .releaseNotes.content.artifacts[] in data.json
+        TMP_DATA=$(mktemp)
+        jq --argjson artifacts "$DEDUPED" '
+          .releaseNotes.content.artifacts = (.releaseNotes.content.artifacts // []) + $artifacts
+        ' "$DATA_FILE" > "$TMP_DATA" && mv "$TMP_DATA" "$DATA_FILE"
+
+        # Ensure mapping.components[] includes each artifact component with contentType
+        COMPONENT_NAMES=$(jq -r '[.[].component] | unique | .[]' <<< "$DEDUPED")
+        MAPPING_ENTRIES="[]"
+        while IFS= read -r comp; do
+          MAPPING_ENTRIES=$(jq -c --arg name "$comp" \
+            '. + [{name: $name, contentType: "generic"}]' \
+            <<< "$MAPPING_ENTRIES")
+        done <<< "$COMPONENT_NAMES"
+        jq --argjson new_comps "$MAPPING_ENTRIES" '
+          ($new_comps | map(.name)) as $names |
+          (.mapping.components // []) as $existing |
+          ($existing | map(.name)) as $existing_names |
+          .mapping.components = [
+            $existing[] |
+            if (.name as $n | $names | index($n))
+               and ((.contentGateway?.contentType //
+                     .contentType // "") == "")
+            then . + {contentType: "generic"}
+            else . end
+          ] + [
+            $new_comps[]
+            | select(.name as $n |
+                $existing_names | index($n) | not)
+          ]
+        ' "$DATA_FILE" > "$TMP_DATA" && mv "$TMP_DATA" "$DATA_FILE"
+
+        echo "Done. Updated artifacts:"
+        jq '.releaseNotes.content.artifacts' "$DATA_FILE"
+
     - name: fetch-chains-provenance
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
@@ -180,7 +333,7 @@ spec:
             --insecure-ignore-tlog=true \
             --insecure-ignore-sct=true \
             --key k8s://openshift-pipelines/public-key \
-            "${IMAGE}" 2>"${COSIGN_STDERR}" | head -1 | jq . > "${PROVENANCE_FILE}"; then
+            "${IMAGE}" 2>"${COSIGN_STDERR}" | head -1 | jq '.payload | @base64d | fromjson' > "${PROVENANCE_FILE}"; then
             echo "  Saved Chains provenance to ${PROVENANCE_FILE}"
           else
             echo "ERROR: Failed to fetch Chains provenance for ${IMAGE}"

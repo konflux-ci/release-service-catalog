@@ -3,63 +3,194 @@
 CLEANUP="true"
 NO_CVE="false" # Default to false
 
-# Override merge_github_pr to include JIRA reference for simple-jira collector
+# Override default lifecycle functions from test-functions.sh for multi-component support.
+
+create_github_repository() {
+    echo "Creating component repositories..."
+
+    "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+        "${component_base_repo_name}" "${component_base_branch}" \
+        "${component_repo_name}" "${component_branch}"
+
+    echo "Creating component 2 repository..."
+    "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+        "${component_base_repo_name}" "${component2_base_branch}" \
+        "${component2_repo_name}" "${component2_branch}"
+}
+
+wait_for_component_initialization() {
+    echo "Waiting for both components to initialize..."
+
+    wait_for_single_component_initialization "${component_name}"
+    component_pr_number="${pr_number}"
+
+    wait_for_single_component_initialization "${component2_name}"
+    component2_pr_number="${pr_number}"
+}
+
 merge_github_pr() {
-    echo "Merging PR ${pr_number} in repo ${component_repo_name}..."
     local commit_message="This fixes CVE-2024-8260. Fixes RELEASE-1502"
     if [ "${NO_CVE}" == "true" ]; then
-      echo "(Note: NOT Adding a CVE to the commit message)"
       commit_message="e2e test. Fixes RELEASE-1502"
-    else
-      echo "(Note: Adding CVE-2024-8260 and RELEASE-1502 to the commit message)"
     fi
-    echo "Commit message: \"${commit_message}\""
 
-    local merge_result
-    local attempt=1
-    local max_attempts=3
-    local success=false
+    _merge_pr() {
+        local pr_num=$1 repo_name=$2
+        local merge_result attempt=1 max_attempts=3 success=false
 
-    while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
-        echo "Merge attempt ${attempt}/${max_attempts}..."
-
-        set +e
-        merge_result=$(curl -L \
-          -X PUT \
-          -H "Accept: application/vnd.github+json" \
-          -H "Authorization: Bearer $GITHUB_TOKEN" \
-          -H "X-GitHub-Api-Version: 2022-11-28" \
-          "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}/merge" \
-          -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" --silent --show-error --fail-with-body)
-
-        if [ $? -eq 0 ]; then
-            success=true
-            echo "✅ PR merge succeeded on attempt ${attempt}"
-        else
-            echo "❌ PR merge failed on attempt ${attempt}. Response: ${merge_result}"
-            if [ $attempt -lt $max_attempts ]; then
-                echo "Waiting 5 seconds before retry..."
-                sleep 5
+        while [ $attempt -le $max_attempts ] && [ "$success" = false ]; do
+            set +e
+            merge_result=$(curl -L -X PUT \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${repo_name}/pulls/${pr_num}/merge" \
+              -d "{\"commit_title\":\"e2e test\",\"commit_message\":\"${commit_message}\"}" \
+              --silent --show-error --fail-with-body)
+            if [ $? -eq 0 ]; then
+                success=true
+            else
+                [ $attempt -lt $max_attempts ] && sleep 5
             fi
+            set -e
+            attempt=$((attempt + 1))
+        done
+        if [ "$success" = false ]; then
+            log_error "Failed to merge PR for ${repo_name} after ${max_attempts} attempts."
         fi
-        set -e
+        SHA=$(jq -r '.sha' <<< "${merge_result}")
+        if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
+            log_error "Failed to get SHA from merge response: ${merge_result}"
+        fi
+    }
+
+    _merge_pr "${component_pr_number}" "${component_repo_name}"
+    component_sha="${SHA}"
+
+    _merge_pr "${component2_pr_number}" "${component2_repo_name}"
+    component2_sha="${SHA}"
+
+    SHA="${component_sha}"
+}
+
+wait_for_plr_to_appear() {
+    comp1_plr_name=$(wait_for_single_plr_to_appear "${component_sha}")
+    component_push_plr_name="${comp1_plr_name}"
+
+    comp2_plr_name=$(wait_for_single_plr_to_appear "${component2_sha}")
+    component2_push_plr_name="${comp2_plr_name}"
+}
+
+wait_for_plr_to_complete() {
+    local comp1_result=$(mktemp)
+    local comp2_result=$(mktemp)
+
+    (
+        if wait_for_single_plr_to_complete "${component_push_plr_name}" "${component_name}" "${component_sha}"; then
+            echo "success" > "${comp1_result}"
+        else
+            echo "failure" > "${comp1_result}"
+        fi
+    ) &
+    local pid1=$!
+
+    (
+        if wait_for_single_plr_to_complete "${component2_push_plr_name}" "${component2_name}" "${component2_sha}"; then
+            echo "success" > "${comp2_result}"
+        else
+            echo "failure" > "${comp2_result}"
+        fi
+    ) &
+    local pid2=$!
+
+    wait $pid1
+    wait $pid2
+
+    local comp1_status=$(cat "${comp1_result}" 2>/dev/null || echo "unknown")
+    local comp2_status=$(cat "${comp2_result}" 2>/dev/null || echo "unknown")
+    rm -f "${comp1_result}" "${comp2_result}"
+
+    if [ "${comp1_status}" = "success" ] && [ "${comp2_status}" = "success" ]; then
+        return 0
+    else
+        echo "PipelineRun failures: comp1=${comp1_status}, comp2=${comp2_status}"
+        return 1
+    fi
+}
+
+# --- Snapshot and Release Management ---
+
+wait_for_multi_component_snapshot() {
+    local max_attempts=24
+    local attempt=1
+    local snapshot_name=""
+
+    while [ $attempt -le $max_attempts ] && [ -z "$snapshot_name" ]; do
+        local all_snapshots
+        all_snapshots=$(kubectl get snapshots -n "$tenant_namespace" \
+            -l "appstudio.openshift.io/application=${application_name}" \
+            --sort-by=.metadata.creationTimestamp \
+            -o json 2>/dev/null)
+
+        if [ $? -ne 0 ] || [ -z "$all_snapshots" ]; then
+            [ $attempt -lt $max_attempts ] && sleep 5
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        echo "$all_snapshots" | jq -r \
+          '.items[] | "  \(.metadata.name): \(.spec.components | length) components"' >&2
+
+        snapshot_name=$(echo "$all_snapshots" | jq -r \
+          '.items[] | select(.spec.components | length == 2) | .metadata.name' | tail -1)
+
+        if [ -z "$snapshot_name" ]; then
+            [ $attempt -lt $max_attempts ] && sleep 5
+        fi
 
         attempt=$((attempt + 1))
     done
 
-    if [ "$success" = false ]; then
-        log_error "Failed to merge PR after ${max_attempts} attempts. Last response: ${merge_result}"
+    if [ -z "$snapshot_name" ]; then
+        echo "Failed to find multi-component snapshot after ${max_attempts} attempts" >&2
     fi
 
-    # SHA is made global by not declaring it local
-    SHA=$(jq -r '.sha' <<< "${merge_result}")
-    if [ -z "$SHA" ] || [ "$SHA" == "null" ]; then
-        log_error "Failed to get SHA from merge response: ${merge_result}"
-    fi
-    echo "Merge SHA: ${SHA}"
+    echo "$snapshot_name"
 }
 
-# Function to verify Release contents
+wait_for_releases() {
+    local snapshot_name
+    snapshot_name=$(wait_for_multi_component_snapshot)
+    if [ -z "$snapshot_name" ]; then
+        echo "Could not find multi-component snapshot"
+        exit 1
+    fi
+
+    local release_name="push-rpms-multi-${uuid}"
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Release
+metadata:
+  name: ${release_name}
+  namespace: ${tenant_namespace}
+  labels:
+    originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
+spec:
+  snapshot: ${snapshot_name}
+  releasePlan: ${release_plan_name}
+EOF
+
+    export RELEASE_NAME=${release_name}
+    export RELEASE_NAMESPACE=${tenant_namespace}
+    "${SUITE_DIR}/../scripts/wait-for-release.sh"
+
+    export RELEASE_NAMES="${release_name}"
+}
+
+# --- Release Verification ---
+
 verify_release_contents() {
   local failures=0
   local failed_releases
@@ -76,49 +207,79 @@ verify_release_contents() {
     advisory_url=$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}")
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
 
-    # first 2 arches are specified in the pipelinerun templates, the last one is src.
-    # When the release includes noarch RPMs, fanout adds extra rpmfiles (one per default arch).
-    arches=("x86_64" "src")
-    echo "Checking RPM files count..."
-    local rpmfiles=$(jq -c '.status.artifacts.rpmfiles // []' <<< "${release_json}")
-    local rpmfiles_count=$(jq -r '. | length' <<< "${rpmfiles}")
-    local noarch_count
-    noarch_count=$(jq -r '[.[]? | select(.arch == "noarch")] | length' <<< "${rpmfiles}")
-    local expected_count=$(( ${#arches[@]} + noarch_count ))
-    if [ "${rpmfiles_count}" -ne "${expected_count}" ]; then
-      echo "🔴 rpmfiles count was ${rpmfiles_count}, expected ${expected_count} (${#arches[@]} base + ${noarch_count} noarch)"
-      failures=$((failures+1))
-    fi
-    for arch in "${arches[@]}"; do
-      echo "Checking RPM files for ${arch}..."
-      arch_rpmfiles=$(jq -r '.[]? | select(.arch == "'"${arch}"'") | .rpm // ""' <<< "${rpmfiles}")
-      if [ -n "${arch_rpmfiles}" ]; then
-        echo "✅️ rpmfiles for ${arch}: ${arch_rpmfiles}"
+    local rpmfiles
+    rpmfiles=$(jq -c '.status.artifacts.rpmfiles // []' <<< "${release_json}")
+    local rpmfiles_count
+    rpmfiles_count=$(jq -r '. | length' <<< "${rpmfiles}")
+
+    local repo_prefix="konflux-release-integration-tests"
+
+    _check_rpm_in_repo() {
+      local label=$1 rpm_pattern=$2 repo=$3
+      local count
+      count=$(jq -r --arg pat "$rpm_pattern" --arg repo "$repo" \
+        '[.[]? | select(.rpm | test($pat)) | select(.pulprepo == $repo)] | length' <<< "$rpmfiles")
+      if [ "$count" -ge 1 ]; then
+        echo "✅️ ${label}"
       else
-        echo "🔴 rpmfiles for ${arch} was empty"
+        echo "🔴 ${label}"
         failures=$((failures+1))
       fi
+    }
+
+    _check_rpm_not_in_repo() {
+      local label=$1 rpm_pattern=$2 repo=$3
+      local count
+      count=$(jq -r --arg pat "$rpm_pattern" --arg repo "$repo" \
+        '[.[]? | select(.rpm | test($pat)) | select(.pulprepo == $repo)] | length' <<< "$rpmfiles")
+      if [ "$count" -eq 0 ]; then
+        echo "✅️ ${label}"
+      else
+        echo "🔴 ${label} (found ${count} unexpected entries)"
+        failures=$((failures+1))
+      fi
+    }
+
+    # Component A (hello): 4 binary + 1 src + 4 noarch = 9
+    # Component B (hello2): 1 binary + 1 src + 4 noarch = 6
+    local expected_count=15
+    echo "Checking RPM files count..."
+    if [ "${rpmfiles_count}" -ne "${expected_count}" ]; then
+      echo "🔴 rpmfiles count was ${rpmfiles_count}, expected ${expected_count}"
+      failures=$((failures+1))
+    else
+      echo "✅️ rpmfiles count ${rpmfiles_count}"
+    fi
+
+    echo "Checking Component A (hello) binary RPMs..."
+    for arch in x86_64 aarch64 s390x ppc64le; do
+      _check_rpm_in_repo "hello.${arch} in ${arch} repo" \
+        "hello-[0-9].*\\.${arch}" "${repo_prefix}/${arch}"
     done
 
-    # When the release includes noarch RPMs, assert they are published to all default arch repos.
-    if [ "${noarch_count}" -gt 0 ]; then
-      echo "Checking noarch RPM fanout to default arch repos..."
-      # Get arches from the rpm-repositories mapping in the RPA (excluding src)
-      default_arches=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
-        -n "${managed_namespace}" -ojson \
-        | jq -r '.spec.data.mapping["rpm-repositories"][]? | select(.arch != "src") | .arch' \
-        | sort -u)
-      for default_arch in ${default_arches}; do
-        local noarch_for_arch
-        noarch_for_arch=$(jq -r '[.[]? | select(.arch == "noarch" and (.pulprepo | test("'"${default_arch}"'")))] | length' <<< "${rpmfiles}")
-        if [ "${noarch_for_arch}" -lt 1 ]; then
-          echo "🔴 noarch RPMs not published to ${default_arch} repo (count: ${noarch_for_arch})"
-          failures=$((failures+1))
-        else
-          echo "✅️ noarch rpmfiles for ${default_arch}: ${noarch_for_arch}"
-        fi
-      done
-    fi
+    echo "Checking Component A (hello) source RPM..."
+    _check_rpm_in_repo "hello.src in source repo" \
+      "hello-[0-9].*\\.src" "${repo_prefix}/source"
+
+    echo "Checking Component B (hello2) binary RPMs..."
+    _check_rpm_in_repo "hello2.x86_64 in x86_64 repo" \
+      "hello2-[0-9].*\\.x86_64" "${repo_prefix}/x86_64"
+
+    echo "Checking Component B (hello2) source RPM..."
+    _check_rpm_in_repo "hello2.src in source repo" \
+      "hello2-[0-9].*\\.src" "${repo_prefix}/source"
+
+    echo "Checking Component A (hello-data) noarch fanout..."
+    for arch in x86_64 aarch64 s390x ppc64le; do
+      _check_rpm_in_repo "hello-data.noarch in ${arch} repo" \
+        "hello-data-" "${repo_prefix}/${arch}"
+    done
+
+    echo "Checking Component B (hello2-data) noarch fanout..."
+    for arch in x86_64 aarch64 s390x ppc64le; do
+      _check_rpm_in_repo "hello2-data.noarch in ${arch} repo" \
+        "hello2-data-" "${repo_prefix}/${arch}"
+    done
 
     if [ -z "$advisory_internal_url" ]; then
         echo "Warning: advisory_internal_url is empty. Skipping advisory content check."
@@ -221,39 +382,65 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
-            # Validate advisory description contains expected RPM grouping format
             echo "Validating advisory description RPM content..."
 
-            # Check for source RPM group header (e.g., "hello:")
+            # Component A (hello) group header and entries
             if echo "${description}" | grep -qE "^hello:$"; then
-              echo "✅️ Found source RPM group header 'hello:' in description"
+              echo "✅️ Found 'hello:' group header in description"
             else
-              echo "🔴 Missing source RPM group header 'hello:' in description"
+              echo "🔴 Missing 'hello:' group header in description"
               failures=$((failures+1))
             fi
 
-            # Check for source RPM entry with .src suffix (e.g., "hello-2.12.1-xxx.src (source)" or "(src)")
             if echo "${description}" | grep -qE "hello-.*\.src \((source|src)\)"; then
-              echo "✅️ Found source RPM entry with .src suffix in description"
+              echo "✅️ Found hello source RPM entry in description"
             else
-              echo "🔴 Missing source RPM entry with .src suffix in description"
+              echo "🔴 Missing hello source RPM entry in description"
               failures=$((failures+1))
             fi
 
-            # Check for binary RPM entry with arch (e.g., "hello-2.12.1-xxx (x86_64)")
-            # Use pattern that doesn't match the .src entry
-            if echo "${description}" | grep -E "hello-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
-              echo "✅️ Found binary RPM entry with x86_64 arch in description"
-            else
-              echo "🔴 Missing binary RPM entry with x86_64 arch in description"
-              failures=$((failures+1))
-            fi
+            for binary_arch in x86_64 aarch64 s390x ppc64le; do
+              if echo "${description}" | grep -E "hello-[0-9].*\(.*${binary_arch}" | grep -qv "\.src"; then
+                echo "✅️ Found hello binary RPM entry with ${binary_arch} in description"
+              else
+                echo "🔴 Missing hello binary RPM entry with ${binary_arch} in description"
+                failures=$((failures+1))
+              fi
+            done
 
-            # Check for noarch RPM entry (e.g., "hello-data-2.12.1-xxx (noarch)")
             if echo "${description}" | grep -q "hello-data-.* (noarch)"; then
-              echo "✅️ Found noarch RPM entry (hello-data) in description"
+              echo "✅️ Found hello-data noarch entry in description"
             else
-              echo "🔴 Missing noarch RPM entry (hello-data) in description"
+              echo "🔴 Missing hello-data noarch entry in description"
+              failures=$((failures+1))
+            fi
+
+            # Component B (hello2) group header and entries
+            if echo "${description}" | grep -qE "^hello2:$"; then
+              echo "✅️ Found 'hello2:' group header in description"
+            else
+              echo "🔴 Missing 'hello2:' group header in description"
+              failures=$((failures+1))
+            fi
+
+            if echo "${description}" | grep -qE "hello2-.*\.src \((source|src)\)"; then
+              echo "✅️ Found hello2 source RPM entry in description"
+            else
+              echo "🔴 Missing hello2 source RPM entry in description"
+              failures=$((failures+1))
+            fi
+
+            if echo "${description}" | grep -E "hello2-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
+              echo "✅️ Found hello2 binary RPM entry with x86_64 in description"
+            else
+              echo "🔴 Missing hello2 binary RPM entry with x86_64 in description"
+              failures=$((failures+1))
+            fi
+
+            if echo "${description}" | grep -q "hello2-data-.* (noarch)"; then
+              echo "✅️ Found hello2-data noarch entry in description"
+            else
+              echo "🔴 Missing hello2-data noarch entry in description"
               failures=$((failures+1))
             fi
 
@@ -523,66 +710,59 @@ EOF
 }
 
 patch_component_source_before_merge() {
-  echo "Patching component source BEFORE MERGE to:"
-  echo "- enable rpmbuilds"
   set +x
-  # Get secret value from the tenant secrets file and use
-  # it for GH_TOKEN
-  secret_value=$(yq '. | select(.metadata.name | contains("pipelines-as-code-secret-")) | .stringData.password' ${SUITE_DIR}/resources/tenant/secrets/tenant-secrets.yaml)
+  secret_value=$(yq '. | select(.metadata.name == "pipelines-as-code-secret-${component_name}") | .stringData.password' \
+    ${SUITE_DIR}/resources/tenant/secrets/tenant-secrets.yaml)
   export GH_TOKEN=${secret_value}
 
-  # Patch each PaC pipeline to add multi-arch support and source image build
-  local file_names=".tekton/${component_name}-pull-request.yaml .tekton/${component_name}-push.yaml "
-  for file_name in ${file_names}; do
-    echo "Patching ${file_name}..."
+  _patch_tekton_templates() {
+    local repo=$1 pr_num=$2 comp_name=$3 pr_template=$4 push_template=$5
 
-    template_file=""
-    template_contents=""
+    local file_names=".tekton/${comp_name}-pull-request.yaml .tekton/${comp_name}-push.yaml"
+    for file_name in ${file_names}; do
+      local template_file=""
+      if [[ "$file_name" == *pull-request.yaml ]]; then
+          template_file="${SUITE_DIR}/resources/tenant/templates/tekton/${pr_template}"
+      elif [[ "$file_name" == *push.yaml ]]; then
+          template_file="${SUITE_DIR}/resources/tenant/templates/tekton/${push_template}"
+      fi
 
-    if [[ "$file_name" == *pull-request.yaml ]]; then
-        template_file="${SUITE_DIR}/resources/tenant/templates/tekton/pull-request-template.yaml"
-    elif [[ "$file_name" == *push.yaml ]]; then
-        template_file="${SUITE_DIR}/resources/tenant/templates/tekton/push-template.yaml"
-    fi
+      if [[ ! -f "$template_file" ]]; then
+          echo "Template not found: $template_file"
+          exit 1
+      fi
 
-    # Check if template file exists and read its contents
-    if [[ -n "$template_file" && -f "$template_file" ]]; then
-        template_contents=$(cat "$template_file" | envsubst)
-        echo "✅ Found template: $template_file"
-    else
-        if [[ -n "$template_file" ]]; then
-            echo "❌ Template not found: $template_file"
-        else
-            echo "ℹ️ No template mapping for: $file_name"
-        fi
-        exit 1
-    fi
+      local encoded_contents
+      encoded_contents=$(cat "$template_file" | envsubst | base64 -w 0)
 
-    encoded_contents=$(base64 -w 0 <<< "${template_contents}")
+      "${SCRIPT_DIR}/scripts/update-file-in-pull-request.sh" \
+          "${repo}" "${pr_num}" "${file_name}" \
+          "Update component source before merge. Fixes RELEASE-1502" \
+          "${encoded_contents}"
+    done
+  }
+
+  _patch_spec_file() {
+    local repo=$1 pr_num=$2 spec_template=$3 spec_name=$4
+
+    local encoded_contents
+    encoded_contents=$(cat "${SUITE_DIR}/resources/tenant/templates/${spec_template}" | envsubst | base64 -w 0)
 
     "${SCRIPT_DIR}/scripts/update-file-in-pull-request.sh" \
-        "${component_repo_name}" \
-        "${pr_number}" \
-        "${file_name}" \
+        "${repo}" "${pr_num}" "${spec_name}" \
         "Update component source before merge. Fixes RELEASE-1502" \
         "${encoded_contents}"
-  done
+  }
 
-  echo "Patching hello.spec..."
+  # Component 1: hello package (all arches)
+  _patch_tekton_templates "${component_repo_name}" "${component_pr_number}" \
+    "${component_name}" "pull-request-template.yaml" "push-template.yaml"
+  _patch_spec_file "${component_repo_name}" "${component_pr_number}" "hello.spec" "hello.spec"
 
-  template_file="${SUITE_DIR}/resources/tenant/templates/hello.spec"
-  file_name="hello.spec"
-
-  template_contents=$(cat "$template_file" | envsubst)
-
-  encoded_contents=$(base64 -w 0 <<< "${template_contents}")
-
-  "${SCRIPT_DIR}/scripts/update-file-in-pull-request.sh" \
-      "${component_repo_name}" \
-      "${pr_number}" \
-      "${file_name}" \
-      "Update component source before merge. Fixes RELEASE-1502" \
-      "${encoded_contents}"
-
-  echo "✅️ Successfully patched component source!"
+  # Component 2: hello2 package (x86_64 only)
+  # Uses package-name=hello so dist-git-client downloads from the real Fedora hello
+  # lookaside cache. The spec has Name: hello2, so the built RPMs are hello2-*.rpm.
+  _patch_tekton_templates "${component2_repo_name}" "${component2_pr_number}" \
+    "${component2_name}" "pull-request-template-comp2.yaml" "push-template-comp2.yaml"
+  _patch_spec_file "${component2_repo_name}" "${component2_pr_number}" "hello2.spec" "hello.spec"
 }
