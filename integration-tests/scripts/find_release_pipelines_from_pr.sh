@@ -213,7 +213,7 @@ _emit_integration_testcase_string() {
     while IFS= read -r suite_name; do
       # Add suite_name if not already present
       # special care is needed for collectors
-      if [ "$suite_name" == "collectors" ]; then
+      if [ "$suite_name" == "collectors" ] || [ "$suite_name" == "collectors-no-cve" ]; then
         suite_name="rh-advisories"
       fi
       if [[ ! " ${FOUND_PIPELINENAMES[*]} " =~ " ${suite_name} " ]]; then
@@ -246,6 +246,10 @@ _emit_integration_testcase_string() {
   if [[ " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry " ]]; then
     SELECTED_TESTCASES+=("push-to-external-registry-self-hosted-quay")
     SELECTED_TESTCASES+=("push-to-external-registry-idempotent")
+  fi
+  # rh-advisories has an extra test suite for the no-CVE path
+  if [[ " ${SELECTED_TESTCASES[*]} " =~ " rh-advisories " ]]; then
+    SELECTED_TESTCASES+=("collectors-no-cve")
   fi
   if (( ${#SELECTED_TESTCASES[@]} > 0 )); then
     echo -n "${SELECTED_TESTCASES[*]}"
