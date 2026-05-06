@@ -181,6 +181,12 @@ cleanup_resources() {
       "${SUITE_DIR}/../scripts/delete-repository.sh" "${component2_repo_name}"
     fi
 
+    # Clean up opt_in repository if it exists and is different from component repo
+    if [ -n "${opt_in_component_repo_name}" ] && [ "${opt_in_component_repo_name}" != "${component_repo_name}" ]; then
+      echo "Deleting Github repository ${opt_in_component_repo_name} ..." >> "${cleanup_log_file}"
+      "${SUITE_DIR}/../scripts/delete-repository.sh" "${opt_in_component_repo_name}"
+    fi
+
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
         echo "Deleting test resources..." | tee -a "${cleanup_log_file}"
         if [ -f "$tmpDir/tenant-resources.yaml" ]; then
@@ -968,6 +974,9 @@ wait_for_single_plr_to_complete() {
 
 # Simple snapshot discovery (no race conditions in controlled test environment)
 wait_for_single_component_snapshot() {
+    # replace global with local values
+    [ -n "$1" ] && application_name=$1
+
     echo "📸 Looking for single-component snapshot..." >&2
     echo "🔍 DEBUG: Search context - namespace: ${tenant_namespace}, application: ${application_name}" >&2
 
