@@ -999,232 +999,6 @@ spec:
             exit $ssh_exit
           fi
         done
-    - name: generate-checksums
-      image: quay.io/konflux-ci/release-service-utils@sha256:b62e2fef45c84259c60c7097f5a572a4c32f957ffeee3eed53eb0b7d560e5234
-      computeResources:
-        limits:
-          memory: 512Mi
-        requests:
-          memory: 512Mi
-          cpu: 250m
-      volumeMounts:
-        - name: shared-dir
-          mountPath: /shared
-        - name: checksum-credentials-vol
-          mountPath: /mnt/checksum_credentials
-        - name: quay-secret
-          mountPath: /mnt/quaySecret
-      env:
-        - name: AUTHOR
-          value: $(params.author)
-        - name: SIGNING_KEY_NAME
-          value: $(params.signingKeyName)
-        - name: SNAPSHOT_JSON
-          value: "$(params.snapshot_json)"
-      script: |
-        #!/usr/bin/env bash
-        set -eu
-
-        QUAY_USER="$(cat /mnt/quaySecret/username)"
-        QUAY_PASS="$(cat /mnt/quaySecret/password)"
-
-        set -x
-
-        #---------------------------------------------------------------------------------------
-        # This step generates checksums for all of the binaries in the content directory and
-        # signs them using the checksum host.
-        # The general workflow is that the binaries are extracted from the image(previous task),
-        # signed on remote hosts (windows and mac) and then a sha256sum is generated for each
-        # binary. The shasums are collected in a sha256sum.txt file which is then transferred to
-        # the checksum host for signing with Red Hat's GPG key.
-        # The detached signatures are returned to the workspace for inclusion in the later tasks
-        # to be pushed to CDN and the Red Hat Developer Portal.
-        #---------------------------------------------------------------------------------------
-
-        STDERR_FILE=/tmp/stderr.txt
-
-        # Check if the previous step finished successfully. If not, stop here.
-        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
-          echo "Previous step failed. Exiting..."
-          exit 0
-        fi
-
-        exitfunc() {
-            local err=$1
-            local line=$2
-            local command="$3"
-            if [ "$err" -eq 0 ] ; then
-                echo -n "Success" > "$(results.result.path)"
-            else
-                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
-                  > "$(results.result.path)"
-                if [ -f "$STDERR_FILE" ] ; then
-                    # save output to the task result excluding the trace log
-                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
-                fi
-            fi
-            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
-        }
-        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
-        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
-
-        if [[ ${AUTHOR} == "" ]] ; then
-          echo Error: invalid author
-          exit 1
-        fi
-
-        SSH_OPTS="-o UserKnownHostsFile=/tmp/.ssh/known_hosts \
-                    -o GSSAPIAuthentication=yes \
-                    -o GSSAPIDelegateCredentials=yes \
-                    -o IdentitiesOnly=yes"
-
-        # Read checksum configuration from secret
-        checksum_user=$(cat /mnt/checksum_credentials/user)
-        checksum_host=$(cat /mnt/checksum_credentials/host)
-
-        sign_file() {
-            local component_name=$1
-            local sign_method=$2  # The signing method: --clearsign or --gpgsign
-            local extension=$3
-            pipeline_run_uid=$(context.taskRun.uid)
-            output_path="/home/$checksum_user/${pipeline_run_uid}_${component_name}/checksum/sha256sum.txt.$extension"
-            input_file="/home/$checksum_user/${pipeline_run_uid}_${component_name}/checksum/sha256sum.txt"
-
-            echo "Executing SSH command with sign method: $sign_method for component: $component_name"
-            # shellcheck disable=SC2029,SC2086
-            ssh $SSH_OPTS "$checksum_user@$checksum_host" \
-            "rpm-sign --nat $sign_method --key $SIGNING_KEY_NAME --onbehalfof=$AUTHOR \
-            --output $output_path $input_file"
-        }
-
-        # Generate a kerberos ticket to ssh to the checksum host.
-        # The ticket is required for interacting with rpm-sign as well,
-        # so we use GSSAPI Delegate (in ssh opts) to transfer the ticket to the checksum host
-        KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
-        export KRB5CCNAME
-        base64 -d /mnt/checksum_credentials/keytab > /tmp/sa.keytab
-        retry 5 kinit -kt /tmp/sa.keytab "${checksum_user}@$(params.kerberosRealm)"
-
-        mkdir -p /tmp/.ssh
-        chmod 700 /tmp/.ssh
-        cp "/mnt/checksum_credentials/fingerprint" /tmp/.ssh/known_hosts
-        chmod 600 /tmp/.ssh/known_hosts
-
-        CONTENT_DIR=/shared/artifacts
-
-        set +x
-        oras login quay.io -u "$QUAY_USER" -p "$QUAY_PASS"
-        set -x
-
-        # Process each component separately
-        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
-        for ((c = 0; c < NUM_COMPONENTS; c++)); do
-          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
-          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
-
-          echo "Generating checksums for component: $COMPONENT_NAME"
-
-          # Create signed directory structure for this component
-          SIGNED_DIR="$COMPONENT_DIR/signed"
-          mkdir -p "$SIGNED_DIR"
-
-          cd "$SIGNED_DIR"
-
-          # Pull signed Mac binaries for this component (if mac content exists)
-          # oras will create macos/ directory with amd64/ and arm64/ subdirectories
-          if [ -f "$COMPONENT_DIR/has_mac" ]; then
-            signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
-            # shellcheck disable=SC2086
-            # Pull directly to current directory ($SIGNED_DIR) - oras will create macos/ directory
-            oras pull "$(params.quayURL)/signed/${COMPONENT_NAME}@${signed_mac_digest}"
-          fi
-
-          # Pull signed Windows binaries for this component (if windows content exists)
-          # oras will create windows/ directory with amd64/ and arm64/ subdirectories
-          if [ -f "$COMPONENT_DIR/has_windows" ]; then
-            signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
-            signed_windows_digest=${signed_windows_digest//[[:space:]]/}
-            # shellcheck disable=SC2086
-            # Pull directly to current directory ($SIGNED_DIR) - oras will create windows/ directory
-            oras pull "$(params.quayURL)/signed/${COMPONENT_NAME}@${signed_windows_digest}"
-          fi
-
-          # Restore supplementary files that were held during the extract step.
-          # They were moved out before signing and now rejoin the signed
-          # binaries for checksums, compression, and publishing.
-          SUPP_HOLD="$COMPONENT_DIR/supplementary"
-          for os_name in macos windows; do
-            [ -d "$SUPP_HOLD/$os_name" ] || continue
-            while IFS= read -r -d '' file; do
-              rel="${file#"$SUPP_HOLD/$os_name"/}"
-              dest="$SIGNED_DIR/$os_name/$rel"
-              mkdir -p "$(dirname "$dest")"
-              mv "$file" "$dest"
-              echo "  Restored supplementary file: $os_name/$rel"
-            done < <(find "$SUPP_HOLD/$os_name" -type f -print0)
-          done
-
-          # Generate checksums for all files (binaries + supplementary).
-          # Linux files remain in $COMPONENT_DIR/linux/ (not signed), while Mac/Windows are in $SIGNED_DIR/
-          # The structure is os/arch/ so we recursively find all files
-          SHA_SUM_PATH="$SIGNED_DIR/sha256sum.txt"
-          touch "$SHA_SUM_PATH"
-
-          # Generate checksums for signed binaries (macos, windows) from SIGNED_DIR
-          CHECKSUM_DIRS=""
-          [ -d "macos" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS macos"
-          [ -d "windows" ] && CHECKSUM_DIRS="$CHECKSUM_DIRS windows"
-
-          if [ -n "$CHECKSUM_DIRS" ]; then
-            # shellcheck disable=SC2086
-            # Recursively find all files in os/arch/ structure
-            find $CHECKSUM_DIRS -type f 2>/dev/null | while read -r file; do
-                checksum=$(sha256sum "$file" | awk '{ print $1 }')
-                echo "$checksum  $file" >> "$SHA_SUM_PATH"
-            done
-          fi
-
-          # Generate checksums for Linux files from COMPONENT_DIR/linux/ (not signed)
-          if [ -f "$COMPONENT_DIR/has_linux" ] && [ -d "$COMPONENT_DIR/linux" ]; then
-            # shellcheck disable=SC2086
-            # Recursively find all files in linux/os/arch/ structure
-            find "$COMPONENT_DIR/linux" -type f 2>/dev/null | while read -r file; do
-                checksum=$(sha256sum "$file" | awk '{ print $1 }')
-                # Use relative path from COMPONENT_DIR for consistency
-                prefix_len=$((${#COMPONENT_DIR} + 1))
-                rel_path="${file:$prefix_len}"
-                echo "$checksum  $rel_path" >> "$SHA_SUM_PATH"
-            done
-          fi
-
-          # Send sha256sum.txt to the checksum host for signing (component-specific path)
-          REMOTE_DIR="$(context.taskRun.uid)_${COMPONENT_NAME}"
-          # shellcheck disable=SC2029,SC2086
-          ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "mkdir -p ~/${REMOTE_DIR}/checksum"
-          # shellcheck disable=SC2086
-          scp $SSH_OPTS "${SHA_SUM_PATH}" \
-          "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum"
-
-          sign_file "$COMPONENT_NAME" --clearsign sig
-          sign_file "$COMPONENT_NAME" --gpgsign gpg
-
-          # Copy the signed checksum files back
-          scp "$SSH_OPTS" \
-          "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum/sha256sum.txt.sig" \
-          "${SIGNED_DIR}/sha256sum.txt.sig"
-
-          scp "$SSH_OPTS" \
-          "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum/sha256sum.txt.gpg" \
-          "${SIGNED_DIR}/sha256sum.txt.gpg"
-
-          # Clean up remote checksum directory
-          # shellcheck disable=SC2029,SC2086
-          ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "rm -rf ~/${REMOTE_DIR}"
-
-          cd "$CONTENT_DIR"
-        done
-
     - name: compress-artifacts
       image: quay.io/konflux-ci/release-service-utils@sha256:b62e2fef45c84259c60c7097f5a572a4c32f957ffeee3eed53eb0b7d560e5234
       computeResources:
@@ -1236,12 +1010,19 @@ spec:
       volumeMounts:
         - name: shared-dir
           mountPath: /shared
+        - name: quay-secret
+          mountPath: /mnt/quaySecret
       env:
         - name: "SNAPSHOT_JSON"
           value: "$(params.snapshot_json)"
       script: |
         #!/usr/bin/env bash
-        set -eux
+        set -eu
+
+        QUAY_USER="$(cat /mnt/quaySecret/username)"
+        QUAY_PASS="$(cat /mnt/quaySecret/password)"
+
+        set -x
 
         STDERR_FILE=/tmp/stderr.txt
 
@@ -1269,6 +1050,10 @@ spec:
         # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
         trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
 
+        set +x
+        oras login quay.io -u "${QUAY_USER}" -p "${QUAY_PASS}" > /dev/null 2>&1
+        set -x
+
         CONTENT_DIR=/shared/artifacts
 
         function compress_component {
@@ -1281,6 +1066,33 @@ spec:
           READY_FOR_DIST_DIR="$COMPONENT_DIR/ready_for_distribution"
 
           mkdir -p "$READY_FOR_DIST_DIR"
+
+          # Pull signed content from Quay and restore supplementary files so that
+          # archives are created with the signed binaries and supplementary files together.
+          mkdir -p "$SIGNED_DIR"
+          cd "$SIGNED_DIR"
+          if [ -f "$COMPONENT_DIR/has_mac" ]; then
+            signed_mac_digest=$(cat "$COMPONENT_DIR/signed_mac_digest.txt")
+            oras pull "$(params.quayURL)/signed/${COMPONENT_NAME}@${signed_mac_digest}"
+          fi
+          if [ -f "$COMPONENT_DIR/has_windows" ]; then
+            signed_windows_digest=$(cat "$COMPONENT_DIR/signed_windows_digest.txt")
+            signed_windows_digest=${signed_windows_digest//[[:space:]]/}
+            oras pull "$(params.quayURL)/signed/${COMPONENT_NAME}@${signed_windows_digest}"
+          fi
+          SUPP_HOLD="$COMPONENT_DIR/supplementary"
+          for os_name in macos windows; do
+            [ -d "$SUPP_HOLD/$os_name" ] || continue
+            while IFS= read -r -d '' file; do
+              rel="${file#"$SUPP_HOLD/$os_name"/}"
+              dest="$SIGNED_DIR/$os_name/$rel"
+              mkdir -p "$(dirname "$dest")"
+              mv "$file" "$dest"
+              echo "  Restored supplementary file: $os_name/$rel"
+            done < <(find "$SUPP_HOLD/$os_name" -type f -print0)
+          done
+          cd "$CONTENT_DIR"
+
           echo "Compressing artifacts for component: $COMPONENT_NAME"
 
           # Helper function to process a single file entry
@@ -1388,11 +1200,6 @@ spec:
             done
           fi
 
-          # Copy checksum files to ready_for_distribution directory (for Developer Portal)
-          cp "${SIGNED_DIR}/sha256sum.txt" "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
-          cp "${SIGNED_DIR}/sha256sum.txt.sig" "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
-          cp "${SIGNED_DIR}/sha256sum.txt.gpg" "${READY_FOR_DIST_DIR}/" 2>/dev/null || true
-
           # Update the component in SNAPSHOT_JSON with the corrected filenames (for files[] array)
           SNAPSHOT_JSON=$(jq --arg name "$COMPONENT_NAME" --argjson updated_files "$UPDATED_FILES" '
             .components |= map(
@@ -1412,6 +1219,177 @@ spec:
 
         # Save the modified snapshot to shared volume so subsequent steps can use it
         echo "$SNAPSHOT_JSON" > /shared/snapshot.json
+
+    - name: generate-checksums
+      image: quay.io/konflux-ci/release-service-utils@sha256:b62e2fef45c84259c60c7097f5a572a4c32f957ffeee3eed53eb0b7d560e5234
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: checksum-credentials-vol
+          mountPath: /mnt/checksum_credentials
+      env:
+        - name: AUTHOR
+          value: $(params.author)
+        - name: SIGNING_KEY_NAME
+          value: $(params.signingKeyName)
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
+      script: |
+        #!/usr/bin/env bash
+        set -eux
+
+        #---------------------------------------------------------------------------------------
+        # This step generates a single sha256sum.txt covering all components' archives
+        # and signs it using the checksum host.
+        # Archives are created by the previous compress-artifacts step. A sha256sum is generated
+        # for each archive across all components so customers can verify integrity before
+        # unpacking. All checksums are merged into one sha256sum.txt which is then transferred
+        # to the checksum host for signing with Red Hat's GPG key. The signed files are placed
+        # in the first component's ready_for_distribution directory so they are delivered to
+        # CGW exactly once.
+        #
+        # Note: if multiple components targeting the same CGW product version are released
+        # in separate releases, the sha256sum.txt from the later release will overwrite the
+        # earlier one. To ensure an accurate combined checksum file, all components for a
+        # given CGW product version should be included in the same RPA/release.
+        #---------------------------------------------------------------------------------------
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        # Check if the previous step finished successfully. If not, stop here.
+        if [ "$(cat "$(results.result.path)")" != "Success" ]; then
+          echo "Previous step failed. Exiting..."
+          exit 0
+        fi
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    # save output to the task result excluding the trace log
+                    grep -v "^\+" "$STDERR_FILE" | tail -c 512 | tee -a "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        if [[ ${AUTHOR} == "" ]] ; then
+          echo Error: invalid author
+          exit 1
+        fi
+
+        SSH_OPTS="-o UserKnownHostsFile=/tmp/.ssh/known_hosts \
+                    -o GSSAPIAuthentication=yes \
+                    -o GSSAPIDelegateCredentials=yes \
+                    -o IdentitiesOnly=yes"
+
+        # Read checksum configuration from secret
+        checksum_user=$(cat /mnt/checksum_credentials/user)
+        checksum_host=$(cat /mnt/checksum_credentials/host)
+
+        # Generate a kerberos ticket to ssh to the checksum host.
+        # The ticket is required for interacting with rpm-sign as well,
+        # so we use GSSAPI Delegate (in ssh opts) to transfer the ticket to the checksum host
+        KRB5CCNAME=FILE:/tmp/krb5cc_$(id -u)
+        export KRB5CCNAME
+        base64 -d /mnt/checksum_credentials/keytab > /tmp/sa.keytab
+        retry 5 kinit -kt /tmp/sa.keytab "${checksum_user}@$(params.kerberosRealm)"
+
+        mkdir -p /tmp/.ssh
+        chmod 700 /tmp/.ssh
+        cp "/mnt/checksum_credentials/fingerprint" /tmp/.ssh/known_hosts
+        chmod 600 /tmp/.ssh/known_hosts
+
+        # Use the modified snapshot from shared volume if available
+        if [ -f /shared/snapshot.json ]; then
+          SNAPSHOT_JSON="$(cat /shared/snapshot.json)"
+        fi
+
+        CONTENT_DIR=/shared/artifacts
+        SHA_SUMS=/tmp/sha256sum.txt
+        touch "$SHA_SUMS"
+        FIRST_READY_FOR_DIST_DIR=""
+
+        # Phase 1: generate checksums for all component archives
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((c = 0; c < NUM_COMPONENTS; c++)); do
+          COMPONENT=$(jq -c --arg i "$c" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+          COMPONENT_NAME=$(jq -r '.name' <<< "$COMPONENT")
+          COMPONENT_DIR="$CONTENT_DIR/$COMPONENT_NAME"
+          READY_FOR_DIST_DIR="$COMPONENT_DIR/ready_for_distribution"
+
+          if [ -z "$FIRST_READY_FOR_DIST_DIR" ]; then
+            FIRST_READY_FOR_DIST_DIR="$READY_FOR_DIST_DIR"
+          fi
+
+          echo "Generating checksums for component: $COMPONENT_NAME"
+
+          find "$READY_FOR_DIST_DIR" -maxdepth 1 -type f ! -name 'sha256sum.txt*' 2>/dev/null \
+            | sort | while read -r file; do
+              checksum=$(sha256sum "$file" | awk '{ print $1 }')
+              echo "$checksum  $(basename "$file")" >> "$SHA_SUMS"
+          done
+        done
+
+        if [ -z "$FIRST_READY_FOR_DIST_DIR" ]; then
+          echo "Error: no components found in snapshot"
+          exit 1
+        fi
+
+        if [ ! -s "$SHA_SUMS" ]; then
+          echo "Error: no archives found to checksum across all components"
+          exit 1
+        fi
+
+        # Phase 2: sign the checksum file once and place results in the first component's directory
+        REMOTE_DIR="$(context.taskRun.uid)_merged"
+        REMOTE_INPUT="/home/$checksum_user/${REMOTE_DIR}/checksum/sha256sum.txt"
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "mkdir -p ~/${REMOTE_DIR}/checksum"
+        # shellcheck disable=SC2086
+        scp $SSH_OPTS "$SHA_SUMS" \
+        "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum"
+
+        echo "Signing merged sha256sum.txt with --clearsign"
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "$checksum_user@$checksum_host" \
+        "rpm-sign --nat --clearsign --key $SIGNING_KEY_NAME --onbehalfof=$AUTHOR \
+        --output ${REMOTE_INPUT}.sig $REMOTE_INPUT"
+
+        echo "Signing merged sha256sum.txt with --gpgsign"
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "$checksum_user@$checksum_host" \
+        "rpm-sign --nat --gpgsign --key $SIGNING_KEY_NAME --onbehalfof=$AUTHOR \
+        --output ${REMOTE_INPUT}.gpg $REMOTE_INPUT"
+
+        # Copy the checksum and signed files into the first component's directory
+        cp "$SHA_SUMS" "${FIRST_READY_FOR_DIST_DIR}/sha256sum.txt"
+
+        scp "$SSH_OPTS" \
+        "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum/sha256sum.txt.sig" \
+        "${FIRST_READY_FOR_DIST_DIR}/sha256sum.txt.sig"
+
+        scp "$SSH_OPTS" \
+        "${checksum_user}@${checksum_host}:~/${REMOTE_DIR}/checksum/sha256sum.txt.gpg" \
+        "${FIRST_READY_FOR_DIST_DIR}/sha256sum.txt.gpg"
+
+        # Clean up remote checksum directory
+        # shellcheck disable=SC2029,SC2086
+        ssh $SSH_OPTS "${checksum_user}@${checksum_host}" "rm -rf ~/${REMOTE_DIR}"
 
     - name: push-artifacts
       image: quay.io/konflux-ci/release-service-utils@sha256:b62e2fef45c84259c60c7097f5a572a4c32f957ffeee3eed53eb0b7d560e5234
