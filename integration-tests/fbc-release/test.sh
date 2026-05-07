@@ -502,14 +502,56 @@ verify_staged() {
 verify_prega() {
     local release_name=$1
     echo "🔍 Verifying prega scenario for: $release_name"
-    # Add prega-specific verification logic here
-    return 0
+    verify_no_redundant_timestamp "$release_name"
+    return $?
 }
 
 verify_hotfix() {
     local release_name=$1
     echo "🔍 Verifying hotfix scenario for: $release_name"
-    # Add hotfix-specific verification logic here
+    verify_no_redundant_timestamp "$release_name"
+    return $?
+}
+
+# Verify that target_index tags do not contain redundant timestamps.
+# Hotfix/pre-GA tags already include a unique suffix (e.g., v4.13-bz12345-<ts>).
+# A bug in collect-index-images could append a second timestamp, producing
+# something like v4.13-bz12345-1715000000-1715000099. This function catches that.
+verify_no_redundant_timestamp() {
+    local release_name=$1
+    local failures=0
+
+    local release_json
+    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
+
+    local component_count
+    component_count=$(jq '.status.artifacts.components | length' <<< "${release_json}")
+
+    for ((i=0; i<component_count; i++)); do
+        local target_index
+        target_index=$(jq -r --argjson i "$i" \
+            '.status.artifacts.components[$i].target_index // ""' <<< "${release_json}")
+
+        if [ -z "${target_index}" ]; then
+            continue
+        fi
+
+        local tag="${target_index##*:}"
+
+        # A redundant timestamp looks like two consecutive numeric segments of 10+ digits
+        # at the end of the tag, e.g. v4.13-bz12345-1715000000-1715000099
+        if [[ "${tag}" =~ -[0-9]{10,}-[0-9]{10,}$ ]]; then
+            echo "🔴 target_index tag has redundant timestamp: ${tag}"
+            failures=$((failures + 1))
+        else
+            echo "✅ target_index tag has no redundant timestamp: ${tag}"
+        fi
+    done
+
+    if (( failures > 0 )); then
+        echo "🔴 Found ${failures} target_index tag(s) with redundant timestamps"
+        return 1
+    fi
     return 0
 }
 
