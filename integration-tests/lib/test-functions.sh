@@ -176,10 +176,22 @@ cleanup_resources() {
       "${SUITE_DIR}/../scripts/delete-repository.sh" "${component2_repo_name}"
     fi
 
-    # Clean up opt_in repository if it exists and is different from component repo
-    if [ -n "${opt_in_component_repo_name}" ] && [ "${opt_in_component_repo_name}" != "${component_repo_name}" ]; then
-      echo "Deleting Github repository ${opt_in_component_repo_name} ..." >> "${cleanup_log_file}"
-      "${SUITE_DIR}/../scripts/delete-repository.sh" "${opt_in_component_repo_name}"
+    # Clean up optin repository if it exists and is different from component repo
+    if [ -n "${optin_component_repo_name}" ] && [ "${optin_component_repo_name}" != "${component_repo_name}" ]; then
+      echo "Deleting Github repository ${optin_component_repo_name} ..." >> "${cleanup_log_file}"
+      "${SUITE_DIR}/../scripts/delete-repository.sh" "${optin_component_repo_name}"
+    fi
+
+    # Clean up optin component 1 repository
+    if [ -n "${optin_component_1_repo_name}" ]; then
+      echo "Deleting Github repository ${optin_component_1_repo_name} ..." >> "${cleanup_log_file}"
+      "${SUITE_DIR}/../scripts/delete-repository.sh" "${optin_component_1_repo_name}"
+    fi
+
+    # Clean up optin component 2 repository if it exists and is different from component repo
+    if [ -n "${optin_component_2_repo_name}" ] && [ "${optin_component_2_repo_name}" != "${component_repo_name}" ]; then
+      echo "Deleting Github repository ${optin_component_2_repo_name} ..." >> "${cleanup_log_file}"
+      "${SUITE_DIR}/../scripts/delete-repository.sh" "${optin_component_2_repo_name}"
     fi
 
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then

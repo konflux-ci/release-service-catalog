@@ -22,6 +22,7 @@ declare -gA GLOBAL_TEST_MATRIX=(
     ["single-prega"]="disabled"
     ["single-hotfix"]="disabled"
     ["single-optin"]="disabled"
+    ["multi-optin"]="disabled"
     ["multi-happy"]="disabled"
     ["multi-staged"]="disabled"
     # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
@@ -125,6 +126,7 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-optin"]="enabled"
         GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
         GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
+        GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
         tests_enabled=true
 
         show_enabled_scenarios "Batching changes enabled" GLOBAL_TEST_MATRIX
@@ -141,6 +143,7 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-optin"]="enabled"
         GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
         GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
+        GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
 
         show_enabled_scenarios "Enabled" GLOBAL_TEST_MATRIX
     fi
@@ -154,8 +157,12 @@ configure_test_matrix() {
 # --- Snapshot Management ---
 
 wait_for_multi_component_snapshot() {
+    # replace global with local values
+    local effective_application_name=${application_name}
+    [ -n "$1" ] && effective_application_name=$1
+
     echo "📸 Looking for multi-component snapshot..." >&2
-    echo "🔍 DEBUG: Search context - namespace: ${tenant_namespace}, application: ${application_name}" >&2
+    echo "🔍 DEBUG: Search context - namespace: ${tenant_namespace}, application: ${effective_application_name}" >&2
     
     local max_attempts=24  # 12 minutes with 30-second intervals
     local attempt=1
@@ -167,7 +174,7 @@ wait_for_multi_component_snapshot() {
         # Get all snapshots for the application
         local all_snapshots
         all_snapshots=$(kubectl get snapshots -n "$tenant_namespace" \
-            -l "appstudio.openshift.io/application=${application_name}" \
+            -l "appstudio.openshift.io/application=${effective_application_name}" \
             --sort-by=.metadata.creationTimestamp \
             -o json 2>/dev/null)
         
@@ -258,12 +265,16 @@ trigger_configured_releases() {
             local snapshot_name
             if [ "$mode" = "single" ]; then
                 if [ "$scenario" = "optin" ]; then
-                    snapshot_name=$(wait_for_single_component_snapshot $opt_in_application_name)
+                    snapshot_name=$(wait_for_single_component_snapshot $optin_application_name)
                 else
                     snapshot_name=$(wait_for_single_component_snapshot)
                 fi
             elif [ "$mode" = "multi" ]; then
-                snapshot_name=$(wait_for_multi_component_snapshot)  
+                if [ "$scenario" = "optin" ]; then
+                    snapshot_name=$(wait_for_multi_component_snapshot $multi_optin_application_name)
+                else
+                    snapshot_name=$(wait_for_multi_component_snapshot)
+                fi
             fi
 
             if [ -z "$snapshot_name" ]; then
@@ -274,7 +285,11 @@ trigger_configured_releases() {
             # Create manual release
             local release_name="fbc-${mode}-${scenario}-${uuid}"
             local release_plan="fbc-release-${scenario}-rp-${uuid}"
-            
+            if [ "$mode" = "multi" ] && [ "$scenario" = "optin" ]; then
+            	echo "⏭️ Multi Opt-In ReleasePlan chosen"
+            	local release_plan="fbc-release-${mode}-${scenario}-rp-${uuid}"
+            fi
+
             echo "  Creating release: $release_name (snapshot: $snapshot_name)"
             cat << EOF | kubectl apply -f -
 apiVersion: appstudio.redhat.com/v1alpha1
@@ -391,6 +406,25 @@ verify_single_component_release() {
     return $failures
 }
 
+registry_authenticate() {
+    # k8s secret containing the dockerconfigjson
+    SECRET_YAML_PATH="$1"
+    SECRET_NAME="$2"
+
+    # skopeo, podman and docker auth
+    DOCKER_CONFIG="$(mktemp -d)"
+    REGISTRY_AUTH_FILE="${DOCKER_CONFIG}/auth.json"
+
+    export DOCKER_CONFIG SECRET_NAME REGISTRY_AUTH_FILE
+
+    yq '. | select(.metadata.name | contains(env(SECRET_NAME))) | .data.".dockerconfigjson"' \
+    "${SECRET_YAML_PATH}" | base64 -d > "${DOCKER_CONFIG}/config.json"
+
+    # creates auth.json for podman
+    ln -s ${DOCKER_CONFIG}/config.json ${DOCKER_CONFIG}/auth.json
+}
+
+
 # Enhanced verification for multi-component releases  
 verify_multi_component_release() {
     local release_name=$1
@@ -398,7 +432,7 @@ verify_multi_component_release() {
     
     local release_json
     release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
-    
+
     local failures=0
     
     # After deduplication, we expect 1 component per unique OCP version (target_index).
@@ -414,79 +448,125 @@ verify_multi_component_release() {
       failures=$((failures+1))
     fi
 
-    # Verify the component has all required fields and a valid index_image
-    local fbc_fragment ocp_version iib_log index_image target_index
-    fbc_fragment=$(jq -r ".status.artifacts.components[0].fbc_fragment // \"\"" <<< "${release_json}")
-    ocp_version=$(jq -r ".status.artifacts.components[0].ocp_version // \"\"" <<< "${release_json}")
-    iib_log=$(jq -r ".status.artifacts.components[0].iibLog // \"\"" <<< "${release_json}")
-    index_image=$(jq -r ".status.artifacts.components[0].index_image // \"\"" <<< "${release_json}")
-    target_index=$(jq -r ".status.artifacts.components[0].target_index // \"\"" <<< "${release_json}")
+    # we need to know if the component is a opt-in
+    local mode_scenario="${RELEASES_TO_VERIFY[$release_name]}"
+    local scenario="${mode_scenario#*-}"
 
-    echo "Verifying component..."
+    for((i=0; i<component_count; i++)); do
+        local ocp_version fbc_fragment index_image target_index
 
-    if [ -n "${fbc_fragment}" ]; then
-      echo "✅️ Component fbc_fragment: ${fbc_fragment}"
-    else
-      echo "🔴 Component fbc_fragment was empty!"
-      failures=$((failures+1))
-    fi
+        # Verify the component has all required fields and a valid index_image
+        local fbc_fragment ocp_version iib_log index_image target_index
 
-    if [ -n "${ocp_version}" ]; then
-      echo "✅️ Component ocp_version: ${ocp_version}"
-    else
-      echo "🔴 Component ocp_version was empty!"
-      failures=$((failures+1))
-    fi
+        fbc_fragment=$(jq -r --arg i "$i" ".status.artifacts.components[$i].fbc_fragment // \"\"" <<< "${release_json}")
+        ocp_version=$(jq -r --arg i "$i" ".status.artifacts.components[$i].ocp_version // \"\"" <<< "${release_json}")
+        iib_log=$(jq -r --arg i "$i" ".status.artifacts.components[$i].iibLog // \"\"" <<< "${release_json}")
+        index_image=$(jq -r --arg i "$i" ".status.artifacts.components[$i].index_image // \"\"" <<< "${release_json}")
+        index_image_resolved=$(jq -r --arg i "$i" ".status.artifacts.components[$i].index_image_resolved // \"\"" <<< "${release_json}")
+        target_index=$(jq -r --arg i "$i" ".status.artifacts.components[$i].target_index // \"\"" <<< "${release_json}")
 
-    if [ -n "${iib_log}" ]; then
-      echo "✅️ Component iib_log: ${iib_log}"
-    else
-      echo "🔴 Component iib_log was empty!"
-      failures=$((failures+1))
-    fi
+        echo "Verifying component..."
 
-    # Verify batching success by checking that the component has a valid index_image
-    if [ -n "${index_image}" ]; then
-      echo "✅️ Component has valid index_image (successful batching): ${index_image}"
-    else
-      echo "🔴 Component index_image was empty (batching failed)!"
-      failures=$((failures+1))
-    fi
+        if [ -n "${fbc_fragment}" ]; then
+          echo "✅️ Component fbc_fragment: ${fbc_fragment}"
+        else
+          echo "🔴 Component fbc_fragment was empty!"
+          failures=$((failures+1))
+        fi
 
-    # Verify the published index references the same OCP version reported by the component
-    if [ -n "${ocp_version}" ] && [ -n "${target_index}" ]; then
-      if [[ "${target_index}" == *"${ocp_version}"* ]]; then
-        echo "✅️ target_index contains ${ocp_version}: ${target_index}"
-      else
-        echo "🔴 target_index does not reference ${ocp_version}: ${target_index}"
-        failures=$((failures+1))
-      fi
-    fi
+        if [ -n "${ocp_version}" ]; then
+          echo "✅️ Component ocp_version: ${ocp_version}"
+        else
+          echo "🔴 Component ocp_version was empty!"
+          failures=$((failures+1))
+        fi
 
-    # Verify all components are present via image_digests
-    local image_digests_count
-    image_digests_count=$(jq ".status.artifacts.components[0].image_digests | length" <<< "${release_json}")
-    if [ "${image_digests_count}" -gt 0 ]; then
-      echo "✅️ image_digests has ${image_digests_count} entry(ies) (fragments merged into index)"
-    else
-      echo "🔴 image_digests is empty (index build may have failed to include fragments)!"
-      failures=$((failures+1))
-    fi
+        if [ -n "${iib_log}" ]; then
+          echo "✅️ Component iib_log: ${iib_log}"
+        else
+          echo "🔴 Component iib_log was empty!"
+          failures=$((failures+1))
+        fi
 
-    # Cross-reference snapshot to verify multiple fragments were submitted
-    local snapshot_name
-    snapshot_name=$(jq -r '.spec.snapshot // ""' <<< "${release_json}")
-    if [ -n "${snapshot_name}" ]; then
-      local snapshot_component_count
-      snapshot_component_count=$(kubectl get snapshot/"${snapshot_name}" -n "${RELEASE_NAMESPACE}" \
-        -ojson 2>/dev/null | jq '.spec.components // [] | length')
-      if [ "${snapshot_component_count}" -ge 2 ]; then
-        echo "✅️ Source snapshot '${snapshot_name}' had ${snapshot_component_count} components (multi-component)"
-      else
-        echo "🔴 Source snapshot '${snapshot_name}' had ${snapshot_component_count} components, expected >= 2!"
-        failures=$((failures+1))
-      fi
-    fi
+        # Verify batching success by checking that the component has a valid index_image
+        if [ -n "${index_image}" ]; then
+          echo "✅️ Component has valid index_image (successful batching): ${index_image}"
+        else
+          echo "🔴 Component index_image was empty (batching failed)!"
+          failures=$((failures+1))
+        fi
+
+        # Verify the published index references the same OCP version reported by the component
+        if [ -n "${ocp_version}" ] && [ -n "${target_index}" ]; then
+          if [[ "${target_index}" == *"${ocp_version}"* ]]; then
+            echo "✅️ target_index contains ${ocp_version}: ${target_index}"
+          else
+            echo "🔴 target_index does not reference ${ocp_version}: ${target_index}"
+            failures=$((failures+1))
+          fi
+        fi
+
+        # Verify all components are present via image_digests
+        local image_digests_count
+        image_digests_count=$(jq ".status.artifacts.components[$i].image_digests | length" <<< "${release_json}")
+        if [ "${image_digests_count}" -gt 0 ]; then
+          echo "✅️ image_digests has ${image_digests_count} entry(ies) (fragments merged into index)"
+        else
+          echo "🔴 image_digests is empty (index build may have failed to include fragments)!"
+          failures=$((failures+1))
+        fi
+
+        # Cross-reference snapshot to verify multiple fragments were submitted
+        local snapshot_name
+        snapshot_name=$(jq -r '.spec.snapshot // ""' <<< "${release_json}")
+        if [ -n "${snapshot_name}" ]; then
+          local snapshot_component_count
+          snapshot_component_count=$(kubectl get snapshot/"${snapshot_name}" -n "${RELEASE_NAMESPACE}" \
+            -ojson 2>/dev/null | jq '.spec.components // [] | length')
+          if [ "${snapshot_component_count}" -ge 2 ]; then
+            echo "✅️ Source snapshot '${snapshot_name}' had ${snapshot_component_count} components (multi-component)"
+          else
+            echo "🔴 Source snapshot '${snapshot_name}' had ${snapshot_component_count} components, expected >= 2!"
+            failures=$((failures+1))
+          fi
+        fi
+
+        # the upcoming checks are only required for multi optin components
+        # otherwise return earlier
+        if [  "$scenario" != "optin" ]; then
+            return $failures
+        fi
+
+        # we can't reach the image in registry-proxy, so we need to resolve it to quay.io
+        # a conditional is not necessary because the test optin index image is only
+        # available in quay.io/redhat/redhat----preview-operator-index.
+        image_sha="${index_image_resolved#*@}"
+        index_image="quay.io/redhat/redhat----preview-operator-index@${image_sha}"
+
+        # generate the authentication config for skopeo
+        managed_secrets_yaml="${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
+        registry_authenticate $managed_secrets_yaml "konflux-fbc-preview-"
+
+        # making sure the produced indexes versions matches with the requested ones
+        index_build_version="$(skopeo \
+            inspect "docker://${index_image}" | jq -r '.Env[] | select(test("BUILD_VERSION.*")) | split("=")[1]')"
+        if [[ "${index_build_version}" =~ ^${ocp_version} ]]; then
+            echo "✅️ Opt-in index-image's BUILD_VERSION matches the required OCP_VERSION ($ocp_version)"
+        else
+            echo "🔴 Opt-in index-image's BUILD_VERSION DOES NOT match the required OCP_VERSION ($ocp_version)"
+            failures=$((failures+1))
+        fi
+
+        # The built fbc_fragment's BUILD_VERSION should match the ocp_version
+        fragment_build_version="$(skopeo \
+            inspect "docker://${fbc_fragment}" | jq -r '.Env[] | select(test("BUILD_VERSION.*")) | split("=")[1]')"
+        if [[ "${fragment_build_version}" =~ ^${ocp_version} ]]; then
+            echo "✅️ Opt-in fbc_fragment's BUILD_VERSION matches the required OCP_VERSION ($ocp_version)"
+        else
+            echo "🔴 Opt-in fbc_fragment's BUILD_VERSION DOES NOT match the required OCP_VERSION ($ocp_version)"
+            failures=$((failures+1))
+        fi
+    done
 
     return $failures
 }
@@ -555,50 +635,60 @@ verify_no_redundant_timestamp() {
     return 0
 }
 
+# Verify the single or multi Optin modes
 verify_optin() {
     local release_name=$1
-    echo "🔍 Verifying optin scenario for: $release_name"
+    local mode=$2
+
+    EXPECTED_COMPONENTS_COUNT=1
+    if [ "$mode" = "multi" ]; then
+        EXPECTED_COMPONENTS_COUNT=2
+    fi
+
+    echo "🔍 Verifying $mode optin scenario for: $release_name"
 
     local release_json
     release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
 
     local failures=0
 
-    # Opt-in releases should produce exactly 1 component (single opt-in fragment)
+    # Opt-in releases should produce 1 or 2 component depending on the mode (single or multi)
     local component_count
     component_count=$(jq '.status.artifacts.components | length' <<< "${release_json}")
-    if [ "${component_count}" -eq 1 ]; then
-      echo "✅️ Opt-in release has exactly 1 component"
+    if [ "${component_count}" -eq "${EXPECTED_COMPONENTS_COUNT}" ]; then
+      echo "✅️ Opt-in release has exactly ${EXPECTED_COMPONENTS_COUNT} component"
     else
-      echo "🔴 Opt-in release expected 1 component, found ${component_count}!"
+      echo "🔴 Opt-in release expected ${EXPECTED_COMPONENTS_COUNT} component, found ${component_count}!"
       failures=$((failures+1))
     fi
 
-    # Verify the snapshot came from the opt-in application (not the main multi-component app)
     local snapshot_name
     snapshot_name=$(jq -r '.spec.snapshot // ""' <<< "${release_json}")
     if [ -n "${snapshot_name}" ]; then
       local snapshot_component_count
       snapshot_component_count=$(kubectl get snapshot/"${snapshot_name}" -n "${RELEASE_NAMESPACE}" \
         -ojson 2>/dev/null | jq '.spec.components // [] | length')
-      if [ "${snapshot_component_count}" -eq 1 ]; then
-        echo "✅️ Opt-in snapshot '${snapshot_name}' has 1 component (correct for opt-in app)"
+      if [ "${snapshot_component_count}" -eq "${EXPECTED_COMPONENTS_COUNT}" ]; then
+        echo "✅️ Opt-in snapshot '${snapshot_name}' has ${EXPECTED_COMPONENTS_COUNT} component (correct for $mode opt-in app)"
       else
-        echo "🔴 Opt-in snapshot has ${snapshot_component_count} components, expected 1!"
+        echo "🔴 Opt-in snapshot has ${snapshot_component_count} components, expected ${EXPECTED_COMPONENTS_COUNT}!"
         failures=$((failures+1))
       fi
     fi
 
     # Verify allowedPackages filtering worked: the fbc_fragment should reference the opt-in package
-    local fbc_fragment
-    fbc_fragment=$(jq -r '.status.artifacts.components[0].fbc_fragment // ""' <<< "${release_json}")
-    if [ -n "${fbc_fragment}" ]; then
-      echo "✅️ Opt-in fbc_fragment present: ${fbc_fragment}"
-    else
-      echo "🔴 Opt-in fbc_fragment was empty (opt-in filtering may have failed)!"
-      failures=$((failures+1))
-    fi
-
+    local fbc_fragments
+    fbc_fragments=$(jq -r '[ .status.artifacts.components[].fbc_fragment // "" ]' <<< "${release_json}")
+    for(( i=0; i<$(jq -r '. |length' <<< "${fbc_fragments}"); i++ )); do
+        local fbc_fragment
+        fbc_fragment=$(jq -r --argjson i "$i" '.status.artifacts.components[$i].fbc_fragment // ""' <<< "${release_json}")
+        if [ -n "${fbc_fragment}" ]; then
+          echo "✅️ Opt-in fbc_fragment present: ${fbc_fragment}"
+        else
+          echo "🔴 Opt-in fbc_fragment was empty (opt-in filtering may have failed)!"
+          failures=$((failures+1))
+        fi
+    done
     return $failures
 }
 
@@ -693,7 +783,7 @@ verify_release_contents() {
                 scenario_result=$?
                 ;;
             "optin")
-                verify_optin "$release_name"
+                verify_optin "$release_name" "$mode"
                 scenario_result=$?
                 ;;
         esac
