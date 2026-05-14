@@ -154,6 +154,7 @@ echo "Global ConfigMap created"
 
 # Initialize test counter for periodic cleanup
 TEST_COUNTER=0
+FAILURES=0
 
 # Create global trusted-ca ConfigMap for all tests
 # This prevents race conditions where tests delete/recreate the same ConfigMap
@@ -285,7 +286,8 @@ do
       if [ "$PR_STATUS" == "True" ]
       then
         echo "  Pipeline $TEST_NAME succeeded but was expected to fail"
-        exit 1
+        FAILURES=$((FAILURES + 1))
+        continue
       else
         echo "  Pipeline $TEST_NAME failed (expected). Checking that it failed in task ${ASSERT_TASK_FAILURE}..."
 
@@ -295,7 +297,8 @@ do
         then
           echo "    Unable to find task $ASSERT_TASK_FAILURE in childReferences of pipelinerun $PIPELINERUN. Pipelinerun failed earlier?"
           kubectl get pr $PIPELINERUN -o json
-          exit 1
+          FAILURES=$((FAILURES + 1))
+          continue
         else
           echo "    Found taskrun $TASKRUN"
         fi
@@ -303,7 +306,8 @@ do
         then
           echo "    Taskrun did not fail - pipelinerun failed later on?"
           kubectl get tr $TASKRUN -o json
-          exit 1
+          FAILURES=$((FAILURES + 1))
+          continue
         else
           echo "    Taskrun failed as expected"
         fi
@@ -340,7 +344,7 @@ do
         done
         echo "  === END DEBUG ==="
 
-        exit 1
+        FAILURES=$((FAILURES + 1))
       fi
     fi
 
@@ -404,3 +408,8 @@ do
   fi
 
 done
+
+if [ "$FAILURES" -gt 0 ]; then
+  echo "ERROR: $FAILURES test(s) failed"
+  exit 1
+fi
