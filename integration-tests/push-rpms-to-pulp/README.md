@@ -2,12 +2,12 @@
 
 This test validates the push-rpms-to-pulp pipeline with two components:
 
-- **Component A (hello)**: builds for all 4 architectures (x86_64, aarch64, s390x, ppc64le)
-- **Component B (hello2)**: builds for x86_64 only
+- **Component A (hello)**: multi-arch binaries (x86_64, aarch64, s390x, ppc64le) plus a noarch subpackage
+- **Component B (hello2)**: noarch-only — only `*.noarch.rpm` and `*.src.rpm` (no arch-specific binaries)
 
-Both components produce binary, source, and noarch RPMs. The test verifies that each RPM is pushed to the correct Pulp repository and validates noarch fanout behavior.
+hello2 was simplified from a x86_64 binary package to a data-only noarch spec so the E2E can verify a noarch-only component in a multi-component release: hello2 publishes only `*.noarch.rpm` and `*.src.rpm`, and `hello2.noarch` is fanned out to all four binary repos (hello already supplies the arch repos).
 
-Auto-release is disabled. The test waits for both component builds to complete, then manually creates a Release against the multi-component Snapshot. It also verifies idempotency by retriggering the release and checking that all RPMs are filtered as already published.
+Auto-release is disabled. The test waits for both builds, creates a Release from the multi-component Snapshot, then retriggering it to confirm already-published RPMs are filtered (`skip_release=true`).
 
 ## Test-Specific Dependencies
 
