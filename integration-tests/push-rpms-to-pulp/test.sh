@@ -241,8 +241,8 @@ verify_release_contents() {
     }
 
     # Component A (hello): 4 binary + 1 src + 4 noarch = 9
-    # Component B (hello2): 1 binary + 1 src + 4 noarch = 6
-    local expected_count=15
+    # Component B (hello2): noarch-only build -> 4 noarch fanout + 1 src = 5 (no arch-specific RPMs)
+    local expected_count=14
     echo "Checking RPM files count..."
     if [ "${rpmfiles_count}" -ne "${expected_count}" ]; then
       echo "🔴 rpmfiles count was ${rpmfiles_count}, expected ${expected_count}"
@@ -261,9 +261,11 @@ verify_release_contents() {
     _check_rpm_in_repo "hello.src in source repo" \
       "hello-[0-9].*\\.src" "${repo_prefix}/source"
 
-    echo "Checking Component B (hello2) binary RPMs..."
-    _check_rpm_in_repo "hello2.x86_64 in x86_64 repo" \
-      "hello2-[0-9].*\\.x86_64" "${repo_prefix}/x86_64"
+    echo "Checking Component B (hello2) has no arch-specific binary RPMs..."
+    for arch in x86_64 aarch64 s390x ppc64le; do
+      _check_rpm_not_in_repo "hello2 must not publish .${arch} binary" \
+        "hello2-[0-9].*\\.${arch}" "${repo_prefix}/${arch}"
+    done
 
     echo "Checking Component B (hello2) source RPM..."
     _check_rpm_in_repo "hello2.src in source repo" \
@@ -275,10 +277,10 @@ verify_release_contents() {
         "hello-data-" "${repo_prefix}/${arch}"
     done
 
-    echo "Checking Component B (hello2-data) noarch fanout..."
+    echo "Checking Component B (hello2) noarch fanout to all default arch repos..."
     for arch in x86_64 aarch64 s390x ppc64le; do
-      _check_rpm_in_repo "hello2-data.noarch in ${arch} repo" \
-        "hello2-data-" "${repo_prefix}/${arch}"
+      _check_rpm_in_repo "hello2.noarch in ${arch} repo" \
+        "hello2-[0-9].*\\.noarch" "${repo_prefix}/${arch}"
     done
 
     if [ -z "$advisory_internal_url" ]; then
@@ -430,18 +432,18 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
-            if echo "${description}" | grep -E "hello2-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
-              echo "✅️ Found hello2 binary RPM entry with x86_64 in description"
+            if echo "${description}" | grep -q "hello2-.* (noarch)"; then
+              echo "✅️ Found hello2 noarch entry in description"
             else
-              echo "🔴 Missing hello2 binary RPM entry with x86_64 in description"
+              echo "🔴 Missing hello2 noarch entry in description"
               failures=$((failures+1))
             fi
 
-            if echo "${description}" | grep -q "hello2-data-.* (noarch)"; then
-              echo "✅️ Found hello2-data noarch entry in description"
-            else
-              echo "🔴 Missing hello2-data noarch entry in description"
+            if echo "${description}" | grep -E "hello2-[0-9].*\(.*x86_64" | grep -qv "\.src"; then
+              echo "🔴 Unexpected hello2 arch-specific binary entry in description"
               failures=$((failures+1))
+            else
+              echo "✅️ No hello2 arch-specific binary entries in description (noarch-only component)"
             fi
 
             # Check for Security Fix(es) section if CVEs are present in artifacts
@@ -759,9 +761,8 @@ patch_component_source_before_merge() {
     "${component_name}" "pull-request-template.yaml" "push-template.yaml"
   _patch_spec_file "${component_repo_name}" "${component_pr_number}" "hello.spec" "hello.spec"
 
-  # Component 2: hello2 package (x86_64 only)
-  # Uses package-name=hello so dist-git-client downloads from the real Fedora hello
-  # lookaside cache. The spec has Name: hello2, so the built RPMs are hello2-*.rpm.
+  # Component 2: hello2 noarch-only package (only *.noarch.rpm + *.src.rpm in the artifact).
+  # Uses package-name=hello so dist-git-client downloads from the real Fedora hello lookaside cache.
   _patch_tekton_templates "${component2_repo_name}" "${component2_pr_number}" \
     "${component2_name}" "pull-request-template-comp2.yaml" "push-template-comp2.yaml"
   _patch_spec_file "${component2_repo_name}" "${component2_pr_number}" "hello2.spec" "hello.spec"
