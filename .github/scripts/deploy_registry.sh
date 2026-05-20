@@ -10,9 +10,10 @@ fi
 script_path="$(dirname -- "${BASH_SOURCE[0]}")"
 
 retry() {
-  for _ in {1..3}; do
+  local attempts="${3:-3}"
+  for _ in $(seq 1 "${attempts}"); do
       local ret=0
-      $1 || ret="$?"
+      eval "$1" || ret="$?"
       if [[ "$ret" -eq 0 ]]; then
           return 0
       fi
@@ -23,23 +24,39 @@ retry() {
   return "$ret"
 }
 
+# Pod Ready does not guarantee the webhook Service is accepting connections yet.
+wait_for_service_endpoints() {
+  local namespace="$1"
+  local service="$2"
+  local message="$3"
+  retry "kubectl get endpoints \"${service}\" -n \"${namespace}\" \
+    -o jsonpath='{.subsets[*].addresses[*].ip}' | grep -qE '[0-9]'" \
+    "${message}"
+}
+
 deploy_cert_manager() {
-  kubectl apply -k "${script_path}/../resources/cert-manager"
+  retry "kubectl apply -k \"${script_path}/../resources/cert-manager\"" \
+    "Failed to apply cert-manager resources"
   sleep 5
   retry "kubectl wait --for=condition=Ready --timeout=120s -l app.kubernetes.io/instance=cert-manager -n cert-manager pod" \
         "Cert manager did not become available within the allocated time"
 }
 
 deploy_trust_manager() {
-  kubectl apply -k "${script_path}/../resources/trust-manager"
+  retry "kubectl apply -k \"${script_path}/../resources/trust-manager\"" \
+    "Failed to apply trust-manager resources"
   sleep 5
   # trust manager is running in the cert-manager namespace
   retry "kubectl wait --for=condition=Ready --timeout=60s -l app.kubernetes.io/instance=trust-manager -n cert-manager pod" \
         "Trust manager did not become available within the allocated time"
+  wait_for_service_endpoints cert-manager trust-manager \
+    "Trust manager webhook endpoints did not become available"
 }
 
 deploy_registry() {
-  kubectl apply -k "${script_path}/../resources/registry"
+  retry "kubectl apply -k \"${script_path}/../resources/registry\"" \
+    "Failed to apply registry resources" \
+    5
   sleep 5
   retry "kubectl wait --for=condition=Ready --timeout=240s -n kind-registry -l run=registry pod" \
         "The local registry did not become available within the allocated time"
@@ -72,7 +89,8 @@ EOF
 
 deploy_cert_manager
 deploy_trust_manager
-kubectl apply -k "${script_path}/../resources/cluster-issuer"
+retry "kubectl apply -k \"${script_path}/../resources/cluster-issuer\"" \
+  "Failed to apply cluster issuer resources"
 deploy_registry
 port_forward
 prepare_docker_config
