@@ -17,6 +17,10 @@ spec:
     - name: KUBECONFIG_SECRET_NAME
       default: 'kubeconfig-secret'
       type: string
+    - name: MAX_PARALLEL
+      default: '9'
+      type: string
+      description: Maximum integration test suites to run concurrently in the periodic run-test step
   tasks:
     - name: get-snapshot-data
       params:
@@ -49,6 +53,8 @@ spec:
           value: $(params.GITHUB_TOKEN_SECRET_NAME)
         - name: KUBECONFIG_SECRET_NAME
           value: $(params.KUBECONFIG_SECRET_NAME)
+        - name: MAX_PARALLEL
+          value: $(params.MAX_PARALLEL)
       taskSpec:
         params:
           - name: STEP_IMAGE
@@ -61,6 +67,8 @@ spec:
           - name: VAULT_PASSWORD_SECRET_NAME
           - name: GITHUB_TOKEN_SECRET_NAME
           - name: KUBECONFIG_SECRET_NAME
+          - name: MAX_PARALLEL
+            type: string
         results:
           - name: TEST_OUTPUT
             description: Test output
@@ -69,9 +77,9 @@ spec:
             image: $(params.STEP_IMAGE)
             computeResources:
               limits:
-                memory: 2Gi
+                memory: 6Gi
               requests:
-                memory: 2Gi
+                memory: 6Gi
             env:
               - name: VAULT_PASSWORD
                 valueFrom:
@@ -171,29 +179,53 @@ spec:
               export RELEASE_CATALOG_GIT_URL
               export RELEASE_CATALOG_GIT_REVISION
 
-              # Run all testcases in parallel and collect their statuses
+              # Cap parallel suites to limit kubectl/API and memory spikes (step memory: 6Gi).
+              MAX_PARALLEL="$(params.MAX_PARALLEL)"
               declare -A pids
-              # declare -A testcase_names
-              for testcase in "${ALL_TESTCASES[@]}"; do
-                echo "Running test case: $testcase"
-                "/home/e2e/tests/run-test.sh" "$testcase" &
-                pid=$!
-                pids["$pid"]=$testcase
-                # testcase_names["$testcase"]=$pid
-              done
+              testcase_index=0
 
-              # Wait for all tests to complete, track success and failure
-              for pid in "${!pids[@]}"; do
-                testcase="${pids[$pid]}"
-                if wait "$pid"; then
-                  success_test_cases+=("$testcase")
-                  success_test_count=$((success_test_count + 1))
-                  echo "Test case $testcase succeeded"
-                else
-                  failed_test_cases+=("$testcase")
-                  failed_test_count=$((failed_test_count + 1))
-                  echo "Test case $testcase failed"
+              reap_finished_test_jobs() {
+                local pid testcase wait_status
+                for pid in "${!pids[@]}"; do
+                  if kill -0 "${pid}" 2>/dev/null; then
+                    continue
+                  fi
+                  testcase="${pids[$pid]}"
+                  set +e
+                  wait "${pid}"
+                  wait_status=$?
+                  set -e
+                  if [ "${wait_status}" -eq 0 ]; then
+                    success_test_cases+=("${testcase}")
+                    success_test_count=$((success_test_count + 1))
+                    echo "Test case ${testcase} succeeded"
+                  else
+                    failed_test_cases+=("${testcase}")
+                    failed_test_count=$((failed_test_count + 1))
+                    echo "Test case ${testcase} failed"
+                  fi
+                  unset 'pids[$pid]'
+                done
+              }
+
+              while [ "${testcase_index}" -lt "${overall_test_count}" ] || [ "${#pids[@]}" -gt 0 ]; do
+                while [ "${testcase_index}" -lt "${overall_test_count}" ] && [ "${#pids[@]}" -lt "${MAX_PARALLEL}" ]; do
+                  testcase="${ALL_TESTCASES[$testcase_index]}"
+                  testcase_index=$((testcase_index + 1))
+                  echo "Running test case: ${testcase} (${testcase_index}/${overall_test_count}," \
+                    "max ${MAX_PARALLEL} concurrent)"
+                  "/home/e2e/tests/run-test.sh" "${testcase}" &
+                  pids[$!]="${testcase}"
+                done
+
+                if [ "${#pids[@]}" -eq 0 ]; then
+                  continue
                 fi
+
+                set +e
+                wait -n 2>/dev/null
+                set -e
+                reap_finished_test_jobs
               done
               if [[ "$failed_test_count" -gt  0 ]]; then
                  exit 1
