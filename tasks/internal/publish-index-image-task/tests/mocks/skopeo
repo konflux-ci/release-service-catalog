@@ -1,0 +1,266 @@
+#!/usr/bin/env bash
+
+set -eu
+
+command="$1"
+
+if [[ "${command}" == "inspect" ]]; then
+  # Mock skopeo inspect - return digest based on image reference
+  shift
+
+  # Check for --config flag
+  config_mode=false
+  if [[ "$*" == *"--config"* ]]; then
+    config_mode=true
+  fi
+
+  # Strip docker:// prefix if present
+  image_ref="${@: -1}"
+  image_ref="${image_ref#docker://}"
+
+  # Fail scenario returns valid data for inspect (failure happens at copy stage)
+
+  # Match scenario - same digest for both images
+  if [[ "${image_ref}" == *"match@sha256:match1234567890"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.12"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:match1234567890",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.12"
+  }
+}
+EOF
+    fi
+  elif [[ "${image_ref}" == *"match-target-digest"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.12"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:match1234567890",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.12"
+  }
+}
+EOF
+    fi
+  # Version mismatch scenario - source v4.12, target already has v4.13
+  elif [[ "${image_ref}" == *"mismatchver@sha256:1234567890"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.12"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:source-digest-mismatch",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.12"
+  }
+}
+EOF
+    fi
+  elif [[ "${image_ref}" == *"mismatch-ver-target-digest"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.13"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:target-digest-different",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.13"
+  }
+}
+EOF
+    fi
+  # Success scenarios - different digests, same version
+  elif [[ "${image_ref}" == *"source@sha256:abcdef1234567890"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.12"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:abcdef1234567890",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.12"
+  }
+}
+EOF
+    fi
+  elif [[ "${image_ref}" == *"/fail@"* ]]; then
+    # Fail scenario - inspect succeeds, copy will fail
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.12"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:0987654321fedcba",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.12"
+  }
+}
+EOF
+    fi
+  elif [[ "${image_ref}" == *"@sha256:0987654321fedcba"* ]] || [[ "${image_ref}" == *"registry-proxy"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {
+      "com.redhat.index.delivery.version": "v4.12"
+    }
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:0987654321fedcba",
+  "Labels": {
+    "com.redhat.index.delivery.version": "v4.12"
+  }
+}
+EOF
+    fi
+  elif [[ "${image_ref}" == *"/target"* ]] && [[ "${image_ref}" != *"mismatch"* ]] && [[ "${image_ref}" != *"match"* ]]; then
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {}
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:target-not-published-yet",
+  "Labels": {}
+}
+EOF
+    fi
+  else
+    # Default response for other images
+    if [[ "${config_mode}" == "true" ]]; then
+      cat <<'EOF'
+{
+  "config": {
+    "Labels": {}
+  }
+}
+EOF
+    else
+      cat <<'EOF'
+{
+  "Digest": "sha256:default1234567890",
+  "Labels": {}
+}
+EOF
+    fi
+  fi
+  exit 0
+fi
+
+if [[ "${command}" == "copy" ]]; then
+  # Check if source contains "fail" - simulate copy failure
+  if [[ "$*" == *"fail"* ]]; then
+    echo "Error: copy failed" >&2
+    exit 1
+  fi
+
+  # Create the minimal directory-transport layout expected by the extractor.
+  # Strip docker:// prefix from arguments
+  destination="${@: -1}"
+  destination="${destination#docker://}"
+  destination="${destination#dir:}"
+  mkdir -p "${destination}"
+
+  archive_name="test-artifact.tar.gz"
+  windows_archive_name="test-windows-artifact.tar.gz"
+  work_dir="$(mktemp -d)"
+  trap 'rm -rf "${work_dir}"' EXIT
+  printf 'test artifact\n' > "${work_dir}/artifact.txt"
+  tar -czf "${work_dir}/${archive_name}" -C "${work_dir}" artifact.txt
+  printf 'test Windows artifact\n' > "${work_dir}/${windows_archive_name}"
+
+  digest="$(sha256sum "${work_dir}/${archive_name}" | cut -d ' ' -f 1)"
+  windows_digest="$(sha256sum "${work_dir}/${windows_archive_name}" | cut -d ' ' -f 1)"
+  cp "${work_dir}/${archive_name}" "${destination}/${digest}"
+  cp "${work_dir}/${windows_archive_name}" "${destination}/${windows_digest}"
+  cat > "${destination}/manifest.json" <<EOF
+{
+  "schemaVersion": 2,
+  "layers": [
+    {
+      "mediaType": "application/gzip",
+      "digest": "sha256:${digest}",
+      "size": $(stat -c '%s' "${work_dir}/${archive_name}"),
+      "annotations": {
+        "org.opencontainers.image.title": "${archive_name}"
+      }
+    },
+    {
+      "mediaType": "application/zip",
+      "digest": "sha256:${windows_digest}",
+      "size": $(stat -c '%s' "${work_dir}/${windows_archive_name}"),
+      "annotations": {
+        "org.opencontainers.image.title": "${windows_archive_name}"
+      }
+    }
+  ]
+}
+EOF
+  exit 0
+fi
+
+echo "Unknown skopeo command: ${command}" >&2
+exit 1
