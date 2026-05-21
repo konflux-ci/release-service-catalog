@@ -173,6 +173,13 @@ These integration tests are automatically executed in CI/CD pipelines:
 - **Pull Request Triggers** - Tests run when changes are made to relevant pipeline files or the `integration-tests/` directory
 - **E2E Pipeline** - Uses `integration-tests/pipelines/e2e-tests-staging-pipeline.yaml`
 - **Konflux E2E Pipeline** - Uses `integration-tests/pipelines/konflux-e2e-tests-pipeline.yaml`
+- **Periodic E2E Pipeline** - Uses `integration-tests/pipelines/e2e-tests-periodic-pipeline.yaml`
+  - Runs all integration suites in one Tekton step
+  - **Memory**: 6Gi on the `run-test` step (raised from 2Gi to avoid OOM during parallel setup)
+  - **Concurrency**: at most **9** suites at a time by default (`MAX_PARALLEL` pipeline param, overridable per PipelineRun)
+  - Component init retries when `kubectl get` is temporarily unavailable under load (`lib/test-functions.sh`)
+
+Local `./run-test.sh` runs one suite at a time; only the periodic pipeline runs many suites in parallel.
 
 ## Troubleshooting
 
@@ -182,7 +189,8 @@ These integration tests are automatically executed in CI/CD pipelines:
 2. **Cluster Access** - Ensure KUBECONFIG is properly configured
 3. **Secret Errors** - Check vault password file exists and is correct
 4. **Resource Conflicts** - Use cleanup scripts to remove stale resources
-5. **PaC token unrecognizable error** - The following error:
+5. **OOM or `kubectl create` exit 137 in periodic e2e** - Usually too many suites starting at once or insufficient step memory. The periodic pipeline caps parallelism and sets 6Gi; if failures persist, check Tekton step logs for `Killed` during tenant resource setup.
+6. **PaC token unrecognizable error** - The following error:
    ```bash
    Initialization check attempt 6/60...
    ⚠️ Warning: Could not get component PR from annotations: {"pac":{"state":"error","error-id":74,"error-message":"74: Access token is unrecognizable by GitHub"},"message":"done"}

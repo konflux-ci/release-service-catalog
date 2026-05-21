@@ -334,6 +334,25 @@ create_kubernetes_resources() {
     echo "Kubernetes resources applied."
 }
 
+# Fetch build.appstudio.openshift.io/status from a Component (stdout). Returns 1 if kubectl fails.
+# Relies on global variable: tenant_namespace
+fetch_component_build_status_annotation() {
+    local comp_name="$1"
+    local component_json=""
+    local kubectl_status=0
+
+    set +e
+    component_json=$(kubectl get component/"${comp_name}" -n "${tenant_namespace}" -ojson 2>/dev/null)
+    kubectl_status=$?
+    set -e
+
+    if [ "${kubectl_status}" -ne 0 ] || [ -z "${component_json}" ]; then
+        return 1
+    fi
+
+    jq -r --arg k "build.appstudio.openshift.io/status" '.metadata.annotations[$k] // ""' <<< "${component_json}"
+}
+
 # Function to wait for component initialization and get PR details
 # Modifies global variables: component_pr, pr_number
 # Relies on global variables: component_name, tenant_namespace
@@ -348,9 +367,15 @@ wait_for_component_initialization() {
     while [ $attempt -le $max_attempts ]; do
       echo "Initialization check attempt ${attempt}/${max_attempts}..."
 
-      # Try to get component annotations
-      component_annotations=$(kubectl get component/"${component_name}" -n "${tenant_namespace}" -ojson 2>/dev/null | \
-        jq -r --arg k "build.appstudio.openshift.io/status" '.metadata.annotations[$k] // ""')
+      if ! component_annotations=$(fetch_component_build_status_annotation "${component_name}"); then
+        log_warning "Could not reach component ${component_name} (kubectl get failed); retrying..."
+        if [ $attempt -lt $max_attempts ]; then
+          echo "Waiting 10 seconds before retry..."
+          sleep 10
+        fi
+        attempt=$((attempt + 1))
+        continue
+      fi
 
       if [ -n "${component_annotations}" ]; then
         # component_pr is made global by not declaring it local
@@ -742,9 +767,15 @@ wait_for_single_component_initialization() {
     while [ $attempt -le $max_attempts ]; do
       echo "Initialization check attempt ${attempt}/${max_attempts} for ${comp_name}..."
 
-      # Try to get component annotations
-      component_annotations=$(kubectl get component/"${comp_name}" -n "${tenant_namespace}" -ojson 2>/dev/null | \
-        jq -r --arg k "build.appstudio.openshift.io/status" '.metadata.annotations[$k] // ""')
+      if ! component_annotations=$(fetch_component_build_status_annotation "${comp_name}"); then
+        echo "⚠️  Could not reach component ${comp_name} (kubectl get failed); retrying..."
+        if [ $attempt -lt $max_attempts ]; then
+          echo "Waiting 10 seconds before retry..."
+          sleep 10
+        fi
+        attempt=$((attempt + 1))
+        continue
+      fi
 
       if [ -n "${component_annotations}" ]; then
         # component_pr is made global by not declaring it local
