@@ -63,7 +63,7 @@ spec:
                     "name": "test-keytab",
                     "secret": "test-keytab-secret"
                   },
-                  "signPipelineImage": "quay.io/konflux-ci/signing:latest",
+                  "signPipelineImage": "quay.io/redhat-isv/operator-pipelines-images:released",
                   "signKeyAlias": {
                     "key": "devkey1"
                   }
@@ -74,23 +74,50 @@ spec:
               }
               EOF
 
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
+              {
+                "spec": {
+                  "pipeline": {
+                    "pipelineRef": {
+                      "resolver": "git",
+                      "params": [
+                        {
+                          "name": "url",
+                          "value": "https://localhost.git"
+                        },
+                        {
+                          "name": "revision",
+                          "value": "main"
+                        },
+                        {
+                          "name": "pathInRepo",
+                          "value": "pipelines/rpm-signing/rpm-signing.yaml"
+                        }
+                      ]
+                    },
+                    "serviceAccountName": "release-service-account"
+                  }
+                }
+              }
+              EOF
+
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts/artifacts.json" << EOF
               {
                 "artifacts": {
                   "test-rpm-1.0-1.el9.x86_64.rpm": {
                     "labels": {"arch": "x86_64"},
-                    "url": "https://pulp.example.com/pulp/content/test/x86_64/test-rpm-1.0-1.el9.x86_64.rpm",
+                    "url": "https://pulp.example.com/api/pulp-content/test/x86_64/Packages/t/test-rpm-1.0-1.el9.x86_64.rpm",
                     "sha256": "abc123def456"
                   },
                   "test-rpm-1.0-1.el9.src.rpm": {
                     "labels": {"arch": "source"},
-                    "url": "https://pulp.example.com/pulp/content/test/source/test-rpm-1.0-1.el9.src.rpm",
+                    "url": "https://pulp.example.com/api/pulp-content/test/source/Packages/t/test-rpm-1.0-1.el9.src.rpm",
                     "sha256": "def789ghi012"
                   }
                 },
                 "distributions": {
-                  "x86_64": "https://pulp.example.com/pulp/content/test/x86_64/",
-                  "source": "https://pulp.example.com/pulp/content/test/source/"
+                  "x86_64": "https://pulp.example.com/api/pulp-content/test/x86_64/",
+                  "source": "https://pulp.example.com/api/pulp-content/test/source/"
                 }
               }
               EOF
@@ -132,12 +159,14 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: snapshotBuildId
+          value: "test-build-123"
+        - name: unsignedRpmsDomain
+          value: "rok-storage"
         - name: signedRpmsDomain
           value: "rok-storage"
-        - name: pipelineImage
-          value: "quay.io/konflux-ci/signing:latest"
-        - name: signPipeline
-          value: "rpm-signing-pipeline"
+        - name: PULP_SECRET_NAME
+          value: "mock-pulp-secret"
       runAfter:
         - setup
     - name: check-result
@@ -197,9 +226,9 @@ spec:
                 exit 1
               fi
 
-              pipelineImage=$(jq -r '.pipeline_image' <<< "${params}")
-              if [ "${pipelineImage}" != "quay.io/konflux-ci/signing:latest" ]; then
-                echo "pipeline_image does not match"
+              pipelineImage=$(jq -r '.image' <<< "${params}")
+              if [ "${pipelineImage}" != "quay.io/redhat-isv/operator-pipelines-images:released" ]; then
+                echo "image does not match"
                 exit 1
               fi
 
@@ -251,8 +280,8 @@ spec:
               fi
 
               artifactJson=$(jq -r '.artifact_json' <<< "${params}")
-              # artifact_json is base64-encoded content, not a path - decode and verify it's valid JSON with artifacts
-              decodedArtifact=$(base64 -d <<< "${artifactJson}")
+              # artifact_json is gzipped+base64-encoded content - decode and verify it's valid JSON with artifacts
+              decodedArtifact=$(base64 -d <<< "${artifactJson}" | gunzip)
               if ! jq -e '.artifacts' > /dev/null 2>&1 <<< "${decodedArtifact}"; then
                 echo "artifact_json does not decode to valid JSON with .artifacts key"
                 exit 1

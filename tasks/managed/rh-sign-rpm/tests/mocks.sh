@@ -60,8 +60,8 @@ function set_ir_status() {
     status="True"
     if [ "${REASON}" == "Failure" ]; then
       status="False"
-    fi
-    cat > "${PATCH_FILE}" << EOF
+      # For failure, don't include signed_rpms_oci_artifact
+      cat > "${PATCH_FILE}" << EOF
 {
   "status": {
     "conditions": [
@@ -72,10 +72,31 @@ function set_ir_status() {
         "status": "${status}",
         "type": "merge"
       }
-    ]
+    ],
+    "results": {}
   }
 }
 EOF
+    else
+      cat > "${PATCH_FILE}" << EOF
+{
+  "status": {
+    "conditions": [
+      {
+        "reason": "${REASON}",
+        "lastTransitionTime": "2023-12-06T15:22:45Z",
+        "message": "my message",
+        "status": "${status}",
+        "type": "merge"
+      }
+    ],
+    "results": {
+      "signed_rpms_oci_artifact": "oci://registry.example.com/signed-rpms/${NAME}@sha256:abc123"
+    }
+  }
+}
+EOF
+    fi
     echo "Calling kubectl patch for ${NAME}..."
     kubectl patch internalrequest "${NAME}" --type=merge --subresource status --patch-file "${PATCH_FILE}"
 }
