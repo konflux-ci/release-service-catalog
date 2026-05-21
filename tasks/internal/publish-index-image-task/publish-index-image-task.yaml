@@ -68,100 +68,22 @@ spec:
       securityContext:
         runAsUser: 1001
       image: >-
-        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+        quay.io/jluza/release-service-utils:RELEASE-1989
+      imagePullPolicy: Always
       computeResources:
         limits:
-          memory: 128Mi
+          memory: 64Mi
         requests:
-          memory: 128Mi
+          memory: 64Mi
           cpu: 400m
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
-
-        function getIndexVersion() {
-            # if dest- and src- string is given, remove them from the auth param
-            if [[ "$#" -gt 1 ]]; then
-              shift
-              indexVersion="$(skopeo inspect --config --creds "$@" \
-                | jq -r '.config.Labels."com.redhat.index.delivery.version"')"
-            else
-              # no auth given
-              indexVersion="$(skopeo inspect --config "$@" \
-                | jq -r '.config.Labels."com.redhat.index.delivery.version"')"
-            fi
-
-            echo "$indexVersion"
-        }
-
-        SOURCE_INDEX_CREDENTIAL="$(cat /mnt/publishingCredentials/sourceIndexCredential)"
-        TARGET_INDEX_CREDENTIAL="$(cat /mnt/publishingCredentials/targetIndexCredential)"
-
-        PATH=/bin:/usr/bin:/usr/local/bin
-        export PATH
-
-        SOURCE_AUTH_ARGS=()
-        if [[ ! "$(params.sourceIndex)" =~ ^registry-proxy(\-stage)?.engineering.redhat.com ]]; then
-            SOURCE_AUTH_ARGS=("--src-creds" "${SOURCE_INDEX_CREDENTIAL}")
-        fi
-
-        TARGET_AUTH_ARGS=("--dest-creds" "${TARGET_INDEX_CREDENTIAL}")
-
-        # Extract digest from pull spec
-        SOURCE_INDEX="$(params.sourceIndex)"
-        SOURCE_DIGEST="${SOURCE_INDEX##*@}"
-
-        echo "Getting target image digest: $(params.targetIndex)"
-        if TARGET_DIGEST=$(skopeo inspect \
-            --creds "${TARGET_INDEX_CREDENTIAL}" \
-            "docker://$(params.targetIndex)" \
-            --format '{{.Digest}}' \
-            --retry-times "$(params.retries)"); then
-            echo "Target image exists."
-            echo "DEBUG: Source Digest - $SOURCE_DIGEST"
-            echo "DEBUG: Target Digest - $TARGET_DIGEST"
-            if [ "$SOURCE_DIGEST" == "$TARGET_DIGEST" ]; then
-                echo -n "Image already exists with the same digest, skipping copy." \
-                  | tee "$(results.requestMessage.path)"
-                exit 0
-            else
-                echo "Image exists in target registry but digests do not match." \
-                    "Proceeding to copy the image."
-            fi
-        else
-            echo "Target image does not exist. Proceeding to copy the image."
-        fi
-
-        # check to make sure the image to be published is for the intended ocpVersion
-        targetOcpVersion="$(params.targetOcpVersion)"
-        sourceVer=$(getIndexVersion "${SOURCE_AUTH_ARGS[@]}" "docker://$(params.sourceIndex)")
-        if [[ "${sourceVer}" != "${targetOcpVersion}" ]]; then
-            echo -n "Error: source index does not match targetOcpVersion (${sourceVer} != ${targetOcpVersion})" \
-              | tee "$(results.requestMessage.path)"
-            exit 0
-        fi
-
-        # hotfix and pre-ga targetIndex should be skip the next check, as they don't exist in the upstream quay
-        # until skopeo copy runs.
-        if [[ "$(params.targetIndex)" =~ .*\:v[0-9]{1}\.[0-9]{2}$ ]]; then
-            targetVer=$(getIndexVersion "${TARGET_AUTH_ARGS[@]}" "docker://$(params.targetIndex)")
-            # check if both indexes are of the same OCP version and exit in case they mismatch.
-            if [ "${sourceVer}" != "${targetVer}" ]; then
-              echo -n "Error: The indexes versions does not match (${sourceVer} != ${targetVer})" \
-              | tee "$(results.requestMessage.path)"
-              exit 0
-            fi
-        fi
-
-        # Proceed with copying the image
-        echo "Copying image from $(params.sourceIndex) to $(params.targetIndex)"
-        (skopeo copy \
-        --all \
-        --preserve-digests \
-        --retry-times "$(params.retries)" \
-        --src-tls-verify=false "${SOURCE_AUTH_ARGS[@]}" \
-        "docker://$(params.sourceIndex)" \
-        "${TARGET_AUTH_ARGS[@]}" \
-        "docker://$(params.targetIndex)" && \
-        echo -n "Index Image Published successfully" || \
-        echo -n "Error: Failed publishing Index Image" ) | tee "$(results.requestMessage.path)"
+        python3 -m publish_index_image \
+          --source-index "$(params.sourceIndex)" \
+          --target-index "$(params.targetIndex)" \
+          --retries "$(params.retries)" \
+          --source-credential-path /mnt/publishingCredentials/sourceIndexCredential \
+          --target-credential-path /mnt/publishingCredentials/targetIndexCredential | \
+        awk '{printf "%s", (NR==1 ? "" : ORS) $0}' | \
+        tee "$(results.requestMessage.path)"
