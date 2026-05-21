@@ -2,11 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-rh-sign-rpm-timeout
-  annotations:
-    test/assert-task-failure: run-task
+  name: test-rh-sign-rpm-dynamic-arch
 spec:
-  description: Test that the task fails when internal request times out
+  description: Test creating internal request with empty snapshotBuildId and multi-arch artifacts.json
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -57,15 +55,32 @@ spec:
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/artifacts"
 
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "rpm-comp0",
+                    "source": {
+                      "git": {
+                        "revision": "deadbeef"
+                      }
+                    },
+                    "containerImage": "quay.io/test/rpm-component@sha256:1111"
+                  }
+                ]
+              }
+              EOF
+
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "signOptions": {
                   "signKeytab": {
                     "principal": "test-principal@REDHAT.COM",
-                    "name": "expected-timeout-failure",
+                    "name": "test-keytab",
                     "secret": "test-keytab-secret"
                   },
-                  "signPipelineImage": "quay.io/konflux-ci/signing:latest",
+                  "signPipelineImage": "quay.io/redhat-isv/operator-pipelines-images:released",
                   "signKeyAlias": {
                     "key": "devkey1"
                   }
@@ -110,10 +125,22 @@ spec:
                     "labels": {"arch": "x86_64"},
                     "url": "https://pulp.example.com/api/pulp-content/test/x86_64/Packages/t/test-rpm-1.0-1.el9.x86_64.rpm",
                     "sha256": "abc123def456"
+                  },
+                  "common-lib-1.0-1.el9.noarch.rpm": {
+                    "labels": {"arch": "noarch"},
+                    "url": "https://pulp.example.com/api/pulp-content/test/aarch64/Packages/c/common-lib-1.0-1.el9.noarch.rpm",
+                    "sha256": "noarch123abc"
+                  },
+                  "test-rpm-1.0-1.el9.src.rpm": {
+                    "labels": {"arch": "source"},
+                    "url": "https://pulp.example.com/api/pulp-content/test/source/Packages/t/test-rpm-1.0-1.el9.src.rpm",
+                    "sha256": "def789ghi012"
                   }
                 },
                 "distributions": {
-                  "x86_64": "https://pulp.example.com/api/pulp-content/test/x86_64/"
+                  "aarch64": "https://pulp.example.com/api/pulp-content/test/aarch64/",
+                  "x86_64": "https://pulp.example.com/api/pulp-content/test/x86_64/",
+                  "source": "https://pulp.example.com/api/pulp-content/test/source/"
                 }
               }
               EOF
@@ -132,9 +159,9 @@ spec:
         name: rh-sign-rpm
       params:
         - name: requester
-          value: testuser-rpm-timeout
+          value: testuser-rpm
         - name: requestTimeout
-          value: "10"
+          value: "1800"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: dataPath
@@ -156,37 +183,97 @@ spec:
         - name: taskGitRevision
           value: "main"
         - name: snapshotBuildId
-          value: "test-timeout-build"
+          value: ""
         - name: unsignedRpmsDomain
           value: "rok-storage"
         - name: signedRpmsDomain
           value: "rok-storage"
+        - name: unsignedRpmsSubpath
+          value: ""
+        - name: signedRpmsSubpath
+          value: ""
+        - name: signedRpmsUploadSubpath
+          value: ""
         - name: PULP_SECRET_NAME
           value: "mock-pulp-secret"
       runAfter:
         - setup
-  finally:
     - name: check-result
       params:
-        - name: taskStatus
-          value: "$(tasks.run-task.status)"
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
       taskSpec:
         params:
-          - name: taskStatus
+          - name: sourceDataArtifact
             type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
           - name: check-result
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              if [ "$(params.taskStatus)" != "Failed" ]; then
-                echo "Task should have failed but got status: $(params.taskStatus)"
+              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
+              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
+
+              echo "Found ${irsLength} internal requests"
+
+              # We expect 1 internal request with all RPMs (single-request mode)
+              if [ "${irsLength}" != "1" ]; then
+                echo "Expected 1 internal request, found ${irsLength}"
                 exit 1
               fi
 
-              echo "Test passed: Task failed as expected due to timeout"
+              params_json=$(jq -r ".items[0].spec.params" <<< "${internalRequests}")
+
+              # Verify unsigned_rpms_location uses "all" repo when snapshotBuildId is empty
+              unsigned_location=$(jq -r '.unsigned_rpms_location' <<< "${params_json}")
+              if [ "${unsigned_location}" != "rok-storage/all" ]; then
+                echo "Expected unsigned_rpms_location 'rok-storage/all', got '${unsigned_location}'"
+                exit 1
+              fi
+
+              signed_destination=$(jq -r '.signed_rpms_destination' <<< "${params_json}")
+              if [ "${signed_destination}" != "rok-storage/all" ]; then
+                echo "Expected signed_rpms_destination 'rok-storage/all', got '${signed_destination}'"
+                exit 1
+              fi
+
+              # Verify artifact_json contains all 3 RPMs (x86_64, noarch, source)
+              artifactJson=$(jq -r '.artifact_json' <<< "${params_json}")
+              decodedArtifact=$(base64 -d <<< "${artifactJson}" | gunzip)
+              artifactCount=$(jq '.artifacts | length' <<< "${decodedArtifact}")
+              if [ "${artifactCount}" != "3" ]; then
+                echo "Expected 3 artifacts in artifact_json, found ${artifactCount}"
+                exit 1
+              fi
+
+              echo "Test passed: single request created with all RPMs when snapshotBuildId is empty"
+      runAfter:
+        - run-task
+  finally:
     - name: cleanup
       taskSpec:
         steps:

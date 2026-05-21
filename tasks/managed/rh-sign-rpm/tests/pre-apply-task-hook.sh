@@ -90,6 +90,13 @@ cat > "/tmp/rpm-signing-pipeline.json" << EOF
 EOF
 kubectl create -f /tmp/rpm-signing-pipeline.json
 
+# Create a dummy pulp secret for idempotency check
+kubectl delete secret mock-pulp-secret --ignore-not-found
+kubectl create secret generic mock-pulp-secret --from-literal=cli.toml='base_url = "https://console.redhat.com"
+client_id = "mock-client-id"
+client_secret = "mock-client-secret"
+'
+
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
