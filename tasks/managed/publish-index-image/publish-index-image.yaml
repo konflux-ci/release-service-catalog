@@ -122,7 +122,8 @@ spec:
           value: $(params.sourceDataArtifact)
     - name: publish-index-image
       image: >-
-        quay.io/konflux-ci/release-service-utils@sha256:da48275d90ecd65e2aec9c71f74b86314ce6ceb81dc3045d5c7546c9548273e8
+        quay.io/konflux-ci/release-service-utils@sha256:8051dfd826d8d5528b048404b7ec73b51a5df107db789bee4bf8c21d22799d93
+      imagePullPolicy: Always
       computeResources:
         limits:
           memory: 512Mi
@@ -139,91 +140,14 @@ spec:
             exit 1
         fi
 
-        request="publish-index-image-pipeline"
-        credentials=$(jq -r '.fbc.publishingCredentials' "$DATA_FILE")
-        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        LENGTH="$(jq -r '.components | length' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
-        for((i=0; i<LENGTH; i++)); do
-          targetIndex=$(jq -r --argjson i "${i}" \
-            '.components[$i].target_index' "$(params.dataDir)/$(params.internalRequestResultsFile)")
-          targetIndexWithTimestamp=$(jq -r --argjson i "${i}" \
-            '.components[$i].target_index_with_timestamp' "$(params.dataDir)/$(params.internalRequestResultsFile)")
-
-          sourceIndex="$(jq -r --argjson i "${i}" \
-            '.components[$i].index_image' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
-          sourceIndexResolved="$(jq -r --argjson i "${i}" \
-            '.components[$i].index_image_resolved' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
-
-          targetOcpVersion=$(jq -r --argjson i "${i}" \
-            '.components[$i].ocp_version' "$(params.dataDir)/$(params.internalRequestResultsFile)")
-
-          publishingImages=("${targetIndex}")
-          publishingSources=("${sourceIndex}")
-          # only publish the extra tag when it does not contain a timestamp already
-          # which is the case for pre-ga and hotfix
-          if [ "${targetIndex}" != "${targetIndexWithTimestamp}" ]; then
-            publishingImages+=("${targetIndexWithTimestamp}")
-            # Use resolved digest for timestamped tag to avoid race with parallel IIB builds
-            publishingSources+=("${sourceIndexResolved}")
-          fi
-
-          requestTimeout=$(params.requestTimeout)
-          pipelineTimeoutSeconds=$((requestTimeout+300))
-          pipelineTimeout=$(date -u -d @"${pipelineTimeoutSeconds}" +"%Hh%Mm%Ss")
-          taskTimeout=$(date -u -d @"${requestTimeout}" +"%Hh%Mm%Ss")
-
-          IR_RESULT_FILE=$(mktemp)
-
-          for((x=0; x<${#publishingImages[@]}; x++ )); do
-              echo "=== Creating internal request to publish image:"
-              echo ""
-              echo "- from: ${publishingSources[${x}]}"
-              echo "- to: ${publishingImages[${x}]}"
-
-              internal-request --pipeline "${request}" \
-                  -p sourceIndex="${publishingSources[${x}]}" \
-                  -p targetIndex="${publishingImages[${x}]}" \
-                  -p targetOcpVersion="${targetOcpVersion}" \
-                  -p publishingCredentials="${credentials}" \
-                  -p retries="$(params.retries)" \
-                  -p taskGitUrl="$(params.taskGitUrl)" \
-                  -p taskGitRevision="$(params.taskGitRevision)" \
-                  -t "$(params.requestTimeout)" \
-                  --pipeline-timeout "${pipelineTimeout}" \
-                  --task-timeout "$taskTimeout" \
-                  -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
-                  | tee "$IR_RESULT_FILE" || \
-                  (grep "^\[" "$IR_RESULT_FILE" | jq . && exit 1)
-
-              internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_RESULT_FILE")
-              echo "done (${internalRequest})"
-
-              # get the internal request status
-              internalRequestJson="$(kubectl get internalrequest "${internalRequest}" -o json | jq -c)"
- 
-              status="$(jq '.status.conditions[].status' <<< "$internalRequestJson")"
-              if [ "$status" = "False" ]; then
-                errorMessage="$(jq '.status.conditions[].message' <<< "$internalRequestJson")"
-                echo "ERROR: Publish to ${publishingImages[$x]} failed"
-                echo "errorMessage: $errorMessage"
-                exit 1
-              fi
-
-              results=$(jq '.status.results' <<< "$internalRequestJson")
-              requestMessage=$(echo "${results}" | jq -r '.requestMessage // ""')
-
-              if echo "${requestMessage}" | grep -qi "error"; then
-                echo "ERROR: Publish to ${publishingImages[${x}]} failed"
-                echo "requestMessage: ${requestMessage}"
-                exit 1
-              fi
-              echo "=== published successfully (${publishingImages[${x}]})"
-
-              echo ""
-              echo ""
-          done
-        done
+        python3 -m release_service_utils.tasks.managed.managed_publish_index_image \
+          --data-file "${DATA_FILE}" \
+          --request-timeout "$(params.requestTimeout)" \
+          --retries "$(params.retries)" \
+          --task-git-url "$(params.taskGitUrl)" \
+          --task-git-revision "$(params.taskGitRevision)" \
+          --pipeline-run-id "$(params.pipelineRunUid)" \
+          --ir-results-file "$(params.dataDir)/$(params.internalRequestResultsFile)"
     - name: create-trusted-artifact
       computeResources:
         limits:
