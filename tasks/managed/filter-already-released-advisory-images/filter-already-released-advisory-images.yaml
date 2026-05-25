@@ -166,6 +166,8 @@ spec:
         echo "Transforming snapshot components using get-image-architectures..."
         SNAPSHOT_JSON=$(jq '.' "$SNAPSHOT_FILE")
         TRANSFORMED_COMPONENTS=$(mktemp)
+        FAILED_COMPONENTS=$(mktemp)
+        echo [] > "$FAILED_COMPONENTS"
 
         jq -c '.components[]' <<< "$SNAPSHOT_JSON" | while IFS= read -r component; do
             CONTAINER_IMAGE=$(jq -r '.containerImage' <<< "$component")
@@ -174,7 +176,9 @@ spec:
             echo "Processing component: $COMPONENT_NAME with image: $CONTAINER_IMAGE" >&2
 
             if ! digests=$(get-image-architectures "${CONTAINER_IMAGE}"); then
-                echo "Warning: Failed to resolve architectures for ${CONTAINER_IMAGE}, skipping component" >&2
+                echo "Warning: Failed to resolve architectures for ${CONTAINER_IMAGE}, assuming not released" >&2
+                jq -c --arg name "$COMPONENT_NAME" '. += [$name]' "$FAILED_COMPONENTS" > failed.tmp && \
+                  mv failed.tmp "$FAILED_COMPONENTS"
                 continue
             fi
 
@@ -342,6 +346,9 @@ spec:
           FILTERED_SNAPSHOT=$(mktemp)
 
           echo "$UNRELEASED_COMPONENTS_RAW" | base64 -d | gunzip | tee "$UNRELEASED_COMPONENTS"
+          # Add in the components that get-image-architectures failed on
+          jq -cn '[inputs] | add | unique' "$UNRELEASED_COMPONENTS" "$FAILED_COMPONENTS" > unreleased.tmp && \
+            mv unreleased.tmp "$UNRELEASED_COMPONENTS"
 
           # Filter the original snapshot using the unreleased components list
           jq --slurpfile unreleased "$UNRELEASED_COMPONENTS" '
