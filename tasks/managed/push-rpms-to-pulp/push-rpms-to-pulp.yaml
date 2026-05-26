@@ -10,6 +10,14 @@ spec:
     - name: SNAPSHOT_PATH
       type: string
       description: Path to the snapshot spec file containing image information
+      default: ""
+    - name: signedRpmsOciArtifact
+      type: string
+      description: |
+        OCI artifact reference containing signed RPMs (e.g., oci:registry/repo@sha256:...).
+        When provided, RPMs are extracted from this artifact instead of from the snapshot.
+        Either SNAPSHOT_PATH or signedRpmsOciArtifact must be provided
+      default: ""
     - name: PULP_DOMAIN
       type: string
       description: The domain to use for Pulp operations
@@ -78,6 +86,11 @@ spec:
       type: string
       description: The chunk size to use when uploading RPMs to Pulp
       default: "100MB"
+    - name: pulpTaskTimeout
+      type: string
+      description: >-
+        Maximum time in seconds to wait for Pulp async tasks to complete (default 7200 = 2 hours)
+      default: "7200"
   results:
     - description: Produced trusted data artifact
       name: sourceDataArtifact
@@ -128,6 +141,8 @@ spec:
         value: $(params.dataDir)/images.txt
       - name: FILES_DIR
         value: /var/workdir/rpm-extract
+      - name: SIGNED_RPMS_OCI_ARTIFACT
+        value: $(params.signedRpmsOciArtifact)
       - name: IMAGE_EXPIRES_AFTER
         value: $(params.ociArtifactExpiresAfter)
       - name: ORAS_OPTIONS
@@ -136,6 +151,8 @@ spec:
         value: $(params.trustedArtifactsDebug)
       - name: PULP_UPLOAD_CHUNK_SIZE
         value: $(params.pulpUploadChunkSize)
+      - name: PULP_TASK_TIMEOUT
+        value: $(params.pulpTaskTimeout)
     volumeMounts:
       - name: workdir
         mountPath: "/var/workdir"
@@ -397,7 +414,7 @@ spec:
               task_url="${PULP_BASE_URL}${task_href}"
             fi
             set +x
-            wait_for_pulp_task "${task_url}" "${auth_header}" 300 5
+            wait_for_pulp_task "${task_url}" "${auth_header}" "${PULP_TASK_TIMEOUT}" 5
             local wait_rc=$?
             set -x
             if [[ ${wait_rc} -ne 0 ]]; then
@@ -543,11 +560,49 @@ spec:
           }
         }
 
+        # Get the published repository version for a repo (what users can actually access)
+        # Returns empty string if nothing is published
+        get_repo_published_version_href() {
+          local repo_name="$1"
+          local auth_header dist_response publication_href publication_json repo_version_href
+
+          set +x
+          auth_header="$(get_auth_header)" || return 1
+
+          # Get distribution for this repo
+          dist_response=$(curl --retry 3 -s -H "${auth_header}" \
+            "${PULP_BASE_URL}/api/pulp/${PULP_DOMAIN}/api/v3/distributions/rpm/rpm/?name=${repo_name}")
+
+          # Check if distribution has a repository_version (direct link)
+          repo_version_href=$(jq -r '.results[0].repository_version // empty' <<< "${dist_response}")
+          if [[ -n "${repo_version_href}" && "${repo_version_href}" != "null" ]]; then
+            set -x
+            echo "${repo_version_href}"
+            return 0
+          fi
+
+          # Otherwise check if it has a publication
+          publication_href=$(jq -r '.results[0].publication // empty' <<< "${dist_response}")
+          if [[ -z "${publication_href}" || "${publication_href}" == "null" ]]; then
+            # No publication → nothing is published
+            set -x
+            echo ""
+            return 0
+          fi
+
+          # Get the repository version from the publication
+          publication_json=$(curl --retry 3 -s -H "${auth_header}" "${PULP_BASE_URL}${publication_href}")
+          repo_version_href=$(jq -r '.repository_version // empty' <<< "${publication_json}")
+          set -x
+          echo "${repo_version_href}"
+        }
+
         # Check if rpm exists in repo and compare digest with local file
+        # Only checks PUBLISHED content - unpublished RPMs can be overwritten
         # Returns:
-        #   0 -> exists and digest matches
-        #   2 -> does not exist
-        #   3 -> exists but digest differs
+        #   0 -> exists in published content and digest matches
+        #   2 -> does not exist in published content (may exist unpublished)
+        #   3 -> exists in published content but digest differs
         check_rpm_exists_with_digest() {
           local repo_name="$1"
           local file_path="$2"
@@ -575,9 +630,15 @@ spec:
           local local_sha
           local_sha="$(sha256sum "${file_path}" | awk '{print $1}')"
 
-          # Resolve latest repository version href
+          # Check PUBLISHED version, not latest version
           local repo_version_href
-          repo_version_href="$(get_repo_latest_version_href "${repo_name}")" || return 1
+          repo_version_href="$(get_repo_published_version_href "${repo_name}")" || return 1
+
+          # If no published version, treat as "not found" (allows overwrite of unpublished content)
+          if [[ -z "${repo_version_href}" || "${repo_version_href}" == "null" ]]; then
+            echo "No published version for ${repo_name}. RPM not accessible to users - allowing upload." >&2
+            return 2
+          fi
 
           # Build query URL using NEVRA
           local enc_repo_version enc_name enc_epoch enc_version enc_release enc_arch query_url
@@ -698,35 +759,73 @@ spec:
         }
         '
 
-        # If the snapshot was pre-processed by filter-already-released-advisory-rpms, it will include
-        # `.components[].rpmsToPublish[]` entries that specify exactly which RPMs should
-        # be published to which repos. When present, we only attempt uploads for those.
-        # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
-        # We extract repository_name for Pulp repo lookups.
-        RPM_REPO_MAP="$(
-          jq -c '
-            [ .components[].rpmsToPublish[]? |
-              {rpm, targetRepos: [.targetRepos[]?.repository_name // empty]} ]
-            | reduce .[] as $i ({}; .[$i.rpm] =
-                ((.[$i.rpm] // []) + ($i.targetRepos // []) | unique)
-              )
-          ' "${SNAPSHOT_PATH}" 2>/dev/null || echo "{}"
-        )"
-        RPM_FILTER_ENABLED="false"
-        if [[ "${RPM_REPO_MAP}" != "{}" ]]; then
-          RPM_FILTER_ENABLED="true"
-        fi
-        echo "RPM pre-filter detected in snapshot: ${RPM_FILTER_ENABLED}"
-
-        jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | tee "${IMAGES_TXT}"
-
-        AUTHFILE='/tmp/auth.json'
         mkdir -p "${FILES_DIR}"
-        while read -r IMAGE; do
-          echo "Processing ${IMAGE}"
-          select-oci-auth "${IMAGE}" > "${AUTHFILE}"
-          oras pull --registry-config "${AUTHFILE}" "${IMAGE}" -o "${FILES_DIR}"
-        done < "${IMAGES_TXT}"
+
+        # Check if we're extracting from signed RPMs OCI artifact or from snapshot
+        if [ -n "${SIGNED_RPMS_OCI_ARTIFACT}" ]; then
+          echo "=== Extracting RPMs from signed RPMs OCI artifact ==="
+          echo "Artifact: ${SIGNED_RPMS_OCI_ARTIFACT}"
+
+          # Strip the "oci:" prefix if present
+          oci_ref="${SIGNED_RPMS_OCI_ARTIFACT#oci:}"
+          echo "OCI ref (stripped): ${oci_ref}"
+
+          # Pull the OCI artifact
+          echo "Pulling artifact to ${FILES_DIR}..."
+          select-oci-auth "${oci_ref}" > /tmp/oci-auth.json
+          oras pull --registry-config /tmp/oci-auth.json "${oci_ref}" -o "${FILES_DIR}"
+
+          # Extract the gzipped tar archive if present
+          if [ -f "${FILES_DIR}/signed-rpms" ]; then
+            echo "Extracting signed-rpms archive..."
+            tar -xzf "${FILES_DIR}/signed-rpms" -C "${FILES_DIR}"
+            rm -f "${FILES_DIR}/signed-rpms"
+          fi
+
+          echo "Extracted RPM files:"
+          ls -la "${FILES_DIR}"
+
+          # No RPM filtering when using signed RPMs artifact
+          RPM_FILTER_ENABLED="false"
+          RPM_REPO_MAP="{}"
+        else
+          echo "=== Extracting RPMs from snapshot containerImages ==="
+
+          # Validate snapshot path is provided
+          if [ -z "${SNAPSHOT_PATH}" ] || [ ! -f "${SNAPSHOT_PATH}" ]; then
+            echo "Error: Either signedRpmsOciArtifact or SNAPSHOT_PATH must be provided"
+            exit 1
+          fi
+
+          # If the snapshot was pre-processed by filter-already-released-advisory-rpms, it will include
+          # `.components[].rpmsToPublish[]` entries that specify exactly which RPMs should
+          # be published to which repos. When present, we only attempt uploads for those.
+          # targetRepos is an array of objects: [{repository_id, repository_name, distro}, ...]
+          # We extract repository_name for Pulp repo lookups.
+          RPM_REPO_MAP="$(
+            jq -c '
+              [ .components[].rpmsToPublish[]? |
+                {rpm, targetRepos: [.targetRepos[]?.repository_name // empty]} ]
+              | reduce .[] as $i ({}; .[$i.rpm] =
+                  ((.[$i.rpm] // []) + ($i.targetRepos // []) | unique)
+                )
+            ' "${SNAPSHOT_PATH}" 2>/dev/null || echo "{}"
+          )"
+          RPM_FILTER_ENABLED="false"
+          if [[ "${RPM_REPO_MAP}" != "{}" ]]; then
+            RPM_FILTER_ENABLED="true"
+          fi
+          echo "RPM pre-filter detected in snapshot: ${RPM_FILTER_ENABLED}"
+
+          jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | tee "${IMAGES_TXT}"
+
+          AUTHFILE='/tmp/auth.json'
+          while read -r IMAGE; do
+            echo "Processing ${IMAGE}"
+            select-oci-auth "${IMAGE}" > "${AUTHFILE}"
+            oras pull --registry-config "${AUTHFILE}" "${IMAGE}" -o "${FILES_DIR}"
+          done < "${IMAGES_TXT}"
+        fi
 
         cd "${FILES_DIR}"
 
@@ -798,6 +897,8 @@ spec:
 
         # Track which noarch RPMs were actually uploaded (not skipped)
         UPLOADED_NOARCH_RPMS=()
+        # Track existing noarch RPMs (for artifacts.json - idempotency support)
+        EXISTING_NOARCH_RPMS=()
 
         # Parse default architectures once for reuse; skip empty entries (e.g. trailing comma)
         DEFAULT_ARCHES=()
@@ -879,7 +980,21 @@ spec:
               status=$?
               set -e
               if [[ $status -eq 0 ]]; then
-                echo "Already exists with matching digest: $pkg in ${arch}. Skipping."
+                echo "Already exists with matching digest: $pkg in ${arch}. Skipping upload."
+                # Still add to artifacts.json for signing (idempotency support)
+                nevra="$(parse_nevra "${pkg}")"
+                IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+                local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+                first_letter="${_name:0:1}"
+                first_letter="${first_letter,,}"
+                pkg_url="${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/${arch}/Packages/${first_letter}/${pkg}"
+                jq --arg key "${pkg}" \
+                   --arg arch "${arch}" \
+                   --arg url "${pkg_url}" \
+                   --arg sha256 "${local_sha}" \
+                  "${JQ_ADD_ARTIFACT}" \
+                  "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+                echo "  Added to artifacts.json for downstream signing"
                 continue
               elif [[ $status -eq 3 ]]; then
                 echo "Error: Package exists in ${arch} with different digest: $pkg"
@@ -919,9 +1034,12 @@ spec:
                 "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
 
               # Add to artifacts.json (pulp-tool format)
+              first_letter="${_name:0:1}"
+              first_letter="${first_letter,,}"
+              pkg_url="${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/${arch}/Packages/${first_letter}/${pkg}"
               jq --arg key "${pkg}" \
                  --arg arch "${arch}" \
-                 --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${arch}/${pkg}" \
+                 --arg url "${pkg_url}" \
                  --arg sha256 "${local_sha}" \
                 "${JQ_ADD_ARTIFACT}" \
                 "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
@@ -941,7 +1059,11 @@ spec:
               status=$?
               set -e
               if [[ $status -eq 0 ]]; then
-                echo "Already exists with matching digest: $pkg in ${arch}. Skipping."
+                echo "Already exists with matching digest: $pkg in ${arch}. Skipping upload."
+                # Track for artifacts.json (idempotency support)
+                if [[ ! " ${EXISTING_NOARCH_RPMS[*]} " == *" ${pkg} "* ]]; then
+                  EXISTING_NOARCH_RPMS+=("${pkg}")
+                fi
                 continue
               elif [[ $status -eq 3 ]]; then
                 echo "Error: Package exists in ${arch} with different digest: $pkg"
@@ -1010,7 +1132,21 @@ spec:
             status=$?
             set -e
             if [[ $status -eq 0 ]]; then
-              echo "Already exists with matching digest: $pkg in source. Skipping."
+              echo "Already exists with matching digest: $pkg in source. Skipping upload."
+              # Still add to artifacts.json for signing (idempotency support)
+              nevra="$(parse_nevra "${pkg}")"
+              IFS='|' read -r _name epoch version release _archParsed <<< "${nevra}"
+              local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+              first_letter="${_name:0:1}"
+              first_letter="${first_letter,,}"
+              pkg_url="${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/source/Packages/${first_letter}/${pkg}"
+              jq --arg key "${pkg}" \
+                 --arg arch "source" \
+                 --arg url "${pkg_url}" \
+                 --arg sha256 "${local_sha}" \
+                "${JQ_ADD_ARTIFACT}" \
+                "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
+              echo "  Added to artifacts.json for downstream signing"
               continue
             elif [[ $status -eq 3 ]]; then
               echo "Error: Package exists in source with different digest: $pkg"
@@ -1049,9 +1185,12 @@ spec:
               "$RESULTS_FILE" > tmp.json && mv tmp.json "$RESULTS_FILE"
 
             # Add to artifacts.json (pulp-tool format)
+            first_letter="${_name:0:1}"
+            first_letter="${first_letter,,}"
+            pkg_url="${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/source/Packages/${first_letter}/${pkg}"
             jq --arg key "${pkg}" \
                --arg arch "source" \
-               --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/source/${pkg}" \
+               --arg url "${pkg_url}" \
                --arg sha256 "${local_sha}" \
               "${JQ_ADD_ARTIFACT}" \
               "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
@@ -1064,29 +1203,39 @@ spec:
           add_content_to_repo "source" "$SRC_HREFS_JSON"
         fi
 
-        # Add noarch RPMs to artifacts.json once (only those that were actually uploaded)
+        # Add noarch RPMs to artifacts.json once
         # Use first available arch for the URL since content is identical in all repos
+        # Include both uploaded and existing noarch RPMs (idempotency support)
         first_arch="${ARCHES[0]:-x86_64}"
-        for pkg in "${UPLOADED_NOARCH_RPMS[@]}"; do
+        ALL_NOARCH_RPMS=("${UPLOADED_NOARCH_RPMS[@]}" "${EXISTING_NOARCH_RPMS[@]}")
+        for pkg in "${ALL_NOARCH_RPMS[@]}"; do
           local_sha="$(sha256sum "${pkg}" | awk '{print $1}')"
+          nevra="$(parse_nevra "${pkg}")"
+          IFS='|' read -r _name _epoch _version _release _archParsed <<< "${nevra}"
+          first_letter="${_name:0:1}"
+          first_letter="${first_letter,,}"
+          pkg_url="${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/${first_arch}/Packages/${first_letter}/${pkg}"
           jq --arg key "${pkg}" \
              --arg arch "noarch" \
-             --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${first_arch}/${pkg}" \
+             --arg url "${pkg_url}" \
              --arg sha256 "${local_sha}" \
             "${JQ_ADD_ARTIFACT}" \
             "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
         done
+        if [[ ${#EXISTING_NOARCH_RPMS[@]} -gt 0 ]]; then
+          echo "Added ${#EXISTING_NOARCH_RPMS[@]} existing noarch RPMs to artifacts.json"
+        fi
 
         # Add distribution URLs to artifacts.json
         for dist_arch in "${ARCHES[@]}"; do
           jq --arg arch "$dist_arch" \
-             --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/${dist_arch}/" \
+             --arg url "${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/${dist_arch}/" \
             '.distributions[$arch] = $url' \
             "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
         done
         # Add source distribution
         jq --arg arch "source" \
-           --arg url "${PULP_BASE_URL}/pulp/content/${PULP_DOMAIN}/source/" \
+           --arg url "${PULP_BASE_URL}/api/pulp-content/${PULP_DOMAIN}/source/" \
           '.distributions[$arch] = $url' \
           "$ARTIFACTS_FILE" > tmp_artifacts.json && mv tmp_artifacts.json "$ARTIFACTS_FILE"
 

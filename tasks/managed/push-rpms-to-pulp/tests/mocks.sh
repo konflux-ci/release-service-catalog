@@ -22,14 +22,16 @@ function curl() {
         echo "token_request" >> ${DATA_DIR}/mock_sso.txt
         # OAuth2 token request
         echo '{"access_token": "mock-access-token", "expires_in": 3600}'
-    elif [[ "$args" == *"/api/pulp/mock/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]] && [[ "$args" != *"modify"* ]]; then
+    elif [[ "$args" == *"/api/v3/distributions/rpm/rpm/"* ]]; then
+        # Distribution query -> return repository_version to enable idempotency check
+        echo '{"results": [{"repository_version": "/api/pulp/mock/api/v3/repositories/rpm/rpm/mock-repo-uuid/versions/1/"}]}'
+    elif [[ "$args" == *"/api/v3/repositories/rpm/rpm/"* ]] && [[ "$args" != *"name="* ]] && [[ "$args" != *"modify"* ]]; then
         # Repository GET by href -> return latest_version_href
         echo '{"latest_version_href": "/api/pulp/mock/api/v3/repositories/rpm/rpm/mock-repo-uuid/versions/1/"}'
-    elif [[ "$args" == *"/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/"* ]]; then
+    elif [[ "$args" == *"content/rpm/packages/mock-existing-uuid/"* ]]; then
         # Content GET (package) by href -> return artifact link
         echo '{"pulp_href": "/api/pulp/mock/api/v3/content/rpm/packages/mock-existing-uuid/", "artifact": "/api/pulp/mock/api/v3/artifacts/mock-artifact-uuid/"}'
-    # SRPMs are queried via the packages endpoint with arch=src; no separate srpms endpoint.
-    elif [[ "$args" == *"/api/pulp/mock/api/v3/artifacts/"* ]]; then
+    elif [[ "$args" == *"/api/v3/artifacts/"* ]]; then
         # Artifact GET -> return sha256 of empty file
         echo '{"sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
     elif [[ "$args" == *"/content/rpm/packages/"* ]] && [[ "$args" != *"modify"* ]]; then
