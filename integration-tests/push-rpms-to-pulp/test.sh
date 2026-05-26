@@ -84,9 +84,10 @@ EOF
 
     export RELEASE_NAME=${release_name}
     export RELEASE_NAMESPACE=${tenant_namespace}
-    "${SUITE_DIR}/../scripts/wait-for-release.sh"
-
     export RELEASE_NAMES="${release_name}"
+    release_names="${release_name}"
+
+    "${SUITE_DIR}/../scripts/wait-for-release.sh"
 }
 
 # --- Release Verification ---
@@ -94,6 +95,7 @@ EOF
 verify_release_contents() {
   local failures=0
   local failed_releases
+
   for RELEASE_NAME in ${RELEASE_NAMES};
   do
     echo "Verifying Release contents for ${RELEASE_NAME} in namespace ${RELEASE_NAMESPACE}..."
@@ -203,8 +205,8 @@ verify_release_contents() {
 
             # Verify SBOM field is present for source RPM artifacts and is downloadable
             echo "Checking SBOM for source RPM artifacts..."
-            sbom_url=$(yq '.spec.content.artifacts[] | select(.architecture == "src") | .sbom // ""' \
-              "${advisory_yaml_dir}/advisory.yaml" | head -n1)
+            sbom_url=$(yq '[.spec.content.artifacts[] | select(.architecture == "src")] | .[0].sbom // ""' \
+              "${advisory_yaml_dir}/advisory.yaml")
 
             if [ -n "${sbom_url}" ]; then
               echo "Found SBOM URL: ${sbom_url}"
@@ -249,8 +251,8 @@ verify_release_contents() {
 
             # Verify attestation field is present for source RPM artifacts and is downloadable
             echo "Checking attestation for source RPM artifacts..."
-            attestation_url=$(yq '.spec.content.artifacts[] | select(.architecture == "src") | .attestation // ""' \
-              "${advisory_yaml_dir}/advisory.yaml" | head -n1)
+            attestation_url=$(yq '[.spec.content.artifacts[] | select(.architecture == "src")] | .[0].attestation // ""' \
+              "${advisory_yaml_dir}/advisory.yaml")
 
             if [ -n "${attestation_url}" ]; then
               echo "Found attestation URL: ${attestation_url}"
@@ -284,6 +286,28 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
+            # Verify signingKey is present on all artifacts and matches the RPA value
+            echo "Checking signingKey for all artifacts..."
+            expected_signing_key=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
+              -n "${managed_namespace}" -o jsonpath='{.spec.data.signOptions.signKeyAlias.key}')
+            echo "Expected signingKey from RPA: ${expected_signing_key}"
+            first_signing_key=$(yq '.spec.content.artifacts[0].signingKey // ""' "${advisory_yaml_dir}/advisory.yaml")
+            if [ -n "${expected_signing_key}" ] && [ -n "${first_signing_key}" ]; then
+              artifact_count=$(yq '.spec.content.artifacts | length' "${advisory_yaml_dir}/advisory.yaml")
+              for ((idx=0; idx<artifact_count; idx++)); do
+                signing_key=$(yq ".spec.content.artifacts[${idx}].signingKey // \"\"" "${advisory_yaml_dir}/advisory.yaml")
+                if [ "${signing_key}" = "${expected_signing_key}" ]; then
+                  echo "✅️ Artifact ${idx} has correct signingKey: ${signing_key}"
+                else
+                  echo "🔴 Artifact ${idx} has incorrect signingKey: '${signing_key}' (expected '${expected_signing_key}')"
+                  failures=$((failures+1))
+                fi
+              done
+            else
+              echo "⏭️ Skipping signingKey check (signingKey not populated in advisory)"
+            fi
+
+            # Validate advisory description contains expected RPM grouping format
             echo "Validating advisory description RPM content..."
 
             # Component A (hello) group header and entries
@@ -425,14 +449,14 @@ verify_release_contents() {
         fi
       fi
 
-      # Verify artifacts.json was created by push-rpms-to-pulp task
-      echo "Checking artifacts.json from push-rpms-to-pulp task..."
+      # Verify artifacts.json was created by push-unsigned-rpms-to-pulp task
+      echo "Checking artifacts.json from push-unsigned-rpms-to-pulp task..."
       local artifacts_dir
       artifacts_dir=$(mktemp -d -p "$(pwd)")
 
       if "${SUITE_DIR}/../scripts/get-trusted-artifact-content.sh" \
           "${managed_plr_name}" \
-          "push-rpms-to-pulp" \
+          "push-unsigned-rpms-to-pulp" \
           "sourceDataArtifact" \
           "${managed_namespace}" \
           "${artifacts_dir}" > /dev/null 2>&1; then
@@ -488,7 +512,7 @@ verify_release_contents() {
           failures=$((failures+1))
         fi
       else
-        echo "⚠️ Could not fetch trusted artifact from push-rpms-to-pulp task (task may not have run)"
+        echo "⚠️ Could not fetch trusted artifact from push-unsigned-rpms-to-pulp task (task may not have run)"
       fi
 
       # Cleanup
