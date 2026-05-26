@@ -82,11 +82,13 @@ check_env_vars() {
 }
 
 # Function to parse script options
-# Modifies global variables: CLEANUP, NO_CVE
+# Modifies global variables: CLEANUP, NO_CVE, INTERACTIVE_MODE
 parse_options() {
     echo "Parsing script options..."
     local opts # Use local for getopt result storage
-    opts=$(getopt -l "skip-cleanup,no-cve" -o "sc,nocve" -a -- "$@")
+    # Note: Using long option names with -a flag to allow single-dash prefix
+    # Short option aliases: sc=skip-cleanup, nocve=no-cve, i=interactive
+    opts=$(getopt -l "skip-cleanup,no-cve,interactive,sc,nocve,i" -o "" -a -- "$@")
     if [ $? -ne 0 ]; then
         log_error "Failed to parse options."
     fi
@@ -94,12 +96,16 @@ parse_options() {
     eval set -- "$opts"
     while true; do
         case "$1" in
-            -sc|--skip-cleanup)
+            --sc|--skip-cleanup)
                 CLEANUP="false"
                 shift
                 ;;
-            -nocve|--no-cve)
+            --nocve|--no-cve)
                 NO_CVE="true"
+                shift
+                ;;
+            --i|--interactive)
+                INTERACTIVE_MODE="true"
                 shift
                 ;;
             --)
@@ -111,7 +117,7 @@ parse_options() {
                 ;;
         esac
     done
-    echo "Options parsed: CLEANUP=${CLEANUP}, NO_CVE=${NO_CVE}"
+    echo "Options parsed: CLEANUP=${CLEANUP}, NO_CVE=${NO_CVE}, INTERACTIVE_MODE=${INTERACTIVE_MODE:-false}"
 }
 
 # Function to get Build PipelineRun URL
@@ -189,13 +195,12 @@ cleanup_resources() {
         echo "tmpDir not set or not a directory, skipping k8s resource cleanup." | tee -a "${cleanup_log_file}"
     fi
 
-    # Clean up Release CRs created by this specific test suite
-    # Use both uuid and originating-tool labels to avoid deleting Release CRs
-    # belonging to other parallel test suites that share the same uuid
-    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ] && [ -n "$originating_tool" ]; then
-        echo "Deleting Release CRs with test-run-uuid=${uuid},originating-tool=${originating_tool} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
+    # Clean up Release CRs created by this specific test run
+    # Use uuid (from test.env) to support concurrent test execution
+    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ]; then
+        echo "Deleting Release CRs with test-run-uuid=${uuid} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
         kubectl delete release -n "${tenant_namespace}" \
-            -l "test-run-uuid=${uuid},originating-tool=${originating_tool}" \
+            -l test-run-uuid="${uuid}" \
             --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
             echo "Warning: Failed to delete some Release CRs" | tee -a "${cleanup_log_file}"
     else
@@ -764,6 +769,17 @@ wait_for_releases() {
     echo ""
     echo "✅ Found: $release_names"
 
+    export RELEASE_NAMESPACE=${tenant_namespace}
+    export RELEASE_NAMES="$release_names"
+
+    _wait_for_releases_internal
+}
+
+# Internal function to wait for releases with interactive retry support
+_wait_for_releases_internal() {
+    local release_failed=false
+    local failed_release=""
+
     RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
 
     export RELEASE_NAMESPACE=${tenant_namespace}
@@ -785,12 +801,55 @@ wait_for_releases() {
         done
     done
 
-    # Wait for remaining processes to finish
+    # Wait for remaining processes to finish, tracking failures
+    set +e
     while (( ${RUNNING_JOBS@P} > 0 )); do
-        wait -n
+        if ! wait -n; then
+            release_failed=true
+            # Find which release failed by checking status
+            for rel in ${RELEASE_NAMES}; do
+                local status
+                status=$(kubectl get release "${rel}" -n "${RELEASE_NAMESPACE}" \
+                    -o jsonpath='{.status.conditions[?(@.type=="Released")].status}' 2>/dev/null || echo "")
+                if [ "$status" == "False" ]; then
+                    failed_release="${rel}"
+                    break
+                fi
+            done
+        fi
     done
+    set -e
 
     export RELEASE_NAMES="$all_release_names"
+
+    if [ "$release_failed" == "true" ]; then
+        echo ""
+        echo "🔴 Release pipeline failed: ${failed_release:-unknown}"
+
+        if [ "${INTERACTIVE_MODE:-false}" == "true" ]; then
+            export RELEASE_NAME="${failed_release:-$(echo $RELEASE_NAMES | awk '{print $1}')}"
+            show_release_context "${RELEASE_NAME}" "${RELEASE_NAMESPACE}"
+
+            while true; do
+                local prompt_result
+                interactive_prompt "${RELEASE_NAME}" "${RELEASE_NAMESPACE}"
+                prompt_result=$?
+
+                if [ $prompt_result -eq 0 ]; then
+                    # Retry succeeded - update RELEASE_NAMES and re-verify
+                    echo "✅ Retry release completed"
+                    RELEASE_NAMES="${RETRY_RELEASE_NAME}"
+                    return 0
+                elif [ $prompt_result -eq 2 ]; then
+                    # User chose cleanup
+                    return 1
+                fi
+                # Otherwise user chose quit without cleanup (handled in interactive_prompt)
+            done
+        else
+            return 1
+        fi
+    fi
 }
 
 # Function to clean up old resources based on originating tool label
@@ -930,4 +989,250 @@ wait_for_single_component_snapshot() {
     fi
 
     echo "$snapshot_name"
+}
+
+# --- Interactive Mode Functions ---
+# These functions support iterative development by pausing on failure
+# and allowing retries with the same snapshot.
+
+# Get Konflux UI URL for pipelineruns
+# Arguments: $1=namespace, $2=pipelinerun_name
+get_pipelinerun_console_url() {
+    local namespace="$1"
+    local pipelinerun_name="$2"
+    local application_name
+
+    # Get application name from pipelinerun labels
+    application_name=$(kubectl get pipelinerun/"${pipelinerun_name}" -n "${namespace}" \
+        -ojsonpath='{.metadata.labels.appstudio\.openshift\.io/application}' 2>/dev/null || true)
+
+    if [ -n "$application_name" ]; then
+        get_build_pipeline_run_url "${namespace}" "${application_name}" "${pipelinerun_name}"
+    else
+        echo "N/A (no application label found)"
+    fi
+}
+
+# Show context information for debugging
+# Arguments: $1=release_name, $2=release_namespace
+show_release_context() {
+    local release_name="${1:-$RELEASE_NAME}"
+    local release_namespace="${2:-$RELEASE_NAMESPACE}"
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "📋 Release Context"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if [ -z "$release_name" ] || [ -z "$release_namespace" ]; then
+        echo "  ⚠️  Release name or namespace not available"
+        echo ""
+        return
+    fi
+
+    local release_json
+    release_json=$(kubectl get release/"${release_name}" -n "${release_namespace}" -ojson 2>/dev/null || echo "{}")
+
+    local snapshot_name release_plan_name managed_plr author
+    snapshot_name=$(jq -r '.spec.snapshot // "N/A"' <<< "$release_json")
+    release_plan_name=$(jq -r '.spec.releasePlan // "N/A"' <<< "$release_json")
+    managed_plr=$(jq -r '.status.managedProcessing.pipelineRun // "N/A"' <<< "$release_json")
+    author=$(jq -r '.metadata.labels["release.appstudio.openshift.io/author"] // .status.attribution.author // "N/A"' <<< "$release_json")
+
+    echo "  Release:        ${release_namespace}/${release_name}"
+    echo "  Snapshot:       ${snapshot_name}"
+    echo "  ReleasePlan:    ${release_plan_name}"
+    echo "  Author:         ${author}"
+    echo ""
+
+    if [ "$managed_plr" != "N/A" ] && [ "$managed_plr" != "null" ]; then
+        local managed_plr_name managed_plr_ns
+        managed_plr_name=$(basename "$managed_plr")
+        managed_plr_ns=$(echo "$managed_plr" | cut -d'/' -f1)
+        echo "  Managed PLR:    ${managed_plr_name}"
+        echo "  PLR URL:        $(get_pipelinerun_console_url "${managed_plr_ns}" "${managed_plr_name}")"
+    fi
+
+    echo ""
+    echo "  Tenant NS:      ${tenant_namespace:-N/A}"
+    echo "  Managed NS:     ${managed_namespace:-N/A}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+}
+
+# Create a new Release with the same snapshot
+# Arguments: $1=original_release_name, $2=release_namespace
+# Returns: new release name via RETRY_RELEASE_NAME global variable
+retry_release() {
+    local original_release_name="${1:-$RELEASE_NAME}"
+    local release_namespace="${2:-$RELEASE_NAMESPACE}"
+
+    if [ -z "$original_release_name" ] || [ -z "$release_namespace" ]; then
+        echo "🔴 Cannot retry: release name or namespace not set"
+        return 1
+    fi
+
+    local release_json
+    release_json=$(kubectl get release/"${original_release_name}" -n "${release_namespace}" -ojson 2>/dev/null)
+
+    if [ -z "$release_json" ]; then
+        echo "🔴 Cannot retry: could not fetch original release ${original_release_name}"
+        return 1
+    fi
+
+    local snapshot_name release_plan_name author
+    snapshot_name=$(jq -r '.spec.snapshot // ""' <<< "$release_json")
+    release_plan_name=$(jq -r '.spec.releasePlan // ""' <<< "$release_json")
+    author=$(jq -r '.metadata.labels["release.appstudio.openshift.io/author"] // .status.attribution.author // ""' <<< "$release_json")
+
+    if [ -z "$snapshot_name" ] || [ -z "$release_plan_name" ]; then
+        echo "🔴 Cannot retry: missing snapshot or releasePlan in original release"
+        return 1
+    fi
+
+    # Generate unique retry name
+    local retry_suffix retry_name
+    retry_suffix=$(date +%s%N | sha256sum | head -c 8)
+    retry_name="retry-${retry_suffix}"
+
+    echo "🔄 Creating retry release: ${retry_name}"
+    echo "   Snapshot:    ${snapshot_name}"
+    echo "   ReleasePlan: ${release_plan_name}"
+
+    # Delete if exists (from previous retry attempt)
+    kubectl delete release "${retry_name}" -n "${release_namespace}" --ignore-not-found >/dev/null 2>&1 || true
+
+    local retry_yaml
+    retry_yaml="$(cat <<EOF
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Release
+metadata:
+  name: ${retry_name}
+  namespace: ${release_namespace}
+  labels:
+    release.appstudio.openshift.io/automated: "false"
+    release.appstudio.openshift.io/author: "${author}"
+    test-run-uuid: "${uuid}"
+spec:
+  releasePlan: ${release_plan_name}
+  snapshot: ${snapshot_name}
+EOF
+)"
+
+    echo "${retry_yaml}" | kubectl create -f - >/dev/null
+
+    if [ $? -ne 0 ]; then
+        echo "🔴 Failed to create retry release"
+        return 1
+    fi
+
+    echo "✅ Retry release created: ${retry_name}"
+
+    # Export for use by caller
+    export RETRY_RELEASE_NAME="${retry_name}"
+
+    # Wait for the release
+    echo ""
+    echo "⏳ Waiting for retry release to complete..."
+    RELEASE_NAME="${retry_name}" RELEASE_NAMESPACE="${release_namespace}" \
+        "${SUITE_DIR}/../scripts/wait-for-release.sh"
+
+    return $?
+}
+
+# Interactive prompt for failure handling
+# Arguments: $1=release_name, $2=release_namespace
+# Returns: 0 if retry succeeded, 1 otherwise
+interactive_prompt() {
+    local release_name="${1:-$RELEASE_NAME}"
+    local release_namespace="${2:-$RELEASE_NAMESPACE}"
+
+    while true; do
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "🛑 Interactive Mode - Test paused"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "  [r] Retry    - Create new Release with same snapshot"
+        echo "  [i] Info     - Show release context again"
+        echo "  [s] Shell    - Drop into bash shell (exit to return)"
+        echo "  [c] Cleanup  - Run cleanup and exit"
+        echo "  [q] Quit     - Exit without cleanup (keep resources)"
+        echo ""
+        read -r -p "Select option: " choice
+
+        case "${choice}" in
+            r|R)
+                echo ""
+                if retry_release "${release_name}" "${release_namespace}"; then
+                    echo ""
+                    echo "✅ Retry release completed successfully!"
+                    # Update RELEASE_NAME for verification
+                    export RELEASE_NAME="${RETRY_RELEASE_NAME}"
+                    return 0
+                else
+                    echo ""
+                    echo "🔴 Retry release failed"
+                    show_release_context "${RETRY_RELEASE_NAME:-$release_name}" "${release_namespace}"
+                fi
+                ;;
+            i|I)
+                show_release_context "${release_name}" "${release_namespace}"
+                ;;
+            s|S)
+                echo ""
+                echo "Dropping into shell. Type 'exit' to return to menu."
+                echo "Useful variables: RELEASE_NAME, RELEASE_NAMESPACE, tenant_namespace, managed_namespace"
+                echo ""
+                bash --norc -i
+                ;;
+            c|C)
+                echo ""
+                echo "Running cleanup..."
+                return 2  # Signal to run cleanup
+                ;;
+            q|Q)
+                echo ""
+                echo "Exiting without cleanup. Resources preserved for debugging."
+                echo ""
+                echo "To manually cleanup later:"
+                echo "  kubectl delete release -l test-run-uuid=${uuid:-unknown} -n ${release_namespace}"
+                export CLEANUP="false"
+                exit 0
+                ;;
+            *)
+                echo "Invalid option. Please choose r, i, s, c, or q."
+                ;;
+        esac
+    done
+}
+
+# Handle test failure with optional interactive mode
+# Arguments: $1=failure_message, $2=release_name (optional), $3=release_namespace (optional)
+# Environment: INTERACTIVE_MODE=true to enable interactive prompts
+handle_test_failure() {
+    local failure_message="$1"
+    local release_name="${2:-$RELEASE_NAME}"
+    local release_namespace="${3:-$RELEASE_NAMESPACE}"
+
+    echo ""
+    echo "🔴 ${failure_message}"
+
+    if [ "${INTERACTIVE_MODE:-false}" == "true" ]; then
+        show_release_context "${release_name}" "${release_namespace}"
+
+        local prompt_result
+        interactive_prompt "${release_name}" "${release_namespace}"
+        prompt_result=$?
+
+        if [ $prompt_result -eq 0 ]; then
+            # Retry succeeded, caller should re-run verification
+            return 0
+        elif [ $prompt_result -eq 2 ]; then
+            # User requested cleanup
+            return 1
+        fi
+    fi
+
+    return 1
 }
