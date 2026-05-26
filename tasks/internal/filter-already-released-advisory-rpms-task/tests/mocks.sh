@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -eux
 
+function select-oci-auth() {
+  echo "/dev/null"
+}
+
+function oras() {
+  echo "Mock oras called with: $*" >&2
+
+  if [[ "$1" == "push" ]]; then
+    return 0
+  elif [[ "$1" == "manifest" && "$2" == "fetch" ]]; then
+    echo '{"digest": "sha256:mockdigest123"}'
+    return 0
+  else
+    echo "Error: Unexpected oras command: $*" >&2
+    exit 1
+  fi
+}
+
 function git() {
   echo "Mock git called with: $*"
 
@@ -9,7 +27,6 @@ function git() {
   elif [[ "$1" == "sparse-checkout" ]]; then
     :
   elif [[ "$1" == "checkout" ]]; then
-    # Create advisory directory structure with advisory.yaml files
     mkdir -p data/advisories/test-origin/2025/1601
     mkdir -p data/advisories/test-origin/2025/1602
     touch data/advisories/test-origin/2025/1601/advisory.yaml
@@ -39,34 +56,36 @@ function find() {
 function yq() {
   echo "Mock yq called with: $*" >&2
 
-  if [[ -z "$3" ]]; then
-    echo "Error: Empty file path in yq command" >&2
-    exit 1
-  fi
+  if [[ "$1" == "-o=json" ]]; then
+    local advisory_path="$3"
+    local advisory_num
+    advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
 
-  advisory_path="$3"
-  advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
-
-  if [[ "$2" == ".spec.type" ]]; then
-    echo "RHBA"
-  elif [[ "$2" == ".metadata.name" ]]; then
-    advisory_year=$(echo "$advisory_path" | awk -F'/' '{print $(NF-2)}')
-    echo "${advisory_year}:${advisory_num}"
-  elif [[ "$2" == *".spec.content.artifacts"* ]]; then
     case "$advisory_num" in
       1601)
-        # These purls match RPMs that should be "in advisory"
         echo '["pkg:rpm/redhat/released-rpm@1.0-1.fc44?arch=x86_64", "pkg:rpm/redhat/all-released-a@1.0-1.fc44?arch=x86_64", "pkg:rpm/redhat/all-released-b@2.0-1.fc44?arch=x86_64"]'
-        ;;
-      1602)
-        echo '[]'
         ;;
       *)
         echo '[]'
         ;;
     esac
+  elif [[ "$1" == "-r" ]]; then
+    local advisory_path="$3"
+    local advisory_num
+    advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
+
+    if [[ "$2" == ".spec.type" ]]; then
+      echo "RHBA"
+    elif [[ "$2" == ".metadata.name" ]]; then
+      local advisory_year
+      advisory_year=$(echo "$advisory_path" | awk -F'/' '{print $(NF-2)}')
+      echo "${advisory_year}:${advisory_num}"
+    else
+      echo "Error: Unexpected yq -r query: $2" >&2
+      exit 1
+    fi
   else
-    echo "Error: Unexpected yq query: $2" >&2
+    echo "Error: Unexpected yq command: $*" >&2
     exit 1
   fi
 }
