@@ -164,7 +164,10 @@ spec:
               {"resultIndex": 2, "key": ".conforma.workerCount", "default": "4"},
               {"resultIndex": 3, "key": ".jira.jiraAdvisorySecret", "default": "konflux-advisory-jira-secret"},
               {"resultIndex": 4, "key": ".sign.cosignSecretName", "default": ""},
-              {"resultIndex": 5, "key": ".intention", "default": "staging"}
+              {"resultIndex": 5, "key": ".intention", "default": "staging"},
+              {"resultIndex": 6, "key": ".signOptions.unsignedRpmsDomain", "default": "rok-storage"},
+              {"resultIndex": 7, "key": ".signOptions.signedRpmsDomain", "default": "rok-storage"},
+              {"resultIndex": 8, "key": ".pulp.taskTimeout", "default": "7200"}
             ]
         - name: taskGitUrl
           value: "$(params.taskGitUrl)"
@@ -441,7 +444,7 @@ spec:
         - name: snapshotPath
           value: "$(tasks.collect-data.results.snapshotSpec)"
         - name: PULP_DOMAIN
-          value: "$(tasks.collect-task-params.results.extractedValues[0])"
+          value: "$(tasks.collect-task-params.results.extractedValues[7])"
         - name: PULP_SECRET_NAME
           value: "$(tasks.collect-task-params.results.extractedValues[1])"
         - name: sourceDataArtifact
@@ -492,8 +495,9 @@ spec:
         resolver: git
       runAfter:
         - populate-release-notes
-        - push-rpms-to-pulp
-    - name: push-rpms-to-pulp
+        - rh-sign-rpm
+    - name: push-unsigned-rpms-to-pulp
+      timeout: "4h0m0s"
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
           operator: in
@@ -514,6 +518,8 @@ spec:
           value: "$(tasks.collect-task-params.results.extractedValues[0])"
         - name: PULP_SECRET_NAME
           value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: pulpTaskTimeout
+          value: "$(tasks.collect-task-params.results.extractedValues[8])"
         - name: resultsDirPath
           value: $(tasks.collect-data.results.resultsDir)
         - name: artifactsJsonDirPath
@@ -532,6 +538,48 @@ spec:
           value: "$(params.taskGitRevision)"
       runAfter:
         - check-data-keys
+    - name: push-signed-rpms-to-pulp
+      timeout: "4h0m0s"
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/push-rpms-to-pulp/push-rpms-to-pulp.yaml
+      params:
+        - name: signedRpmsOciArtifact
+          value: "$(tasks.rh-sign-rpm.results.signedRpmsOciArtifacts)"
+        - name: PULP_DOMAIN
+          value: "$(tasks.collect-task-params.results.extractedValues[7])"
+        - name: PULP_SECRET_NAME
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: pulpTaskTimeout
+          value: "$(tasks.collect-task-params.results.extractedValues[8])"
+        - name: resultsDirPath
+          value: $(tasks.collect-data.results.resultsDir)
+        - name: artifactsJsonDirPath
+          value: $(tasks.collect-data.results.subdirectory)/artifacts-signed
+        - name: sourceDataArtifact
+          value: "$(tasks.rh-sign-rpm.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - rh-sign-rpm
     - name: process-component-sbom
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
@@ -582,7 +630,7 @@ spec:
       runAfter:
         - collect-data
         - collect-atlas-params
-        - push-rpms-to-pulp
+        - rh-sign-rpm
     - name: process-product-sbom
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
@@ -629,7 +677,7 @@ spec:
       runAfter:
         - collect-data
         - collect-atlas-params
-        - push-rpms-to-pulp
+        - rh-sign-rpm
     - name: check-data-keys
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
@@ -673,6 +721,56 @@ spec:
         resolver: git
       runAfter:
         - populate-release-notes
+    - name: rh-sign-rpm
+      retries: 5
+      when:
+        - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
+          operator: in
+          values: ["false"]
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/rh-sign-rpm/rh-sign-rpm.yaml
+      params:
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: artifactsJsonPath
+          value: "$(tasks.collect-data.results.subdirectory)/artifacts/artifacts.json"
+        - name: requester
+          value: "$(tasks.extract-requester-from-release.results.output-result)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: unsignedRpmsDomain
+          value: "$(tasks.collect-task-params.results.extractedValues[6])"
+        - name: signedRpmsDomain
+          value: "$(tasks.collect-task-params.results.extractedValues[7])"
+        - name: unsignedRpmsSubpath
+          value: ""
+        - name: signedRpmsSubpath
+          value: ""
+        - name: signedRpmsUploadSubpath
+          value: ""
+        - name: PULP_SECRET_NAME
+          value: "$(tasks.collect-task-params.results.extractedValues[1])"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.push-unsigned-rpms-to-pulp.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - push-unsigned-rpms-to-pulp
     - name: collect-atlas-params
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
@@ -704,7 +802,7 @@ spec:
           value: "$(params.taskGitRevision)"
       runAfter:
         - collect-data
-        - push-rpms-to-pulp
+        - rh-sign-rpm
     - name: create-advisory
       when:
         - input: "$(tasks.filter-already-released-advisory-rpms.results.skip_release)"
@@ -749,7 +847,8 @@ spec:
         - check-data-keys
         - embargo-check
         - set-advisory-severity
-        - push-rpms-to-pulp
+        - rh-sign-rpm
+        - push-signed-rpms-to-pulp
         - process-component-sbom
         - process-product-sbom
     - name: close-advisory-issues
@@ -804,7 +903,8 @@ spec:
           value: $(params.ociStorage)
         - name: resultArtifacts
           value:
-            - "$(tasks.push-rpms-to-pulp.results.sourceDataArtifact)=$(params.dataDir)"
+            - "$(tasks.push-unsigned-rpms-to-pulp.results.sourceDataArtifact)=$(params.dataDir)"
+            - "$(tasks.push-signed-rpms-to-pulp.results.sourceDataArtifact)=$(params.dataDir)"
             - "$(tasks.create-advisory.results.sourceDataArtifact)=$(params.dataDir)"
             - "$(tasks.process-product-sbom.results.sourceDataArtifact)=$(params.dataDir)"
             - "$(tasks.process-component-sbom.results.sourceDataArtifact)=$(params.dataDir)"
