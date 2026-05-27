@@ -86,12 +86,12 @@ spec:
       runAsUser: 1001
   steps:
     - name: create-advisory
-      image: quay.io/konflux-ci/release-service-utils@sha256:9460d206ab78a096679cf0d96bf812b3f9a5227dd2f7061e06e8e58c49cdad16
+      image: quay.io/konflux-ci/release-service-utils@sha256:71a99d12d920fcc157e08e5dc9894fbc4bce42328e9c2f58dc53411278858d91
       computeResources:
         limits:
-          memory: 256Mi
+          memory: 512Mi
         requests:
-          memory: 256Mi
+          memory: 512Mi
           cpu: '1'  # 1 is the max allowed by at least the staging cluster
       volumeMounts:
         - name: advisory-secret
@@ -99,264 +99,28 @@ spec:
         - name: errata-secret
           mountPath: /mnt/errata_secret
       env:
-        - name: "ADVISORY_JSON"
-          value: "$(params.advisory_json)"
-      script: |
-          #!/usr/bin/env bash
-          set -eo pipefail
-
-          GITLAB_HOST="$(cat /mnt/advisory_secret/gitlab_host)"
-
-          # This is a GitLab Project access token. Go to the settings/access_tokens page
-          # of your repository to create one. It should have the Developer role with read
-          # and write repository rights.
-          ACCESS_TOKEN="$(cat /mnt/advisory_secret/gitlab_access_token)"
-
-          GIT_AUTHOR_NAME="$(cat /mnt/advisory_secret/git_author_name)"
-          GIT_AUTHOR_EMAIL="$(cat /mnt/advisory_secret/git_author_email)"
-          GIT_REPO="$(cat /mnt/advisory_secret/git_repo)"
-          ERRATA_API="$(cat /mnt/errata_secret/errata_api)"
-          SERVICE_ACCOUNT_NAME="$(cat /mnt/errata_secret/name)"
-          SERVICE_ACCOUNT_KEYTAB="$(cat /mnt/errata_secret/base64_keytab)"
-
-          # export variables required by the called script "gitlab-functions" in release-service-utils
-          export GITLAB_HOST ACCESS_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
-
-          STDERR_FILE=/tmp/stderr.txt
-          echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
-          echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
-
-          exitfunc() {
-              local err=$1
-              local line=$2
-              local command="$3"
-              if [ "$err" -eq 0 ] ; then
-                  echo -n "Success" > "$(results.result.path)"
-              else
-                  echo -n \
-                    "$0: ERROR '$command' failed at line $line - exited with status $err" > "$(results.result.path)"
-                  if [ -f "$STDERR_FILE" ] ; then
-                      tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
-                  fi
-              fi
-              echo -n "${ADVISORY_URL}" > "$(results.advisory_url.path)"
-              echo -n "${ADVISORY_INTERNAL_URL}" > "$(results.advisory_internal_url.path)"
-              exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
-          }
-          # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
-          trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
-
-          REPO_BRANCH=main
-          ADVISORY_URL=""
-          ADVISORY_INTERNAL_URL=""
-          ADVISORY_BASE_DIR="data/advisories/$(params.origin)"
-          if [[ "${GIT_REPO}" == *"/rhtap-release/"* ]]; then
-            ADVISORY_URL_PREFIX="https://access.stage.redhat.com/errata"
-          else
-            ADVISORY_URL_PREFIX="https://access.redhat.com/errata"
-          fi
-
-          # Switch to /tmp to avoid filesystem permission issues
-          cd /tmp
-
-          # loading git and gitlab functions
-          # shellcheck source=/dev/null
-          . /home/utils/gitlab-functions
-          # shellcheck source=/dev/null
-          . /home/utils/git-functions
-          gitlab_init
-          git_functions_init
-
-          # This also cds into the git repo
-          git_clone_and_checkout --repository "$GIT_REPO" --revision "$REPO_BRANCH" \
-            --sparse-dir "$ADVISORY_BASE_DIR" --sparse-dir schema
-
-          if [ "$(params.contentType)" = "image" ]; then
-            echo "Content type is image."
-            spec_content_type=".content.images"
-          elif [ "$(params.contentType)" == "binary" ] || [ "$(params.contentType)" == "generic" ] \
-          || [ "$(params.contentType)" == "rpm" ]; then
-            echo "Content type is generic or rpm artifact."
-            spec_content_type=".content.artifacts"
-          else
-            echo "Unsupported contentType: $(params.contentType)"| tee -a "$STDERR_FILE"
-            echo "Exiting." | tee -a "$STDERR_FILE"
-            exit 1
-          fi
-          CONTENT_FILE=/tmp/content.json
-          # Write the advisory JSON parameter to a file to avoid argument length limits
-          printf '%s' "$ADVISORY_JSON" | base64 --decode | gunzip > /tmp/advisory_decoded.json
-          jq -c "${spec_content_type} // []" /tmp/advisory_decoded.json > "$CONTENT_FILE"
-
-          # Use ISO 8601 format in UTC/Zulu time, e.g. 2024-03-06T17:27:38Z
-          SHIP_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          YEAR=${SHIP_DATE%%-*} # derive the year from the ship date
-          # Define advisory directory
-          echo "Checking advisories in directory: ${ADVISORY_BASE_DIR}"
-
-          # Check existing advisories across ALL years
-          EXISTING_ADVISORIES=""
-          if [ -d "${ADVISORY_BASE_DIR}" ]; then
-            EXISTING_ADVISORIES=$(
-              # year/advisory dir with modified time
-              find "${ADVISORY_BASE_DIR}" -mindepth 2 -type d -printf "%T@ %p\n" |
-              sort -nr |                       # sort by latest modified first
-              cut -d' ' -f2- |                 # remove the timestamp, keep only path
-              sed "s|^${ADVISORY_BASE_DIR}/||" # keeping year/advisory format
-            )
-          fi
-
-          if [[ -z "$EXISTING_ADVISORIES" ]]; then
-              echo "No existing advisories found."
-          fi
-
-          # Track the latest advisory that contains matching content
-          # EXISTING_ADVISORIES is sorted by modification time (newest first)
-          LATEST_ADVISORY_FILE=""
-
-          EXISTING_CONTENT=/tmp/existing_content.json
-          for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
-              ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
-              yq -o=json ".spec${spec_content_type} // []" "${ADVISORY_FILE}" > "$EXISTING_CONTENT"
-              echo "Processing advisory: ${ADVISORY_FILE}"
-              echo "Existing content in advisory: "
-              cat "$EXISTING_CONTENT"
-
-              # Check if this advisory contains any matching content before filtering
-              CONTENT_BEFORE_FILTER=$(cat "$CONTENT_FILE")
-
-              # Update CONTENT by removing entries that already exist in the advisory
-              if [ "$(params.contentType)" == "generic" ] || [ "$(params.contentType)" == "binary" ]; then
-                # Use purl as unique key, but strip checksum= for comparison
-                # This allows re-releases (with new checksums from re-signing) to update existing advisories
-                # The filename= param (if present) ensures we match the correct file
-                jq --slurpfile existing "$EXISTING_CONTENT" '
-                  # Function to strip checksum param from purl for comparison
-                  def strip_checksum:
-                    gsub("&checksum=[^&]*"; "") | gsub("\\?checksum=[^&]*&"; "?") | gsub("\\?checksum=[^&]*$"; "");
-                  map(select(
-                    (.purl | strip_checksum) as $p |
-                    ($existing[0] | map(select((.purl | strip_checksum) == $p)) | length == 0)
-                  ))' "$CONTENT_FILE" > /tmp/content_filtered.json
-              elif [ "$(params.contentType)" == "rpm" ] || [ "$(params.contentType)" == "disk-image" ]; then
-                # Use exact purl matching for RPM and disk-image (checksums are stable, no re-signing)
-                jq --slurpfile existing "$EXISTING_CONTENT" '
-                  map(select(
-                    .purl as $p |
-                    ($existing[0] | map(select(.purl == $p)) | length == 0)
-                  ))' "$CONTENT_FILE" > /tmp/content_filtered.json
-              else
-                jq --slurpfile existing "$EXISTING_CONTENT" '
-                  map(select(
-                    .containerImage as $ci |
-                    .tags as $tags |
-                    .repository as $repo |
-                    ($existing[0] | map(select(
-                      .containerImage == $ci and .tags == $tags and .repository == $repo
-                    )) | length == 0)
-                  ))' "$CONTENT_FILE" > /tmp/content_filtered.json
-              fi
-
-              mv /tmp/content_filtered.json "$CONTENT_FILE"
-
-              echo "Remaining entries after filtering:"
-              cat "$CONTENT_FILE"
-
-              CONTENT_BEFORE_COUNT=$(jq 'length' <<< "$CONTENT_BEFORE_FILTER")
-              CONTENT_AFTER_COUNT=$(jq 'length' "$CONTENT_FILE")
-              if [[ $CONTENT_BEFORE_COUNT -gt $CONTENT_AFTER_COUNT ]]; then
-                if [[ -z "$LATEST_ADVISORY_FILE" ]]; then
-                  LATEST_ADVISORY_FILE="$ADVISORY_FILE"
-                  FILTERED_COUNT=$((CONTENT_BEFORE_COUNT - CONTENT_AFTER_COUNT))
-                  echo "Tracked latest advisory: $LATEST_ADVISORY_FILE (filtered $FILTERED_COUNT items)"
-                fi
-              fi
-
-              # If after filtering, no entries are left, then we can exit early
-              if jq -e 'length == 0' "$CONTENT_FILE" >/dev/null; then
-                  echo "All content found in existing advisories. Skipping creation."
-                  echo "Returning advisory: $LATEST_ADVISORY_FILE"
-
-                  ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${LATEST_ADVISORY_FILE}"
-                  ADVISORY_TYPE=$(yq -r '.spec.type' "${LATEST_ADVISORY_FILE}")
-                  ADVISORY_NAME=$(yq -r '.metadata.name' "${LATEST_ADVISORY_FILE}")
-                  ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
-                  echo -n "Success" > "$(results.result.path)"
-                  echo -n "${ADVISORY_URL}" > "$(results.advisory_url.path)"
-                  echo -n "$ADVISORY_INTERNAL_URL" > "$(results.advisory_internal_url.path)"
-                  exit 0
-              fi
-          done
-
-          NEW_ADVISORY_JSON=$(jq --slurpfile new_content "$CONTENT_FILE" \
-            "${spec_content_type} = \$new_content[0]" /tmp/advisory_decoded.json)
-
-          signingKey=$(kubectl get configmap "$(params.config_map_name)" -o jsonpath="{.data.SIG_KEY_NAME}")
-          # Write to temp file to avoid argument length limits
-          echo "$NEW_ADVISORY_JSON" > /tmp/new_advisory.json
-          # Add signingKey only if not already present in the artifact (supports pre-populated values from
-          # populate-release-notes for RPM releases)
-          jq -c --arg key "$signingKey" \
-            "${spec_content_type} |= map(if .signingKey then . else . + {\"signingKey\": \$key} end)" \
-            /tmp/new_advisory.json > /tmp/advisory_with_key.json
-
-          LIVE_ID=$(jq -r '.live_id' /tmp/advisory_decoded.json)
-          if [[ "$LIVE_ID" == null ]]; then
-            # write keytab to file
-            echo -n "${SERVICE_ACCOUNT_KEYTAB}" | base64 --decode > /tmp/keytab
-            # workaround kinit: Invalid UID in persistent keyring name while getting default ccache
-            KRB5CCNAME=$(mktemp)
-            export KRB5CCNAME
-            # see https://stackoverflow.com/a/12308187
-            KRB5_CONFIG=$(mktemp)
-            export KRB5_CONFIG
-            export KRB5_TRACE=/dev/stderr
-            sed '/\[libdefaults\]/a\    dns_canonicalize_hostname = false' /etc/krb5.conf > "${KRB5_CONFIG}"
-            retry 5 kinit "${SERVICE_ACCOUNT_NAME}" -k -t /tmp/keytab
-            REQUEST_URL="${ERRATA_API}/advisory/reserve_live_id"
-            LIVE_ID=$(curl --retry 3 --negotiate -u : "${REQUEST_URL}" -XPOST | jq -r '.live_id')
-          fi
-          ADVISORY_NUM=$(printf "%04d" "$LIVE_ID")
-
-          # Check if the advisory number is already used
-          GIT_RESULT_FILE=$(mktemp)
-          git ls-tree -r --name-only origin/main > "$GIT_RESULT_FILE"
-          GREP_RESULT=$(grep "data/advisories/.*/${YEAR}/${ADVISORY_NUM}/" "$GIT_RESULT_FILE" || true)
-          if [[ -n "${GREP_RESULT}" ]]; then
-            echo "An advisory with number ${ADVISORY_NUM} already exists:" | tee -a "$STDERR_FILE"
-            echo "${GREP_RESULT}" | tee -a "$STDERR_FILE"
-            echo "Exiting." | tee -a "$STDERR_FILE"
-            exit 1
-          fi
-
-          # group advisories by <origin workspace>/year
-          ADVISORY_DIR="data/advisories/$(params.origin)/${YEAR}/${ADVISORY_NUM}"
-          mkdir -p "${ADVISORY_DIR}"
-          JSON_ADVISORY_FILEPATH="${ADVISORY_DIR}/advisory.json"
-          YAML_ADVISORY_FILEPATH="${ADVISORY_DIR}/advisory.yaml"
-          ADVISORY_NAME="${YEAR}:${ADVISORY_NUM}"
-
-          # Prepare variables for the advisory template
-          # Write to file to avoid argument length limits
-          jq -c '{"advisory":{"spec":.}}' /tmp/advisory_with_key.json > /tmp/template_data.json
-          jq -c --arg advisory_name "$ADVISORY_NAME" --arg advisory_ship_date "$SHIP_DATE" \
-            '$ARGS.named + .' /tmp/template_data.json > /tmp/template_data_final.json
-
-          # Create advisory file using the apply_template.py script
-          /home/utils/apply_template.py -o "$JSON_ADVISORY_FILEPATH" --data-file /tmp/template_data_final.json \
-          --template /home/templates/advisory.yaml.jinja -v 2> "$STDERR_FILE"
-
-          # Convert to yaml for readability
-          yq eval -o yaml "$JSON_ADVISORY_FILEPATH" | tee "$YAML_ADVISORY_FILEPATH"
-
-          # Ensure the created advisory file passes the advisory schema
-          check-jsonschema --schemafile schema/advisory.json "$YAML_ADVISORY_FILEPATH" 2>&1 | tee "$STDERR_FILE"
-
-          git add "${YAML_ADVISORY_FILEPATH}"
-          git commit -m "[Konflux Release] new advisory for $(params.componentGroup)"
-          echo "Pushing to ${REPO_BRANCH}..."
-          git_push_with_retries --branch $REPO_BRANCH --retries 5 --url origin 2> "$STDERR_FILE"
-          # Construct the advisory url on customer portal to report back to the user as a result
-          ADVISORY_TYPE=$(jq -r '.type' /tmp/advisory_decoded.json)
-          ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
-          ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/${REPO_BRANCH}/${YAML_ADVISORY_FILEPATH}"
+        - name: ADVISORY_JSON
+          value: $(params.advisory_json)
+        - name: PARAM_COMPONENT_GROUP
+          value: $(params.componentGroup)
+        - name: PARAM_ORIGIN
+          value: $(params.origin)
+        - name: PARAM_CONFIG_MAP_NAME
+          value: $(params.config_map_name)
+        - name: PARAM_CONTENT_TYPE
+          value: $(params.contentType)
+        - name: PARAM_INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: $(params.internalRequestPipelineRunName)
+        - name: PARAM_TASK_RUN_NAME
+          value: $(context.taskRun.name)
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+        - name: RESULT_ADVISORY_URL
+          value: $(results.advisory_url.path)
+        - name: RESULT_ADVISORY_INTERNAL_URL
+          value: $(results.advisory_internal_url.path)
+        - name: RESULT_INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: $(results.internalRequestPipelineRunName.path)
+        - name: RESULT_INTERNAL_REQUEST_TASK_RUN_NAME
+          value: $(results.internalRequestTaskRunName.path)
+      command: ["/home/scripts/python/tasks/internal/create_advisory.py"]

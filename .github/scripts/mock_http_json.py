@@ -41,26 +41,28 @@ class _Handler(BaseHTTPRequestHandler):
         # Keep Tekton step logs readable; every GET would otherwise print a line.
         return
 
-    def do_GET(self) -> None:
+    def _route_body(self) -> bytes | None:
         parsed = urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
-        body = None
         # Order in mocks.yaml matters: first matching rule wins (not most specific).
         for rule in self.routes:
             suf = rule.get("path_suffix")
             if suf is not None:
                 # Match both "/auth/token" and "/auth/token/" style paths.
-                if path.endswith(suf) or path.endswith(suf.rstrip("/")):
+                suf_stripped = suf.rstrip("/")
+                if path.endswith(suf) or (suf_stripped and path.endswith(suf_stripped)):
                     # mocks.yaml body values are strings, not pre-serialized bytes.
-                    body = rule["body"].encode("utf-8")
-                    break
+                    return rule["body"].encode("utf-8")
                 # path_suffix and path_contains are mutually exclusive per rule.
                 continue
             sub = rule.get("path_contains")
             if sub is not None and sub in parsed.path:
                 # Query string is ignored; only the path is checked.
-                body = rule["body"].encode("utf-8")
-                break
+                return rule["body"].encode("utf-8")
+        return None
+
+    def _send_routed_json(self) -> None:
+        body = self._route_body()
         if body is None:
             # Unmatched paths look like "service down" to callers, not empty JSON.
             self.send_response(404)
@@ -71,6 +73,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    do_GET = do_POST = _send_routed_json
 
 
 class _ReuseHTTPServer(HTTPServer):
