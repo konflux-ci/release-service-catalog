@@ -1,13 +1,55 @@
 # yamllint disable-file
 ---
+# Composite action for ubuntu-latest CI jobs (Linters tknparse, Tekton task tests).
+# Resolves the latest tektoncd/cli release, caches the Linux .deb by version (actions/cache),
+# and installs with dpkg. Requires jq on the runner. Uses GITHUB_TOKEN when set for API rate limits;
+# curl uses --retry 3 for transient failures. A missing or empty cached .deb is re-downloaded.
+# dpkg-deb -I smoke-tests the .deb before install; re-downloads once if corrupt (avoids poisoning cache).
 name: Install tkn
+description: >-
+  Install latest tkn CLI. Caches the versioned .deb under RUNNER_TEMP to avoid repeat downloads;
+  requires jq on the runner (provided on GitHub-hosted ubuntu-latest).
 runs:
   using: "composite"
   steps:
-    - run: |
-        # Get latest tkn CLI version
-        TKN_CLI_VERSION=$(curl -s https://api.github.com/repos/tektoncd/cli/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')
-        echo "Installing tkn CLI version: $TKN_CLI_VERSION"
-        curl -LO "https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/tektoncd-cli-${TKN_CLI_VERSION}_Linux-64bit.deb"
-        sudo dpkg -i ./tektoncd-cli-${TKN_CLI_VERSION}_Linux-64bit.deb
+    - id: tkn-version
       shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        # Get latest tkn CLI version
+        api_url="https://api.github.com/repos/tektoncd/cli/releases/latest"
+        curl_args=(-fsSL --retry 3 -H "Accept: application/vnd.github+json")
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
+          curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+        fi
+        TKN_CLI_VERSION=$(curl "${curl_args[@]}" "${api_url}" | jq -er '.tag_name | ltrimstr("v")')
+        echo "version=${TKN_CLI_VERSION}" >> "${GITHUB_OUTPUT}"
+    - id: tkn-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
+      with:
+        path: ${{ runner.temp }}/tkn-cache
+        key: tkn-cli-${{ steps.tkn-version.outputs.version }}-linux-64bit-deb
+    - name: Install tkn CLI
+      shell: bash
+      env:
+        TKN_CLI_VERSION: ${{ steps.tkn-version.outputs.version }}
+      run: |
+        set -euo pipefail
+        CACHE_DIR="${RUNNER_TEMP}/tkn-cache"
+        DEB_NAME="tektoncd-cli-${TKN_CLI_VERSION}_Linux-64bit.deb"
+        DEB_PATH="${CACHE_DIR}/${DEB_NAME}"
+        DEB_URL="https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/${DEB_NAME}"
+        mkdir -p "${CACHE_DIR}"
+        if [ ! -s "${DEB_PATH}" ]; then
+          curl --retry 3 -fsSL -o "${DEB_PATH}" "${DEB_URL}"
+        fi
+        if ! dpkg-deb -I "${DEB_PATH}" >/dev/null 2>&1; then
+          echo "::warning::Invalid or corrupted .deb; re-downloading ${DEB_NAME}"
+          rm -f "${DEB_PATH}"
+          curl --retry 3 -fsSL -o "${DEB_PATH}" "${DEB_URL}"
+          dpkg-deb -I "${DEB_PATH}" >/dev/null
+        fi
+        echo "Installing tkn CLI version: ${TKN_CLI_VERSION}"
+        sudo dpkg -i "${DEB_PATH}"

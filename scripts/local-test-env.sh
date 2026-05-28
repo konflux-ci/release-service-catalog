@@ -7,8 +7,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CLUSTER_NAME="${CLUSTER_NAME:-release-service-catalog}"
-# Get latest tkn CLI version from GitHub API (same as .github/actions/install-tkn/action.yaml)
-TKN_CLI_VERSION="${TKN_CLI_VERSION:-$(curl -s https://api.github.com/repos/tektoncd/cli/releases/latest | grep tag_name | cut -d '"' -f 4 | sed 's/v//')}"
+
+# Resolve latest tkn CLI version (same jq parsing as .github/actions/install-tkn/action.yaml).
+# Set GITHUB_TOKEN or GH_TOKEN to avoid unauthenticated API rate limits (optional locally; required in CI via github.token).
+_resolve_tkn_cli_version() {
+  local api_url="https://api.github.com/repos/tektoncd/cli/releases/latest"
+  local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -n "${token}" ]; then
+    curl -fsSL --retry 3 \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer ${token}" \
+      "${api_url}"
+  else
+    curl -fsSL --retry 3 \
+      -H "Accept: application/vnd.github+json" \
+      "${api_url}"
+  fi | jq -er '.tag_name | ltrimstr("v")'
+}
+TKN_CLI_VERSION="${TKN_CLI_VERSION:-$(_resolve_tkn_cli_version)}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -178,12 +194,21 @@ install_tkn() {
     
     case "$(uname -s)" in
         Linux)
-            curl -LO "https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/tektoncd-cli-${TKN_CLI_VERSION}_Linux-64bit.deb"
-            sudo dpkg -i "./tektoncd-cli-${TKN_CLI_VERSION}_Linux-64bit.deb" || {
+            local deb_name="tektoncd-cli-${TKN_CLI_VERSION}_Linux-64bit.deb"
+            local deb_url="https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/${deb_name}"
+            curl --retry 3 -fsSL -o "${deb_name}" "${deb_url}"
+            if ! dpkg-deb -I "${deb_name}" >/dev/null 2>&1; then
+                warn "Invalid or corrupted .deb; re-downloading ${deb_name}"
+                rm -f "${deb_name}"
+                curl --retry 3 -fsSL -o "${deb_name}" "${deb_url}"
+                dpkg-deb -I "${deb_name}" >/dev/null
+            fi
+            sudo dpkg -i "./${deb_name}" || {
                 # Try without sudo if it fails
                 warn "dpkg with sudo failed, trying alternative installation..."
-                curl -LO "https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/tkn_${TKN_CLI_VERSION}_Linux_x86_64.tar.gz"
-                tar -xzf "tkn_${TKN_CLI_VERSION}_Linux_x86_64.tar.gz"
+                local tarball_name="tkn_${TKN_CLI_VERSION}_Linux_x86_64.tar.gz"
+                curl --retry 3 -fsSL -o "${tarball_name}" "${deb_url%/*}/${tarball_name}"
+                tar -xzf "${tarball_name}"
                 sudo mv tkn /usr/local/bin/ || {
                     warn "Could not install to /usr/local/bin, installing to ~/.local/bin"
                     mkdir -p ~/.local/bin
@@ -196,7 +221,8 @@ install_tkn() {
             if command -v brew >/dev/null 2>&1; then
                 brew install tektoncd-cli
             else
-                curl -LO "https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/tkn_${TKN_CLI_VERSION}_Darwin_x86_64.tar.gz"
+                curl --retry 3 -fsSL -o "tkn_${TKN_CLI_VERSION}_Darwin_x86_64.tar.gz" \
+                    "https://github.com/tektoncd/cli/releases/download/v${TKN_CLI_VERSION}/tkn_${TKN_CLI_VERSION}_Darwin_x86_64.tar.gz"
                 tar -xzf "tkn_${TKN_CLI_VERSION}_Darwin_x86_64.tar.gz"
                 sudo mv tkn /usr/local/bin/ || {
                     warn "Could not install to /usr/local/bin, installing to ~/.local/bin"
