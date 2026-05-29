@@ -2,15 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-update-infra-deployments-fail-git-suffix-url
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-update-infra-deployments
 spec:
   description: |
-    Run the update-infra-deployments task with a snapshot whose git URL ends in '.git'.
-    No data file is provided so the task fails fast at the git-clone step. This test
-    ensures the task can be invoked with a .git-suffixed URL without issues in the
-    setup phase, and documents the .git URL scenario for the bash-level strip fix.
+    Run the update-infra-deployments task with snapshot and data files, apply a
+    mocked infra update script, and open or refresh the GitHub pull request.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -53,34 +49,40 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:67bb57a671d7e1b8d51ee07cefcca4ac46db02b8c3a9ee8fad60fb9365aab324
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              uid_dir="$(params.dataDir)/$(context.pipelineRun.uid)"
+              mkdir -p "${uid_dir}"
+
+              cat > "${uid_dir}/snapshot.json" << 'EOF'
               {
                 "application": "myapp",
                 "components": [
                   {
-                    "name": "comp",
-                    "containerImage": "registry.io/image:tag",
-                    "repository": "prod-registry.io/prod-location",
-                    "tags": [
-                      "tag"
-                    ],
+                    "name": "my-app",
+                    "containerImage": "quay.io/org/img@sha256:abc",
                     "source": {
                       "git": {
-                        "revision": "abc123",
-                        "url": "https://github.com/myorg/myrepo.git"
+                        "revision": "abc123def456",
+                        "url": "https://github.com/org/my-app.git"
                       }
                     }
                   }
                 ]
               }
               EOF
-              # Intentionally NOT creating data.json to trigger fast failure at git-clone step
+
+              cat > "${uid_dir}/data.json" << 'EOF'
+              {
+                "targetGHRepo": "test-org/infra-deployments",
+                "githubAppID": "12345",
+                "githubAppInstallationID": "67890",
+                "infra-deployment-update-script": "sed -i 's/old-revision-sha/abc123def456/' config/deployment.yaml\n"
+              }
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
