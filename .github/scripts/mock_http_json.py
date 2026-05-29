@@ -74,7 +74,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    do_GET = do_POST = _send_routed_json
+    do_GET = do_POST = do_PATCH = _send_routed_json
 
 
 class _ReuseHTTPServer(HTTPServer):

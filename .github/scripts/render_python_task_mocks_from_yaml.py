@@ -16,14 +16,14 @@ services:                     # optional list
   - type: http_json
     port: 8080                # optional; default 8080
     bind: 127.0.0.1           # optional; default 127.0.0.1
-    routes:                   # first match wins; GET only
+    routes:                   # first match wins; GET, POST, and PATCH
       - path_suffix: /auth/token
         body: '{"ok": true}'
       - path_contains: /api/v1/widgets
         body: '{}'
     # Task reads its API base URL from this env var (e.g. PYXIS_URL in the Task
-    # spec). http_json only starts the mock server; mock_server_for_env_var sets
-    # that var to http://BIND:PORT/v1 so requests hit the mock, not production.
+    # spec). http_json starts the mock server; mock_server_for_env_var sets
+    # that var to http://BIND:PORT plus mock_server_api_path (default /v1).
     # If the URL lives in a secret mount file instead, use rewrite_secret_mount.
     mock_server_for_env_var: PYXIS_URL
     rewrite_secret_mount:     # optional; after server is listening
@@ -152,8 +152,12 @@ def _render_http_json(svc: dict[str, Any]) -> str:
             mock_server_for_env_var
         ):
             _die(f"invalid mock_server_for_env_var: {mock_server_for_env_var!r}")
+        api_path = svc.get("mock_server_api_path", "/v1")
+        if api_path is not None and not isinstance(api_path, str):
+            _die(f"invalid mock_server_api_path: {api_path!r}")
+        suffix = api_path if api_path is not None else "/v1"
         lines += [
-            f'export {mock_server_for_env_var}="http://${{BIND}}:${{PORT}}/v1"',
+            f'export {mock_server_for_env_var}="http://${{BIND}}:${{PORT}}{suffix}"',
             "",
         ]
     rw = svc.get("rewrite_secret_mount")
