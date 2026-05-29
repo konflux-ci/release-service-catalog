@@ -30,10 +30,10 @@ verify_release_contents() {
     echo "Restored artifact ${ociArtifact} to ${oci_artifact_dir}"
 
     local failures=0
-    local image_url image_arch
+    local image_url image_arches
 
     image_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
-    image_arch=$(jq -r '.status.artifacts.images[0]?.arches[0] // ""' <<< "${release_json}")
+    image_arches=$(jq -r '.status.artifacts.images[0]?.arches // [] | sort | join(" ")' <<< "${release_json}")
 
     echo "Checking Image URL..."
     if [ -n "${image_url}" ]; then
@@ -42,18 +42,43 @@ verify_release_contents() {
         echo "🔴 image_url was empty"
         failures=$((failures+1))
     fi
-    echo "Checking Image Arch..."
-    if [ -n "${image_arch}" ]; then
-        echo "✅️ image_arch: ${image_arch}"
+
+    echo "Checking image arches..."
+    if [ "${image_arches}" = "amd64 arm64" ]; then
+        echo "✅️ Found required image arches: amd64 arm64"
     else
-        echo "🔴 image_arch was empty"
+        echo "🔴 Expected image arches: amd64 arm64, found: ${image_arches}"
         failures=$((failures+1))
     fi
+
+    echo "Verifying multi-arch image pullability with skopeo..."
+    AUTH_FILE="$(mktemp)"
+    yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
+        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${AUTH_FILE}"
+
+    for arch in amd64 arm64; do
+        if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true \
+                "docker://${image_url}" > /dev/null 2>&1; then
+            echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_url}"
+        else
+            echo "🔴 skopeo inspect --override-arch ${arch} failed for ${image_url}"
+            failures=$((failures+1))
+        fi
+    done
+    rm -f "${AUTH_FILE}"
 
     echo "Checking Image IDs..."
     pyxisDataFile=$(find ${oci_artifact_dir} -name "pyxis.json")
     imageIds=$(jq -r '[.components[].pyxisImages[].imageId] | join(" ")' "${pyxisDataFile}")
     imageIdsFound=false
+
+    imageIdCount=$(echo "${imageIds}" | wc -w)
+    if [ "${imageIdCount}" -ge 2 ]; then
+        echo "✅️ Found ${imageIdCount} Pyxis image IDs (expected at least 2 for multi-arch)"
+    else
+        echo "🔴 Found only ${imageIdCount} Pyxis image ID(s), expected at least 2 for multi-arch"
+        failures=$((failures+1))
+    fi
 
     # prepare pyxis credentials
     cert_secret_encoded_value=$(yq '. | select(.metadata.name | contains("pyxis-")) | .data.cert' ${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml)
@@ -96,4 +121,37 @@ verify_release_contents() {
     else
       echo "✅️ All release checks passed. Success!"
     fi
+}
+
+patch_component_source_before_merge() {
+  set +x
+  secret_value=$(yq '. | select(.metadata.name | contains("pipelines-as-code-secret-")) | .stringData.password' \
+      "${SUITE_DIR}/resources/tenant/secrets/tenant-secrets.yaml")
+  export GH_TOKEN="${secret_value}"
+
+  head_sha=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
+      "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}" | jq -r '.head.sha')
+
+  local file_names=".tekton/${component_name}-pull-request.yaml .tekton/${component_name}-push.yaml "
+  for file_name in ${file_names}; do
+    local work_dir
+    work_dir=$(mktemp -d)
+    nopath_file_name=$(basename "${file_name}")
+
+    curl -s -H "Authorization: token ${GH_TOKEN}" \
+        "https://api.github.com/repos/${component_repo_name}/contents/${file_name}?ref=${head_sha}" | \
+        jq -r '.content' | base64 -d > "${work_dir}/${nopath_file_name}"
+
+    yq -i '(.spec.params[] | select(.name == "build-platforms") | .value) += ["linux/arm64"]' \
+        "${work_dir}/${nopath_file_name}"
+    encoded_contents=$(base64 -w 0 "${work_dir}/${nopath_file_name}")
+    rm -rf "${work_dir}"
+
+    "${SCRIPT_DIR}/scripts/update-file-in-pull-request.sh" \
+        "${component_repo_name}" \
+        "${pr_number}" \
+        "${file_name}" \
+        "Update component source before merge" \
+        "${encoded_contents}"
+  done
 }
