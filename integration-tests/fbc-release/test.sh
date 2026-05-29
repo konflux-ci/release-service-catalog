@@ -602,6 +602,33 @@ verify_optin() {
     return $failures
 }
 
+verify_index_image_content() {
+    local release_name=$1
+    echo "🔍 Verifying published index content for: $release_name"
+
+    local release_json
+    release_json=$(kubectl get release/"${release_name}" -n "${RELEASE_NAMESPACE}" -ojson)
+
+    local fbc_fragment target_index
+    fbc_fragment=$(jq -r '.status.artifacts.components[0].fbc_fragment // ""' <<< "${release_json}")
+    target_index=$(jq -r '.status.artifacts.components[0].target_index // ""' <<< "${release_json}")
+
+    if [ -z "${target_index}" ]; then
+        echo "🔴 No target_index in release artifacts"
+        return 1
+    fi
+
+    if [ -z "${fbc_fragment}" ]; then
+        echo "🔴 No fbc_fragment in release artifacts"
+        return 1
+    fi
+
+    local managed_secrets_yaml="${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
+
+    "${SUITE_DIR}/../scripts/verify-fbc-index-content.sh" \
+        "${target_index}" "${fbc_fragment}" "${managed_secrets_yaml}"
+}
+
 # Wait for a single release to complete
 wait_for_release() {
     local release_name=$1
@@ -671,7 +698,16 @@ verify_release_contents() {
                 ;;
         esac
         
-        if [ $mode_result -eq 0 ] && [ $scenario_result -eq 0 ] && [ $pipeline_result -eq 0 ]; then
+        # Index content verification (non-staged only — staged builds don't publish to a pullable target)
+        local content_result=0
+        if [ "$scenario" != "staged" ]; then
+            verify_index_image_content "$release_name"
+            content_result=$?
+        else
+            echo "  ⏭️  Skipping index content verification for staged release"
+        fi
+
+        if [ $mode_result -eq 0 ] && [ $scenario_result -eq 0 ] && [ $pipeline_result -eq 0 ] && [ $content_result -eq 0 ]; then
             echo "  ✅ $release_name verification passed"
         else
             echo "  🔴 $release_name verification failed"
