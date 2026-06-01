@@ -229,7 +229,8 @@ _emit_integration_testcase_string() {
   ALL_TESTCASES=("e2e" "rh-advisories" "fbc-release" "release-to-github" "push-to-external-registry" \
   "push-to-external-registry-self-hosted-quay" \
   "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io" \
-  "rh-push-to-external-registry" "push-to-addons-registry" \
+  "rh-push-to-external-registry" "rh-push-to-external-registry-multi-component" \
+  "push-to-addons-registry" \
   "push-rpms-to-pulp")
 
   declare -a SELECTED_TESTCASES=()
@@ -246,6 +247,10 @@ _emit_integration_testcase_string() {
   if [[ " ${SELECTED_TESTCASES[*]} " =~ " push-to-external-registry " ]]; then
     SELECTED_TESTCASES+=("push-to-external-registry-self-hosted-quay")
     SELECTED_TESTCASES+=("push-to-external-registry-idempotent")
+  fi
+  # rh-push-to-external-registry has an extra test suite for multi-component
+  if [[ " ${SELECTED_TESTCASES[*]} " =~ " rh-push-to-external-registry " ]]; then
+    SELECTED_TESTCASES+=("rh-push-to-external-registry-multi-component")
   fi
   # rh-advisories has an extra test suite for the no-CVE path
   if [[ " ${SELECTED_TESTCASES[*]} " =~ " rh-advisories " ]]; then
