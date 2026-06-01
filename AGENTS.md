@@ -52,7 +52,7 @@ Test locally first. Use `--pr-mode` for pre-merge validation. Check `test-result
 
 ## Scripting & Tooling
 
-- **Shell options**: `set -eo pipefail` minimum in Tekton task scripts; `set -euo pipefail` for standalone scripts
+- **Shell options**: `set -eo pipefail` minimum in Tekton task scripts; `set -euo pipefail` for standalone scripts. Integration test `test.sh` files are sourced (not standalone) and inherit the caller's shell options
 - **Variables**: always quote — `"${VAR}"`, `"$(command)"`; use `${VAR}` not `$VAR`
 - **JSON**: build with `jq --arg`/`--argjson` or `jq -n`, never string concatenation or `echo`
 - **jq flags**: `-r` for raw output, `-c` for compact, `-e` to exit non-zero on false/null
