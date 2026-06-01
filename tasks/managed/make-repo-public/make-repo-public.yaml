@@ -122,7 +122,7 @@ spec:
         - name: caCertPath
           value: $(params.caCertPath)
     - name: make-repo-public
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:67bb57a671d7e1b8d51ee07cefcca4ac46db02b8c3a9ee8fad60fb9365aab324
       computeResources:
         limits:
           memory: 256Mi
@@ -132,116 +132,18 @@ spec:
       volumeMounts:
         - name: registry-secret-vol
           mountPath: "/etc/secrets"
-      script: |
-        #!/usr/bin/env bash
-        set -eu
-
-        if [ -f "/mnt/trusted-ca/ca-bundle.crt" ]; then
-            COMBINED_CA="/tmp/combined-ca-bundle.crt"
-            { cat /etc/pki/tls/certs/ca-bundle.crt; echo; cat /mnt/trusted-ca/ca-bundle.crt; } > "$COMBINED_CA"
-            export SSL_CERT_FILE="$COMBINED_CA"
-            export CURL_CA_BUNDLE="$COMBINED_CA"
-        fi
-
-        REGISTRY_TOKEN="$(cat /etc/secrets/token)"
-
-        declare -A QUAY_REGISTRY_CACHE
-
-        set -x
-
-        function is_quay_registry() {
-          local registry="$1"
-          if [[ -v "QUAY_REGISTRY_CACHE[$registry]" ]]; then
-            [ "${QUAY_REGISTRY_CACHE[$registry]}" = "true" ]
-            return
-          fi
-          set +x
-          local http_code
-          http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-            --retry 3 \
-            "https://${registry}/api/v1/discovery")
-          set -x
-          if [ "$http_code" = "200" ]; then
-            QUAY_REGISTRY_CACHE[$registry]="true"
-            return 0
-          else
-            QUAY_REGISTRY_CACHE[$registry]="false"
-            return 1
-          fi
-        }
-
-        function make_repo_public() {
-          local registry="$1"
-          local repo_path="$2"
-          set +x
-          if curl -X POST \
-            --fail-with-body --retry 3 \
-            --header "Authorization: Bearer ${REGISTRY_TOKEN}" \
-            --header 'Content-Type: application/json' \
-            --data '{"visibility": "public"}' \
-            "https://${registry}/api/v1/repository/${repo_path}/changevisibility"
-          then
-            echo Success
-          else
-            echo "Error: Failed to make repo ${registry}/${repo_path} public."\
-              "Make sure the secret $(params.registrySecret) contains"\
-              " the \"token\" key with token that has permission to"\
-              " Administer Repositories."
-            exit 1
-          fi
-          set -x
-        }
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No valid data file was provided."
-            exit 1
-        fi
-
-        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
-        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
-            echo "No valid snapshot file was provided."
-            exit 1
-        fi
-
-        DEFAULT="$(jq -r '.mapping.defaults.public // false' "$DATA_FILE")"
-
-        TARGET_REGISTRY=""
-
-        NUM_COMPONENTS=$(jq '.components | length' "$SNAPSHOT_FILE")
-        for ((i=0; i < NUM_COMPONENTS; i++)); do
-          COMPONENT="$(jq -c ".components[$i]" "$SNAPSHOT_FILE")"
-          if [ "$(jq -r --arg default "$DEFAULT" '.public // $default' <<< "$COMPONENT")" = true ] ; then
-            repositories=$(jq -c '.repositories' <<< "$COMPONENT")
-            NUM_REPOS=$(jq 'length' <<< "$repositories")
-
-            for ((j = 0; j < NUM_REPOS; j++)); do
-              REPO=$(jq -r --argjson j "$j" '.[$j]."url"' <<< "$repositories")
-
-              echo "Making repository $REPO public..."
-
-              registry=$(echo "$REPO" | cut -d '/' -f 1)
-              repo_path=${REPO#"${registry}/"}
-              repo_path=${repo_path%/}
-
-              if ! is_quay_registry "$registry"; then
-                echo "Warning: Registry ${registry} is not a Quay instance. Skipping."
-                continue
-              fi
-
-              if [ -z "$TARGET_REGISTRY" ]; then
-                TARGET_REGISTRY="$registry"
-              elif [ "$TARGET_REGISTRY" != "$registry" ]; then
-                echo "Error: Multiple Quay registries found (${TARGET_REGISTRY} and ${registry})."\
-                  " Only a single Quay registry is supported because the registrySecret"\
-                  " contains a token for one registry."
-                exit 1
-              fi
-
-              make_repo_public "$registry" "$repo_path"
-            done
-          fi
-        done
+      env:
+        - name: DATA_FILE
+          value: "$(params.dataDir)/$(params.dataPath)"
+        - name: SNAPSHOT_FILE
+          value: "$(params.dataDir)/$(params.snapshotPath)"
+        - name: REGISTRY_SECRET_PATH
+          value: "/etc/secrets"
+        - name: CA_CERT_PATH
+          value: "$(params.caCertPath)"
+        - name: REGISTRY_SECRET_NAME
+          value: "$(params.registrySecret)"
+      command: ["/home/scripts/python/tasks/managed/make_repo_public.py"]
     - name: create-trusted-artifact
       computeResources:
         limits:

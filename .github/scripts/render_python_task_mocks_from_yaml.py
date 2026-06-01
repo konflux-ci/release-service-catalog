@@ -16,11 +16,15 @@ services:                     # optional list
   - type: http_json
     port: 8080                # optional; default 8080
     bind: 127.0.0.1           # optional; default 127.0.0.1
-    routes:                   # first match wins; GET, POST, and PATCH
+    tls: false                # optional; default false (use HTTPS with self-signed cert)
+    hostname: "127.0.0.1"    # optional; additional SAN for the cert (for tls: true)
+    routes:                   # first match wins; GET, POST, and PATCH; method-aware
       - path_suffix: /auth/token
         body: '{"ok": true}'
+        method: GET           # optional; omit to match any method
       - path_contains: /api/v1/widgets
         body: '{}'
+        method: POST          # optional; restrict to POST only
     # Task reads its API base URL from this env var (e.g. PYXIS_URL in the Task
     # spec). http_json starts the mock server; mock_server_for_env_var sets
     # that var to http://BIND:PORT plus mock_server_api_path (default /v1).
@@ -30,6 +34,8 @@ services:                     # optional list
       source: /mnt/osidb-service-account
       env_var: OSIDB_SERVICE_ACCOUNT_MOUNT
       url_file: osidb_url
+    rewrite_ca_cert_env:      # optional; set CA_CERT_PATH to the mock cert
+      env_var: CA_CERT_PATH   # env var to overwrite with the mock cert path
 
 **Mock binaries:** add executable scripts as regular files under ``tests/mocks/``
 (e.g. ``tests/mocks/kinit``). Basenames become names on ``PATH`` (``kinit``,
@@ -117,6 +123,8 @@ def _heredoc_embed(dest_var: str, body: str, label: str) -> list[str]:
 def _render_http_json(svc: dict[str, Any]) -> str:
     port = int(svc.get("port", 8080))
     bind = str(svc.get("bind", "127.0.0.1"))
+    use_tls = bool(svc.get("tls", False))
+    hostname = svc.get("hostname")
     routes = svc.get("routes")
     if not isinstance(routes, list):
         _die("http_json service requires a routes list")
@@ -141,6 +149,17 @@ def _render_http_json(svc: dict[str, Any]) -> str:
         'export TEKTON_HTTP_BIND="${BIND}"',
         "",
     ]
+    if use_tls:
+        lines += [
+            'export TEKTON_MOCK_TLS=1',
+            'export TEKTON_MOCK_CA_CERT_PATH="/tmp/mock-ca.crt"',
+        ]
+        if hostname:
+            lines.append(
+                f'export TEKTON_MOCK_HOSTNAME={shlex.quote(hostname)}'
+            )
+        lines.append("")
+
     lines += _heredoc_embed("MOCK_HTTP_JSON", mock_http_body, "mock_http_json.py")
     lines += [
         'python3 "${MOCK_HTTP_JSON}" "$PORT" &',
@@ -153,6 +172,15 @@ def _render_http_json(svc: dict[str, Any]) -> str:
         r"done",
         "",
     ]
+
+    if use_tls:
+        lines += [
+            'export SSL_CERT_FILE="/tmp/mock-ca.crt"',
+            'export REQUESTS_CA_BUNDLE="/tmp/mock-ca.crt"',
+            'export CURL_CA_BUNDLE="/tmp/mock-ca.crt"',
+            "",
+        ]
+
     mock_server_for_env_var = svc.get("mock_server_for_env_var")
     if mock_server_for_env_var is not None:
         if not isinstance(mock_server_for_env_var, str) or not _ENV_SAFE.match(
@@ -163,8 +191,9 @@ def _render_http_json(svc: dict[str, Any]) -> str:
         if api_path is not None and not isinstance(api_path, str):
             _die(f"invalid mock_server_api_path: {api_path!r}")
         suffix = api_path if api_path is not None else "/v1"
+        scheme = "https" if use_tls else "http"
         lines += [
-            f'export {mock_server_for_env_var}="http://${{BIND}}:${{PORT}}{suffix}"',
+            f'export {mock_server_for_env_var}="{scheme}://${{BIND}}:${{PORT}}{suffix}"',
             "",
         ]
     rw = svc.get("rewrite_secret_mount")
@@ -186,15 +215,27 @@ def _render_http_json(svc: dict[str, Any]) -> str:
         if not _NAME_SAFE.match(url_file):
             _die(f"invalid url_file for rewrite_secret_mount: {url_file!r}")
         qsrc = shlex.quote(src + "/.")
+        scheme = "https" if use_tls else "http"
         lines += [
             r'MOCK_SA="$(mktemp -d)"',
             rf'cp -a {qsrc} "${{MOCK_SA}}/"',
             r'chmod -R u+w "${MOCK_SA}"',
             (
-                'printf \'%s\\n\' "http://${BIND}:${PORT}" '
+                f'printf \'%s\\n\' "{scheme}://${{BIND}}:${{PORT}}" '
                 f'> "${{MOCK_SA}}/{url_file}"'
             ),
             f'export {env_var}="${{MOCK_SA}}"',
+            "",
+        ]
+    rw_ca = svc.get("rewrite_ca_cert_env")
+    if rw_ca:
+        if not isinstance(rw_ca, dict):
+            _die("rewrite_ca_cert_env must be a mapping")
+        ca_env_var = rw_ca.get("env_var")
+        if not isinstance(ca_env_var, str) or not _ENV_SAFE.match(ca_env_var):
+            _die(f"invalid env_var for rewrite_ca_cert_env: {ca_env_var!r}")
+        lines += [
+            f'export {ca_env_var}="/tmp/mock-ca.crt"',
             "",
         ]
     return "\n".join(lines)
