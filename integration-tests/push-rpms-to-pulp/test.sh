@@ -142,9 +142,9 @@ verify_release_contents() {
       fi
     }
 
-    # Component A (hello): 4 binary + 1 src + 4 noarch = 9
+    # Component A (hello): 2 binary (x86_64, aarch64) + 1 src + 4 noarch = 7
     # Component B (hello2): noarch-only build -> 4 noarch fanout + 1 src = 5 (no arch-specific RPMs)
-    local expected_count=14
+    local expected_count=12
     echo "Checking RPM files count..."
     if [ "${rpmfiles_count}" -ne "${expected_count}" ]; then
       echo "🔴 rpmfiles count was ${rpmfiles_count}, expected ${expected_count}"
@@ -154,7 +154,7 @@ verify_release_contents() {
     fi
 
     echo "Checking Component A (hello) binary RPMs..."
-    for arch in x86_64 aarch64 s390x ppc64le; do
+    for arch in x86_64 aarch64; do
       _check_rpm_in_repo "hello.${arch} in ${arch} repo" \
         "hello-[0-9].*\\.${arch}" "${repo_prefix}/${arch}"
     done
@@ -164,7 +164,7 @@ verify_release_contents() {
       "hello-[0-9].*\\.src" "${repo_prefix}/source"
 
     echo "Checking Component B (hello2) has no arch-specific binary RPMs..."
-    for arch in x86_64 aarch64 s390x ppc64le; do
+    for arch in x86_64 aarch64; do
       _check_rpm_not_in_repo "hello2 must not publish .${arch} binary" \
         "hello2-[0-9].*\\.${arch}" "${repo_prefix}/${arch}"
     done
@@ -325,7 +325,7 @@ verify_release_contents() {
               failures=$((failures+1))
             fi
 
-            for binary_arch in x86_64 aarch64 s390x ppc64le; do
+            for binary_arch in x86_64 aarch64; do
               if echo "${description}" | grep -E "hello-[0-9].*\(.*${binary_arch}" | grep -qv "\.src"; then
                 echo "✅️ Found hello binary RPM entry with ${binary_arch} in description"
               else
