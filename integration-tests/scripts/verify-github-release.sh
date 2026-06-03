@@ -78,8 +78,6 @@ RESPONSE_BODY="${RESPONSE%???}"
 case "$HTTP_STATUS" in
     200)
         log_info "✅ Release tag '$RELEASE_TAG' exists in repository '$REPO_PATH'"
-
-        exit 0
         ;;
     404)
         log_error "❌ Release tag '$RELEASE_TAG' does not exist in repository '$REPO_PATH'"
@@ -113,3 +111,28 @@ case "$HTTP_STATUS" in
         exit 1
         ;;
 esac
+
+FAIL_CHECK=0
+if ! jq -e 'any(.assets[]?; .name | test(".*SHA256SUMS$"))' <<< "$RESPONSE_BODY" >/dev/null; then
+    log_error "❌ Missing asset 'SHA256SUMS' in release"
+    FAIL_CHECK=1
+fi
+
+if ! jq -e '[ .assets[]? | select(.name | endswith(".sig")) ] | length == 1' <<< "$RESPONSE_BODY" >/dev/null; then
+    log_error "❌ Expected exactly one '.sig' asset in release"
+    FAIL_CHECK=1
+fi
+
+if ! jq -e '[ .assets[]? | select(.name | endswith(".zip")) ] | length == 1' <<< "$RESPONSE_BODY" >/dev/null; then
+    log_error "❌ Expected exactly one '.zip' asset in release"
+    FAIL_CHECK=1
+fi
+
+if [ "$FAIL_CHECK" -eq 1 ]; then
+    log_info "Available assets:"
+    jq -r '.assets[]?.name' <<< "$RESPONSE_BODY"
+    exit 1
+fi
+
+log_info "✅ All requested assets ('SHA256SUMS', '.sig', and '.zip') are present in the release."
+exit 0
