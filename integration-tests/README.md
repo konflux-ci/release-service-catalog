@@ -10,6 +10,7 @@ The following integration test suites are available:
 - **[collectors-no-cve](collectors-no-cve/)** - Tests for the no-CVE path of advisory data collection
 - **[rh-advisories-idempotent](rh-advisories-idempotent/)** - Tests idempotent re-release behavior for the rh-advisories pipeline: verifies that a second release with the same snapshot detects the existing advisory, skips all downstream tasks, and correctly populates `advisory.url` in the Release CR status
 - **[fbc-release](fbc-release/)** - Tests for File-Based Catalog (FBC) release pipeline
+- **[push-artifacts-to-cdn](push-artifacts-to-cdn/)** - Tests for the push-artifacts-to-cdn pipeline (binary artifact distribution to Pulp and CGW)
 - **[push-to-addons-registry](push-to-addons-registry/)** - Tests for pushing to addon registries
 - **[rh-push-helm-chart-to-registry-redhat-io](rh-push-helm-chart-to-registry-redhat-io/)** - Tests for Helm OCI chart release pipeline
 - **[rh-push-to-external-registry](rh-push-to-external-registry/)** - Tests for pushing to external registries
