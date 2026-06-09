@@ -169,7 +169,7 @@ cleanup_resources() {
     # Clean up component repository
     echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
     "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
-    
+
     # Clean up component2 repository if it exists and is different from component repo
     if [ -n "${component2_repo_name}" ] && [ "${component2_repo_name}" != "${component_repo_name}" ]; then
       echo "Deleting Github repository ${component2_repo_name} ..." >> "${cleanup_log_file}"
@@ -195,12 +195,13 @@ cleanup_resources() {
         echo "tmpDir not set or not a directory, skipping k8s resource cleanup." | tee -a "${cleanup_log_file}"
     fi
 
-    # Clean up Release CRs created by this specific test run
-    # Use uuid (from test.env) to support concurrent test execution
-    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ]; then
-        echo "Deleting Release CRs with test-run-uuid=${uuid} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
+    # Clean up Release CRs created by this specific test suite
+    # Use both uuid and originating-tool labels to avoid deleting Release CRs
+    # belonging to other parallel test suites that share the same uuid
+    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ] && [ -n "$originating_tool" ]; then
+        echo "Deleting Release CRs with test-run-uuid=${uuid},originating-tool=${originating_tool} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
         kubectl delete release -n "${tenant_namespace}" \
-            -l test-run-uuid="${uuid}" \
+            -l "test-run-uuid=${uuid},originating-tool=${originating_tool}" \
             --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
             echo "Warning: Failed to delete some Release CRs" | tee -a "${cleanup_log_file}"
     else
