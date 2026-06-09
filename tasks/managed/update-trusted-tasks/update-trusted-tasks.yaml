@@ -127,13 +127,18 @@ spec:
         set -eux
 
         SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
-        TAG="latest"
 
         # check if snapshot exsits
         if [ ! -f "${SNAPSHOT_SPEC_FILE}" ] ; then
             echo "No valid snapshot file was found."
             exit 1
         fi
+
+        # The OPA data bundle is tagged with the current timestamp. This has two main
+        # advantages. First, it prevents the image from accidentally not having any tags,
+        # and getting garbage collected. Second, it helps us create a timeline of the
+        # changes done to the data over time.
+        TIMESTAMP_TAG=$(date '+%s')
 
         # Extract the componentGroup from the snapshot
         componentGroup=$(jq -r '.componentGroup' "${SNAPSHOT_SPEC_FILE}")
@@ -165,6 +170,21 @@ spec:
                 ACCEPTABLE_BUNDLES=$(echo "${repository}" \
                   | awk -F'/' '{$NF="data-acceptable-bundles"; print $0}' OFS='/')
 
+                # Check once if :latest exists for this ACCEPTABLE_BUNDLES repo
+                # Use inspect instead of list-tags for efficiency as tag count grows
+                set +e
+                skopeo inspect --retry-times 3 --raw --no-tags docker://"${ACCEPTABLE_BUNDLES}:latest" &> /dev/null
+                RESULT=$?
+                set -e
+
+                if [ ${RESULT} -eq 0 ]; then
+                    echo "${ACCEPTABLE_BUNDLES}:latest exists - using it as an input"
+                    LATEST_EXISTS="true"
+                else
+                    echo "${ACCEPTABLE_BUNDLES}:latest does not exist"
+                    LATEST_EXISTS="false"
+                fi
+
                 # Get the number of tags from the repository
                 NUM_TAGS=$(jq --argjson j "$j" '.repositories[$j].tags | length' <<< "$component")
 
@@ -173,24 +193,25 @@ spec:
                 do
                     imageTag=$(jq -c -r --argjson j "$j" --argjson k "$k" '.repositories[$j].tags[$k]' <<< "$component")
 
-                    set +e
-                    # Check if ACCEPTABLE_BUNDLES OCI artifact has a latest tag
-                    skopeo list-tags docker://"${ACCEPTABLE_BUNDLES}" | jq -r '.Tags[]' | grep "^${TAG}$" &> /dev/null
-                    RESULT=$?
-                    set -e
-
-                    # If it has a latest tag, use it as an --input for the ec track bundle command
-                    if [ $RESULT -eq 0 ]; then
-                        echo "${ACCEPTABLE_BUNDLES}:${TAG} exists - using it as an input"
+                    # If :latest exists, use it as an --input for the ec track bundle command
+                    # Output to the timestamp tag to prevent garbage collection
+                    if [[ "${LATEST_EXISTS}" == "true" ]]; then
+                        echo "Adding ${repository}:${imageTag}${sha} to ${ACCEPTABLE_BUNDLES}:${TIMESTAMP_TAG}"
                         ec track bundle --bundle "${repository}:${imageTag}${sha}" \
-                        --input oci:"${ACCEPTABLE_BUNDLES}:${TAG}" --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
-
-                    # Else - Do not use it as an --input
+                        --input oci:"${ACCEPTABLE_BUNDLES}:latest" --output oci:"${ACCEPTABLE_BUNDLES}:${TIMESTAMP_TAG}"
                     else
-                        echo "${ACCEPTABLE_BUNDLES}:${TAG} does not exist"
+                        echo "Creating ${ACCEPTABLE_BUNDLES}:${TIMESTAMP_TAG} with ${repository}:${imageTag}${sha}"
                         ec track bundle --bundle "${repository}:${imageTag}${sha}" \
-                        --output oci:"${ACCEPTABLE_BUNDLES}:${TAG}"
+                        --output oci:"${ACCEPTABLE_BUNDLES}:${TIMESTAMP_TAG}"
                     fi
+
+                    # Tag the timestamp-based image as :latest for the next iteration
+                    echo "Tagging ${ACCEPTABLE_BUNDLES}:${TIMESTAMP_TAG} as :latest"
+                    skopeo copy --retry-times 3 "docker://${ACCEPTABLE_BUNDLES}:${TIMESTAMP_TAG}" \
+                    "docker://${ACCEPTABLE_BUNDLES}:latest"
+
+                    # Now that we've created :latest, mark it as existing for subsequent tags
+                    LATEST_EXISTS="true"
                 done
             done
         done
