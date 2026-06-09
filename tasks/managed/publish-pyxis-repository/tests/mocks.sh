@@ -21,7 +21,7 @@ function curl() {
       elif [[ "$*" == *"my-image"[56]* ]]; then
         echo '{"_id": "'$CALL_ID'", "publish_on_push": true, "requires_terms": false}'
       else
-        echo '{"_id": "'$CALL_ID'", "publish_on_push": true, "requires_terms": true}'
+        echo '{"_id": "'$CALL_ID'", "publish_on_push": true, "published": true, "requires_terms": true}'
       fi
     fi
   elif [[ "$*" == '--retry 5 --key /tmp/key --cert /tmp/crt https://pyxis.api.redhat.com/v1/repositories/id/'?' -X PATCH -H Content-Type: application/json --data-binary {"published":true}' ]]
