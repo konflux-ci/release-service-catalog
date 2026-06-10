@@ -51,7 +51,23 @@ function skopeo() {
       echo '{"Tags": ["1.2.1", "1.2.1-26", "1.2.1-67", "1.2.1-135", "1.2.1-1737653481", "1.2.1-1740048934", "1.2.1-1745398585"]}'
       return
   fi
-  
+
+  # component-incrementer test repos: repo-ci-a has max 3, repo-ci-b has max 5 → global max 5 → next 6
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-ci-a ]]; then
+      echo '{"Tags": ["v1.0.0-1", "v1.0.0-2", "v1.0.0-3"]}'
+      return
+  fi
+
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-ci-b ]]; then
+      echo '{"Tags": ["v1.0.0-1", "v1.0.0-2", "v1.0.0-3", "v1.0.0-4", "v1.0.0-5"]}'
+      return
+  fi
+
+  # component-incrementer single-repo test: repo-ci-c has max 3 → next 4
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-ci-c ]]; then
+      echo '{"Tags": ["v2.0.0-1", "v2.0.0-2", "v2.0.0-3"]}'
+      return
+  fi
   # 7 digit tags: ignored by {1,6} regex, incrementer starts at 1
   if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-leadingzero ]]; then
       echo '{"Tags": ["v0.7.0-0760387", "v0.7.0-0760386"]}'
