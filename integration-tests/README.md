@@ -262,3 +262,6 @@ When adding new integration tests:
 4. Store secrets in ansible vault files
 5. Update this README with test-specific information
 6. Add test-specific documentation to the individual test README
+7. Sym link resource files to existing tests where applicable (like `application.yaml` files)
+8. Add an IntegrationTestScenario to `konflux-release-data` to trigger the test. Following existing examples, add the test for release-service-utils as well
+9. After the test has proven stable for 7 days, mark it as required in the GitHub UI branch settings
