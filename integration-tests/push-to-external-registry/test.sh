@@ -93,6 +93,42 @@ verify_release_contents() {
         failures=$((failures+1))
     fi
 
+    # Verify both repositories received the same {{ component-incrementer }} tag
+    echo "Verifying uniform {{ component-incrementer }} tag across both repositories..."
+    local auth_file
+    auth_file=$(mktemp)
+    chmod 600 "${auth_file}"
+    trap 'rm -f "${auth_file}"' EXIT
+    yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
+        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" \
+        | base64 -d > "${auth_file}"
+
+    local repo_a="quay.io/hacbs-release-tests/${component_name}"
+    local repo_b="quay.io/hacbs-release-tests/${component_name}-b"
+    local repo_a_tag repo_b_tag
+    repo_a_tag=$(skopeo list-tags --retry-times 3 --authfile "${auth_file}" "docker://${repo_a}" \
+        2>/dev/null | jq -r '.Tags[]' 2>/dev/null | grep -E '^v1\.0\.0-[0-9]+$' | sort -t- -k2 -rn | head -1 || true)
+    repo_b_tag=$(skopeo list-tags --retry-times 3 --authfile "${auth_file}" "docker://${repo_b}" \
+        2>/dev/null | jq -r '.Tags[]' 2>/dev/null | grep -E '^v1\.0\.0-[0-9]+$' | sort -t- -k2 -rn | head -1 || true)
+
+    rm -f "${auth_file}"
+    trap - EXIT
+
+    echo "Repository A (${component_name}) got component-incrementer tag: ${repo_a_tag:-<not found>}"
+    echo "Repository B (${component_name}-b) got component-incrementer tag: ${repo_b_tag:-<not found>}"
+
+    if [ -n "${repo_a_tag}" ] && [ -n "${repo_b_tag}" ]; then
+        if [ "${repo_a_tag}" = "${repo_b_tag}" ]; then
+            echo "✅️ Both repositories received the same uniform component-incrementer tag: ${repo_a_tag}"
+        else
+            echo "🔴 Tag mismatch! Repository A got '${repo_a_tag}' but Repository B got '${repo_b_tag}'"
+            failures=$((failures+1))
+        fi
+    else
+        echo "🔴 Could not retrieve component-incrementer tag from one or both repositories"
+        failures=$((failures+1))
+    fi
+
     if [ "${failures}" -gt 0 ]; then
       echo "🔴 Test has FAILED with ${failures} failure(s)!"
       exit 1

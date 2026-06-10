@@ -21,6 +21,11 @@ This task supports variable expansion in tag values from the mapping. The curren
 * "{{ digest_sha }}" -> The image digest of the respective component
 * "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the
   repository and generates the next sequential tag (e.g., if the highest tag is v1.0.0-2, it will generate v1.0.0-3)
+* "{{ component-incrementer }}" -> Like {{ incrementer }}, but finds the highest existing tag
+  across ALL repositories in the component and generates the next sequential tag uniformly.
+  Use this instead of {{ incrementer }} when pushing to multiple registries to ensure every
+  registry receives the same tag (e.g., if repo-a has v1.0.0-3 and repo-b has v1.0.0-5,
+  both will receive v1.0.0-6).
 * "{{ oci_version }}" -> The version from OCI image annotations (org.opencontainers.image.version), with fallback
   to OCI image labels if not present in annotations (converts + to _ for tag compliance)
 

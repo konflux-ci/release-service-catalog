@@ -29,6 +29,11 @@ spec:
     * "{{ digest_sha }}" -> The image digest of the respective component
     * "{{ incrementer }}" -> Automatically finds the highest existing incremented tag in the
       repository and generates the next sequential tag (e.g., if the highest tag is v1.0.0-2, it will generate v1.0.0-3)
+    * "{{ component-incrementer }}" -> Like {{ incrementer }}, but finds the highest existing tag
+      across ALL repositories in the component and generates the next sequential tag uniformly.
+      Use this instead of {{ incrementer }} when pushing to multiple registries to ensure every
+      registry receives the same tag (e.g., if repo-a has v1.0.0-3 and repo-b has v1.0.0-5,
+      both will receive v1.0.0-6).
     * "{{ oci_version }}" -> The version from OCI image annotations (org.opencontainers.image.version), with fallback
       to OCI image labels if not present in annotations (converts + to _ for tag compliance)
 
@@ -228,6 +233,84 @@ spec:
             echo "$tag"  # Return the final tag
         }
 
+        # Function to handle component-incrementer logic: finds the highest increment across
+        # ALL repositories in a component and returns the next uniform sequential tag.
+        # Results are cached by version_prefix to avoid redundant skopeo calls.
+        # Expected arguments are: [tag_template, all_repos_json]
+        component_increment_tag() {
+            local tag_template="$1"
+            local all_repos_json="${2:-[]}"
+
+            # Remove {{ component-incrementer }} placeholder to get the version prefix
+            local version_prefix
+            # shellcheck disable=SC2001
+            version_prefix=$(echo "${tag_template}" | sed 's/{{ *component-incrementer *}}//g')
+
+            # Return cached result if available for this prefix.
+            # Cache files survive subshell boundaries; associative arrays do not.
+            local cache_key
+            cache_key=$(printf '%s' "${version_prefix}" | base64 | tr -d '=\n' | tr '+/' '-_')
+            local cache_file="${_inc_cache_dir}/${cache_key}"
+            if [[ -f "${cache_file}" ]]; then
+                local cached_increment
+                cached_increment=$(< "${cache_file}")
+                local tag
+                # shellcheck disable=SC2001
+                tag=$(echo "${tag_template}" | sed "s/{{ *component-incrementer *}}/${cached_increment}/g")
+                if [[ ! "${tag}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                    echo "Error: Invalid tag format after substitution: ${tag}" >&2
+                    exit 1
+                fi
+                echo "$tag"
+                return
+            fi
+
+            # Escape version_prefix for safe use in ERE (grep -E) and sed -E.
+            # Without escaping, a prefix like "v1.0.0-" would treat the dots as
+            # regex wildcards, potentially matching unintended tags.
+            local escaped_prefix
+            # shellcheck disable=SC2016
+            escaped_prefix=$(printf '%s' "${version_prefix}" | sed 's/[.[\\*^$()+?{|]/\\&/g')
+
+            # Match tags with 1–6 digit increments only. Ignore 7+ digit tags to avoid
+            # treating short commit SHAs as incrementer values
+            local tag_pattern="^${escaped_prefix}[0-9]{1,6}$"
+
+            # Find the global maximum increment across all repositories in the component
+            local global_max=0
+            local num_repos
+            num_repos=$(jq 'length' <<< "$all_repos_json")
+            for ((r = 0; r < num_repos; r++)); do
+                local repo
+                repo=$(jq -r --argjson r "$r" '.[$r]' <<< "$all_repos_json")
+                local existing_tags
+                existing_tags=$(skopeo list-tags --retry-times 3 docker://"${repo}" | jq -r '.Tags[]')
+                local repo_max
+                repo_max=$(echo "${existing_tags}" | { grep -E "${tag_pattern}" || true; } \
+                    | sed -E "s/^${escaped_prefix}//" | sort -nr | head -n1)
+                # Use 10# to force decimal input preventing leading 0 from being treated as octal
+                if [[ -n "$repo_max" ]] && [[ $((10#${repo_max})) -gt $global_max ]]; then
+                    global_max=$((10#${repo_max}))
+                fi
+            done
+
+            local increment=$((global_max + 1))
+
+            # Cache the result so subsequent repos in this component reuse the same value
+            echo "${increment}" > "${cache_file}"
+
+            local tag
+            # shellcheck disable=SC2001
+            tag=$(echo "${tag_template}" | sed "s/{{ *component-incrementer *}}/${increment}/g")
+
+            if [[ ! "${tag}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+                echo "Error: Invalid tag format after substitution: ${tag}" >&2
+                exit 1
+            fi
+
+            echo "$tag"
+        }
+
         # Expected arguments are: [variable, substitute_map, labels_map]
         substitute() {
             variable=$1
@@ -261,20 +344,23 @@ spec:
             echo "$tags_json" | jq -c --arg ts "$timestamp_val" '. + [$ts] | unique'
         }
 
-        # Expected arguments are [tags, substitute_map, labels_map, repo]
+        # Expected arguments are [tags, substitute_map, labels_map, repo, all_repos_json]
         # The tags argument is a json array
         translate_tags () {
-            tags=$1
-            substitute_map=$2
-            labels_map=$3
-            repo=$4
+            local tags=$1
+            local substitute_map=$2
+            local labels_map=$3
+            local repo=$4
+            local all_repos_json="${5:-[]}"
             if [ "$tags" = '' ] ; then
                 echo ''
                 return
             fi
 
-            translated_tags='[]'
+            local translated_tags='[]'
+            local NUM_TAGS
             NUM_TAGS="$(jq 'length' <<< "${tags}")"
+            local i tag var_name replacement
             for ((i = 0; i < NUM_TAGS; i++)); do
                 tag="$(jq -r --argjson i "$i" '.[$i]' <<< "${tags}")"
 
@@ -292,6 +378,8 @@ spec:
                   # Handle incrementer logic
                   if [[ "$var_name" == "incrementer" ]]; then
                       tag=$(increment_tag "$tag" "$repo")
+                  elif [[ "$var_name" == "component-incrementer" ]]; then
+                      tag=$(component_increment_tag "$tag" "$all_repos_json")
                   else
                       replacement=$(substitute "$var_name" "$substitute_map" "$labels_map")
                       if [ -z "$replacement" ]; then
@@ -423,7 +511,18 @@ spec:
         currentTimestamp="$(date "+%Y%m%d %T")"
         defaultCGWSettings=$(jq -c '.defaults.contentGateway // {}' <<< "$MAPPING")
         NUM_MAPPED_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
+
+        # File-based cache dir for component-incrementer results. A file-based
+        # approach is required because component_increment_tag is invoked inside
+        # $(...) subshells (via translate_tags), so bash associative array writes
+        # would be lost on subshell exit. Files persist across subshell boundaries.
+        _inc_cache_dir=$(mktemp -d)
+        trap 'rm -rf "${_inc_cache_dir}"' EXIT
+
         for ((i = 0; i < NUM_MAPPED_COMPONENTS; i++)) ; do
+            # Clear the cache at the start of each component so that different
+            # components with the same tag template use independent repo sets.
+            rm -f "${_inc_cache_dir}/"* 2>/dev/null || true
             component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
             componentTags=$(jq '.componentTags // []' <<< "$component")
             defaultComponentTags=$(jq -n --argjson defaults "$defaultTags" --argjson componentTags \
@@ -574,6 +673,17 @@ spec:
               "${SNAPSHOT_SPEC_FILE}" > /tmp/temp && mv /tmp/temp "${SNAPSHOT_SPEC_FILE}"
             fi
 
+            # Build a JSON array of all repository URLs for this component.
+            # This is used by {{ component-incrementer }} to query all repos and compute a
+            # uniform increment value across registries.
+            component_repos_json='[]'
+            _ci_num_repos=$(jq '.repositories | length' <<< "$component")
+            for ((_ci_j = 0; _ci_j < _ci_num_repos; _ci_j++)) ; do
+                _ci_repo_url=$(jq -r --argjson j "$_ci_j" '.repositories[$j].url' <<< "$component")
+                component_repos_json=$(jq -c --arg url "$_ci_repo_url" '. + [$url]' \
+                    <<< "$component_repos_json")
+            done
+
             NUM_REPOSITORIES=$(jq '.repositories | length' <<< "$component")
             for ((j = 0; j < NUM_REPOSITORIES; j++)) ; do
                 repository=$(jq -c --argjson j "$j" '.repositories[$j]' <<< "$component")
@@ -583,7 +693,8 @@ spec:
 
                 allTagsPreSubstitution=$(jq -n --argjson defaults "$defaultComponentTags" --argjson repoTags \
                   "$repoTags" '$defaults? + $repoTags? | unique')
-                tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}" "${url}")
+                tags=$(translate_tags "${allTagsPreSubstitution}" "${substitute_map}" "${labels}" "${url}" \
+                    "${component_repos_json}")
                 tags=$(ensure_implicit_timestamp_value "${tags}" "${timestamp}")
                 if [ "$(jq 'length' <<< "$tags")" -gt 0 ] ; then
                   jq --argjson i "$i" --argjson j "$j" --argjson updatedTags "$tags" \
