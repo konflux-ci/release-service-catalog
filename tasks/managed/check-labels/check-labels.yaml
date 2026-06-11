@@ -93,176 +93,19 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: enforce-name-label
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+    - name: check-labels
+      image: quay.io/konflux-ci/release-service-utils@sha256:8ac7a9b0bb623775eca570edef8a0fc34f693f50a7e0a50547a4e496875d68b9
       computeResources:
         limits:
-          memory: 100Mi
+          memory: 128Mi
         requests:
-          memory: 100Mi
-          cpu: 10m
-      script: |
-        #!/usr/bin/env bash
-        set -ex
-
-        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
-        if [ ! -f "${SNAPSHOT_FILE}" ] ; then
-            echo "No valid snapshot file was provided."
-            exit 1
-        fi
-
-        fail_or_warn() {
-            # Use $* to join all arguments with a single space
-            local msg="$*"
-            if [ "$(params.enforce)" == "true" ]; then
-                echo "Error: ${msg}" >&2
-                exit 1
-            fi
-            echo "Warning: ${msg}" >&2
-        }
-
-        # derive namespace/repo from a container image URL
-        derive_name_from_url() {
-            local url="$1"
-            # remove scheme (like docker://), remove registry (first path segment),
-            # remove tag or digest (anything after : or @), strip leading slashes
-            sed -E 's~^[^/]+://~~; s~^[^/]+/~~; s~[:@].*$~~' <<< "$url" | sed 's#^/*##'
-        }
-
-        num_components=$(jq '.components | length' "${SNAPSHOT_FILE}")
-        for ((i = 0; i < num_components; i++))
-        do
-            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
-            name=$(jq -r '.name' <<< "$component")
-
-            # Fetch the media type of the artifact
-            media_type=$(jq -r '.metadata.media_type // null' <<< "$component")
-
-            # Standard config types are:
-            #   - application/vnd.oci.image.config.v1+json (OCI images)
-            #   - application/vnd.docker.container.image.v1+json (Docker images)
-            # All other artifacts (Helm charts, ML models, empty configs, etc.)
-            # don't have labels. Ignore this check for non-images
-            if [[ "$media_type" != "application/vnd.oci.image.config.v1+json" ]] && \
-               [[ "$media_type" != "application/vnd.docker.container.image.v1+json" ]]; then
-                echo "Skipping check for artifact '$name' of type '$media_type'"
-                continue
-            fi
-
-            # Fetch the value of the 'name' label from the container's metadata
-            name_label=$(jq -r '.metadata.labels? | .[] | select(.name == "name") | .value' <<< "$component" || true)
-
-            # Check if the label was found. It is always required.
-            if [[ -z "$name_label" || "$name_label" == "null" ]]; then
-              fail_or_warn "Component '$name' is missing the required container label" \
-                "'name' in its metadata."
-              continue
-            fi
-
-            # Fetch canonicalName from the component root
-            canonical_name=$(jq -r ".canonicalName // empty" <<< "$component")
-
-            num_repos=$(jq '.repositories | length' <<< "$component")
-
-            # Require canonicalName when multiple repositories exist
-            if [[ "$num_repos" -gt 1 && -z "$canonical_name" ]]; then
-                fail_or_warn "Component '$name' has multiple repositories, but is missing the" \
-                    "component-level 'canonicalName'."
-                continue
-            fi
-
-            # Use canonicalName if present, otherwise derive from repository URL
-            if [[ -n "$canonical_name" ]]; then
-                expected_name="$canonical_name"
-            else
-                url=$(jq -r '.repositories[0]."rh-registry-repo" // empty' <<< "$component")
-                if [[ -z "$url" ]]; then
-                    echo "Error: Component '$name' repositories[0].\"rh-registry-repo\" is missing" >&2
-                    exit 1
-                fi
-                expected_name=$(derive_name_from_url "$url")
-            fi
-
-            # Validate name label matches expected name
-            if [[ "$name_label" != "$expected_name" ]]; then
-                fail_or_warn "Component '$name' name label ('$name_label') does not match" \
-                    "expected name ('$expected_name')"
-            fi
-        done
-    - name: enforce-cpe-label
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
-      computeResources:
-        limits:
-          memory: 100Mi
-        requests:
-          memory: 100Mi
-          cpu: 300m
-      script: |
-        #!/usr/bin/env bash
-        set -ex
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No valid data file was provided."
-            exit 1
-        fi
-
-        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
-
-        fail_or_warn() {
-            # Use $* to join all arguments with a single space
-            local msg="$*"
-            if [ "$(params.enforce)" == "true" ]; then
-                echo "Error: ${msg}" >&2
-                exit 1
-            fi
-            echo "Warning: ${msg}" >&2
-        }
-
-        CPE_DATA=$(jq -r '.releaseNotes.cpe // empty' "${DATA_FILE}")
-        if [[ -z "$CPE_DATA" ]]; then
-            echo "Error: The required static value 'releaseNotes.cpe' is missing or empty in the data file." >&2
-            exit 1
-        fi
-
-        num_components=$(jq '.components | length' "${SNAPSHOT_FILE}")
-
-        # Now iterate through components to check the label against the single fetched value
-        for ((i = 0; i < num_components; i++))
-        do
-            component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_FILE}")
-            name=$(jq -r '.name' <<< "$component")
-
-            # Fetch the media type of the artifact
-            media_type=$(jq -r '.metadata.media_type // null' <<< "$component")
-
-            # Standard config types are:
-            #   - application/vnd.oci.image.config.v1+json (OCI images)
-            #   - application/vnd.docker.container.image.v1+json (Docker images)
-            # All other artifacts (Helm charts, ML models, empty configs, etc.)
-            # don't have labels. Ignore this check for non-images
-            if [[ "$media_type" != "application/vnd.oci.image.config.v1+json" ]] && \
-               [[ "$media_type" != "application/vnd.docker.container.image.v1+json" ]]; then
-                echo "Skipping check for artifact '$name' of type '$media_type'"
-                continue
-            fi
-
-            # Fetch the value of the 'cpe' label from the component's metadata
-            cpe_label=$(jq -r '.metadata.labels // [] | .[] | select(.name == "cpe")
-                | .value // empty' <<< "$component")
-
-            # Check if the label was found. If not, we skip the enforcement.
-            if [[ -z "$cpe_label" ]]; then
-              echo "Info: Component '$name' is missing the 'cpe' label. Skipping enforcement."
-              continue
-            fi
-
-            # Compare the label value with the single data value (CPE_DATA)
-            if [[ "$cpe_label" != "$CPE_DATA" ]]; then
-                fail_or_warn "Component '$name' 'cpe' label ('$cpe_label') does not match" \
-                    "the single required CPE value from the data file ('$CPE_DATA')."
-                continue
-            fi
-
-            echo "Success: Component '$name' 'cpe' label matches the data file value."
-        done
+          memory: 128Mi
+          cpu: 50m
+      command: ["/home/scripts/python/tasks/managed/check_labels.py"]
+      args:
+        - --snapshot-file
+        - $(params.dataDir)/$(params.snapshotPath)
+        - --data-file
+        - $(params.dataDir)/$(params.dataPath)
+        - --enforce
+        - $(params.enforce)
