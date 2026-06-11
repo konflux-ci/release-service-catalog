@@ -67,6 +67,7 @@ def get_changelog(source_repo, old_rev, new_rev):
             sha = c["sha"][:7]
             url = c["html_url"]
             msg = c["commit"]["message"].split('\n')[0]
+            msg = re.sub(r'#(\d+)', rf'[#\1](https://github.com/{owner_repo}/pull/\1)', msg)
             author = c.get("author", {}).get("login") if c.get("author") else None
             if author:
                 lines.append(f"- [`{sha}`]({url}) {msg} - @{author}")
@@ -131,6 +132,19 @@ check("starts with ## Changelog", result.startswith("## Changelog"))
 check("contains commit links", "](https://github.com/" in result)
 lines = result.strip().split('\n')
 check(f"header + {len(lines)-1} commit entries", len(lines) >= 2)
+print(f"\n  Output:\n{result}")
+
+header("get_changelog — bare PR refs rewritten to full URLs")
+print(f"  Inputs: repo='konflux-ci/release-service' old={OLD_SHA[:10]} new={NEW_SHA[:10]}")
+result = get_changelog("https://github.com/konflux-ci/release-service", OLD_SHA, NEW_SHA)
+pr_ref_pattern = re.compile(r'(?<![/\w])#\d+')
+check("no bare #NNN references remain", not pr_ref_pattern.search(result))
+full_url_pattern = re.compile(r'\[#\d+\]\(https://github\.com/konflux-ci/release-service/pull/\d+\)')
+has_pr_ref = full_url_pattern.search(result) or '#' not in ''.join(
+    c["commit"]["message"].split('\n')[0] for c in requests.get(
+        f"{GITHUB_API_URL}/repos/konflux-ci/release-service/compare/{OLD_SHA}...{NEW_SHA}",
+        headers={"Accept": "application/vnd.github.v3+json"}).json().get("commits", []))
+check("PR refs expanded to full GitHub URLs (or none present)", has_pr_ref)
 print(f"\n  Output:\n{result}")
 
 header("get_changelog — nonexistent repo (graceful skip)")
