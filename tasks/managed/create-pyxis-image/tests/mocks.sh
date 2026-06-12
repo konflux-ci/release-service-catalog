@@ -43,7 +43,7 @@ function create_container_image() {
     printf "The image id is %04d\n" "$image_id"
   fi
 
-  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --oras-manifest-fetch "*" --name "*" --media-type "*" --digest "*" --architecture-digest "*" --architecture "*" --rh-push "* ]]
+  if [[ "$*" != "--pyxis-url https://pyxis.preprod.api.redhat.com/ --certified false --tags "*" --is-latest false --verbose --oras-manifest-fetch "*" --name "*" --media-type "*" --digest "*" --architecture-digest "*" --architecture "*" --rh-push "*" --append-tags "*" --dockerfile "* ]]
   then
     echo Error: Unexpected call
     echo Mock create_container_image called with: $*
