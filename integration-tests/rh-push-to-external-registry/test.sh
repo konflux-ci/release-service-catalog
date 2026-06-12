@@ -30,10 +30,11 @@ verify_release_contents() {
     echo "Restored artifact ${ociArtifact} to ${oci_artifact_dir}"
 
     local failures=0
-    local image_url image_arches
+    local image_url image_arches image_shasum
 
     image_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
     image_arches=$(jq -r '.status.artifacts.images[0]?.arches // [] | sort | join(" ")' <<< "${release_json}")
+    image_shasum=$(jq -r '.status.artifacts.images[0]?.shasum // ""' <<< "${release_json}")
 
     echo "Checking Image URL..."
     if [ -n "${image_url}" ]; then
@@ -51,17 +52,20 @@ verify_release_contents() {
         failures=$((failures+1))
     fi
 
-    echo "Verifying multi-arch image pullability with skopeo..."
+    # Use digest instead of tag, tag can be overwritten by concurrent tests
+    local image_pullspec="${image_url%:*}@${image_shasum}"
+
+    echo "Verifying multi-arch image pullability with skopeo (${image_pullspec})..."
     AUTH_FILE="$(mktemp)"
     yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
         "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${AUTH_FILE}"
 
     for arch in amd64 arm64; do
         if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true \
-                "docker://${image_url}" > /dev/null 2>&1; then
-            echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_url}"
+                "docker://${image_pullspec}" > /dev/null 2>&1; then
+            echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_pullspec}"
         else
-            echo "🔴 skopeo inspect --override-arch ${arch} failed for ${image_url}"
+            echo "🔴 skopeo inspect --override-arch ${arch} failed for ${image_pullspec}"
             failures=$((failures+1))
         fi
     done
