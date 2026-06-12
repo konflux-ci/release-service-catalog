@@ -36,6 +36,13 @@ services:                     # optional list
 ``curl``, …). File contents are embedded into the generated step script at
 render time (the task pod does not mount the git tree).
 
+**Mock Python modules:** add ``.py`` files under ``tests/python_mocks/``
+(e.g. ``tests/python_mocks/requests_kerberos.py``). They are written to a temp
+directory prepended to ``PYTHONPATH``, so ``import requests_kerberos`` loads the
+mock instead of the real package. Use this when the task script imports a Python
+library that cannot work in the test environment (e.g. libraries that need live
+credentials).
+
 ``http_json`` uses ``.github/scripts/mock_http_json.py`` (copied into the step
 at render time). At most one ``http_json`` service per file (v1). Extend this
 module for new ``type`` values.
@@ -220,6 +227,36 @@ def _render_mock_binaries_from_dir(tests_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _render_python_module_mocks_from_dir(tests_dir: Path) -> str:
+    """Turn ``tests/python_mocks/<mod>.py`` files into a temp dir prepended to ``PYTHONPATH``."""
+    mock_dir = tests_dir / "python_mocks"
+    if not mock_dir.is_dir():
+        return ""
+    paths = sorted(
+        p
+        for p in mock_dir.iterdir()
+        if p.is_file() and p.suffix == ".py" and not p.name.startswith(".")
+    )
+    if not paths:
+        return ""
+    lines = [
+        'MOCK_PYMOD_ROOT="$(mktemp -d)"',
+        'export PYTHONPATH="${MOCK_PYMOD_ROOT}:${PYTHONPATH:-}"',
+        "",
+    ]
+    for path in paths:
+        if not _NAME_SAFE.match(path.name):
+            _die(
+                "mock Python module filename must match "
+                f"^[a-zA-Z0-9._-]+$: {path.name!r} ({path})"
+            )
+        body = path.read_text(encoding="utf-8")
+        dest = f'"${{MOCK_PYMOD_ROOT}}/{path.name}"'
+        lines += _heredoc_lines(dest, body, path.name)
+        lines.append("")
+    return "\n".join(lines)
+
+
 def render(tests_dir: Path) -> str:
     mocks_path = tests_dir / "mocks.yaml"
     if not mocks_path.is_file():
@@ -243,6 +280,7 @@ def render(tests_dir: Path) -> str:
     if http_svcs:
         parts.append(_render_http_json(http_svcs[0]))
     parts.append(_render_mock_binaries_from_dir(tests_dir))
+    parts.append(_render_python_module_mocks_from_dir(tests_dir))
     parts.append('exec "${TASK_ENTRYPOINT[@]}"')
     return "\n".join(p for p in parts if p)
 
