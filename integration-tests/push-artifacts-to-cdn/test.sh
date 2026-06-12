@@ -142,7 +142,7 @@ _print_cgw_state() {
         { set +x; } 2>/dev/null
         _code=$(curl --retry 3 -L -s -w "%{http_code}" "${proxy_args[@]}" \
             -u "${cgw_user}:${cgw_pass}" -H "Accept: application/json" \
-            -o "${_out}" "${_url}" 2>/dev/null)
+            -o "${_out}" "${_url}" 2>/dev/null || true)
         (( _xtrace_on )) && set -x || { set +x; } 2>/dev/null
         printf '%s' "${_code}"
     }
@@ -156,7 +156,8 @@ _print_cgw_state() {
 
     http_code=$(_cgw_get "${cgw_hostname}/products" "${products_file}")
     if [ "${http_code}" != "200" ]; then
-        echo "⚠️ CGW products endpoint returned HTTP ${http_code}, skipping CGW state report"
+        echo "⚠️ CGW products endpoint returned HTTP ${http_code:-network error}, skipping CGW state report"
+        echo "   (CGW state report is intended for locally invoked tests with network access)"
         return 0
     fi
     product_id=$(jq -r --arg name "${cgw_product_name}" \
@@ -170,7 +171,7 @@ _print_cgw_state() {
     local version_id
     http_code=$(_cgw_get "${cgw_hostname}/products/${product_id}/versions" "${versions_file}")
     if [ "${http_code}" != "200" ]; then
-        echo "⚠️ CGW versions endpoint returned HTTP ${http_code}, skipping CGW state report"
+        echo "⚠️ CGW versions endpoint returned HTTP ${http_code:-network error}, skipping CGW state report"
         return 0
     fi
     version_id=$(jq -r --arg name "${cgw_product_version}" \
@@ -185,7 +186,7 @@ _print_cgw_state() {
         "${cgw_hostname}/products/${product_id}/versions/${version_id}/files" \
         "${cgw_files_file}")
     if [ "${http_code}" != "200" ]; then
-        echo "⚠️ CGW files endpoint returned HTTP ${http_code}, skipping CGW state report"
+        echo "⚠️ CGW files endpoint returned HTTP ${http_code:-network error}, skipping CGW state report"
         return 0
     fi
 
@@ -237,10 +238,11 @@ _print_pulp_state() {
         -H "Content-Type: application/json" -H "Accept: application/json" \
         -d '{"criteria": {"type_ids": ["iso"]}}' \
         -o "${pulp_response_file}" \
-        "${pulp_base_url}/pulp/api/v2/repositories/${pulp_repo}/search/units/" 2>/dev/null)
+        "${pulp_base_url}/pulp/api/v2/repositories/${pulp_repo}/search/units/" 2>/dev/null || true)
 
     if [ "${http_code}" != "200" ]; then
-        echo "⚠️ Pulp API returned HTTP ${http_code}, skipping Pulp state report"
+        echo "⚠️ Pulp API returned HTTP ${http_code:-network error}, skipping Pulp state report"
+        echo "   (Pulp state report is intended for locally invoked tests with network access)"
         return 0
     fi
 
