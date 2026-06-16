@@ -31,6 +31,11 @@ This task supports variable expansion in tag values from the mapping. The curren
 
 You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
 
+Use "{{ incrementer }}" when pushing to a single registry. Use "{{ component-incrementer }}"
+when pushing to multiple registries to guarantee every registry receives the same sequential tag.
+Example: if repo-a has v1.0.0-3 and repo-b has v1.0.0-1, the next release will push v1.0.0-4
+to both.
+
 ## Parameters
 
 | Name                    | Description                                                                                                                                                                                                                                | Optional | Default value                 |
