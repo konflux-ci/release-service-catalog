@@ -165,44 +165,65 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers | \
-                sed 's/[[:space:]]*$//' |head -1)"
-              pipeline="$(kubectl get internalrequest "${internalRequest}" -o \
-              jsonpath="{.spec.pipeline.pipelineRef.params[2].value}")"
-
-              params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-
-              if [ "$pipeline" != \
-                "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
-                echo "pipeline does not match"
-                exit 1
+              internalRequests=$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
+              -o json | jq '.items')
+              irIndex=$(jq '. | length' <<< "${internalRequests}")
+              if [ "${irIndex}" -ne 2 ]; then
+                  echo "Too many internalrequests found. Should be 2"
+                  exit 1
               fi
+              declare -a expected_target=()
+              expected_target+=("quay.io/scoheb/fbc-target-index-testing:v4.12")
+              expected_target+=("quay.io/scoheb/fbc-target-index-testing:v4.12-2023-03-06T16:39:11.314092Z")
+              for((i=0; i<irIndex; i++)); do
+                  pipeline=$(jq -r ".[$i] | .spec.pipeline.pipelineRef.params[2].value" <<< "${internalRequests}")
 
-              if [ "$(jq -r '.retries' <<< "${params}")" != "2" ]; then
-                echo "number of retries does not match"
-                exit 1
-              fi
+                  params=$(jq -r ".[$i] | .spec.params" <<< "${internalRequests}")
 
-              if [ "$(jq -r '.sourceIndex' <<< "${params}")" != "redhat.com/rh-stage/iib:01" ]; then
-                echo "sourceIndex image does not match"
-                exit 1
-              fi
+                  if [ "$pipeline" != \
+                    "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
+                    echo "pipeline does not match"
+                    exit 1
+                  fi
 
-              targetIndex=$(jq -r '.targetIndex' <<< "${params}")
-              if [ "$targetIndex" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
-                echo "targetIndex image does not match"
-                exit 1
-              fi
+                  if [ "$(jq -r '.retries' <<< "${params}")" != "2" ]; then
+                    echo "number of retries does not match"
+                    exit 1
+                  fi
 
-              if [ "$(jq -r '.taskGitUrl' <<< "${params}")" != "http://localhost" ]; then
-                echo "taskGitUrl image does not match"
-                exit 1
-              fi
+                  if [ "$(jq -r '.sourceIndex' <<< "${params}")" != "redhat.com/rh-stage/iib:01" ]; then
+                    echo "sourceIndex image does not match"
+                    exit 1
+                  fi
 
-              if [ "$(jq -r '.taskGitRevision' <<< "${params}")" != "main" ]; then
-                echo "taskGitRevision image does not match"
-                exit 1
-              fi
+                  targetIndex=$(jq -r '.targetIndex' <<< "${params}")
+                  found=
+                  ti=0
+                  for expected in "${expected_target[@]}"; do
+                    if [ "$targetIndex" == "$expected" ]; then
+                      unset "expected_target[ti]"
+                      expected_target=("${expected_target[@]}")
+                      echo "${expected_target[@]}"
+                      found=1
+                      break
+                    fi
+                    ti=$((ti+1))
+                  done
+                  if [ -z "$found" ]; then
+                    echo "targetIndex ${targetIndex} image does not match any expected value"
+                    exit 1
+                  fi
+
+                  if [ "$(jq -r '.taskGitUrl' <<< "${params}")" != "http://localhost" ]; then
+                    echo "taskGitUrl image does not match"
+                    exit 1
+                  fi
+
+                  if [ "$(jq -r '.taskGitRevision' <<< "${params}")" != "main" ]; then
+                    echo "taskGitRevision image does not match"
+                    exit 1
+                  fi
+              done
   finally:
     - name: cleanup
       taskSpec:

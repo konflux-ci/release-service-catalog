@@ -125,7 +125,8 @@ spec:
           value: $(params.sourceDataArtifact)
     - name: publish-index-image
       image: >-
-        quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+        quay.io/jluza/release-service-utils:RELEASE-1989
+      imagePullPolicy: Always
       computeResources:
         limits:
           memory: 512Mi
@@ -142,71 +143,16 @@ spec:
             exit 1
         fi
 
-        request="publish-index-image-pipeline"
-        credentials=$(jq -r '.fbc.publishingCredentials' "$DATA_FILE")
-        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
+        credentials="$(jq -r '.fbc.publishingCredentials' "$DATA_FILE")"
 
-        LENGTH="$(jq -r '.components | length' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
-        for((i=0; i<LENGTH; i++)); do
-          targetIndex=$(jq -r --argjson i "$i" \
-            '.components[$i].target_index' "$(params.dataDir)/$(params.internalRequestResultsFile)")
-
-          sourceIndex=$(jq -r  --argjson i "$i" \
-            '.components[$i].index_image' "$(params.dataDir)/$(params.internalRequestResultsFile)")
-
-          buildTimestamp=$(jq -r --argjson i "$i" '.components[$i].completion_time' \
-            "$(params.dataDir)/$(params.internalRequestResultsFile)")
-
-          publishingImages=("$targetIndex")
-          # only publish the extra timestamp-based tag if the targetIndex does not have it already
-          if [[ ! "$targetIndex" =~ .*"$buildTimestamp"$ ]]; then
-            publishingImages+=("${targetIndex}-${buildTimestamp}")
-          fi
-
-          requestTimeout=$(params.requestTimeout)
-          pipelineTimeoutSeconds=$((requestTimeout+300))
-          pipelineTimeout=$(date -u -d @"${pipelineTimeoutSeconds}" +"%Hh%Mm%Ss")
-          taskTimeout=$(date -u -d @"${requestTimeout}" +"%Hh%Mm%Ss")
-
-          IR_RESULT_FILE=$(mktemp)
-
-          for((x=0; x<${#publishingImages[@]}; x++ )); do
-              echo "=== Creating internal request to publish image:"
-              echo ""
-              echo "- from: ${sourceIndex}"
-              echo "- to: ${publishingImages[$x]}"
-
-              internal-request --pipeline "${request}" \
-                  -p sourceIndex="${sourceIndex}" \
-                  -p targetIndex="${publishingImages[$x]}" \
-                  -p publishingCredentials="${credentials}" \
-                  -p retries="$(params.retries)" \
-                  -p taskGitUrl="$(params.taskGitUrl)" \
-                  -p taskGitRevision="$(params.taskGitRevision)" \
-                  -t "$(params.requestTimeout)" \
-                  --pipeline-timeout "${pipelineTimeout}" \
-                  --task-timeout "$taskTimeout" \
-                  -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
-                  | tee "$IR_RESULT_FILE" || \
-                  (grep "^\[" "$IR_RESULT_FILE" | jq . && exit 1)
-
-              internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_RESULT_FILE")
-              echo "done (${internalRequest})"
-
-              results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
-              requestMessage=$(echo "${results}" | jq -r '.requestMessage // ""')
-
-              if echo "${requestMessage}" | grep -qi "error"; then
-                echo "ERROR: Publish to ${publishingImages[$x]} failed"
-                echo "requestMessage: ${requestMessage}"
-                exit 1
-              fi
-              echo "=== published successfully (${publishingImages[$x]})"
-
-              echo ""
-              echo ""
-          done
-        done
+        python3 -m managed_publish_index_image \
+          --request-timeout "$(params.requestTimeout)" \
+          --publishing-credentials "${credentials}" \
+          --retries "$(params.retries)" \
+          --task-git-url "$(params.taskGitUrl)" \
+          --task-git-revision "$(params.taskGitRevision)" \
+          --pipeline-run-id "$(params.pipelineRunUid)" \
+          --ir-results-file "$(params.dataDir)/$(params.internalRequestResultsFile)"
     - name: create-trusted-artifact
       computeResources:
         limits:
