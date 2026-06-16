@@ -8,6 +8,7 @@ Tekton pipeline to publish a built FBC index image using skopeo
 |-----------------------|---------------------------------------------------------------------------------------|----------|-----------------------------------------------------------|
 | sourceIndex           | sourceIndex signing image                                                             | No       | -                                                         |
 | targetIndex           | targetIndex signing image                                                             | No       | -                                                         |
+| targetOcpVersion      | target OCP Version of the index image                                                 | Yes      | ""                                                        |
 | retries               | Number of skopeo retries                                                              | Yes      | 0                                                         |
 | publishingCredentials | The credentials used to access the registries                                         | No       | -                                                         |
 | requestUpdateTimeout  | Max seconds waiting for the status update                                             | Yes      | 360                                                       |
