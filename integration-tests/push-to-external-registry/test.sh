@@ -3,6 +3,34 @@
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
 
+# Hook: runs after Kubernetes resources are created, before the release triggers.
+# Pre-seeds repo A with 3 existing tags to simulate divergent history between
+# repo A and repo B, demonstrating {{ component-incrementer }} uniformity.
+post_create_kubernetes_resources() {
+    echo "── [demo] Pre-seeding repo A with divergent tag history ──"
+    local auth_file
+    auth_file=$(mktemp)
+    chmod 600 "${auth_file}"
+    trap 'rm -f "${auth_file}"' RETURN
+    yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
+        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" \
+        | base64 -d > "${auth_file}"
+
+    local repo_a="quay.io/hacbs-release-tests/${component_name}"
+    local source_image="docker://quay.io/libpod/alpine:latest"
+    for tag in v1.0.0-1 v1.0.0-2 v1.0.0-3; do
+        echo "  → seeding ${repo_a}:${tag}"
+        skopeo copy --retry-times 3 \
+            --override-os linux --override-arch amd64 \
+            --dest-authfile "${auth_file}" \
+            "${source_image}" \
+            "docker://${repo_a}:${tag}"
+    done
+    echo "  ✅ Repo A pre-seeded: v1.0.0-1, v1.0.0-2, v1.0.0-3"
+    echo "  ℹ️  Repo B (${component_name}-b) is empty — divergent state ready"
+    echo "── [demo] Pre-seeding complete ──"
+}
+
 # Function to verify Release contents
 # Relies on global variables: RELEASE_NAME, RELEASE_NAMESPACE, SUITE_DIR, managed_namespace
 verify_release_contents() {
