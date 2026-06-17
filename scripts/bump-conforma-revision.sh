@@ -28,9 +28,14 @@ echo "Updating conforma/tekton-catalog revision to ${NEW_REV}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+SED="sed"
+if ! sed --version 2>/dev/null | grep -q "GNU"; then
+    SED="gsed"
+fi
+
 count=0
 while IFS= read -r file; do
-    if sed -i -E \
+    if "${SED}" -i -E \
         "/name: url/{N;/value: https:\/\/github\.com\/conforma\/tekton-catalog/{N;/name: revision/{N;s|(value: \")[a-f0-9]+(\")|\1${NEW_REV}\2|}}}" \
         "${file}"; then
         count=$((count + 1))
