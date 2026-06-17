@@ -95,16 +95,10 @@ patch_component_source_before_merge() {
         work_dir=$(mktemp -d)
         nopath_file_name=$(basename "${file_name}")
         echo "${decoded_contents}" > "${work_dir}/${nopath_file_name}"
-        yq -i '
-          .spec.params //= [] |
-          (.spec.params[] | select(.name == "build-platforms") | .value) |=
-            ((. // []) + ["linux/arm64"] | unique) |
-          if any(.spec.params[]; .name == "build-source-image") then
-            (.spec.params[] | select(.name == "build-source-image") | .value) = "true"
-          else
-            .spec.params += [{"name": "build-source-image", "value": "true"}]
-          end
-        ' "${work_dir}/${nopath_file_name}"
+        yq -i '(.spec.params[] | select(.name == "build-platforms") | .value) += ["linux/arm64"]' \
+            "${work_dir}/${nopath_file_name}"
+        yq -i '.spec.params += [{"name": "build-source-image", "value": "true"}]' \
+            "${work_dir}/${nopath_file_name}"
         encoded_contents=$(base64 -w 0 < "${work_dir}/${nopath_file_name}")
         rm -rf "${work_dir}"
 
