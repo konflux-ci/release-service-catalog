@@ -2,35 +2,14 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-process-file-updates-seed
+  name: test-process-file-updates
 spec:
   description: |
-    Run the process-file-updates task with a single seed or update. The result
-    task result should be provide a merge request url
+    Run process-file-updates-task with a seed file and regex replacement.
+    Expects result Success and a merge request URL in fileUpdatesInfo.
   workspaces:
     - name: tests-workspace
   tasks:
-    - name: setup
-      workspaces:
-        - name: pipeline
-          workspace: tests-workspace
-      taskSpec:
-        workspaces:
-          - name: pipeline
-        steps:
-          - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
-            securityContext:
-              runAsUser: 1001
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              mkdir -p "$(workspaces.pipeline.path)/$(context.pipelineRun.uid)/file-updates"
-              cd "$(workspaces.pipeline.path)/$(context.pipelineRun.uid)/file-updates"
-              mkdir one-update
-              cd one-update
-              git init .
     - name: run-task
       taskRef:
         name: process-file-updates-task
@@ -43,7 +22,8 @@ spec:
           value: "main"
         - name: paths
           value: >-
-            [{"path":"test/one-update.yaml","seed":"indexImage: \\ntom:"}]
+            [{"path":"addons/my-addon2.yaml","seed":"indexImage:\u000a\u000a",
+            "replacements":[{"key":".indexImage","replacement":"|indexImage:.*|indexImage: Tom|"}]}]
         - name: componentGroup
           value: "scott"
         - name: file_updates_secret
@@ -55,8 +35,6 @@ spec:
       workspaces:
         - name: pipeline
           workspace: tests-workspace
-      runAfter:
-        - setup
     - name: check-result
       runAfter:
         - run-task
@@ -65,6 +43,10 @@ spec:
           value: $(tasks.run-task.results.fileUpdatesInfo)
         - name: fileUpdatesState
           value: $(tasks.run-task.results.fileUpdatesState)
+        - name: internalRequestTaskRunName
+          value: $(tasks.run-task.results.internalRequestTaskRunName)
+        - name: internalRequestPipelineRunName
+          value: $(tasks.run-task.results.internalRequestPipelineRunName)
         - name: tempDir
           value: "$(workspaces.pipeline.path)/$(context.pipelineRun.uid)/file-updates"
       taskSpec:
@@ -73,16 +55,31 @@ spec:
             type: string
           - name: fileUpdatesState
             type: string
+          - name: internalRequestTaskRunName
+            type: string
+          - name: internalRequestPipelineRunName
+            type: string
           - name: tempDir
             type: string
         steps:
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:78f41d6b4245a1536efbfe561038888dbf7c2b81f76d10f1eff1ce80002666c4
+            computeResources:
+              limits:
+                memory: 512Mi
+              requests:
+                memory: 512Mi
+                cpu: 250m
             securityContext:
               runAsUser: 1001
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -euxo pipefail
+
+              EXPECTED_STATE="Success"
+
+              echo Test that task succeeded
+              test "$(params.fileUpdatesState)" == "${EXPECTED_STATE}"
 
               echo Test that merge_request can be parsed
               test "$(jq -r .merge_request <<< '$(params.fileUpdatesInfo)')" == \
@@ -90,13 +87,27 @@ spec:
 
               cd "$(params.tempDir)/one-update"
               commits=$(git log --oneline | wc -l)
-              echo "Test that only 1 commit was made"
+              echo "Test that only 1 commit is present"
               test "${commits}" == "1"
 
-              commitId=$(git log --oneline | cut -f1 -d" ")
+              commitId=$(git log --oneline | awk '{print $1}' | tail -1)
               changedFiles=$(git show -r "${commitId}" --name-only --oneline | tail -1)
               echo "Test that files changed in commit correspond to updates"
-              test "${changedFiles}" == "test/one-update.yaml"
+              test "${changedFiles}" == "addons/my-addon2.yaml"
+
+              cat > "/tmp/my-addon2.yaml" << EOF
+              indexImage: Tom
+
+              EOF
+
+              echo "Testing that file present in working directory is what we expect"
+              diff "$(params.tempDir)/one-update/addons/my-addon2.yaml" "/tmp/my-addon2.yaml"
+
+              echo Test that internalRequestTaskRunName is not empty
+              test -n "$(params.internalRequestTaskRunName)"
+
+              echo Test that internalRequestPipelineRunName is not empty
+              test -n "$(params.internalRequestPipelineRunName)"
 
       workspaces:
         - name: pipeline
@@ -112,12 +123,18 @@ spec:
             type: string
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:78f41d6b4245a1536efbfe561038888dbf7c2b81f76d10f1eff1ce80002666c4
+            computeResources:
+              limits:
+                memory: 512Mi
+              requests:
+                memory: 512Mi
+                cpu: 250m
             securityContext:
               runAsUser: 1001
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -euxo pipefail
 
               rm -rf "$(params.tempDir)"
       workspaces:

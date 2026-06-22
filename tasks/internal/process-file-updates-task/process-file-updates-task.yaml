@@ -34,8 +34,8 @@ spec:
       description: The credentials used to update the git repo
     - name: tempDir
       type: string
-      default: "/tmp/$(context.taskRun.uid)/file-updates"
-      description: temp dir for cloning and updates
+      default: "$(workspaces.pipeline.path)/$(context.taskRun.uid)/file-updates"
+      description: Workspace-backed temp dir for cloning, path handoff, and updates
     - name: internalRequestPipelineRunName
       type: string
       description: name of the PipelineRun that called this task
@@ -76,11 +76,11 @@ spec:
       - name: trusted-ca
         mountPath: /mnt/trusted-ca
         readOnly: true
+    securityContext:
+      runAsUser: 1001
   steps:
-    - name: perform-updates
-      image: quay.io/konflux-ci/release-service-utils@sha256:0b35e861c83b9c1141e3a8d7a8924cc9c4ae0b09dc87938971eee66ee9b9aaaf
-      securityContext:
-        runAsUser: 1001
+    - name: run-file-updates
+      image: quay.io/konflux-ci/release-service-utils@sha256:78f41d6b4245a1536efbfe561038888dbf7c2b81f76d10f1eff1ce80002666c4
       computeResources:
         limits:
           memory: 512Mi
@@ -91,249 +91,33 @@ spec:
         - name: file-updates-secret-vol
           mountPath: "/mnt/file-updates-secret"
       env:
-        - name: TEMP
-          value: "$(params.tempDir)"
-      script: |
-        #!/usr/bin/env bash
-        set -eo pipefail
-
-        GITLAB_HOST="$(cat /mnt/file-updates-secret/gitlab_host)"
-        ACCESS_TOKEN="$(cat /mnt/file-updates-secret/gitlab_access_token)"
-        GIT_AUTHOR_NAME="$(cat /mnt/file-updates-secret/git_author_name)"
-        GIT_AUTHOR_EMAIL="$(cat /mnt/file-updates-secret/git_author_email)"
-
-        # export the variables used by the scripts in release-service-utils
-        export GITLAB_HOST ACCESS_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
-
-        echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
-        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
-
-        # loading git and gitlab functions
-        # shellcheck source=/dev/null
-        . /home/utils/gitlab-functions
-        # shellcheck source=/dev/null
-        . /home/utils/git-functions
-
-        echo "Temp Dir: $TEMP"
-        mkdir -p "$TEMP"
-
-        gitlab_init
-        git_functions_init
-
-        # saves the params.paths json to a file
-        updatePathsTmpfile="${TEMP}/updatePaths.json"
-        cat > "${updatePathsTmpfile}" << JSON
-        $(params.paths)
-        JSON
-
-        UPSTREAM_REPO="$(params.upstream_repo)"
-        REPO="$(params.repo)"
-        REVISION="$(params.ref)"
-
-        echo -e "=== UPDATING ${REPO} ON BRANCH ${REVISION} ===\n"
-
-        cd "${TEMP}"
-        git_clone_and_checkout --repository "${REPO}" --revision "${REVISION}"
-
-        # updating local branch with the upstream
-        git_rebase -n "glab-base" -r "${UPSTREAM_REPO}" -v "${REVISION}"
-
-        replacementsUpdateError=
-        # getting the files that have replacements
-        cat "${updatePathsTmpfile}"
-        PATHS_LENGTH="$(jq '. | length' "${updatePathsTmpfile}")"
-        for (( PATH_INDEX=0; PATH_INDEX < PATHS_LENGTH; PATH_INDEX++ )); do
-          # getting the replacements for the file
-          echo "-- start updatePathsTmpfile --"
-          cat "${updatePathsTmpfile}"
-          echo "-- end updatePathsTmpfile --"
-          targetFile="$(jq -cr ".[${PATH_INDEX}].path" "${updatePathsTmpfile}")"
-          echo "targetFile: ${targetFile}"
-
-          seed=$(jq ".[${PATH_INDEX}].seed // \"\"" "${updatePathsTmpfile}")
-          seed="${seed%\"}"
-          seed="${seed#\"}"
-          echo "${seed}"
-
-          if [ -n "${seed}" ] ; then
-            echo "seed operation to perform"
-            targetDir=$(dirname "${targetFile}")
-            mkdir -p "${targetDir}"
-            echo -e "${seed}" > "${targetFile}"
-            echo "-- start targetFile --"
-            cat "${targetFile}"
-            echo "-- end targetFile --"
-            git add "${targetFile}"
-            git status
-          fi
-
-          REPLACEMENTS_LENGTH="$(jq -cr ".[${PATH_INDEX}].replacements | length" "${updatePathsTmpfile}")"
-          echo "Replacements to perform: ${REPLACEMENTS_LENGTH}"
-          REPLACEMENTS_PERFORMED=
-          if [ "${REPLACEMENTS_LENGTH}" -gt 0 ] ; then
-            REPLACEMENTS_PERFORMED=0
-            # we need to know how many empty newlines and `---` the file has before
-            # the actual yaml data starts excluding comments
-            blankLinesBeforeYaml="$(awk '/[[:alpha:]]+/{ if(! match($0, "^#")) { print NR-1; exit } }' "${targetFile}")"
-
-            # check if the targetFile is a valid yaml file
-            if ! yq "${targetFile}" >/dev/null 2>&1; then
-              echo "fileUpdates: the targetFile ${targetFile} is not a yaml file" | \
-              tee "$(results.fileUpdatesInfo.path)"
-              exit 1
-            fi
-
-            keyNotFound=false
-            for (( REPLACEMENT_INDEX=0; REPLACEMENT_INDEX < REPLACEMENTS_LENGTH; REPLACEMENT_INDEX++ )); do
-              echo "REPLACEMENT: #${REPLACEMENT_INDEX}"
-              key="$(jq -cr ".[${PATH_INDEX}].replacements[${REPLACEMENT_INDEX}].key" "${updatePathsTmpfile}")"
-              replacement="$(jq -cr ".[${PATH_INDEX}].replacements[${REPLACEMENT_INDEX}].replacement" \
-                "${updatePathsTmpfile}")"
-
-              # getting the key's position
-              echo -en "Searching for key \`${key}\`: "
-              yq "${key} | (line, .)" "${targetFile}" > "${TEMP}/found.txt"
-              cat "${TEMP}/found.txt"
-              foundAt=$(head -n 1 "${TEMP}/found.txt")
-              if (( foundAt == 0 )); then
-                  echo "NOT FOUND"
-                  keyNotFound=true
-                  continue
-              fi
-              echo "FOUND"
-
-              sed -i '1d' "${TEMP}/found.txt"
-              # getting the value size (in number of lines)
-              valueSize=$(yq "${key}" "${targetFile}" | wc -l)
-              startBlock=$(( foundAt + blankLinesBeforeYaml ))
-
-              # the replacement should be a sed expression using "|" as separator
-              if [[ $(tr -dc "|" <<< "${replacement}" | wc -m ) != 3 ]]; then
-                  replacementsUpdateError="Replace expression should be in '|search|replace|' format"
-                  break
-              fi
-
-              # run the replace
-              echo "--start file--"
-              cat "${targetFile}"
-              echo "--end file--"
-              sed -i "${startBlock},+${valueSize}s${replacement}" "${targetFile}"
-
-              # get the replace part of "|search|replace|"
-              replaceStr=$(awk -F"|" '{print $3}' <<< "${replacement}")
-
-              # when the value is a text block we must make sure
-              # only a single line was replaced and that the result
-              # block has the same number of lines as before
-              sed -ne "${startBlock},+${valueSize}p" "${targetFile}" > "${TEMP}/result.txt"
-              diff -u "${TEMP}/found.txt" "${TEMP}/result.txt" > "${TEMP}/diff.txt" || true
-
-              replacedBlockLines=$(wc -l < "${TEMP}/result.txt")
-              if [[ $replacedBlockLines != $(( valueSize +1 )) ]]; then
-                  replacementsUpdateError="Text block size differs from the original"
-                  break
-              fi
-
-              # check if only a single line was replaced
-              replacedCount=$(sed -ne "${startBlock},+${valueSize}p" "${targetFile}" | grep -c "${replaceStr}")
-              if [[ $replacedCount != 1 ]]; then
-                  replacementsUpdateError="Too many lines replaced. Check if the replace expression isn't too greedy"
-                  break
-              fi
-              REPLACEMENTS_PERFORMED=$((REPLACEMENTS_PERFORMED + 1))
-            done
-          fi
-          git add "${targetFile}"
-        done
-
-        if [ -n "${replacementsUpdateError}" ]; then
-            tempdiff=$(cat "${TEMP}/diff.txt")
-            # we need to limit the size to due to the max result buffer
-            diff=${tempdiff:1:3700} \
-            error="${replacementsUpdateError}" \
-            yq -o json --null-input '.str = strenv(diff), .error = strenv(error)' \
-            | tee "$(results.fileUpdatesInfo.path)"
-            echo -n "Failed" |tee "$(results.fileUpdatesState.path)"
-            # it should exit 0 otherwise the task does not set the results
-            # this way the InternalRequest can see what was wrong
-            exit 0
-        fi
-        if [ "${REPLACEMENTS_PERFORMED}" == 0 ] ;then
-            if [[ "$keyNotFound" == true ]]; then
-                error="\"no replacements were performed\"" \
-                yq -o json --null-input '.str = strenv(error), .error = strenv(error)' \
-                | tee "$(results.fileUpdatesInfo.path)"
-                echo -n "Failed" |tee "$(results.fileUpdatesState.path)"
-            else
-                echo "nothing needs change" \
-                    | tee -a "$(results.fileUpdatesInfo.path)"
-                echo -n "Success" |tee "$(results.fileUpdatesState.path)"
-            fi
-            # it should exit 0 otherwise the task does not set the results
-            # this way the InternalRequest can see what was wrong
-            exit 0
-        fi
-
-        echo -e "\n*** START LOCAL CHANGES ***\n"
-        echo -e "\n*** Result from git diff --cached ***\n"
-        # compare the differences between the staging area and the latest commit
-        git diff --cached | tee "${TEMP}"/tempMRFile-cached.diff
-
-        echo -e "\n*** END LOCAL CHANGES ***\n"
-
-        if [[ ! -s "${TEMP}"/tempMRFile-cached.diff ]]; then
-           # nothing needs to change, the MR is merged
-           echo "nothing needs change" \
-               | tee -a "$(results.fileUpdatesInfo.path)"
-           echo -n "Success" |tee "$(results.fileUpdatesState.path)"
-           exit 0
-        fi
-
-        # Get all MRs by paginating through results
-        page=1
-        openMRList=""
-        while true; do
-            mrPage=$(glab mr list -R "${UPSTREAM_REPO}" \
-                --search "[Konflux release] $(params.componentGroup)" \
-                --per-page 100 --page $page | grep "^!" || true)
-            # add "$mrPage" == '' check for unit testing
-            if [ -z "$mrPage" ] || [ "$mrPage" == '' ] ; then
-                break
-            fi
-            openMRList="${openMRList}${mrPage}"$'\n'
-            ((page++))
-        done
-
-        # Remove trailing newline
-        openMRList=$(echo "$openMRList" | sed '/^$/d')
-
-        if [ -n "$openMRList" ]; then
-            while IFS= read -r oneItem; do
-                mrNum=$(echo "$oneItem" | cut -f1 | tr -d '!')
-                git fetch origin merge-requests/"${mrNum}"/head:mr_"${mrNum}"
-
-                # compare if the cached content and the content in MR are the same
-                git diff --cached mr_"${mrNum}" | tee "${TEMP}"/final.diff
-
-                if [[ ! -s "${TEMP}"/final.diff ]] ; then
-                    echo "There is an existing MR with the same updates in the repo"
-                    echo "{\"merge_request\":\"${UPSTREAM_REPO}/-/merge_requests/${mrNum}\"}" \
-                        | tee -a "$(results.fileUpdatesInfo.path)"
-                    echo -n "Success" | tee "$(results.fileUpdatesState.path)"
-                    exit 0
-                fi
-            done <<< "$openMRList"
-        fi
-
-        WORKING_BRANCH=$(uuidgen |awk '{print substr($1, 1, 8)}')
-        git_commit_and_push --branch "$WORKING_BRANCH" --message "fileUpdates changes"
-
-        echo "Creating Pull Request..."
-        GITLAB_MR_MSG="[Konflux release] $(params.componentGroup): fileUpdates changes ${WORKING_BRANCH}"
-        gitlab_create_mr --head "$WORKING_BRANCH" --target-branch "$REVISION" --title "${GITLAB_MR_MSG}" \
-            --description "${GITLAB_MR_MSG}" --upstream-repo "${UPSTREAM_REPO}" | jq . \
-            | tee -a "$(results.fileUpdatesInfo.path)"
-
-        echo -n "Success" |tee "$(results.fileUpdatesState.path)"
-
-        echo -e "=== FINISHED ===\n"
+        - name: RESULT_FILE_UPDATES_INFO
+          value: $(results.fileUpdatesInfo.path)
+        - name: RESULT_FILE_UPDATES_STATE
+          value: $(results.fileUpdatesState.path)
+        - name: RESULT_INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: $(results.internalRequestPipelineRunName.path)
+        - name: RESULT_INTERNAL_REQUEST_TASK_RUN_NAME
+          value: $(results.internalRequestTaskRunName.path)
+        - name: CA_CERT_PATH
+          value: /mnt/trusted-ca/ca-bundle.crt
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+      command: ["python3", "-m", "process_file_updates"]
+      args:
+        - --upstream-repo
+        - $(params.upstream_repo)
+        - --repo
+        - $(params.repo)
+        - --ref
+        - $(params.ref)
+        - --paths
+        - $(params.paths)
+        - --component-group
+        - $(params.componentGroup)
+        - --internal-request-pipeline-run-name
+        - $(params.internalRequestPipelineRunName)
+        - --internal-request-task-run-name
+        - $(context.taskRun.name)
+        - --temp-dir
+        - $(params.tempDir)
