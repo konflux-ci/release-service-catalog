@@ -62,13 +62,10 @@ apply_python_command_mocks_merge() {
       echo '#!/usr/bin/env bash'
       echo "TASK_ENTRYPOINT=("
       for w in "${entrypoint_argv[@]}"; do
-        # Tekton placeholders must stay unescaped so Tekton can substitute them
-        # (printf %q would escape the '$').  Use single quotes so that JSON
-        # values with embedded double quotes survive bash array construction.
-        # Tekton does raw text replacement on the whole script string before
-        # bash sees it, so single quotes do not prevent substitution.
+        # Do not use printf %q for Tekton placeholders: single-quoted %q output
+        # prevents Tekton from rewriting $(params.*) inside spec.steps[].script.
         if [[ "$w" == *'$('* ]]; then
-          printf "  '%s'\n" "$w"
+          printf '  "%s"\n' "$w"
         else
           printf '  %q\n' "$w"
         fi
