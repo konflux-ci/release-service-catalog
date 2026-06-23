@@ -1,0 +1,229 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-populate-release-notes-binary-staged-files
+spec:
+  description: |
+    Run the populate-release-notes task with a binary component that has its files nested under
+    staged.files (no top-level .files array, no contentGateway). This covers teams that push only
+    to the customer portal / Pulp and must use the staged structure for destination routing.
+    Asserts that releaseNotes.content.artifacts is populated correctly for each staged file.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "odf-cli",
+                      "contentType": "binary",
+                      "staged": {
+                        "destination": "rh-odf-4-for-rhel-9-x86_64-files",
+                        "version": "4.21",
+                        "files": [
+                          {
+                            "source": "/releases/odf-cli-linux-amd64.tar.gz",
+                            "filename": "odf-cli-4.21-linux-amd64.tar.gz",
+                            "arch": "amd64",
+                            "os": "linux"
+                          },
+                          {
+                            "source": "/releases/odf-cli-darwin-amd64.tar.gz",
+                            "filename": "odf-cli-4.21-darwin-amd64.tar.gz",
+                            "arch": "amd64",
+                            "os": "darwin"
+                          },
+                          {
+                            "source": "/releases/odf-cli-windows-amd64.zip",
+                            "filename": "odf-cli-4.21-windows-amd64.zip",
+                            "arch": "amd64",
+                            "os": "windows"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                },
+                "releaseNotes": {
+                  "product_id": [547],
+                  "product_name": "Red Hat OpenShift Data Foundation",
+                  "product_version": "4.21",
+                  "cpe": "cpe:/a:redhat:openshift_data_foundation:4.21::el9",
+                  "synopsis": "ODF 4.21 CLI binaries update",
+                  "topic": "ODF 4.21 CLI binaries update",
+                  "description": "ODF 4.21 CLI binaries update",
+                  "solution": "Update your CLI.",
+                  "issues": {
+                    "fixed": []
+                  }
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot.json" << EOF
+              {
+                "application": "odf",
+                "components": [
+                  {
+                    "name": "odf-cli",
+                    "containerImage": "registry.io/image@sha256:abc123"
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: populate-release-notes
+      params:
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot.json"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+
+              # releaseNotes.content.artifacts must exist with one entry per staged file
+              artifactCount=$(jq '.releaseNotes.content.artifacts | length' "$DATA_FILE")
+              if [ "$artifactCount" -ne 3 ]; then
+                echo "Expected 3 artifacts, got $artifactCount"
+                jq '.releaseNotes.content.artifacts' "$DATA_FILE"
+                exit 1
+              fi
+
+              # Each entry must have architecture, os, component, and a placeholder purl
+              for i in 0 1 2; do
+                test "$(jq -e --argjson i "$i" \
+                  '.releaseNotes.content.artifacts[$i] | has("architecture")' "$DATA_FILE")" == "true"
+                test "$(jq -e --argjson i "$i" \
+                  '.releaseNotes.content.artifacts[$i] | has("os")' "$DATA_FILE")" == "true"
+                test "$(jq -r --argjson i "$i" \
+                  '.releaseNotes.content.artifacts[$i].component' "$DATA_FILE")" == "odf-cli"
+                test "$(jq -r --argjson i "$i" \
+                  '.releaseNotes.content.artifacts[$i].purl' "$DATA_FILE")" == "placeholder"
+              done
+
+              # Verify all three expected arch/os combinations are present
+              linuxCount=$(jq '[.releaseNotes.content.artifacts[]
+                | select(.architecture == "amd64" and .os == "linux")] | length' "$DATA_FILE")
+              darwinCount=$(jq '[.releaseNotes.content.artifacts[]
+                | select(.architecture == "amd64" and .os == "darwin")] | length' "$DATA_FILE")
+              windowsCount=$(jq '[.releaseNotes.content.artifacts[]
+                | select(.architecture == "amd64" and .os == "windows")] | length' "$DATA_FILE")
+
+              test "$linuxCount" -eq 1
+              test "$darwinCount" -eq 1
+              test "$windowsCount" -eq 1
+      runAfter:
+        - run-task
