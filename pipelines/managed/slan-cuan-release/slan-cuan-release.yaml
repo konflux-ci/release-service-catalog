@@ -17,10 +17,65 @@ spec:
     This pipeline orchestrates the complete release workflow for Java artifacts built by
     PNC (Project Newcastle).
   params:
-    # Pipeline infrastructure
+    # Release service standard params (passed by release-service controller)
+    - name: release
+      type: string
+      description: The namespaced name (namespace/name) of the Release
+    - name: releasePlan
+      type: string
+      description: The namespaced name (namespace/name) of the ReleasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name (namespace/name) of the ReleasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the ReleaseServiceConfig
+    - name: snapshot
+      type: string
+      description: The namespaced name (namespace/name) of the Snapshot
+    - name: ociStorage
+      type: string
+      description: The OCI repository where Trusted Artifacts are stored
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for trusted artifacts created in the OCI repository
+      default: "1d"
+    - name: trustedArtifactsDebug
+      type: string
+      description: Flag to enable debug logging in trusted artifacts
+      default: ""
+    - name: orasOptions
+      type: string
+      description: oras options to pass to Trusted Artifacts calls
+      default: ""
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: "/var/workdir/release"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: "trusted-ca"
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: "ca-bundle.crt"
+
+    # Catalog git params — for release-service-catalog tasks (collect-data, collect-task-params)
+    - name: catalogGitUrl
+      type: string
+      description: The url to the git repo where release-service-catalog tasks are stored
+      default: https://github.com/arewm/release-service-catalog.git
+    - name: catalogGitRevision
+      type: string
+      description: The revision in the catalogGitUrl repo to be used
+      default: lightwell-pipeline
+
+    # Pipeline infrastructure — for slan-cuan domain-specific tasks
     - name: taskGitUrl
       type: string
-      description: The url to the git repo where the tasks to be used are stored
+      description: The url to the git repo where the slan-cuan tasks are stored
       default: https://github.com/konflux-lightwell/slan-cuan.git
     - name: taskGitRevision
       type: string
@@ -123,18 +178,6 @@ spec:
       default: ""
 
     # Publish parameters
-    - name: pulp-url
-      description: |
-        Pulp instance base URL.
-        The base URL for the Pulp content management system.
-        Example: https://pulp.example.com
-      type: string
-    - name: pulp-repository
-      description: |
-        Pulp Maven distribution name.
-        The name of the target Pulp repository for artifact publishing.
-        Example: lightwell-maven
-      type: string
     - name: publish-insecure
       description: |
         Disable TLS verification for Pulp API calls.
@@ -175,6 +218,90 @@ spec:
       description: Shared workspace for artifact processing across tasks.
 
   tasks:
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.catalogGitUrl)
+          - name: revision
+            value: $(params.catalogGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-data/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: caTrustConfigMapName
+          value: $(params.caTrustConfigMapName)
+        - name: caTrustConfigMapKey
+          value: $(params.caTrustConfigMapKey)
+        - name: taskGitUrl
+          value: $(params.catalogGitUrl)
+        - name: taskGitRevision
+          value: $(params.catalogGitRevision)
+
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.catalogGitUrl)
+          - name: revision
+            value: $(params.catalogGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".pulp.domain"},
+              {"resultIndex": 1, "key": ".pulp.repository"}
+            ]
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: $(tasks.collect-data.results.sourceDataArtifact)
+        - name: taskGitUrl
+          value: $(params.catalogGitUrl)
+        - name: taskGitRevision
+          value: $(params.catalogGitRevision)
+        - name: caTrustConfigMapName
+          value: $(params.caTrustConfigMapName)
+        - name: caTrustConfigMapKey
+          value: $(params.caTrustConfigMapKey)
+
     - name: extract
       taskRef:
         resolver: "git"
@@ -185,6 +312,8 @@ spec:
             value: $(params.taskGitRevision)
           - name: pathInRepo
             value: tasks/managed/slan-cuan-extract/slan-cuan-extract.yaml
+      runAfter:
+        - collect-data
       params:
         - name: IMAGE
           value: $(params.pnc-image)
@@ -268,11 +397,12 @@ spec:
             value: tasks/managed/slan-cuan-publish/slan-cuan-publish.yaml
       runAfter:
         - register
+        - collect-task-params
       params:
         - name: PULP_URL
-          value: $(params.pulp-url)
+          value: $(tasks.collect-task-params.results.extractedValues[0])
         - name: PULP_REPOSITORY
-          value: $(params.pulp-repository)
+          value: $(tasks.collect-task-params.results.extractedValues[1])
         - name: INSECURE
           value: $(params.publish-insecure)
         - name: CA_CERT_SECRET
