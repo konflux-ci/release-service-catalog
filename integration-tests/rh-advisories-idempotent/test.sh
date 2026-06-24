@@ -276,7 +276,7 @@ verify_release_contents() {
         "populate-release-notes"
         "embargo-check"
         "set-advisory-severity"
-        "rh-sign-image"
+        "rh-direct-sign-image"
         "rh-sign-image-cosign"
         "push-snapshot"
         "create-pyxis-image"

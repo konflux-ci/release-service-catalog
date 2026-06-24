@@ -122,7 +122,7 @@ The `test-report` finally task always runs and actively diagnoses failures:
 
 - **Pre-pipeline failures** (e.g. `generate-large-snapshot.sh` errors): the
   failed component, step, command, and exit code are shown.
-- **Managed pipeline failures** (e.g. `apply-mapping`, `rh-sign-image`): the
+- **Managed pipeline failures** (e.g. `apply-mapping`, `rh-direct-sign-image`): the
   `test-report` task queries the cluster directly and shows the failed task
   name, TaskRun name, Tekton condition message, and — if the pod has not yet
   been garbage-collected — the last matching error lines from the pod log

@@ -57,7 +57,7 @@ This test validates idempotent re-release behavior for the `rh-advisories` pipel
 ## Acceptance Criteria
 
 - Second release: all major tasks (`create-advisory`, `push-snapshot`, `verify-conforma`,
-  `rh-sign-image`, etc.) appear in `skippedTasks`
+  `rh-direct-sign-image`, etc.) appear in `skippedTasks`
 - `advisory.url` present in second release `status.artifacts` (written by
   `update-cr-status-skipped` from filter result, not `create-advisory`)
 
