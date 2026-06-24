@@ -263,10 +263,14 @@ add_to_parsed_tickets_json() {
         pr_url="$pr_url_input"
     fi
 
-    # Append the ticket and PR URL (if present) to the parsed JSON
-    PARSED_TICKETS_JSON="$(jq --arg ticket "$ticket" --arg pr_url "$pr_url" \
-        '. += [ {"ticket": $ticket} + (if $pr_url != "" then {"pr_url": $pr_url} else {} end) ]' \
-        <<<"$PARSED_TICKETS_JSON")"
+    # Upsert: if ticket exists, append PR to its prs array; otherwise add new entry
+    PARSED_TICKETS_JSON="$(jq --arg ticket "${ticket}" --arg pr_url "${pr_url}" '
+        if any(.[]; .ticket == $ticket) then
+            map(if .ticket == $ticket and $pr_url != "" then .prs = ((.prs + [$pr_url]) | unique) else . end)
+        else
+            . + [{ticket: $ticket, prs: (if $pr_url != "" then [$pr_url] else [] end)}]
+        end
+    ' <<<"${PARSED_TICKETS_JSON}")"
 }
 
 if [ -z "${PROMOTION_TYPE}" ]; then
