@@ -1,0 +1,412 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: slan-cuan-release
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/displayName: "slan-cuan: Release Pipeline"
+    tekton.dev/pipelines.minVersion: "0.50.0"
+    tekton.dev/platforms: "linux/amd64"
+    tekton.dev/tags: "release,maven,lightwell"
+spec:
+  description: |
+    Release pipeline for Lightwell Java artifacts (slan-cuan).
+
+    This pipeline orchestrates the complete release workflow for Java artifacts built by
+    PNC (Project Newcastle).
+  params:
+    # Release service standard params (passed by release-service controller)
+    - name: release
+      type: string
+      description: The namespaced name (namespace/name) of the Release
+    - name: releasePlan
+      type: string
+      description: The namespaced name (namespace/name) of the ReleasePlan
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name (namespace/name) of the ReleasePlanAdmission
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name (namespace/name) of the ReleaseServiceConfig
+    - name: snapshot
+      type: string
+      description: The namespaced name (namespace/name) of the Snapshot
+    - name: ociStorage
+      type: string
+      description: The OCI repository where Trusted Artifacts are stored
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for trusted artifacts created in the OCI repository
+      default: "1d"
+    - name: trustedArtifactsDebug
+      type: string
+      description: Flag to enable debug logging in trusted artifacts
+      default: ""
+    - name: orasOptions
+      type: string
+      description: oras options to pass to Trusted Artifacts calls
+      default: ""
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: "/var/workdir/release"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: "trusted-ca"
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: "ca-bundle.crt"
+
+    # Catalog git params — for release-service-catalog tasks (collect-data, collect-task-params)
+    - name: catalogGitUrl
+      type: string
+      description: The url to the git repo where release-service-catalog tasks are stored
+      default: https://github.com/arewm/release-service-catalog.git
+    - name: catalogGitRevision
+      type: string
+      description: The revision in the catalogGitUrl repo to be used
+      default: lightwell-pipeline
+
+    # Pipeline infrastructure — for slan-cuan domain-specific tasks
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the slan-cuan tasks are stored
+      default: https://github.com/konflux-lightwell/slan-cuan.git
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+
+    # Extract parameters
+    - name: pnc-image
+      description: |
+        PNC container image reference to extract artifacts from.
+        This is the image produced by Project Newcastle containing the deliverable artifacts and SBOM.
+        Example: quay.io/pnc-builds/foo@sha256:xyz
+      type: string
+    - name: registry-auth-secret
+      description: |
+        Kubernetes Secret name for registry authentication (.dockerconfigjson format).
+        Points to a Docker/Podman auth config for accessing private registries
+      type: string
+      default: "registry-auth"
+    - name: force-extract
+      description: |
+        Overwrite existing output directory if it exists.
+        Without this flag, the extract task refuses to overwrite existing directories
+      type: string
+      default: "false"
+
+    # Sign parameters
+    - name: signing-key
+      description: |
+        Signing key name for RADAS.
+        Identifies which signing key to use for cryptographic signatures
+      type: string
+    - name: radas-config-secret
+      description: |
+        Kubernetes Secret name containing RADAS configuration JSON.
+        The secret must have a `config.json` key with RADAS API URL and credentials
+      type: string
+      default: "radas-config"
+    - name: requester-id
+      description: |
+        Requester identity for signing operations.
+        Used for audit trails and RADAS access control. Typically an email address
+      type: string
+      default: "slan-cuan@org.com"
+    - name: zip-root-path
+      description: |
+        Root of the Maven repository tree inside the ZIP archive submitted to RADAS.
+        The ZIP file structure is <ZIP_ROOT_PATH>/<maven-layout>
+      type: string
+      default: "repository"
+    - name: product-key
+      description: |
+        Product key for metadata tagging.
+        Identifies the product in RADAS records and signing logs
+      type: string
+      default: "slan-cuan"
+    - name: ignore-patterns
+      description: |
+        Comma-separated regex patterns to exclude files from signing.
+        Example: ".*-sources\\.jar$,.*-javadoc\\.jar$" excludes source and javadoc JARs
+      type: string
+      default: ""
+
+    # Register parameters
+    - name: trustify-api-url
+      description: |
+        Trustify instance API URL.
+        The base URL for the Trustify (TPA) SBOM ingestion API.
+        Example: https://trustify.stage.example.com
+      type: string
+    - name: sso-token-url
+      description: |
+        OIDC token endpoint URL.
+        The OAuth2/OIDC token endpoint for Trustify authentication.
+        Example: https://sso.example.com/auth/token
+      type: string
+    - name: sso-secret-name
+      description: |
+        Kubernetes Secret name with OIDC credentials.
+        The secret must have `client-id` and `client-secret` keys for OAuth2 client credentials flow
+      type: string
+      default: "trustify-sso"
+    - name: register-insecure
+      description: |
+        Disable TLS verification for Trustify API calls.
+        Set to "true" to skip certificate validation (not recommended for production)
+      type: string
+      default: "false"
+    - name: register-retries
+      description: |
+        Number of retry attempts for Trustify API calls.
+        The task will retry failed API calls this many times before giving up
+      type: string
+      default: "3"
+    - name: register-ca-cert-secret
+      description: |
+        Kubernetes Secret name for custom CA certificate (optional).
+        The secret must have a `ca.crt` key containing the PEM-encoded CA certificate.
+        Leave empty to use system CA bundle
+      type: string
+      default: ""
+
+    # Publish parameters
+    - name: publish-insecure
+      description: |
+        Disable TLS verification for Pulp API calls.
+        Set to "true" to skip certificate validation (not recommended for production)
+      type: string
+      default: "false"
+    - name: publish-ca-cert-secret
+      description: |
+        Kubernetes Secret name for custom CA certificate (optional).
+        The secret must have a `ca.crt` key containing the PEM-encoded CA certificate.
+        Leave empty to use system CA bundle
+      type: string
+      default: ""
+
+  results:
+    - name: manifest-digest
+      description: OCI manifest digest of the extracted image.
+      value: $(tasks.extract.results.MANIFEST_DIGEST)
+    - name: deliverable-dir
+      description: Name of the deliverable directory inside the artifact.
+      value: $(tasks.extract.results.DELIVERABLE_DIR)
+    - name: sbom-urn
+      description: URN of the SBOM registered in Trustify.
+      value: $(tasks.register.results.SBOM_URN)
+    - name: artifacts-uploaded
+      description: Number of artifacts uploaded to Pulp.
+      value: $(tasks.publish.results.ARTIFACTS_UPLOADED)
+    - name: artifacts-skipped
+      description: Number of artifacts skipped during upload.
+      value: $(tasks.publish.results.ARTIFACTS_SKIPPED)
+    - name: published-artifact-outputs
+      description: JSON object for Tekton Chains SLSA provenance.
+      type: object
+      value: $(tasks.publish.results.PUBLISHED_ARTIFACT_OUTPUTS)
+
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for artifact processing across tasks.
+
+  tasks:
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.catalogGitUrl)
+          - name: revision
+            value: $(params.catalogGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-data/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: caTrustConfigMapName
+          value: $(params.caTrustConfigMapName)
+        - name: caTrustConfigMapKey
+          value: $(params.caTrustConfigMapKey)
+        - name: taskGitUrl
+          value: $(params.catalogGitUrl)
+        - name: taskGitRevision
+          value: $(params.catalogGitRevision)
+
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.catalogGitUrl)
+          - name: revision
+            value: $(params.catalogGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".pulp.domain"},
+              {"resultIndex": 1, "key": ".pulp.repository"}
+            ]
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: $(tasks.collect-data.results.sourceDataArtifact)
+        - name: taskGitUrl
+          value: $(params.catalogGitUrl)
+        - name: taskGitRevision
+          value: $(params.catalogGitRevision)
+        - name: caTrustConfigMapName
+          value: $(params.caTrustConfigMapName)
+        - name: caTrustConfigMapKey
+          value: $(params.caTrustConfigMapKey)
+
+    - name: extract
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/slan-cuan-extract/slan-cuan-extract.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: IMAGE
+          value: $(params.pnc-image)
+        - name: REGISTRY_AUTH_SECRET
+          value: $(params.registry-auth-secret)
+        - name: FORCE
+          value: $(params.force-extract)
+      workspaces:
+        - name: workdir
+          workspace: shared-workspace
+
+    - name: sign
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/slan-cuan-sign/slan-cuan-sign.yaml
+      runAfter:
+        - extract
+      params:
+        - name: REPO_URL
+          value: $(params.pnc-image)
+        - name: SIGNING_KEY
+          value: $(params.signing-key)
+        - name: RADAS_CONFIG_SECRET
+          value: $(params.radas-config-secret)
+        - name: REQUESTER_ID
+          value: $(params.requester-id)
+        - name: ZIP_ROOT_PATH
+          value: $(params.zip-root-path)
+        - name: PRODUCT_KEY
+          value: $(params.product-key)
+        - name: IGNORE_PATTERNS
+          value: $(params.ignore-patterns)
+      workspaces:
+        - name: workdir
+          workspace: shared-workspace
+
+    - name: register
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/slan-cuan-register/slan-cuan-register.yaml
+      runAfter:
+        - sign
+      params:
+        - name: TRUSTIFY_API_URL
+          value: $(params.trustify-api-url)
+        - name: SSO_TOKEN_URL
+          value: $(params.sso-token-url)
+        - name: SSO_SECRET_NAME
+          value: $(params.sso-secret-name)
+        - name: INSECURE
+          value: $(params.register-insecure)
+        - name: RETRIES
+          value: $(params.register-retries)
+        - name: CA_CERT_SECRET
+          value: $(params.register-ca-cert-secret)
+      workspaces:
+        - name: workdir
+          workspace: shared-workspace
+
+    - name: publish
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/slan-cuan-publish/slan-cuan-publish.yaml
+      runAfter:
+        - register
+        - collect-task-params
+      params:
+        - name: PULP_URL
+          value: $(tasks.collect-task-params.results.extractedValues[0])
+        - name: PULP_REPOSITORY
+          value: $(tasks.collect-task-params.results.extractedValues[1])
+        - name: INSECURE
+          value: $(params.publish-insecure)
+        - name: CA_CERT_SECRET
+          value: $(params.publish-ca-cert-secret)
+      workspaces:
+        - name: workdir
+          workspace: shared-workspace
