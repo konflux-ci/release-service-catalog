@@ -15,7 +15,9 @@ spec:
     Release pipeline for Lightwell Java artifacts (slan-cuan).
 
     This pipeline orchestrates the complete release workflow for Java artifacts built by
-    PNC (Project Newcastle).
+    PNC (Project Newcastle). All per-release configuration (image reference, signing key,
+    Trustify URLs, Pulp target) is derived from the Snapshot and ReleasePlanAdmission data
+    via collect-data, so no pipeline parameters need to be supplied at invocation time.
   params:
     # Release service standard params (passed by release-service controller)
     - name: release
@@ -82,12 +84,6 @@ spec:
       description: The revision in the taskGitUrl repo to be used
 
     # Extract parameters
-    - name: pnc-image
-      description: |
-        PNC container image reference to extract artifacts from.
-        This is the image produced by Project Newcastle containing the deliverable artifacts and SBOM.
-        Example: quay.io/pnc-builds/foo@sha256:xyz
-      type: string
     - name: registry-auth-secret
       description: |
         Kubernetes Secret name for registry authentication (.dockerconfigjson format).
@@ -102,12 +98,12 @@ spec:
       default: "false"
 
     # Sign parameters
-    - name: signing-key
+    - name: radas-config-secret
       description: |
-        Signing key name for RADAS.
-        Identifies which signing key to use for cryptographic signatures
+        Kubernetes Secret name containing RADAS configuration JSON.
+        The secret must have a `config.json` key with RADAS API URL and credentials
       type: string
-      default: "redhate2etesting"
+      default: "radas-config"
     - name: requester-id
       description: |
         Requester identity for signing operations.
@@ -134,18 +130,6 @@ spec:
       default: ""
 
     # Register parameters
-    - name: trustify-api-url
-      description: |
-        Trustify instance API URL.
-        The base URL for the Trustify (TPA) SBOM ingestion API.
-        Example: https://trustify.stage.example.com
-      type: string
-    - name: sso-token-url
-      description: |
-        OIDC token endpoint URL.
-        The OAuth2/OIDC token endpoint for Trustify authentication.
-        Example: https://sso.example.com/auth/token
-      type: string
     - name: sso-secret-name
       description: |
         Kubernetes Secret name with OIDC credentials.
@@ -287,7 +271,51 @@ spec:
           value: |
             [
               {"resultIndex": 0, "key": ".pulp.domain"},
-              {"resultIndex": 1, "key": ".pulp.repository"}
+              {"resultIndex": 1, "key": ".pulp.repository"},
+              {"resultIndex": 2, "key": ".radas.signingKey"},
+              {"resultIndex": 3, "key": ".trustify.apiUrl"},
+              {"resultIndex": 4, "key": ".trustify.ssoTokenUrl"}
+            ]
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: $(tasks.collect-data.results.sourceDataArtifact)
+        - name: taskGitUrl
+          value: $(params.catalogGitUrl)
+        - name: taskGitRevision
+          value: $(params.catalogGitRevision)
+        - name: caTrustConfigMapName
+          value: $(params.caTrustConfigMapName)
+        - name: caTrustConfigMapKey
+          value: $(params.caTrustConfigMapKey)
+
+    - name: collect-snapshot-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.catalogGitUrl)
+          - name: revision
+            value: $(params.catalogGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: dataPath
+          value: $(tasks.collect-data.results.snapshotSpec)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".components[0].containerImage"}
             ]
         - name: ociStorage
           value: $(params.ociStorage)
@@ -351,12 +379,12 @@ spec:
           - name: pathInRepo
             value: tekton/tasks/slan-cuan-extract.yaml
       runAfter:
-        - collect-data
         # TODO: Uncomment below to make the Conforma check required
         # - verify-conforma
+        - collect-snapshot-params
       params:
         - name: IMAGE
-          value: $(params.pnc-image)
+          value: $(tasks.collect-snapshot-params.results.extractedValues[0])
         - name: REGISTRY_AUTH_SECRET
           value: $(params.registry-auth-secret)
         - name: FORCE
@@ -377,11 +405,14 @@ spec:
             value: tekton/tasks/slan-cuan-sign.yaml
       runAfter:
         - extract
+        - collect-task-params
       params:
         - name: REPO_URL
-          value: $(params.pnc-image)
+          value: $(tasks.collect-snapshot-params.results.extractedValues[0])
         - name: SIGNING_KEY
-          value: $(params.signing-key)
+          value: $(tasks.collect-task-params.results.extractedValues[2])
+        - name: RADAS_CONFIG_SECRET
+          value: $(params.radas-config-secret)
         - name: REQUESTER_ID
           value: $(params.requester-id)
         - name: ZIP_ROOT_PATH
@@ -408,9 +439,9 @@ spec:
         - sign
       params:
         - name: TRUSTIFY_API_URL
-          value: $(params.trustify-api-url)
+          value: $(tasks.collect-task-params.results.extractedValues[3])
         - name: SSO_TOKEN_URL
-          value: $(params.sso-token-url)
+          value: $(tasks.collect-task-params.results.extractedValues[4])
         - name: SSO_SECRET_NAME
           value: $(params.sso-secret-name)
         - name: INSECURE
