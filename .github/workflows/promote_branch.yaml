@@ -200,14 +200,48 @@ jobs:
         if: |
           steps.promote.outcome == 'success' && 
           inputs.update-jira-tickets == true &&
+          inputs.dry-run == false &&
           steps.promote.outputs.parsed_tickets_file != ''
-        uses: konflux-ci/release-service-automations/jira-ci@87615e00a3a699a7cc473ed93d3203624e3b86f0  # main
-        with:
-          jira_url: "https://redhat.atlassian.net"
-          promotion_type: ${{ inputs.promotion-type }}
-          metadata_file: ${{ steps.promote.outputs.parsed_tickets_file }}
-          jira_token: ${{ secrets.JIRA_TOKEN }}
-          dry_run: ${{ inputs.dry-run }}
+        env:
+          JIRA_WEBHOOK_URL: ${{ secrets.JIRA_AUTOMATION_WEBHOOK_URL }}
+          JIRA_WEBHOOK_TOKEN: ${{ secrets.JIRA_AUTOMATION_WEBHOOK_TOKEN }}
+          PARSED_TICKETS_FILE: ${{ steps.promote.outputs.parsed_tickets_file }}
+          PROMOTION_TYPE: ${{ inputs.promotion-type }}
+        run: |
+          SOURCE="${PROMOTION_TYPE%-to-*}"
+          ENVIRONMENT="${PROMOTION_TYPE#*-to-}"
+
+          PAYLOAD=$(jq --arg env "${ENVIRONMENT}" --arg src "${SOURCE}" \
+            '{tickets: ., environment: $env, source: $src}' "${PARSED_TICKETS_FILE}")
+
+          TICKET_COUNT="$(jq '.tickets | length' <<< "${PAYLOAD}")"
+          if [ "${TICKET_COUNT}" -eq 0 ]; then
+            echo "No tickets to update, skipping webhook call"
+            exit 0
+          fi
+
+          echo "Calling Jira Automation webhook for ${SOURCE} -> ${ENVIRONMENT}"
+          echo "Tickets: $(jq -r '.[].ticket' "${PARSED_TICKETS_FILE}" | tr '\n' ' ')"
+
+          set +e
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --retry 3 --max-time 30 \
+            -X POST "${JIRA_WEBHOOK_URL}" \
+            -H "Content-Type: application/json" \
+            -H "X-Automation-Webhook-Token: ${JIRA_WEBHOOK_TOKEN}" \
+            -d "${PAYLOAD}")
+          CURL_RC=$?
+          set -e
+
+          if [ "${CURL_RC}" -ne 0 ]; then
+            echo "WARNING: curl failed with exit code ${CURL_RC}"
+            echo "Promotion was successful but Jira update may have failed."
+          elif [ "${HTTP_CODE}" -eq 200 ]; then
+            echo "Jira Automation webhook called successfully (HTTP ${HTTP_CODE})"
+          else
+            echo "WARNING: Jira Automation webhook returned HTTP ${HTTP_CODE}"
+            echo "Promotion was successful but Jira update may have failed."
+          fi
           
       - name: Set up Python
         if: |
