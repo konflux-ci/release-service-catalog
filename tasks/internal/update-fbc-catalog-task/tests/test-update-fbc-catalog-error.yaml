@@ -1,0 +1,90 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-update-fbc-catalog-error
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: Tests the pipeline using a set of parameters in consonance with a production fbc release. In this test
+    the mocked commands and functions emulates the behavior of a fbc opt in fragment, but forces an IIB error which is
+    triggered by having the "error" tag in the image value of the fromIndex parameter.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: update-fbc-catalog-task
+      params:
+        - name: fbcFragments
+          value: '["registry.io/image0@sha256:0000"]'
+        - name: fromIndex
+          value: "quay.io/scoheb/fbc-index-testing:error"
+        - name: buildTags
+          value: "[]"
+        - name: addArches
+          value: "[]"
+        - name: iibServiceAccountSecret
+          value: "iib-service-account-secret"
+        - name: publishingCredentials
+          value: "publishing-credentials"
+    - name: check-result
+      params:
+        - name: jsonBuildInfo
+          value: $(tasks.run-task.results.jsonBuildInfo)
+        - name: buildState
+          value: $(tasks.run-task.results.buildState)
+        - name: iibLog
+          value: $(tasks.run-task.results.iibLog)
+        - name: exitCode
+          value: $(tasks.run-task.results.exitCode)
+      taskSpec:
+        params:
+          - name: jsonBuildInfo
+            type: string
+          - name: buildState
+            type: string
+          - name: iibLog
+            type: string
+          - name: exitCode
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:b524cefd4f00d386fd50fcc4892b761f09c8c5ca49242700c5ee129aae1408d3
+            env:
+              - name: BUILD_STATE
+                value: $(params.buildState)
+              - name: JSON_BUILDINFO
+                value: $(params.jsonBuildInfo)
+              - name: MOCK_BEHAVIOR
+                value: '{"case": "default", "error": true, "fragments": ["registry.io/image0@sha256:0000"]}'
+            script: |
+              #!/bin/bash
+              set -x
+
+              # Decompress jsonBuildInfo since task now uses compression
+              decompressed_json="$(base64 -d <<< "${JSON_BUILDINFO}" | gunzip)"
+
+              # the jsonBuild mockes has 12 keys on it
+              keyLength=$(jq '. | length' <<< "${decompressed_json}")
+              if [ "$keyLength" -ne 12 ]; then
+                echo "The task did not save a valid json in jsonBuildInfo result"
+                exit 1
+              fi
+
+              state="$(jq -cr .state <<< "${BUILD_STATE}")"
+              if [ "$state" != "failed" ]; then
+                echo "The task did not save a completed IIB build in buildState result"
+                exit 1
+              fi
+
+              iibLog=$(awk '{match($0, /https.*/); print(substr($0, RSTART)) }' <<< "$(params.iibLog)")
+              if [  "$iibLog" != "https://fakeiib.host/api/v1/builds/1/logs" ]; then
+                echo "The task did not save a valid iib log url in the iibLog result"
+                exit 1
+              fi
+
+              if [ "$(params.exitCode)" != "1" ]; then
+                echo "The task did not finish with a fail exit code"
+                exit 1
+              fi
+      runAfter:
+        - run-task
