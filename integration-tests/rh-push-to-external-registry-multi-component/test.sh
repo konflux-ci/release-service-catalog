@@ -57,20 +57,16 @@ verify_release_contents() {
     fi
 
     local failures=0
+    local failed_releases=""
 
+    # Verify multi-component images using shared helper
+    check_container_images
+
+    # Additional verification: ensure distinct URLs and shasums for multi-component test
     echo ""
-    echo "Checking for 2 image entries with distinct URLs and shasums..."
-
+    echo "Verifying distinct URLs and shasums for each component..."
     local image_count
     image_count=$(jq -r '.status.artifacts.images | length' <<< "${release_json}")
-
-    echo "Found ${image_count} image entries in status.artifacts.images"
-    if [ "${image_count}" -ge 2 ]; then
-        echo "✅️ Found ${image_count} image entries (expected at least 2)"
-    else
-        echo "🔴 Found only ${image_count} image entries, expected at least 2"
-        failures=$((failures+1))
-    fi
 
     local image0_url image0_shasum image1_url image1_shasum
     image0_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
@@ -80,20 +76,6 @@ verify_release_contents() {
 
     echo "Image 0: url=${image0_url}, shasum=${image0_shasum}"
     echo "Image 1: url=${image1_url}, shasum=${image1_shasum}"
-
-    if [ -n "${image0_url}" ] && [ -n "${image1_url}" ]; then
-        echo "✅️ Both image URLs are non-empty"
-    else
-        echo "🔴 One or both image URLs are empty"
-        failures=$((failures+1))
-    fi
-
-    if [ -n "${image0_shasum}" ] && [ -n "${image1_shasum}" ]; then
-        echo "✅️ Both image shasums are non-empty"
-    else
-        echo "🔴 One or both image shasums are empty"
-        failures=$((failures+1))
-    fi
 
     if [ "${image0_url}" != "${image1_url}" ]; then
         echo "✅️ Image URLs are distinct"
@@ -108,35 +90,6 @@ verify_release_contents() {
         echo "🔴 Image shasums are identical: ${image0_shasum}"
         failures=$((failures+1))
     fi
-
-    echo ""
-    echo "Verifying both images are pullable via skopeo..."
-
-    for i in 0 1; do
-        local img_url img_shasum
-        img_url=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
-        img_shasum=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
-
-        if [ -z "${img_url}" ] || [ -z "${img_shasum}" ]; then
-            echo "🔴 Image ${i}: missing url or shasum, skipping skopeo check"
-            failures=$((failures+1))
-            continue
-        fi
-
-        echo "Verifying image ${i} pullability with skopeo: ${img_url}"
-        set +e
-        "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
-            "${img_url}" "${img_shasum}" \
-            "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
-        local skopeo_rc=$?
-        set -e
-        if [ "${skopeo_rc}" -ne 0 ]; then
-            echo "🔴 Image ${i} skopeo verification failed"
-            failures=$((failures+1))
-        else
-            echo "✅️ Image ${i} is pullable"
-        fi
-    done
 
     echo ""
     echo "Verifying Pyxis image IDs..."

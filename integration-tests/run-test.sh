@@ -169,6 +169,10 @@ if [[ -n "${PTSV_BUILD_PIPELINE}" ]]; then
     )
 fi
 
+if [ -z "$PTSV_EXPECTED_ARCHES" ]; then
+    PTSV_EXPECTED_ARCHES="amd64"
+fi
+
 # --- Main Script Execution ---
 
 # Trap EXIT signal to call cleanup function

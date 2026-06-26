@@ -14,45 +14,10 @@ verify_release_contents() {
     fi
 
     local failures=0
-    local image_url image_arch
+    local failed_releases=""
 
-    image_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
-    image_arch=$(jq -r '.status.artifacts.images[0]?.arches[0] // ""' <<< "${release_json}")
-    image_shasum=$(jq -r '.status.artifacts.images[0]?.shasum // ""' <<< "${release_json}")
-
-    echo "Checking Image URL..."
-    if [ -n "${image_url}" ]; then
-        echo "✅️ image_url: ${image_url}"
-    else
-        echo "🔴 image_url was empty"
-        failures=$((failures+1))
-    fi
-    echo "Checking Image Arch..."
-    if [ -n "${image_arch}" ]; then
-        echo "✅️ image_arch: ${image_arch}"
-    else
-        echo "🔴 image_arch was empty"
-        failures=$((failures+1))
-    fi
-
-    echo "Checking Image Shasum..."
-    if [ -n "${image_shasum}" ]; then
-        echo "✅️ image_shasum: ${image_shasum}"
-    else
-        echo "🔴 image_shasum was empty"
-        failures=$((failures+1))
-    fi
-
-    echo "Verifying image pullability with skopeo..."
-    set +e
-    "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
-        "${image_url}" "${image_shasum}" \
-        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
-    skopeo_return_code=$?
-    set -e
-    if [ "${skopeo_return_code}" -ne 0 ]; then
-        failures=$((failures+1))
-    fi
+    # Verify container images using shared helper (single-arch)
+    check_container_images
 
     # Verify componentTags combination with defaults.tags and repository tags
     echo "Verifying tag combination from all sources..."
