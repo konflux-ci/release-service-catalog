@@ -166,25 +166,14 @@ verify_release_contents() {
       fi
 
       local failures=0
-      local image_url mergerequest_url image_arches image_shasum released_status
+      local mergerequest_url released_status
 
-      image_url=$(jq -r '.status.artifacts.images[0]?.urls[0]? // ""' <<< "${release_json}")
       mergerequest_url=$(jq -r '.status.artifacts.merge_requests[0]?.url? // ""' <<< "${release_json}")
-      # Release may list one arch per manifest/index entry (e.g. duplicate amd64); compare distinct sets.
-      # Strip optional linux/ prefix (e.g. linux/amd64 -> amd64). Default null/missing .arches to [].
-      image_arches=$(jq -r '(.status.artifacts.images[0]?.arches? // [])
-        | map((tostring | split("/") | .[-1]))
-        | unique
-        | join(" ")' <<< "${release_json}")
-      image_shasum=$(jq -r '.status.artifacts.images[0]?.shasum? // ""' <<< "${release_json}")
       released_status=$(jq -r '([.status.conditions[]? | select(.type=="Released") | .status] | first) // ""' <<< "${release_json}")
 
       echo "Release fields under validation:"
       echo "  Released: ${released_status}"
-      echo "  image_url: ${image_url}"
       echo "  mergerequest_url: ${mergerequest_url}"
-      echo "  image_arches: ${image_arches}"
-      echo "  image_shasum: ${image_shasum}"
 
       echo "Checking Released=True..."
       if [ "${released_status}" = "True" ]; then
@@ -194,13 +183,6 @@ verify_release_contents() {
         failures=$((failures+1))
       fi
 
-      echo "Checking image_url..."
-      if [ -n "${image_url}" ]; then
-        echo "✅️ image_url: ${image_url}"
-      else
-        echo "🔴 image_url was empty!"
-        failures=$((failures+1))
-      fi
       echo "Checking mergerequest_url..."
       if [ -n "${mergerequest_url}" ]; then
         echo "✅️ mergerequest_url: ${mergerequest_url}"
@@ -209,38 +191,9 @@ verify_release_contents() {
         failures=$((failures+1))
       fi
 
-      echo "Checking image arches include amd64 and arm64..."
-      if [[ " ${image_arches} " == *" amd64 "* && " ${image_arches} " == *" arm64 "* ]]; then
-        echo "✅️ Found required arches: ${image_arches}"
-      else
-        echo "🔴 Missing required arches (need: amd64 and arm64), found: '${image_arches}'"
-        failures=$((failures+1))
-      fi
-
-      echo "Checking image shasum (manifest list digest) is present..."
-      if [[ "${image_shasum}" == sha256:* ]]; then
-        echo "✅️ image_shasum: ${image_shasum}"
-      else
-        echo "🔴 image_shasum missing or invalid: '${image_shasum}'"
-        failures=$((failures+1))
-      fi
-
-      echo "Checking skopeo inspect succeeds for both arches (digest pull + registry auth)..."
-      if [ -n "${image_url}" ] && [[ "${image_shasum}" == sha256:* ]]; then
-        set +e
-        "${SCRIPT_DIR}/scripts/skopeo-verify-image.sh" \
-          "${image_url}" "${image_shasum}" \
-          "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" \
-          "amd64 arm64"
-        skopeo_rc=$?
-        set -e
-        if [ "${skopeo_rc}" -ne 0 ]; then
-          failures=$((failures+1))
-        fi
-      elif [ -n "${image_url}" ]; then
-        echo "🔴 Skipping skopeo multi-arch check: image_shasum missing or not sha256:*"
-        failures=$((failures+1))
-      fi
+      # Verify container images using shared helper
+      local failed_releases=""
+      check_container_images
 
       if [ "${failures}" -gt 0 ]; then
         echo "🔴 Test has FAILED with ${failures} failure(s)!"

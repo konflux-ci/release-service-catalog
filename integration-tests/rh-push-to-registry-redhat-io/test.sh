@@ -18,12 +18,9 @@ verify_release_contents() {
 
     local catalog_url
     local failures=0
-    local image_url image_arch image_shasum
+    local failed_releases=""
     local file_update_mr_url
 
-    image_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
-    image_arch=$(jq -r '.status.artifacts.images[0]?.arches[0] // ""' <<< "${release_json}")
-    image_shasum=$(jq -r '.status.artifacts.images[0]?.shasum // ""' <<< "${release_json}")
     catalog_url=$(jq -r '.status.artifacts.catalog_urls[]?.url // ""' <<< "${release_json}")
     file_update_mr_url=$(jq -r '.status.artifacts.merge_requests[0]?.url // ""' <<< "${release_json}")
 
@@ -43,39 +40,8 @@ verify_release_contents() {
         failures=$((failures+1))
     fi
 
-    echo "Checking Image URL..."
-    if [ -n "${image_url}" ]; then
-        echo "✅️ image_url: ${image_url}"
-    else
-        echo "🔴 image_url was empty"
-        failures=$((failures+1))
-    fi
-    echo "Checking Image Arch..."
-    if [ -n "${image_arch}" ]; then
-        echo "✅️ image_arch: ${image_arch}"
-    else
-        echo "🔴 image_arch was empty"
-        failures=$((failures+1))
-    fi
-
-    echo "Checking Image Shasum..."
-    if [ -n "${image_shasum}" ]; then
-        echo "✅️ image_shasum: ${image_shasum}"
-    else
-        echo "🔴 image_shasum was empty"
-        failures=$((failures+1))
-    fi
-
-    echo "Verifying image pullability with skopeo..."
-    set +e
-    "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
-        "${image_url}" "${image_shasum}" \
-        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
-    skopeo_return_code=$?
-    set -e
-    if [ "${skopeo_return_code}" -ne 0 ]; then
-        failures=$((failures+1))
-    fi
+    # Verify container images using shared helper (single-arch)
+    check_container_images
 
     if [ "${failures}" -gt 0 ]; then
       echo "🔴 Test has FAILED with ${failures} failure(s)!"

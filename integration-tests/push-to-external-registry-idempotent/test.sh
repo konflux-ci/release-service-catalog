@@ -33,72 +33,20 @@ verify_single_release() {
         log_error "Could not retrieve Release JSON for ${release_name}"
     fi
 
+    # Set RELEASE_NAME for check_container_images (it expects this global)
+    local RELEASE_NAME="${release_name}"
     local failures=0
-    local expected_count
-    expected_count=$(echo "${PTSV_COMPONENTS}" | wc -w)
+    local failed_releases=""
 
-    local image_count
-    image_count=$(jq -r '.status.artifacts.images | length' <<< "${release_json}")
-
-    echo "Checking image count (expected ${expected_count} components)..."
-    if [ "${image_count}" -ge "${expected_count}" ]; then
-        echo "✅️ Found ${image_count} image entries (expected at least ${expected_count})"
-    else
-        echo "🔴 Found only ${image_count} image entries, expected at least ${expected_count}"
-        failures=$((failures+1))
-    fi
-
-    echo ""
-    echo "Verifying each image artifact..."
-    for ((i = 0; i < image_count; i++)); do
-        local image_url image_arch image_shasum
-        image_url=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
-        image_arch=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.arches[0] // ""' <<< "${release_json}")
-        image_shasum=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
-
-        echo "Image ${i}:"
-        if [ -n "${image_url}" ]; then
-            echo "  ✅️ url: ${image_url}"
-        else
-            echo "  🔴 url was empty"
-            failures=$((failures+1))
-        fi
-
-        if [ -n "${image_arch}" ]; then
-            echo "  ✅️ arch: ${image_arch}"
-        else
-            echo "  🔴 arch was empty"
-            failures=$((failures+1))
-        fi
-
-        if [ -n "${image_shasum}" ]; then
-            echo "  ✅️ shasum: ${image_shasum}"
-        else
-            echo "  🔴 shasum was empty"
-            failures=$((failures+1))
-        fi
-
-        if [ -n "${image_url}" ] && [ -n "${image_shasum}" ]; then
-            echo "  Verifying image pullability with skopeo..."
-            set +e
-            "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
-                "${image_url}" "${image_shasum}" \
-                "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
-            local skopeo_return_code=$?
-            set -e
-            if [ "${skopeo_return_code}" -ne 0 ]; then
-                echo "  🔴 skopeo verification failed"
-                failures=$((failures+1))
-            else
-                echo "  ✅️ image is pullable"
-            fi
-        fi
-    done
+    # Verify container images using shared helper (single-arch)
+    check_container_images
 
     if [ "${failures}" -gt 0 ]; then
         echo "🔴 Release verification FAILED with ${failures} failure(s)!"
         return 1
     else
+        local image_count
+        image_count=$(jq -r '.status.artifacts.images | length' <<< "${release_json}")
         echo "✅️ All release checks passed for ${image_count} image(s)."
         return 0
     fi

@@ -1389,3 +1389,81 @@ wait_for_multi_component_snapshot() {
 
     echo "$snapshot_name"
 }
+
+check_container_images() {
+    local expected_count image_count
+
+    image_count=$(jq -r '.status.artifacts.images | length' <<< "${release_json}")
+    expected_count=$(echo "${PTSV_COMPONENTS}" | wc -w)
+
+    echo "Checking image count (expected ${expected_count} components)..."
+    if [ "${image_count}" -ge "${expected_count}" ]; then
+        echo "✅️ Found ${image_count} image entries (expected at least ${expected_count})"
+    else
+        echo "🔴 Found only ${image_count} image entries, expected at least ${expected_count}"
+        failures=$((failures+1))
+    fi
+
+    echo "Verifying each image artifact..."
+
+    for ((i = 0; i < image_count; i++)); do
+        local failures=0
+        local image_url image_arch image_shasum
+        image_url=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
+        image_arches=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.arches // ""' <<< "${release_json}")
+        image_shasum=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
+
+        echo "Checking Image URL..."
+        if [ -n "${image_url}" ]; then
+            echo "✅️ image_url: ${image_url}"
+        else
+            echo "🔴 image_url was empty"
+            failures=$((failures+1))
+        fi
+
+        str_image_arches=$(echo "${image_arches}" |  jq -r '. | sort | unique | join(" ")')
+        echo "Checking image arches..."
+        if [ "${str_image_arches}" = "$PTSV_EXPECTED_ARCHES" ]; then
+            echo "✅️ Found required image arches: $PTSV_EXPECTED_ARCHES"
+        else
+            echo "🔴 Expected image arches: '$PTSV_EXPECTED_ARCHES', found: '${image_arches}'"
+            failures=$((failures+1))
+        fi
+
+        echo "Checking Image Shasum..."
+        if [ -n "${image_shasum}" ]; then
+            echo "✅️ image_shasum: ${image_shasum}"
+        else
+            echo "🔴 image_shasum was empty"
+            failures=$((failures+1))
+        fi
+
+        # Use digest instead of tag, tag can be overwritten by concurrent tests
+        local image_pullspec="${image_url%:*}@${image_shasum}"
+
+        echo "Verifying multi-arch image pullability with skopeo (${image_pullspec})..."
+        AUTH_FILE="$(mktemp)"
+        yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
+            "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${AUTH_FILE}"
+
+        for arch in $PTSV_EXPECTED_ARCHES; do
+            if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true --retry-times 3 \
+                    "docker://${image_pullspec}" > /dev/null 2>&1; then
+                echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_pullspec}"
+            else
+                echo "🔴 skopeo inspect --override-arch ${arch} failed for ${image_pullspec}"
+                failures=$((failures+1))
+            fi
+        done
+
+        if [ "${failures}" -gt 0 ]; then
+          echo "🔴 Test has FAILED with ${failures} failure(s)!"
+          failed_releases="${RELEASE_NAME} ${failed_releases}"
+        else
+          echo "✅️ All release checks passed. Success!"
+        fi
+    done
+    if [ -f "${AUTH_FILE}" ]; then
+        rm -f "${AUTH_FILE}"
+    fi
+}

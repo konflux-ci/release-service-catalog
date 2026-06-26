@@ -30,46 +30,10 @@ verify_release_contents() {
     echo "Restored artifact ${ociArtifact} to ${oci_artifact_dir}"
 
     local failures=0
-    local image_url image_arches image_shasum
+    local failed_releases=""
 
-    image_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
-    image_arches=$(jq -r '.status.artifacts.images[0]?.arches // [] | sort | join(" ")' <<< "${release_json}")
-    image_shasum=$(jq -r '.status.artifacts.images[0]?.shasum // ""' <<< "${release_json}")
-
-    echo "Checking Image URL..."
-    if [ -n "${image_url}" ]; then
-        echo "✅️ image_url: ${image_url}"
-    else
-        echo "🔴 image_url was empty"
-        failures=$((failures+1))
-    fi
-
-    echo "Checking image arches..."
-    if [ "${image_arches}" = "amd64 arm64" ]; then
-        echo "✅️ Found required image arches: amd64 arm64"
-    else
-        echo "🔴 Expected image arches: amd64 arm64, found: ${image_arches}"
-        failures=$((failures+1))
-    fi
-
-    # Use digest instead of tag, tag can be overwritten by concurrent tests
-    local image_pullspec="${image_url%:*}@${image_shasum}"
-
-    echo "Verifying multi-arch image pullability with skopeo (${image_pullspec})..."
-    AUTH_FILE="$(mktemp)"
-    yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
-        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${AUTH_FILE}"
-
-    for arch in amd64 arm64; do
-        if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true --retry-times 3 \
-                "docker://${image_pullspec}" > /dev/null 2>&1; then
-            echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_pullspec}"
-        else
-            echo "🔴 skopeo inspect --override-arch ${arch} failed for ${image_pullspec}"
-            failures=$((failures+1))
-        fi
-    done
-    rm -f "${AUTH_FILE}"
+    # Verify container images using shared helper
+    check_container_images
 
     echo "Checking Image IDs..."
     pyxisDataFile=$(find ${oci_artifact_dir} -name "pyxis.json")
