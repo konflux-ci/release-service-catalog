@@ -186,28 +186,24 @@ spec:
           exit 0
         fi
 
-        # Try to extract the first contentType if it exists
-        content_type=$(jq -r '.mapping.components[]? |
-          (.contentGateway?.contentType // .contentType) // empty' "$DATA_FILE" | head -n1)
+        # Check whether any component requires PURL updates (binary/generic/disk-image).
+        # A release can have mixed content types (e.g. binary + disk-image), so we look across
+        # all components rather than stopping at the first one.
+        has_checksum_content_type=$(jq -r '[.mapping.components[]? |
+          (.contentGateway?.contentType // .contentType) // empty] |
+          map(select(test("^(binary|generic|disk-image)$"))) | first // empty' "$DATA_FILE")
 
-        # If no contentType is found, check if this is a github release
-        if [ -z "$content_type" ]; then
+        if [ -z "${has_checksum_content_type}" ]; then
           github_field=$(jq -r '.github // empty' "$DATA_FILE")
           if [[ -n "$github_field" ]]; then
             echo "Github release. Skipping update-purl."
             exit 0
           fi
-          echo "Content type is not a generic artifact, skipping update-purl"
+          echo "No binary/generic/disk-image content type found, skipping update-purl"
           exit 0
         fi
 
-        # Only binary/generic/disk-image need PURL updates with checksums
-        if [[ ! "$content_type" =~ ^(binary|generic|disk-image)$ ]]; then
-          echo "Content type '$content_type'. Skipping update-purl."
-          exit 0
-        fi
-
-        echo "Processing $content_type artifacts for PURL updates..."
+        echo "Processing artifacts for PURL updates..."
 
         # If all artifacts already have real (non-placeholder) PURLs, skip update-purl entirely.
         # This handles content types (e.g. Python wheels) where PURLs are populated upstream
@@ -244,7 +240,7 @@ spec:
 
         if [ -z "$CHECKSUM_MAP_PARAM" ] || [ "$CHECKSUM_MAP_PARAM" = "null" ] \
             || [ "$CHECKSUM_MAP_PARAM" = "empty" ]; then
-          echo "Error: checksum map is required for content type '$content_type' but was not provided."
+          echo "Error: checksum map is required for content type '${has_checksum_content_type}' but was not provided."
           exit 1
         fi
 
@@ -283,6 +279,17 @@ spec:
 
         COMPONENTS=$(jq -c '.mapping.components[]' "$DATA_FILE")
 
+        # Build a name → staged.files lookup from the snapshot.  apply-mapping substitutes
+        # {{ release_timestamp }} (and other template vars) in the snapshot's components but
+        # does NOT write those substitutions back to the data file.  Reading staged.files from
+        # DATA_FILE would produce filenames like "foo-{{ release_timestamp }}-x86_64.iso" which
+        # Jinja2 would then render as empty, giving "foo--x86_64.iso" in the advisory.
+        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
+        SNAPSHOT_STAGED=$(jq -c \
+          'reduce .components[] as $c ({}; .[$c.name] = ($c.staged.files // []))' \
+          "$SNAPSHOT_FILE")
+
+        UPDATED_ENTRIES_DISK=()
         UPDATED_ENTRIES=()
 
         while IFS= read -r component; do
@@ -297,6 +304,17 @@ spec:
               continue
             fi
 
+            # Resolve content type per component so mixed releases (e.g. binary + disk-image)
+            # are each processed through the correct code path.
+            component_content_type=$(jq -r \
+              '(.contentGateway?.contentType // .contentType) // empty' <<< "$component")
+            # Default content type when not specified is "image" (container), which does not
+            # require PURL updates here. Skip components without a recognised PURL content type.
+            if [[ ! "${component_content_type}" =~ ^(binary|generic|disk-image)$ ]]; then
+              echo "Component ${COMPONENT_NAME} content type '${component_content_type}'. Skipping."
+              continue
+            fi
+
             # Get all advisory entries that match this component
             MATCHING_ENTRIES=$(jq -c --arg name "$COMPONENT_NAME" \
               '.releaseNotes.content.artifacts[] | select(.component == $name)' "$DATA_FILE")
@@ -306,29 +324,94 @@ spec:
               continue
             fi
 
-            while IFS= read -r entry; do
+            if [ "${component_content_type}" = "disk-image" ]; then
+              # For disk-images, generate one advisory entry per file in staged.files[].
+              # Multiple files can share the same os+arch (e.g. ISO + QCOW2 both linux/amd64),
+              # so iterating over advisory entries (one per os+arch) would produce malformed PURLs.
+              # Instead, use the first advisory entry as a metadata template and expand it per file.
+              TEMPLATE_ENTRY=$(echo "$MATCHING_ENTRIES" | head -1)
+              # When a component has both contentGateway (Developer Portal) and staged (Customer
+              # Portal/CDN), CGW is used as the canonical download_url in the PURL. If only
+              # staged is present, the CDN URL is used instead.
+              HAS_CGW=$(jq -r 'if ((.contentGateway // {}) | length) > 0 then "true" else "false" end' \
+                <<< "$component")
+              if [ "$HAS_CGW" = "true" ]; then
+                DOWNLOAD_URL="$CGW_BASE_URL"
+              else
+                DOWNLOAD_URL="$CDN_BASE_URL"
+              fi
+
+              # Fail loudly instead of silently leaving placeholder PURLs in place if the
+              # snapshot has no staged.files[] for this component (e.g. snapshot/mapping
+              # mismatch), since the loop below would otherwise just do nothing.
+              STAGED_FILE_COUNT=$(jq -r --arg name "$COMPONENT_NAME" \
+                '(.[$name] // []) | length' <<< "$SNAPSHOT_STAGED")
+              if [ "$STAGED_FILE_COUNT" -eq 0 ]; then
+                echo "Error: disk-image component ${COMPONENT_NAME} has releaseNotes.content.artifacts" \
+                  "entries but no staged.files[] in the snapshot" >&2
+                exit 1
+              fi
+
+              # Use process substitution so the loop body is never entered when jq returns
+              # no output (a here-string would feed one empty line and corrupt subsequent jq calls).
+              while IFS= read -r staged_file; do
+                FILENAME=$(jq -r '.filename // empty' <<< "$staged_file")
+                if [ -z "${FILENAME}" ] || [ "${FILENAME}" = "null" ]; then
+                  echo "Error: staged.files[].filename is required for disk-image" \
+                    "component ${COMPONENT_NAME}" >&2
+                  exit 1
+                fi
+                FILENAME_BASENAME=$(basename "$FILENAME")
+
+                # Derive arch from filename (same logic as populate-release-notes)
+                FILE_ARCH="unknown"
+                if [[ "$FILENAME_BASENAME" == *"aarch64"* ]]; then
+                  FILE_ARCH="aarch64"
+                elif [[ "$FILENAME_BASENAME" == *"x86_64"* ]]; then
+                  FILE_ARCH="x86_64"
+                fi
+                FILE_OS="linux"  # Default for disk images
+
+                CHECKSUM=$(jq -r --arg component "$COMPONENT_NAME" --arg filename "$FILENAME_BASENAME" \
+                  '.[] | select(.component == $component) | .files[$filename] // empty' \
+                  <<< "$CHECKSUM_MAP_JSON")
+                if [ -z "$CHECKSUM" ]; then
+                  echo "Warning: No checksum found for $COMPONENT_NAME/$FILENAME_BASENAME in manifest" >&2
+                fi
+
+                PURL="pkg:generic/$COMPONENT_NAME@$VERSION_NAME"
+                QUERY_PARAMS=()
+                # Add filename first - this uniquely identifies the file
+                if [ -n "$FILENAME_BASENAME" ]; then
+                  QUERY_PARAMS+=("filename=$FILENAME_BASENAME")
+                fi
+                if [ -n "$CHECKSUM" ]; then
+                  QUERY_PARAMS+=("checksum=$CHECKSUM")
+                fi
+                if [ -n "$DOWNLOAD_URL" ]; then
+                  QUERY_PARAMS+=("download_url=$DOWNLOAD_URL")
+                fi
+                if [ "${#QUERY_PARAMS[@]}" -gt 0 ]; then
+                  PURL="${PURL}?$(IFS=\&; echo "${QUERY_PARAMS[*]}")"
+                fi
+
+                UPDATED_ENTRY=$(jq -c \
+                  --arg purl "$PURL" --arg arch "$FILE_ARCH" --arg os "$FILE_OS" \
+                  '.purl = $purl | .architecture = $arch | .os = $os' <<< "$TEMPLATE_ENTRY")
+                UPDATED_ENTRIES_DISK+=("$UPDATED_ENTRY")
+              done < <(jq -c --arg name "$COMPONENT_NAME" '.[$name][]?' <<< "$SNAPSHOT_STAGED")
+            else
+              while IFS= read -r entry; do
                 ARCH=$(jq -r '.architecture' <<< "$entry")
                 OS=$(jq -r '.os' <<< "$entry")
 
-                if [ "$content_type" = "disk-image" ]; then
-                  # For disk-images, we need to match the filename from the populate-release-notes step
-                  # with the staged.files[].filename that has the same architecture
-                  FILENAME=$(jq -r --arg arch "$ARCH" \
-                    '.staged.files[] | select(.filename | contains($arch)) | .filename' <<< "$component")
-
-                  if [ -z "$FILENAME" ] || [ "$FILENAME" = "null" ]; then
-                    echo "Warning: No filename found for arch $ARCH in component $COMPONENT_NAME" >&2
-                    continue
-                  fi
-                else
-                  # Binary/generic files have arch/os matching, falling back to staged.files
-                  # for teams that use the CDN staged structure instead of a top-level files array
-                  FILENAME=$(jq -r --arg arch "$ARCH" --arg os "$OS" \
-                    '((.files // []) as $f
-                       | if ($f|length) > 0 then $f else (.staged.files // []) end)[]
-                       | select(.arch == $arch and .os == $os) | .source' \
-                    <<< "$component")
-                fi
+                # Binary/generic files have arch/os matching, falling back to staged.files
+                # for teams that use the CDN staged structure instead of a top-level files array
+                FILENAME=$(jq -r --arg arch "$ARCH" --arg os "$OS" \
+                  '((.files // []) as $f
+                     | if ($f|length) > 0 then $f else (.staged.files // []) end)[]
+                     | select(.arch == $arch and .os == $os) | .source' \
+                  <<< "$component")
 
                 FILENAME_BASENAME=$(basename "$FILENAME")
                 # Apply Windows archive conversion (.tar.gz -> .zip) when looking up checksum
@@ -336,17 +419,19 @@ spec:
                 if [ "$OS" = "windows" ] && [[ "$FILENAME_BASENAME" == *.tar.gz ]]; then
                   FILENAME_BASENAME="${FILENAME_BASENAME%.tar.gz}.zip"
                 fi
-                
+
                 CHECKSUM=$(jq -r --arg component "$COMPONENT_NAME" --arg filename "$FILENAME_BASENAME" \
-                  '.[] | select(.component == $component) | .files[$filename] // empty' <<< "$CHECKSUM_MAP_JSON")
+                  '.[] | select(.component == $component) | .files[$filename] // empty' \
+                  <<< "$CHECKSUM_MAP_JSON")
                 if [ -z "$CHECKSUM" ]; then
                   echo "Warning: No checksum found for $COMPONENT_NAME/$FILENAME_BASENAME in manifest" >&2
                 fi
 
-                # Determine download URL based on portal (using environment-aware base URLs)
-                # - If .contentGateway: Developer Portal (CGW)
-                # - If only .staged (no .contentGateway): Customer Portal (CDN)
-                HAS_CGW=$(jq -r '.contentGateway | length > 0' <<< "$component")
+                # When a component has both contentGateway (Developer Portal) and staged (Customer
+                # Portal/CDN), CGW is used as the canonical download_url in the PURL. If only
+                # staged is present, the CDN URL is used instead.
+                HAS_CGW=$(jq -r 'if ((.contentGateway // {}) | length) > 0 then "true" else "false" end' \
+                  <<< "$component")
                 if [ "$HAS_CGW" = "true" ]; then
                   DOWNLOAD_URL="$CGW_BASE_URL"
                 else
@@ -371,30 +456,55 @@ spec:
 
                 UPDATED_ENTRY=$(jq -c --arg purl "$PURL" '.purl = $purl' <<< "$entry")
                 UPDATED_ENTRIES+=("$UPDATED_ENTRY")
-            done <<< "$MATCHING_ENTRIES"
+              done <<< "$MATCHING_ENTRIES"
+            fi
 
         done <<< "$COMPONENTS"
 
-        # Merge updated advisory entries back into releaseNotes.content.artifacts in the DATA_FILE
-        # Also deduplicate entries by component|architecture|os to handle cases where
-        # multiple files have the same arch/os (e.g., binary + ISO for same arch)
-        if [ "${#UPDATED_ENTRIES[@]}" -eq 0 ]; then
+        if [ "${#UPDATED_ENTRIES_DISK[@]}" -eq 0 ] && [ "${#UPDATED_ENTRIES[@]}" -eq 0 ]; then
           echo "No advisory entries were updated."
           exit 0
         fi
 
-        ENTRIES_JOINED=$(IFS=,; echo "${UPDATED_ENTRIES[*]}")
-        UPDATED_MAP=$(jq -nc --argjson updated "[$ENTRIES_JOINED]" '
-          reduce $updated[] as $item ({}; . + {($item.component + "|" + $item.architecture + "|" + $item.os): $item})
-        ')
-        # Update entries AND deduplicate: convert to map (dedup by key), then back to array
-        jq --argjson updated "$UPDATED_MAP" '
-          .releaseNotes.content.artifacts |= (
-            map(($updated[(.component + "|" + .architecture + "|" + .os)] // .))
-            | reduce .[] as $item ({}; . + {($item.component + "|" + $item.architecture + "|" + $item.os): $item})
-            | [.[]]
-          )
-        ' "$DATA_FILE" > /tmp/data.tmp && mv /tmp/data.tmp "$DATA_FILE"
+        # Apply disk-image replacements: drop existing entries for updated components and
+        # substitute the new per-file expanded entries. Cannot deduplicate by component|arch|os
+        # because multiple files (e.g. ISO + QCOW2) legitimately share the same arch/os.
+        DISK_COMPONENTS_JSON="[]"
+        if [ "${#UPDATED_ENTRIES_DISK[@]}" -gt 0 ]; then
+          ENTRIES_JOINED_DISK=$(IFS=,; echo "${UPDATED_ENTRIES_DISK[*]}")
+          DISK_COMPONENTS_JSON=$(jq -c '[.[].component] | unique' <<< "[$ENTRIES_JOINED_DISK]")
+          jq --argjson updated "[$ENTRIES_JOINED_DISK]" '
+            ($updated | map(.component) | unique) as $updated_components |
+            .releaseNotes.content.artifacts |= (
+              map(select(.component | IN($updated_components[]) | not)) + $updated
+            )
+          ' "$DATA_FILE" > /tmp/data.tmp && mv /tmp/data.tmp "$DATA_FILE"
+        fi
+
+        # Merge binary/generic updated entries back into releaseNotes.content.artifacts.
+        # Deduplicate by component|architecture|os to handle cases where multiple files share the
+        # same arch/os (e.g. binary + ISO for same arch). Disk-image components are excluded from
+        # this pass (and re-appended untouched) because they were already correctly expanded above
+        # and can legitimately have multiple entries sharing the same component|architecture|os
+        # (e.g. ISO + QCOW2) -- deduplicating them here would drop all but one file's PURL/checksum.
+        if [ "${#UPDATED_ENTRIES[@]}" -gt 0 ]; then
+          ENTRIES_JOINED=$(IFS=,; echo "${UPDATED_ENTRIES[*]}")
+          UPDATED_MAP=$(jq -nc --argjson updated "[$ENTRIES_JOINED]" '
+            reduce $updated[] as $item ({}; . + {($item.component + "|" + $item.architecture + "|" + $item.os): $item})
+          ')
+          jq --argjson updated "$UPDATED_MAP" --argjson diskComponents "$DISK_COMPONENTS_JSON" '
+            (.releaseNotes.content.artifacts | map(select(.component | IN($diskComponents[])))) as $diskItems |
+            (.releaseNotes.content.artifacts | map(select(.component | IN($diskComponents[]) | not))) as $otherItems |
+            .releaseNotes.content.artifacts = (
+              (
+                $otherItems
+                | map(($updated[(.component + "|" + .architecture + "|" + .os)] // .))
+                | reduce .[] as $item ({}; . + {($item.component + "|" + $item.architecture + "|" + $item.os): $item})
+                | [.[]]
+              ) + $diskItems
+            )
+          ' "$DATA_FILE" > /tmp/data.tmp && mv /tmp/data.tmp "$DATA_FILE"
+        fi
     - name: run-script
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:

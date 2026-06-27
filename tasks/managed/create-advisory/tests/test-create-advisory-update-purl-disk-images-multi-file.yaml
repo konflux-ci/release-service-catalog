@@ -2,11 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-create-advisory-disk-image-secrets
+  name: test-create-advisory-update-purl-disk-images-multi-file
 spec:
   description: |
-    Verify that for disk-image content types the task uses staging secrets when
-    intention is 'staging'.
+    Assert that the update-purl step generates one advisory artifact entry per staged file
+    for a disk-image component that has multiple files (e.g. ISO + QCOW2) under the same
+    os/architecture. This covers the case where a single component ships multiple disk image
+    formats, all for linux/x86_64, and each must receive its own correct PURL entry.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -56,7 +58,7 @@ spec:
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -exo pipefail
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
 
@@ -69,45 +71,44 @@ spec:
                   "namespace": "default"
                 },
                 "spec": {
-                  "applications": ["rhel-ai-app"],
+                  "applications": ["test-app"],
                   "policy": "policy",
                   "pipeline": {
                     "pipelineRef": {
                       "resolver": "git",
                       "params": [
-                        {
-                          "name": "url",
-                          "value": "github.com"
-                        },
-                        {
-                          "name": "revision",
-                          "value": "main"
-                        },
-                        {
-                          "name": "pathInRepo",
-                          "value": "pipeline.yaml"
-                        }
+                        {"name": "url", "value": "github.com"},
+                        {"name": "revision", "value": "main"},
+                        {"name": "pathInRepo", "value": "pipeline.yaml"}
                       ]
                     }
                   },
-                  "serviceAccountName": "sa"
-                },
-                "origin": "rhel-ai-tenant"
+                  "serviceAccountName": "sa",
+                  "origin": "test-tenant"
+                }
               }
               EOF
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << 'EOF'
               {
-                "application": "rhel-ai-app",
+                "application": "test-app",
                 "components": [
                   {
-                    "name": "intel-bootc-iso-disk-image-1-5",
-                    "repository": "quay.io/redhat-prod/rhel-ai----disk-image",
+                    "name": "multi-file-disk-image",
+                    "repository": "quay.io/test/multi-file-disk-image",
                     "staged": {
                       "files": [
                         {
-                          "filename": "rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz",
-                          "source": "install.iso.gz"
+                          "filename": "test-product-1.0.0-1234567890-x86_64-boot.iso.gz",
+                          "source": "/releases/install.iso.gz",
+                          "os": "linux",
+                          "arch": "amd64"
+                        },
+                        {
+                          "filename": "test-product-1.0.0-1234567890-x86_64-kvm.qcow2",
+                          "source": "/releases/disk.qcow2",
+                          "os": "linux",
+                          "arch": "amd64"
                         }
                       ]
                     }
@@ -116,28 +117,38 @@ spec:
               }
               EOF
 
+              # Single component with two staged.files[] entries — both linux/amd64.
+              # populate-release-notes emits one artifact entry (linux/x86_64); update-purl
+              # must expand it into two entries (one per file) with correct PURLs.
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
                 "mapping": {
                   "components": [
                     {
-                      "name": "intel-bootc-iso-disk-image-1-5",
+                      "name": "multi-file-disk-image",
                       "staged": {
-                        "destination": "rhelai-1_DOT_5-for-rhel-9-x86_64-isos",
-                        "version": "1.5.1",
+                        "destination": "test-product-1_DOT_0-for-rhel-9-x86_64-files",
+                        "version": "1.0.0",
                         "files": [
                           {
-                            "filename": "rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz",
-                            "source": "install.iso.gz"
+                            "filename": "test-product-1.0.0-1234567890-x86_64-boot.iso.gz",
+                            "source": "/releases/install.iso.gz",
+                            "os": "linux",
+                            "arch": "amd64"
+                          },
+                          {
+                            "filename": "test-product-1.0.0-1234567890-x86_64-kvm.qcow2",
+                            "source": "/releases/disk.qcow2",
+                            "os": "linux",
+                            "arch": "amd64"
                           }
                         ]
                       },
                       "contentGateway": {
                         "contentType": "disk-image",
-                        "productName": "Binary_RL_Red Hat Enterprise Linux AI",
-                        "productCode": "RHELAI",
-                        "productVersionName": "1.5.1",
-                        "filePrefix": "rhel-ai-intel-1.5.1"
+                        "productCode": "TestProduct",
+                        "productName": "Test Product",
+                        "productVersionName": "1.0.0"
                       }
                     }
                   ]
@@ -147,30 +158,33 @@ spec:
                     "artifacts": [
                       {
                         "architecture": "x86_64",
-                        "component": "intel-bootc-iso-disk-image-1-5",
+                        "component": "multi-file-disk-image",
                         "os": "linux",
                         "purl": "placeholder"
                       }
                     ]
                   }
                 },
+                "cdn": {
+                  "env": "qa"
+                },
                 "sign": {
                   "configMapName": "cm"
-                },
-                "intention": "staging"
+                }
               }
               EOF
 
-              # Create checksum_map mock data file (will be read by oras mock)
               jq -nc '[
                 {
-                  "component": "intel-bootc-iso-disk-image-1-5",
+                  "component": "multi-file-disk-image",
                   "files": {
-                    "rhel-ai-intel-1.5.1-1749643937-x86_64.iso.gz": "sha256:dummychecksum123456"
+                    "test-product-1.0.0-1234567890-x86_64-boot.iso.gz":
+                      "sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222",
+                    "test-product-1.0.0-1234567890-x86_64-kvm.qcow2":
+                      "sha256:1111aaaa2222bbbb3333cccc4444dddd5555eeee6666ffff1111aaaa2222bbbb"
                   }
                 }
               ]' > "$(params.dataDir)/mock_checksum_map.json"
-              # Output mock OCI reference (oras mock will use the file above)
               echo -n "mock-registry/checksum-map@sha256:mock" | tee "$(results.checksum_map.path)"
           - name: create-trusted-artifact
             ref:
@@ -261,33 +275,50 @@ spec:
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
-              set -ex
+              set -exo pipefail
 
-              # Count the number of InternalRequests
-              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              artifacts=$(jq -c '.releaseNotes.content.artifacts' "${DATA_FILE}")
 
-              if [ "$requestsCount" -ne 1 ]; then
-                echo "Unexpected number of InternalRequests. Expected: 1, Found: $requestsCount"
+              # Expect two artifact entries: one per staged file, both for the same component.
+              artifact_count=$(echo "${artifacts}" | jq 'length')
+              if [ "${artifact_count}" != "2" ]; then
+                echo "Expected 2 artifact entries (one per file), got ${artifact_count}"
+                echo "artifacts: ${artifacts}"
                 exit 1
               fi
 
-              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+              iso_checksum="sha256:aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa1111bbbb2222"
+              qcow2_checksum="sha256:1111aaaa2222bbbb3333cccc4444dddd5555eeee6666ffff1111aaaa2222bbbb"
+              cgw_base="https://developers.qa.redhat.com/products"
 
-              # For disk-image content types with intention=staging, expect standard staging secrets
-              advisory_secret_name=$(echo "$internalRequest" | jq -r '.spec.params.advisory_secret_name')
-              if [ "$advisory_secret_name" != "create-advisory-stage-secret" ]; then
-                echo "InternalRequest has the wrong advisory_secret_name parameter"
-                echo "$internalRequest" | jq
+              iso_file="test-product-1.0.0-1234567890-x86_64-boot.iso.gz"
+              qcow2_file="test-product-1.0.0-1234567890-x86_64-kvm.qcow2"
+              base_purl="pkg:generic/multi-file-disk-image@1.0.0"
+
+              expectedIsoPurl="${base_purl}?filename=${iso_file}&checksum=${iso_checksum}&download_url=${cgw_base}"
+              expectedQcow2Purl="${base_purl}?filename=${qcow2_file}&checksum=${qcow2_checksum}&download_url=${cgw_base}"
+
+              isoFilter='.[] | select(.purl | contains("iso.gz")) | .purl'
+              isoPurl=$(echo "${artifacts}" | jq -r "${isoFilter}")
+              qcow2Filter='.[] | select(.purl | contains("qcow2")) | .purl'
+              qcow2Purl=$(echo "${artifacts}" | jq -r "${qcow2Filter}")
+
+              if [ "${isoPurl}" != "${expectedIsoPurl}" ]; then
+                echo "Unexpected PURL for iso disk-image"
+                echo "got:      ${isoPurl}"
+                echo "expected: ${expectedIsoPurl}"
                 exit 1
               fi
 
-              errata_secret_name=$(echo "$internalRequest" | jq -r '.spec.params.errata_secret_name')
-              if [ "$errata_secret_name" != "errata-stage-service-account" ]; then
-                echo "InternalRequest has the wrong errata_secret_name parameter"
-                echo "$internalRequest" | jq
+              if [ "${qcow2Purl}" != "${expectedQcow2Purl}" ]; then
+                echo "Unexpected PURL for qcow2 disk-image"
+                echo "got:      ${qcow2Purl}"
+                echo "expected: ${expectedQcow2Purl}"
                 exit 1
               fi
 
+              echo "All checks passed: two per-file advisory entries with correct PURLs"
   finally:
     - name: cleanup
       taskSpec:
@@ -296,6 +327,6 @@ spec:
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -exo pipefail
 
               kubectl delete internalrequests --all
