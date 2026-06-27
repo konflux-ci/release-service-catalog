@@ -1,6 +1,6 @@
 # push-artifacts-to-cdn Test
 
-This test validates the `push-artifacts-to-cdn` pipeline with two components:
+This test validates the `push-artifacts-to-cdn` pipeline with three components:
 
 - **Component 1** (`push-artifacts-cdn-<uuid>`): releases 3 binary files (Windows, Linux, macOS)
   to both the **Customer Portal (Pulp/CDN)** and the **Content Gateway (CGW)**.
@@ -10,8 +10,13 @@ This test validates the `push-artifacts-to-cdn` pipeline with two components:
   to the **Content Gateway (CGW) only** (no Pulp push).
   It has a `contentGateway` section but no `staged` section in the RPA mapping.
 
-Auto-release is disabled. The test waits for both component builds to complete, then manually creates
-a Release against the multi-component Snapshot. After the release pipeline succeeds:
+- **Component 3** (`push-artifacts-cdn-comp3-<uuid>`): releases 1 disk-image file (QCOW2)
+  to both the **Customer Portal (Pulp/CDN)** and the **Content Gateway (CGW)**, using
+  `contentGateway.contentType: disk-image`. It has both a `staged` section (for Pulp) and a
+  `contentGateway` section in the RPA mapping.
+
+Auto-release is disabled. The test waits for all three component builds to complete, then manually
+creates a Release against the multi-component Snapshot. After the release pipeline succeeds:
 
 1. Asserts the `push-artifacts-to-cdn` TaskRun succeeded.
 2. Prints the current file list from the CGW staging API for this product/version.
@@ -23,7 +28,7 @@ In addition to the [common dependencies](../README.md#dependencies), this test r
 
 ### GitHub Repository Branches
 
-Two base branches must exist in `https://github.com/hacbs-release-tests/e2e-base`:
+Three base branches must exist in `https://github.com/hacbs-release-tests/e2e-base`:
 
 #### `push-artifacts-to-cdn-comp1-base`
 Contains a `Dockerfile` and 3 `.tar.gz` archives for Component 1 (Pulp + CGW).
@@ -43,9 +48,16 @@ Each archive wraps one **jq 1.6** binary from https://github.com/jqlang/jq/relea
 /releases/e2e-cdn-comp2-darwin-amd64.tar.gz   ← contains jq-osx-amd64 (Mach-O x86_64)
 ```
 
-> **Important**: The Windows and Mac binaries inside the archives must be real PE/Mach-O
-> executables because the pipeline extracts and submits them to production signing hosts.
-> The pipeline re-packages the output: Windows → `.zip`, Linux/macOS → `.tar.gz`.
+#### `push-artifacts-to-cdn-comp3-base`
+Contains a `Dockerfile` and one small QCOW2 disk image for Component 3 (Pulp + CGW):
+```
+/releases/e2e-cdn-comp3-rhel10-x86_64.qcow2  ← small QCOW2 image, os: linux only
+```
+Disk images are passed straight through the pipeline (no signing, no compression).
+
+> **Important**: The Windows and Mac binaries inside the comp1/comp2 archives must be real
+> PE/Mach-O executables because the pipeline extracts and submits them to production signing
+> hosts. The pipeline re-packages the output: Windows → `.zip`, Linux/macOS → `.tar.gz`.
 
 ### Required Secrets in `managed-release-team-tenant` (stg-rh01)
 
@@ -120,19 +132,21 @@ With debug (skip cleanup on failure):
 
 ## Test Workflow
 
-1. **GitHub Setup** — Creates component GitHub repos from the two base branches in e2e-base.
-2. **Konflux Onboarding** — Creates Application, 2 Components, ReleasePlan, and ReleasePlanAdmission.
-3. **Component Builds** — Waits for both components' Konflux build PipelineRuns to complete.
-   Each component builds a container image containing the test binary files.
-4. **Multi-Component Snapshot** — Waits for a Snapshot containing both components.
+1. **GitHub Setup** — Creates component GitHub repos from the three base branches in e2e-base.
+2. **Konflux Onboarding** — Creates Application, 3 Components, ReleasePlan, and ReleasePlanAdmission.
+3. **Component Builds** — Waits for all three components' Konflux build PipelineRuns to complete.
+   Each component builds a container image containing the test binary/disk-image files.
+4. **Multi-Component Snapshot** — Waits for a Snapshot containing all three components.
 5. **Manual Release** — Creates a Release CR against the multi-component Snapshot.
 6. **Pipeline Execution** — Monitors the `push-artifacts-to-cdn` managed pipeline:
    - `collect-data`, `reduce-snapshot`, `apply-mapping` run first.
    - `push-artifacts-to-cdn` (managed task) creates an InternalRequest.
    - InternalRequest triggers the internal pipeline on the internal services cluster.
-   - Internal pipeline: extracts binaries → pushes unsigned to Quay (ORAS) →
-     signs via Mac/Windows signing hosts → compresses → generates checksums →
-     pushes to Pulp (comp1 only) → pushes to CGW (both comps) → pushes checksum file to CGW.
+   - Internal pipeline: extracts binaries/disk-images → pushes unsigned to Quay (ORAS) →
+     signs binaries via Mac/Windows signing hosts (disk images pass through unsigned) →
+     compresses binaries (disk images pass through uncompressed) → generates checksums →
+     pushes to Pulp (comp1 and comp3) → pushes to CGW (all three comps) →
+     pushes checksum file to CGW.
 7. **Verification**:
    - Asserts the `push-artifacts-to-cdn` TaskRun succeeded.
    - Prints the current file list from the CGW staging API (informational).

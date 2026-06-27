@@ -2,8 +2,8 @@
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
 
-# Tell the framework to manage two components: component (Pulp+CGW) and component2 (CGW only).
-PTSV_COMPONENTS="component component2"
+# component (Pulp+CGW, binary), component2 (CGW only, binary), component3 (Pulp+CGW, disk-image).
+PTSV_COMPONENTS="component component2 component3"
 
 # --- Snapshot and Release Management ---
 
