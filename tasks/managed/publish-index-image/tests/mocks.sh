@@ -15,9 +15,51 @@ function internal-request() {
 }
 
 function kubectl() {
-  if [[ "$*" == *"get internalrequest"*"jsonpath"*"status.results"* ]]
+  if [[ "$*" == *"get internalrequest"*"-o json"* ]]
   then
-    echo '{"requestMessage":"Index Image Published successfully"}'
+    # Check if this is the failure test case by looking for a marker file in dataDir
+    # The dataDir is mounted at /var/workdir/release by default
+    if [ -f /var/workdir/release/.test-failure-marker ]; then
+      echo '{
+        "status": {
+          "conditions": [
+            {
+              "type": "Succeeded",
+              "status": "False",
+              "reason": "Failed",
+              "message": "Failed to publish index image: permission denied to registry"
+            }
+          ],
+          "results": {
+            "requestMessage": "Error: Failed to push image"
+          }
+        }
+      }'
+    else
+      # Return successful status for normal tests
+      echo '{
+        "status": {
+          "conditions": [
+            {
+              "type": "Succeeded",
+              "status": "True",
+              "reason": "Succeeded",
+              "message": ""
+            }
+          ],
+          "results": {
+            "requestMessage": "Index Image Published successfully"
+          }
+        }
+      }'
+    fi
+  elif [[ "$*" == *"get internalrequest"*"jsonpath"*"status.results"* ]]
+  then
+    if [ -f /var/workdir/release/.test-failure-marker ]; then
+      echo '{"requestMessage":"Error: Failed to push image"}'
+    else
+      echo '{"requestMessage":"Index Image Published successfully"}'
+    fi
   else
     /usr/bin/kubectl $*
   fi
