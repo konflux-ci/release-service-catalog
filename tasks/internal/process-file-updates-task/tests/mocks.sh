@@ -42,7 +42,10 @@ function glab() {
     gitRepo=$(echo "$*" | cut -f5 -d/ | cut -f1 -d.)
     echo "https://some.gitlab/test/one-update.git/-/merge_request/1"
   elif [[ "$*" == *"mr list"* ]]; then
-    if [[ "$*" == *"page 1" ]] && [[ "${gitRepo}" == "replace-idempotent" ]]; then
+    # Search must be scoped by componentGroup (e.g. "[Konflux release] <componentGroup>"),
+    # not the broad "Konflux release" that matches all open MRs
+    if [[ "$*" == *"page 1" ]] && [[ "${gitRepo}" == "replace-idempotent" ]] \
+        && [[ "$*" == *"[Konflux release]"* ]]; then
       	echo '!1'
     else
       echo ''
