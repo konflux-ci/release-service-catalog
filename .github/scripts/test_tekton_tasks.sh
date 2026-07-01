@@ -86,6 +86,62 @@ apply_python_command_mocks_merge() {
   done
 }
 
+# When mocks.yaml sets hostname on an http_json service, map that hostname to the
+# mock bind address via PipelineRun podTemplate.hostAliases (Task CRDs cannot set this).
+apply_mock_host_aliases_to_pipelinerun_spec() {
+  local tests_dir="$1"
+  local test_path="$2"
+  local task_name="$3"
+  local pipelinerun_json="$4"
+  local mocks_yaml="${tests_dir}/mocks.yaml"
+  local mock_host mock_bind pipeline_task
+
+  [[ -f "$mocks_yaml" ]] || { echo "$pipelinerun_json"; return 0; }
+
+  mock_host=$(yq -r '.services[0].hostname // ""' "$mocks_yaml")
+  mock_bind=$(yq -r '.services[0].bind // "127.0.0.1"' "$mocks_yaml")
+  if [[ -z "$mock_host" || "$mock_host" == "null" || "$mock_host" == "$mock_bind" ]]; then
+    echo "$pipelinerun_json"
+    return 0
+  fi
+
+  pipeline_task=$(
+    yq -r ".spec.tasks[] | select(.taskRef.name == \"${task_name}\") | .name" \
+      "$test_path"
+  )
+  if [[ -z "$pipeline_task" || "$pipeline_task" == "null" ]]; then
+    echo "  Warning: mocks.yaml hostname set but no taskRef.name=${task_name} in ${test_path}" >&2
+    echo "$pipelinerun_json"
+    return 0
+  fi
+
+  echo "  Applying hostAliases ${mock_host} -> ${mock_bind} for pipeline task ${pipeline_task}" >&2
+  jq \
+    --arg task "$pipeline_task" \
+    --arg ip "$mock_bind" \
+    --arg host "$mock_host" \
+    '.spec.taskRunSpecs = [{
+      pipelineTaskName: $task,
+      podTemplate: {
+        hostAliases: [{
+          ip: $ip,
+          hostnames: [$host]
+        }]
+      }
+    }]' <<<"$pipelinerun_json"
+}
+
+needs_mock_host_aliases() {
+  local tests_dir="$1"
+  local mocks_yaml="${tests_dir}/mocks.yaml"
+  local mock_host mock_bind
+
+  [[ -f "$mocks_yaml" ]] || return 1
+  mock_host=$(yq -r '.services[0].hostname // ""' "$mocks_yaml")
+  mock_bind=$(yq -r '.services[0].bind // "127.0.0.1"' "$mocks_yaml")
+  [[ -n "$mock_host" && "$mock_host" != "null" && "$mock_host" != "$mock_bind" ]]
+}
+
 show_help() {
   echo "Usage: $0 [--remove-compute-resources] [--no-cleanup] [item1] [item2] [...]"
   echo
@@ -338,8 +394,26 @@ do
       sleep 5
     done
 
-    PIPELINERUNJSON=$(tkn p start --use-param-defaults $TEST_NAME ${ociStorageParam} ${dataDirParam} -w "name=tests-workspace,${workSpaceParams}" -o json)
-    PIPELINERUN=$(jq -r '.metadata.name' <<< "${PIPELINERUNJSON}")
+    if needs_mock_host_aliases "$TESTS_DIR"; then
+      PIPELINERUNJSON=$(
+        tkn p start --dry-run --use-param-defaults "$TEST_NAME" \
+          ${ociStorageParam} ${dataDirParam} \
+          -w "name=tests-workspace,${workSpaceParams}" -o json
+      )
+      PIPELINERUNJSON=$(
+        apply_mock_host_aliases_to_pipelinerun_spec \
+          "$TESTS_DIR" "$TEST_PATH" "$TASK_NAME" "$PIPELINERUNJSON"
+      )
+      CREATED_PRLINE=$(echo "$PIPELINERUNJSON" | kubectl create -f - -o json)
+      PIPELINERUN=$(jq -r '.metadata.name' <<< "${CREATED_PRLINE}")
+    else
+      PIPELINERUNJSON=$(
+        tkn p start --use-param-defaults "$TEST_NAME" \
+          ${ociStorageParam} ${dataDirParam} \
+          -w "name=tests-workspace,${workSpaceParams}" -o json
+      )
+      PIPELINERUN=$(jq -r '.metadata.name' <<< "${PIPELINERUNJSON}")
+    fi
 
     echo "  Started pipelinerun $PIPELINERUN"
     sleep 1  # allow a second for the pr object to appear (including a status condition)

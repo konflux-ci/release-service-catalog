@@ -121,96 +121,26 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: close-issues
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:7080de2cf6b6e26faf962698dedbc3afed98636d75ff07dacb524b64c8c42f95
       computeResources:
         limits:
-          memory: 32Mi
+          memory: 128Mi
         requests:
-          memory: 32Mi
+          memory: 128Mi
           cpu: 100m
       volumeMounts:
         - name: access-token-secret-vol
           mountPath: "/etc/secrets"
-      script: |
-        #!/usr/bin/env bash
-        # We do not set -x here because it would leak the ACCESS_TOKEN
-        set -eu
-
-        ACCESS_TOKEN="$(cat /etc/secrets/token)"
-        EMAIL="$(cat /etc/secrets/email)"
-
-        ISSUE_TRACKERS='{
-            "Jira": {
-                "api": "rest/api/2/issue",
-                "servers": [
-                    "issues.redhat.com",
-                    "jira.atlassian.com",
-                    "redhat.atlassian.net"
-                ]
-            },
-            "bugzilla": {
-                "api": "rest/bug",
-                "servers": [
-                    "bugzilla.redhat.com"
-                ]
-            }
-        }'
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No data JSON was provided."
-            exit 1
-        fi
-
-        NUM_ISSUES=$(jq -cr '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
-        for ((i = 0; i < NUM_ISSUES; i++)); do
-            issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
-            server=$(jq -r '.source' <<< "$issue")
-            if [ "$server" = "issues.redhat.com" ] ; then
-                server=redhat.atlassian.net
-            fi
-            if [ "$server" != "redhat.atlassian.net" ] ; then
-                echo "This task currently only supports closing issues on issues.redhat.com"
-                echo "and redhat.atlassian.net. Skipping issue $issue as it is on $server"
-                continue
-            fi
-
-            CURL_ARGS=(-u "${EMAIL}:${ACCESS_TOKEN}")
-
-            API=$(jq -r '.[] | select(.servers[] | contains("'"$server"'")) | .api' <<< "$ISSUE_TRACKERS")
-            API_URL="https://${server}/${API}/$(jq -r '.id' <<< "$issue")"
-
-            if [ "$(curl-with-retry "${CURL_ARGS[@]}" "${API_URL}" | jq -r '.fields.status.name')" == "Closed" ] ; then
-                echo "Issue $issue is already in Closed state. Skipping it."
-                continue
-            fi
-
-            echo "Closing issue $issue"
-            CLOSE_COMMENT="Fixed in Konflux Advisory $(params.advisoryUrl)"
-            CLOSING_RC=0
-            # Get the Closed transition id. This varies per Jira project
-            if ! CLOSED_ID="$(curl-with-retry "${CURL_ARGS[@]}" "${API_URL}/transitions" \
-              | jq -er '.transitions[] | select(.name=="Closed") | .id')"; then
-                echo "Warning: failed to fetch the closed state id for issue $issue. We most likely do not have" \
-                  "permission to close it. Will try to add a comment instead."
-                CLOSING_RC=1
-            # Close the issue
-            elif ! curl-with-retry "${CURL_ARGS[@]}" -XPOST --data \
-              '{"transition":{"id":"'"$CLOSED_ID"'"},"update":{"comment":[{"add":{"body":"'"$CLOSE_COMMENT"'"}}]}}' \
-              -H "Content-Type: application/json" "${API_URL}/transitions"; then
-                echo "Warning: failed to close issue $issue. Will try to add a comment instead."
-                CLOSING_RC=1
-            fi
-
-            if [ "$CLOSING_RC" -ne 0 ] ; then
-                # Try to add the comment even if closing failed
-                if ! curl-with-retry "${CURL_ARGS[@]}" -XPOST --data \
-                  '{"body":"'"$CLOSE_COMMENT"'"}' \
-                  -H "Content-Type: application/json" "${API_URL}/comment"; then
-                    echo "Warning: failed to add comment to issue $issue."
-                fi
-            fi
-        done
+      env:
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+        - name: PARAM_DATA_PATH
+          value: $(params.dataPath)
+        - name: PARAM_ADVISORY_URL
+          value: $(params.advisoryUrl)
+        - name: JIRA_SECRET_PATH
+          value: /etc/secrets
+      command: ["/home/scripts/python/tasks/managed/close_advisory_issues.py"]
     - name: create-trusted-artifact
       computeResources:
         limits:

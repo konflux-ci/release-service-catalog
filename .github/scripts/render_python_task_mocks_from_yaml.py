@@ -173,14 +173,6 @@ def _render_http_json(svc: dict[str, Any]) -> str:
         "",
     ]
 
-    if use_tls:
-        lines += [
-            'export SSL_CERT_FILE="/tmp/mock-ca.crt"',
-            'export REQUESTS_CA_BUNDLE="/tmp/mock-ca.crt"',
-            'export CURL_CA_BUNDLE="/tmp/mock-ca.crt"',
-            "",
-        ]
-
     mock_server_for_env_var = svc.get("mock_server_for_env_var")
     if mock_server_for_env_var is not None:
         if not isinstance(mock_server_for_env_var, str) or not _ENV_SAFE.match(
@@ -239,6 +231,33 @@ def _render_http_json(svc: dict[str, Any]) -> str:
             "",
         ]
     return "\n".join(lines)
+
+
+def _render_tls_task_entrypoint_exec() -> str:
+    """Run TASK_ENTRYPOINT after configuring TLS trust for mock HTTPS."""
+    return r"""exec python3 - "${TASK_ENTRYPOINT[@]}" <<'PY'
+import os
+import sys
+import tempfile
+
+ca = os.environ.get("TEKTON_MOCK_CA_CERT_PATH", "")
+if ca and os.path.isfile(ca):
+    bundle = ca
+    system_ca = "/etc/pki/tls/certs/ca-bundle.crt"
+    if os.path.isfile(system_ca):
+        fd, bundle = tempfile.mkstemp(suffix=".crt")
+        os.close(fd)
+        with open(bundle, "wb") as out:
+            with open(system_ca, "rb") as handle:
+                out.write(handle.read())
+            with open(ca, "rb") as handle:
+                out.write(handle.read())
+    os.environ["SSL_CERT_FILE"] = bundle
+    os.environ["REQUESTS_CA_BUNDLE"] = bundle
+    os.environ["CURL_CA_BUNDLE"] = bundle
+
+os.execvp(sys.argv[1], sys.argv[1:])
+PY"""
 
 
 def _render_mock_binaries_from_dir(tests_dir: Path) -> str:
@@ -322,11 +341,19 @@ def render(tests_dir: Path) -> str:
         _die("at most one http_json service (v1)")
 
     parts: list[str] = []
+    use_tls_entrypoint = False
     if http_svcs:
-        parts.append(_render_http_json(http_svcs[0]))
+        svc = http_svcs[0]
+        parts.append(_render_http_json(svc))
+        use_tls_entrypoint = bool(svc.get("tls", False)) and svc.get(
+            "rewrite_ca_cert_env"
+        ) is None
     parts.append(_render_mock_binaries_from_dir(tests_dir))
     parts.append(_render_python_module_mocks_from_dir(tests_dir))
-    parts.append('exec "${TASK_ENTRYPOINT[@]}"')
+    if use_tls_entrypoint:
+        parts.append(_render_tls_task_entrypoint_exec())
+    else:
+        parts.append('exec "${TASK_ENTRYPOINT[@]}"')
     return "\n".join(p for p in parts if p)
 
 
