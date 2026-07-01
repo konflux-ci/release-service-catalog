@@ -155,11 +155,16 @@ def main() -> None:
     bind = os.environ.get("TEKTON_HTTP_BIND", "127.0.0.1")
     routes = _routes_from_env()
     _Handler.routes = routes
-    server = _ReuseHTTPServer((bind, port), _Handler)
 
+    cert_path: str | None = None
+    key_path: str | None = None
     if os.environ.get("TEKTON_MOCK_TLS") == "1":
         hostname = os.environ.get("TEKTON_MOCK_HOSTNAME")
         cert_path, key_path, _ca = _generate_self_signed_cert(bind, hostname)
+
+    server = _ReuseHTTPServer((bind, port), _Handler)
+
+    if cert_path is not None and key_path is not None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert_path, key_path)
         server.socket = ctx.wrap_socket(server.socket, server_side=True)
