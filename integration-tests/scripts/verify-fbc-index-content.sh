@@ -29,6 +29,15 @@ echo "🔍 Verifying published FBC index content"
 echo "  target_index:  ${target_index}"
 echo "  fbc_fragment:  ${fbc_fragment}"
 echo "  cache_dir:     ${OPM_CACHE_DIR}"
+echo "  DEBUG: hostname=$(hostname 2>/dev/null || echo unknown)"
+echo "  DEBUG: uname=$(uname -m 2>/dev/null || echo unknown)"
+echo "  DEBUG: opm=$(command -v opm 2>/dev/null || echo 'NOT FOUND')"
+if command -v opm &>/dev/null; then
+    echo "  DEBUG: opm version=$(opm version 2>&1 | head -1)"
+    echo "  DEBUG: opm file type=$(file "$(command -v opm)" 2>/dev/null | head -1)"
+fi
+echo "  DEBUG: policy.json exists=$(test -f /etc/containers/policy.json && echo YES || echo NO)"
+echo "  DEBUG: memory=$(cat /proc/meminfo 2>/dev/null | grep MemAvailable | head -1 || echo 'N/A')"
 
 setup_registry_auth "${managed_secrets_yaml}" || {
     echo "🔴 Cannot set up registry credentials — unable to verify published index"

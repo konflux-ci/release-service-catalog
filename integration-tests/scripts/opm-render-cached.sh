@@ -89,8 +89,28 @@ opm_render_cached() {
     fi
 
     echo "  Rendering: ${image_ref}..." >&2
-    if ! opm render "${image_ref}" > "${cache_file}" 2>&1; then
-        echo "🔴 opm render failed for: ${image_ref}" >&2
+    echo "  DEBUG: opm path=$(command -v opm) version=$(opm version 2>&1 | head -1)" >&2
+    echo "  DEBUG: DOCKER_CONFIG=${DOCKER_CONFIG:-unset}" >&2
+    echo "  DEBUG: cache_file=${cache_file}" >&2
+    if [ -n "${DOCKER_CONFIG:-}" ] && [ -f "${DOCKER_CONFIG}/config.json" ]; then
+        echo "  DEBUG: config.json exists ($(wc -c < "${DOCKER_CONFIG}/config.json") bytes)" >&2
+    else
+        echo "  DEBUG: config.json NOT found at ${DOCKER_CONFIG:-unset}/config.json" >&2
+    fi
+
+    opm render "${image_ref}" > "${cache_file}" 2>&1
+    local opm_exit=$?
+
+    if [ $opm_exit -ne 0 ]; then
+        echo "🔴 opm render failed for: ${image_ref} (exit code: ${opm_exit})" >&2
+        if [ $opm_exit -gt 128 ]; then
+            echo "  Killed by signal: $((opm_exit - 128)) (e.g. 9=SIGKILL/OOM, 11=SIGSEGV)" >&2
+        fi
+        local file_size=0
+        if [ -f "${cache_file}" ]; then
+            file_size=$(wc -c < "${cache_file}")
+        fi
+        echo "  Cache file size: ${file_size} bytes" >&2
         echo "  Error (first 10 lines):" >&2
         head -10 "${cache_file}" | sed 's/^/    /' >&2
         rm -f "${cache_file}"
