@@ -49,7 +49,7 @@ apply_python_command_mocks_merge() {
     for w in "${entrypoint_argv[@]}"; do
       joined+=" $w"
     done
-    [[ "$joined" == *".py"* ]] || continue
+    [[ "$joined" == *".py"* ]] || [[ "$joined" == *"python"*" -m "* ]] || continue
 
     if [[ -f "$mocks_yaml" ]]; then
       echo "  Merging tests/mocks.yaml into step $i (Python entrypoint) for task tests"
