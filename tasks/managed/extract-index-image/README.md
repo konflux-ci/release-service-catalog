@@ -1,15 +1,11 @@
 # extract-index-image
 
-Extract the index image fields from the inputDataFile
-
-The inputDataFile is a result from another task which includes the workspace name in it. Thus,
-the workspace name for this task *must* be input.
+Extract the index image fields from the internalRequestResultsFile
 
 ## Parameters
 
 | Name                       | Description                                                                                                                | Optional | Default value        |
 |----------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|----------------------|
-| inputDataFile              | Result from another task which includes the workspace name in it                                                           | No       | -                    |
 | resultsDirPath             | Path to the results directory in the data workspace                                                                        | No       | -                    |
 | internalRequestResultsFile | Path to the results file of the InternalRequest build result                                                               | No       | -                    |
 | ociStorage                 | The OCI repository where the Trusted Artifacts are stored                                                                  | Yes      | empty                |
