@@ -22,64 +22,84 @@ were_all_components_filtered() {
     is_task_skipped "${release_name}" "push-snapshot"
 }
 
-# Verify a single release has valid artifacts and image can be pulled
+# Verify a release has valid artifacts for all components and images can be pulled
 verify_single_release() {
     local release_name=$1
     echo "Verifying Release contents for ${release_name}..."
 
     local release_json
     release_json=$(get_release_json "${release_name}")
-    if [ -z "$release_json" ]; then
+    if [ -z "${release_json}" ]; then
         log_error "Could not retrieve Release JSON for ${release_name}"
     fi
 
     local failures=0
-    local image_url image_arch image_shasum
+    local expected_count
+    expected_count=$(echo "${PTSV_COMPONENTS}" | wc -w)
 
-    image_url=$(jq -r '.status.artifacts.images[0]?.urls[0] // ""' <<< "${release_json}")
-    image_arch=$(jq -r '.status.artifacts.images[0]?.arches[0] // ""' <<< "${release_json}")
-    image_shasum=$(jq -r '.status.artifacts.images[0]?.shasum // ""' <<< "${release_json}")
+    local image_count
+    image_count=$(jq -r '.status.artifacts.images | length' <<< "${release_json}")
 
-    echo "Checking Image URL..."
-    if [ -n "${image_url}" ]; then
-        echo "✅️ image_url: ${image_url}"
+    echo "Checking image count (expected ${expected_count} components)..."
+    if [ "${image_count}" -ge "${expected_count}" ]; then
+        echo "✅️ Found ${image_count} image entries (expected at least ${expected_count})"
     else
-        echo "🔴 image_url was empty"
+        echo "🔴 Found only ${image_count} image entries, expected at least ${expected_count}"
         failures=$((failures+1))
     fi
 
-    echo "Checking Image Arch..."
-    if [ -n "${image_arch}" ]; then
-        echo "✅️ image_arch: ${image_arch}"
-    else
-        echo "🔴 image_arch was empty"
-        failures=$((failures+1))
-    fi
+    echo ""
+    echo "Verifying each image artifact..."
+    for i in $(seq 0 $((image_count - 1))); do
+        local image_url image_arch image_shasum
+        image_url=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
+        image_arch=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.arches[0] // ""' <<< "${release_json}")
+        image_shasum=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
 
-    echo "Checking Image Shasum..."
-    if [ -n "${image_shasum}" ]; then
-        echo "✅️ image_shasum: ${image_shasum}"
-    else
-        echo "🔴 image_shasum was empty"
-        failures=$((failures+1))
-    fi
+        echo "Image ${i}:"
+        if [ -n "${image_url}" ]; then
+            echo "  ✅️ url: ${image_url}"
+        else
+            echo "  🔴 url was empty"
+            failures=$((failures+1))
+        fi
 
-    echo "Verifying image pullability with skopeo..."
-    set +e
-    "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
-        "${image_url}" "${image_shasum}" \
-        "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
-    skopeo_return_code=$?
-    set -e
-    if [ "${skopeo_return_code}" -ne 0 ]; then
-        failures=$((failures+1))
-    fi
+        if [ -n "${image_arch}" ]; then
+            echo "  ✅️ arch: ${image_arch}"
+        else
+            echo "  🔴 arch was empty"
+            failures=$((failures+1))
+        fi
+
+        if [ -n "${image_shasum}" ]; then
+            echo "  ✅️ shasum: ${image_shasum}"
+        else
+            echo "  🔴 shasum was empty"
+            failures=$((failures+1))
+        fi
+
+        if [ -n "${image_url}" ] && [ -n "${image_shasum}" ]; then
+            echo "  Verifying image pullability with skopeo..."
+            set +e
+            "${SUITE_DIR}/../scripts/skopeo-verify-image.sh" \
+                "${image_url}" "${image_shasum}" \
+                "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml"
+            local skopeo_return_code=$?
+            set -e
+            if [ "${skopeo_return_code}" -ne 0 ]; then
+                echo "  🔴 skopeo verification failed"
+                failures=$((failures+1))
+            else
+                echo "  ✅️ image is pullable"
+            fi
+        fi
+    done
 
     if [ "${failures}" -gt 0 ]; then
         echo "🔴 Release verification FAILED with ${failures} failure(s)!"
         return 1
     else
-        echo "✅️ All release checks passed."
+        echo "✅️ All release checks passed for ${image_count} image(s)."
         return 0
     fi
 }
@@ -189,14 +209,17 @@ EOF
         log_error "Releases report different artifacts: ${artifacts_1} vs ${artifacts_2}"
     fi
 
+    local component_count
+    component_count=$(echo "${PTSV_COMPONENTS}" | wc -w)
+
     echo ""
     echo "════════════════════════════════════════════════════════════════════"
     echo "  ✅ IDEMPOTENT RELEASE TEST PASSED"
     echo "════════════════════════════════════════════════════════════════════"
     echo ""
     echo "Summary:"
-    echo "  • First release pushed 1 component"
-    echo "  • Second release filtered component (already released)"
+    echo "  • First release pushed ${component_count} component(s)"
+    echo "  • Second release filtered all components (already released)"
     echo "  • Artifact consistency: Verified"
     echo "  • Idempotent behavior: ✅ CONFIRMED"
     echo ""
