@@ -324,35 +324,59 @@ resolve_symlinks_for_kustomize() {
 # Modifies global variable: tmpDir
 # Relies on global variables: SUITE_DIR
 create_kubernetes_resources() {
-    echo "Creating Kubernetes resources..."
-    # tmpDir is made global by not declaring it local
-    tmpDir=$(mktemp -d)
-    echo "Temporary directory for resources: ${tmpDir}"
+    orig_component_name=${component_name}
+    orig_component_repo_name=${component_repo_name}
+    orig_component_branch=${component_branch}
+    orig_pr_number=${pr_number}
+    orig_component_git_url=${component_git_url}
 
-    # Resolve symlinks in resources directories for kustomize compatibility
-    # This allows tests to use symlinks to share resources while maintaining
-    # compatibility with kustomize's security restrictions
-    echo "Resolving symlinks in resources directories..."
-    resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/tenant" "$tmpDir/tenant"
-    resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/managed" "$tmpDir/managed"
+    for component in $PTSV_COMPONENTS; do
+        local _v="${component}_name"
+        export component_name="${!_v}"
+        _v="${component}_repo_name"
+        export component_repo_name="${!_v}"
+        _v="${component}_pr_number"
+        export pr_number="${!_v}"
+        _v="${component}_branch"
+        export component_branch="${!_v}"
+        _v="${component}_git_url"
+        export component_git_url="${!_v}"
 
-    # Apply infrastructure secrets first (if they exist) - these persist across test runs
-    local managed_infra_secrets_file="$tmpDir/managed/secrets/managed-infra-secrets.yaml"
-    if [ -f "${managed_infra_secrets_file}" ]; then
-        echo "Applying infrastructure secrets (these persist across test runs)..."
-        envsubst < "${managed_infra_secrets_file}" > "$tmpDir/managed-infra-resources.yaml"
-        kubectl apply -f "$tmpDir/managed-infra-resources.yaml" -n "${managed_namespace}"
-    fi
+        echo "Creating Kubernetes resources..."
+        # tmpDir is made global by not declaring it local
+        tmpDir=$(mktemp -d)
+        echo "Temporary directory for resources: ${tmpDir}"
 
-    echo "Building and applying tenant resources..."
-    kustomize build "$tmpDir/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
-    kubectl create -f "$tmpDir/tenant-resources.yaml"
+        # Resolve symlinks in resources directories for kustomize compatibility
+        # This allows tests to use symlinks to share resources while maintaining
+        # compatibility with kustomize's security restrictions
+        echo "Resolving symlinks in resources directories..."
+        resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/tenant" "$tmpDir/tenant"
+        resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/managed" "$tmpDir/managed"
 
-    echo "Building and applying managed resources..."
-    kustomize build "$tmpDir/managed" | envsubst > "$tmpDir/managed-resources.yaml"
-    kubectl apply -f "$tmpDir/managed-resources.yaml"
+        # Apply infrastructure secrets first (if they exist) - these persist across test runs
+        local managed_infra_secrets_file="$tmpDir/managed/secrets/managed-infra-secrets.yaml"
+        if [ -f "${managed_infra_secrets_file}" ]; then
+            echo "Applying infrastructure secrets (these persist across test runs)..."
+            envsubst < "${managed_infra_secrets_file}" > "$tmpDir/managed-infra-resources.yaml"
+            kubectl apply -f "$tmpDir/managed-infra-resources.yaml" -n "${managed_namespace}"
+        fi
 
-    echo "Kubernetes resources applied."
+        echo "Building and applying tenant resources..."
+        kustomize build "$tmpDir/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
+        kubectl create -f "$tmpDir/tenant-resources.yaml"
+
+        echo "Building and applying managed resources..."
+        kustomize build "$tmpDir/managed" | envsubst > "$tmpDir/managed-resources.yaml"
+        kubectl apply -f "$tmpDir/managed-resources.yaml"
+
+        echo "Kubernetes resources applied."
+    done
+    export component_name=${orig_component_name}
+    export component_repo_name=${orig_component_repo_name}
+    export component_branch=${orig_component_branch}
+    export pr_number=${orig_pr_number}
+    export component_git_url=${orig_component_git_url}
 }
 
 # Fetch build.appstudio.openshift.io/status from a Component (stdout). Returns 1 if kubectl fails.
@@ -1010,7 +1034,7 @@ patch_components_source_before_merge() {
     for component in $PTSV_COMPONENTS; do
         local _v="${component}_name"
         local component_name="${!_v}"
-        _v="${component}_repo_name"
+        _v="${component}_repo_name"patch_components_source_before_merge
         local component_repo_name="${!_v}"
         _v="${component}_pr_number"
         local pr_number="${!_v}"
