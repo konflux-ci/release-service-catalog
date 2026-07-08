@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
@@ -21,6 +22,15 @@ kubectl create secret generic test-ca \
   --from-literal=client-key.password="testpass" \
   --from-literal=mrrc-signing.crt="testca"
 
-# Add mocks to the beginning of scripts
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+kubectl delete configmap test-use-custom-ca-cert --ignore-not-found
+kubectl create configmap test-use-custom-ca-cert --from-literal=cert=mycert
+
+# Python entrypoint mocks are merged from tests/mocks.yaml and tests/mocks/ by
+# test_tekton_tasks.sh (see CONTRIBUTING.md).
+#
+# Bash script steps need mocks injected via yq prepend.
+# Step 0: use-trusted-artifact (ref - no script)
+# Step 1: prepare-repo (Python entrypoint - uses mocks.yaml)
+# Step 2: upload-npm-archive (bash script - needs yq mock injection)
+# Step 3: create-trusted-artifact (ref - no script)
+yq -i '.spec.steps[2].script = load_str("'"$SCRIPT_DIR"'/mocks_upload.sh") + .spec.steps[2].script' "$TASK_PATH"
