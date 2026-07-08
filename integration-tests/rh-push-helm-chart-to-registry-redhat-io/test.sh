@@ -113,14 +113,14 @@ verify_release_contents() {
         "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${DOCKER_CONFIG}/config.json"
 
     # Helm OCI artifacts require --raw (mediaType is application/vnd.cncf.helm.config.v1+json)
-    if skopeo inspect --tls-verify=true --raw "docker://${COMPLETE_PULLSPEC}" 2>/dev/null | \
+    if skopeo inspect --tls-verify=true --raw --retry-times 3 "docker://${COMPLETE_PULLSPEC}" 2>/dev/null | \
         jq -e '.config.mediaType == "application/vnd.cncf.helm.config.v1+json"' &>/dev/null; then
         echo "✅️ Helm OCI artifact '$COMPLETE_PULLSPEC' verified with skopeo inspect --raw."
-    elif skopeo inspect --tls-verify=true "docker://${COMPLETE_PULLSPEC}" &>/dev/null; then
+    elif skopeo inspect --tls-verify=true --retry-times 3 "docker://${COMPLETE_PULLSPEC}" &>/dev/null; then
         echo "✅️ Image '$COMPLETE_PULLSPEC' can be inspected with skopeo inspect."
     else
         echo "🔴 Failed to inspect '$COMPLETE_PULLSPEC' as Helm OCI artifact or container image."
-        skopeo inspect --tls-verify=true --raw "docker://${COMPLETE_PULLSPEC}" | head -c 500 || true
+        skopeo inspect --tls-verify=true --raw --retry-times 3 "docker://${COMPLETE_PULLSPEC}" | head -c 500 || true
         failures=$((failures+1))
     fi
 
