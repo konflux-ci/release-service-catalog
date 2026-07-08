@@ -559,7 +559,10 @@ wait_for_plrs_to_appear() {
     local start_time=$(date +%s)
     local current_time
     local elapsed_time
-    declare -gA appeared_plrs=()
+    # Only declare appeared_plrs if it doesn't exist (preserve existing entries during retry)
+    if [ -z "${appeared_plrs+x}" ]; then
+        declare -gA appeared_plrs=()
+    fi
     local count=$(echo "$PTSV_COMPONENTS" | wc -w)
 
     echo -n "Waiting for PipelineRun to appear"
