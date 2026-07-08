@@ -61,7 +61,7 @@ verify_release_contents() {
         "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${AUTH_FILE}"
 
     for arch in amd64 arm64; do
-        if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true \
+        if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true --retry-times 3 \
                 "docker://${image_pullspec}" > /dev/null 2>&1; then
             echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_pullspec}"
         else

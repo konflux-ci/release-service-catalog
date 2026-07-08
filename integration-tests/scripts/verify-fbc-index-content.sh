@@ -89,7 +89,7 @@ if command -v opm &>/dev/null; then
 
 elif command -v skopeo &>/dev/null; then
     echo "⚠️  opm not available, falling back to skopeo inspect"
-    if skopeo inspect --tls-verify=true "docker://${target_index}" &>/dev/null; then
+    if skopeo inspect --tls-verify=true --retry-times 3 "docker://${target_index}" &>/dev/null; then
         echo "✅ Published index image is pullable (skopeo inspect passed)"
     else
         echo "🔴 Published index image is NOT pullable"
