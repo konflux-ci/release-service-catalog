@@ -128,206 +128,31 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: check-issues
-      image: quay.io/konflux-ci/release-service-utils@sha256:0e30ef7b9cf668e8691ae55d04766ae9b8ca2be7e0fa9233227689c1d60a1b96
+    - name: embargo-check
+      image: quay.io/konflux-ci/release-service-utils@sha256:b42578b8eda9853aaac89353d184358abfff8e117c95ab6981658a0f04bf7d32
       computeResources:
         limits:
-          memory: 64Mi
+          memory: 768Mi
         requests:
-          memory: 64Mi
-          cpu: 50m
+          memory: 768Mi
+          cpu: 200m
       volumeMounts:
         - name: access-token-secret-vol
           mountPath: "/etc/secrets"
-      script: |
-        #!/usr/bin/env bash
-
-        ACCESS_TOKEN="$(cat /etc/secrets/token)"
-        EMAIL="$(cat /etc/secrets/email)"
-
-        set -x
-
-        SUPPORTED_ISSUE_TRACKERS='{
-            "Jira": {
-                "api": "rest/api/2/issue",
-                "servers": [
-                    "issues.redhat.com",
-                    "jira.atlassian.com",
-                    "redhat.atlassian.net"
-                ]
-            },
-            "bugzilla": {
-                "api": "rest/bug",
-                "servers": [
-                    "bugzilla.redhat.com"
-                ]
-            }
-        }'
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No data JSON was provided."
-            exit 1
-        fi
-
-        # It is expected for the custom field ids to remain stable, but to get them, you can do:
-        # curl -u "$email:$token" https://redhat.atlassian.net/rest/api/2/field and look for one with
-        # name "CVE ID"
-        CVE_FIELD="customfield_10667"
-
-        RC=0
-
-        NUM_ISSUES=$(jq -cr '.releaseNotes.issues.fixed | length' "${DATA_FILE}")
-        for ((i = 0; i < NUM_ISSUES; i++)); do
-            issue=$(jq -c --argjson i "$i" '.releaseNotes.issues.fixed[$i]' "${DATA_FILE}")
-            server=$(jq -r '.source' <<< "$issue")
-            if [ "$server" = "issues.redhat.com" ] ; then
-                server=redhat.atlassian.net
-            fi
-            API=$(jq -r '.[] | select(.servers[] | contains("'"$server"'")) | .api' <<< "$SUPPORTED_ISSUE_TRACKERS")
-            API_URL="https://${server}/${API}/$(jq -r '.id' <<< "$issue")"
-            AUTH_ARGS=()
-            set +x # We don't want to leak the ACCESS_TOKEN
-            if [ "$server" = "redhat.atlassian.net" ] ; then
-                AUTH_ARGS=(-u "${EMAIL}:${ACCESS_TOKEN}")
-                # Retry flaky 404s from Jira Cloud (same response as permission denied); opt-in via utils script.
-                OUTPUT=$(CURL_WITH_RETRY_RETRY_404=1 curl-with-retry --retry 3 "${AUTH_ARGS[@]}" "${API_URL}")
-            else
-                OUTPUT=$(curl-with-retry --retry 3 "${AUTH_ARGS[@]}" "${API_URL}")
-            fi
-            CURL_RC=$?
-            set -x
-            if [ "$CURL_RC" -ne 0 ] ; then
-                echo "Error: ${issue} is not visible. Assuming it is embargoed and stopping pipelineRun execution." \
-                    | tee -a /tmp/errors.txt
-                RC=1
-                continue
-            fi
-
-            # Public should be true if and only if the security field is null/missing and the issue is accessible
-            # without authentication. On Atlassian Cloud, the security field exists but is null for public issues.
-            # Also handle case where OUTPUT is empty (jq returns empty string).
-            public=false
-            SECURITY_VALUE=$(jq '.fields.security' <<< "$OUTPUT")
-
-            if [ -z "$SECURITY_VALUE" ] || [ "$SECURITY_VALUE" = "null" ]  ; then
-                echo "Checking if the issue is public - if not, curl will fail with error 401"
-                if curl-with-retry --retry 3 "${API_URL}" > /dev/null; then
-                    public=true
-                fi
-            fi
-
-            # Inject public key
-            jq --argjson i "$i" --argjson public $public '.releaseNotes.issues.fixed[$i].public = $public' \
-                "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-
-            # Perform additional checks only for issues on redhat.atlassian.net
-            if [ "$server" != "redhat.atlassian.net" ] ; then
-                continue
-            fi
-
-            # Perform cve id check only if the type is Vulnerability
-            ISSUE_TYPE=$(jq -r '.fields.issuetype.name' <<< "$OUTPUT")
-            if [ "$ISSUE_TYPE" != "Vulnerability" ] ; then
-                continue
-            fi
-
-            if jq -e '.releaseNotes.content.images' "$DATA_FILE" > /dev/null; then
-                CONTENT_TYPE=".releaseNotes.content.images"
-            elif jq -e '.releaseNotes.content.artifacts' "$DATA_FILE" > /dev/null; then
-                CONTENT_TYPE=".releaseNotes.content.artifacts"
-            else
-                echo "No content found under releaseNotes.content.images or .artifacts;"
-                continue
-            fi
-
-            CVE_ID=$(jq -r --arg field "$CVE_FIELD" '.fields[$field]' <<< "$OUTPUT")
-
-            if [ "$(jq --arg CVE "$CVE_ID" \
-              "$CONTENT_TYPE"' | map(.cves.fixed | has($CVE)) | any' \
-              < "$DATA_FILE")" != "true" ]; then
-                echo "Error: Issue $issue lists 'CVE ID' $CVE_ID" \
-                  "but that CVE is not present in the releaseNotes.content section for any image or artifact." \
-                  "This is likely due to CVE $CVE_ID not being provided in the releaseNotes.cves part of" \
-                  "your Release object." \
-                  | tee -a /tmp/errors.txt
-                RC=1
-                continue
-            fi
-
-        done
-
-        if [ "$RC" -ne 0 ] ; then
-            echo "Errors were found in the embargo check:"
-            cat /tmp/errors.txt
-        fi
-        exit $RC
-    - name: check-cves
-      image: quay.io/konflux-ci/release-service-utils@sha256:0e30ef7b9cf668e8691ae55d04766ae9b8ca2be7e0fa9233227689c1d60a1b96
-      computeResources:
-        limits:
-          memory: 512Mi
-        requests:
-          memory: 512Mi
-          cpu: 100m
-      script: |
-        #!/usr/bin/env bash
-        set -x
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No data JSON was provided."
-            exit 1
-        fi
-
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        if jq -e '.releaseNotes.content.images' "$DATA_FILE" > /dev/null; then
-            CONTENT_TYPE=".releaseNotes.content.images"
-        elif jq -e '.releaseNotes.content.artifacts' "$DATA_FILE" > /dev/null; then
-            CONTENT_TYPE=".releaseNotes.content.artifacts"
-        else
-            echo "No content found under releaseNotes.content.images or .artifacts;"
-        fi
-
-        CVES=$(jq -r "$CONTENT_TYPE"'[] | select(.cves.fixed) | .cves.fixed
-            | to_entries[] | .key' "${DATA_FILE}" | sort -u | tr "\n" " ")
-
-        if [[ ${CVES} == "" ]] ; then
-            echo "No CVEs found to check"
-            exit 0
-        fi
-
-        echo "Checking the following CVEs: ${CVES}"
-
-        IR_RESULT_FILE=$(mktemp)
-
-        requestTimeout=$(($(params.requestTimeout)+300))
-        pipelineTimeout=$(date -u -d @${requestTimeout} +"%Hh%Mm%Ss")
-        taskTimeout=$(date -u -d @"$(params.requestTimeout)" +"%Hh%Mm%Ss")
-        internal-request --pipeline "check-embargoed-cves" \
-            -p cves="${CVES}" \
-            -p taskGitUrl="$(params.taskGitUrl)" \
-            -p taskGitRevision="$(params.taskGitRevision)" \
-            -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-            -t "$(params.requestTimeout)" \
-            --pipeline-timeout "$pipelineTimeout" \
-            --task-timeout "$taskTimeout" \
-            -s true \
-            | tee "$IR_RESULT_FILE" || \
-            (grep "^\[" "$IR_RESULT_FILE" | jq . && exit 1)
-
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_RESULT_FILE")
-        echo "done (${internalRequest})"
-
-        results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
-        if [[ "$(echo "${results}" | jq -r '.result')" == "Success" ]]; then
-          echo "No embargoed CVEs found"
-        else
-          echo "The following CVEs are marked as embargoed:"
-          echo "${results}" | jq -cr '.embargoed_cves'
-          exit 1
-        fi
+      env:
+        - name: DATA_FILE
+          value: "$(params.dataDir)/$(params.dataPath)"
+        - name: JIRA_SECRET_PATH
+          value: "/etc/secrets"
+        - name: PIPELINE_RUN_UID
+          value: "$(params.pipelineRunUid)"
+        - name: REQUEST_TIMEOUT
+          value: "$(params.requestTimeout)"
+        - name: TASK_GIT_URL
+          value: "$(params.taskGitUrl)"
+        - name: TASK_GIT_REVISION
+          value: "$(params.taskGitRevision)"
+      command: ["python3", "-m", "embargo_check"]
     - name: create-trusted-artifact
       computeResources:
         limits:
