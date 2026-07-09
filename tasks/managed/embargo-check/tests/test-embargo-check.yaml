@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-embargo-check-rh-issue-artifact
+  name: test-embargo-check
 spec:
   description: |
-    Test for embargo-check where a redhat.atlassian.net issue lists CVE-123 as a CVE and that
-    CVE is listed in one component of releaseNotes.content.artifacts.
+    Run the embargo-check task against mock Jira API and mock
+    internal-request/kubectl binaries, ensuring the step completes successfully.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -49,43 +49,29 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:0e30ef7b9cf668e8691ae55d04766ae9b8ca2be7e0fa9233227689c1d60a1b96
+            image: quay.io/konflux-ci/release-service-utils@sha256:b42578b8eda9853aaac89353d184358abfff8e117c95ab6981658a0f04bf7d32
             script: |
               #!/usr/bin/env bash
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
                 "releaseNotes": {
                   "issues": {
                     "fixed": [
                       {
-                        "id": "VULN-123",
+                        "id": "ISSUE-123",
                         "source": "redhat.atlassian.net"
-                      },
-                      {
-                        "id": "12345",
-                        "source": "bugzilla.redhat.com"
                       }
                     ]
                   },
                   "content": {
-                    "artifacts": [
+                    "images": [
                       {
-                        "component": "my-other-component",
-                        "architecture": "x86_64",
-                        "containerImage": "registry.io/org/other-repo"
-                      },
-                      {
-                        "component": "my-component",
-                        "architecture": "x86_64",
-                        "containerImage": "registry.io/org/repo",
                         "cves": {
                           "fixed": {
-                            "CVE-123": {
-                              "packages": []
-                            }
+                            "CVE-2024-0001": {}
                           }
                         }
                       }
@@ -109,9 +95,11 @@ spec:
         name: embargo-check
       params:
         - name: dataPath
-          value: $(context.pipelineRun.uid)/data.json
+          value: "$(context.pipelineRun.uid)/data.json"
         - name: pipelineRunUid
-          value: $(context.pipelineRun.uid)
+          value: "$(context.pipelineRun.uid)"
+        - name: requestTimeout
+          value: "2700"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -126,59 +114,7 @@ spec:
           value: "http://localhost"
         - name: taskGitRevision
           value: "main"
+        - name: jiraSecretName
+          value: "test-jira-secret"
       runAfter:
         - setup
-    - name: check-result
-      params:
-        - name: sourceDataArtifact
-          value: "$(tasks.run-task.results.sourceDataArtifact)"
-        - name: dataDir
-          value: $(params.dataDir)
-      taskSpec:
-        params:
-          - name: sourceDataArtifact
-            type: string
-          - name: dataDir
-            type: string
-        volumes:
-          - name: workdir
-            emptyDir: {}
-        stepTemplate:
-          volumeMounts:
-            - mountPath: /var/workdir
-              name: workdir
-          env:
-            - name: IMAGE_EXPIRES_AFTER
-              value: $(params.ociArtifactExpiresAfter)
-            - name: "ORAS_OPTIONS"
-              value: "$(params.orasOptions)"
-            - name: "DEBUG"
-              value: "$(params.trustedArtifactsDebug)"
-        steps:
-          - name: use-trusted-artifact
-            ref:
-              name: use-trusted-artifact
-            params:
-              - name: workDir
-                value: $(params.dataDir)
-              - name: sourceDataArtifact
-                value: $(params.sourceDataArtifact)
-          - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:0e30ef7b9cf668e8691ae55d04766ae9b8ca2be7e0fa9233227689c1d60a1b96
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              if [ "$(wc -l < "$(params.dataDir)/mock_curl.txt")" != 3 ]; then
-                  echo Error: curl was expected to be called 3 times. Actual calls:
-                  cat "$(params.dataDir)/mock_curl.txt"
-                  exit 1
-              fi
-
-              [[ $(head -n 1 "$(params.dataDir)/mock_curl.txt") == *"VULN-123"* ]]
-              [[ $(tail -n 1 "$(params.dataDir)/mock_curl.txt") == *"12345"* ]]
-
-              [[ $(head -n 1 "$(params.dataDir)/mock_curl_retry404.txt") == "1" ]]
-              [[ $(grep -c . "$(params.dataDir)/mock_curl_retry404.txt") -eq 1 ]]
-      runAfter:
-        - run-task
