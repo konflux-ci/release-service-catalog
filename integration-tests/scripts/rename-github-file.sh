@@ -72,10 +72,53 @@ delete_file() {
 
 check_branch_exists() {
     local repo="$1" branch="$2" token="$3"
-    local response=$("$CURL_WITH_RETRY" --retry 3 --retry-all-errors -s \
-        -H "Authorization: token $token" -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/$repo/branches/$branch" 2>/dev/null || echo "")
-    [[ -n "$response" ]] && echo "$response" | jq -e '.name' >/dev/null 2>&1
+    local max_retries=3
+    local retry=0
+    local backoff=1
+
+    while [[ $retry -le $max_retries ]]; do
+        if [[ $retry -gt 0 ]]; then
+            log_info "Retry $retry/$max_retries after ${backoff}s backoff..." >&2
+            sleep "$backoff"
+            backoff=$((backoff * 2))
+        fi
+
+        local raw_response
+        raw_response=$(curl -sS -w "\n%{http_code}" \
+            -H "Authorization: token ${token}" \
+            -H "Accept: application/vnd.github.v3+json" \
+	    --retry 3 --retry-delay 2\
+            "https://api.github.com/repos/${repo}/branches/${branch}")
+
+        local http_code body
+        http_code=$(echo "$raw_response" | tail -n1)
+        body=$(echo "$raw_response" | head -n -1)
+
+        case "$http_code" in
+            200)
+                if echo "$body" | jq -e '.name' >/dev/null 2>&1; then
+                    return 0
+                fi
+                log_error "Unexpected response from branch API (HTTP 200 but no .name field)"
+                return 1
+                ;;
+            401|403)
+                local api_msg
+                api_msg=$(echo "$body" | jq -r '.message // empty' 2>/dev/null)
+                log_error "Authentication/authorization failure (HTTP ${http_code}): ${api_msg:-no details}"
+                return 1
+                ;;
+            404|429|5[0-9][0-9])
+                retry=$((retry + 1))
+                ;;
+            *)
+                log_error "Unexpected HTTP status ${http_code} from branch API"
+                return 1
+                ;;
+        esac
+    done
+
+    return 1
 }
 
 rename_file() {
