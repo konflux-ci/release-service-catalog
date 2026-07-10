@@ -19,65 +19,92 @@
 
 set -eo pipefail
 
-if [ -z $GH_TOKEN ] ; then
+if [ -z "${GH_TOKEN:-}" ]; then
   echo "error: missing env var GH_TOKEN"
   exit 1
 fi
 
 repo_name=$1
-if [ -z "$repo_name" ] ; then
+if [ -z "${repo_name}" ]; then
   echo "🔴 error: missing parameter repo_name"
   exit 1
 fi
 pr_number=$2
-if [ -z "$pr_number" ] ; then
+if [ -z "${pr_number}" ]; then
   echo "🔴 error: missing parameter pr_number"
   exit 1
 fi
 file_name=$3
-if [ -z "$file_name" ] ; then
+if [ -z "${file_name}" ]; then
   echo "🔴 error: missing parameter file_name"
   exit 1
 fi
 commit_msg=$4
-if [ -z "$commit_msg" ] ; then
+if [ -z "${commit_msg}" ]; then
   echo "🔴 error: missing parameter commit_msg"
   exit 1
 fi
-tmpFile=$(mktemp)
-
-encoded_contents="$5"
-if [ -z "$encoded_contents" ] ; then
+encoded_contents=$5
+if [ -z "${encoded_contents}" ]; then
   echo "🔴 error: missing parameter encoded_contents"
   exit 1
 fi
 
 echo "Updating an existing file ${file_name} in PR ${pr_number}"
-# Get PR head branch info
-pr_info=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
-  "https://api.github.com/repos/${repo_name}/pulls/${pr_number}")
+
+if ! pr_info=$(curl -sS --retry 3 --retry-all-errors --fail-with-body \
+    -H "Authorization: token ${GH_TOKEN}" \
+    "https://api.github.com/repos/${repo_name}/pulls/${pr_number}"); then
+  echo "🔴 error: GitHub API request failed when fetching PR ${pr_number} in ${repo_name}" >&2
+  [ -n "${pr_info}" ] && echo "${pr_info}" >&2
+  exit 1
+fi
+if ! jq -e . >/dev/null 2>&1 <<< "${pr_info}"; then
+  echo "🔴 error: non-JSON response when fetching PR ${pr_number}: ${pr_info}" >&2
+  exit 1
+fi
 head_branch=$(jq -r '.head.ref' <<< "${pr_info}")
 head_repo=$(jq -r '.head.repo.full_name' <<< "${pr_info}")
 
-# Get current file SHA
-file_sha=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
-  "https://api.github.com/repos/${head_repo}/contents/${file_name}?ref=${head_branch}" \
-  | jq -r '.sha')
+if ! contents_response=$(curl -sS --retry 3 --retry-all-errors --fail-with-body \
+    -H "Authorization: token ${GH_TOKEN}" \
+    "https://api.github.com/repos/${head_repo}/contents/${file_name}?ref=${head_branch}"); then
+  echo "🔴 error: GitHub API request failed when fetching ${file_name}" >&2
+  [ -n "${contents_response}" ] && echo "${contents_response}" >&2
+  exit 1
+fi
+if ! jq -e . >/dev/null 2>&1 <<< "${contents_response}"; then
+  echo "🔴 error: non-JSON response when fetching ${file_name}: ${contents_response}" >&2
+  exit 1
+fi
+file_sha=$(jq -r '.sha' <<< "${contents_response}")
 
-# Update the file
-response=$(curl -s -w "\n%{http_code}" -X PUT \
-  -H "Authorization: token ${GH_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "'"${commit_msg}"'",
-    "content": "'"${encoded_contents}"'",
-    "sha": "'"${file_sha}"'",
-    "branch": "'"${head_branch}"'"
-  }' \
-  "https://api.github.com/repos/${head_repo}/contents/${file_name}")
+if ! response=$(curl -sS --retry 3 -w "\n%{http_code}" -X PUT \
+    -H "Authorization: token ${GH_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "message": "'"${commit_msg}"'",
+      "content": "'"${encoded_contents}"'",
+      "sha": "'"${file_sha}"'",
+      "branch": "'"${head_branch}"'"
+    }' \
+    "https://api.github.com/repos/${head_repo}/contents/${file_name}"); then
+  echo "🔴 error: GitHub API request failed when updating ${file_name}" >&2
+  [ -n "${response}" ] && echo "${response}" >&2
+  exit 1
+fi
 
-code=$(echo "$response" | tail -n1)
-[[ "$code" == "200" ]] && { echo "✅️ file ${file_name} updated in PR ${pr_number}"; exit 0; }
-echo "🔴 error: Update failed: $3 (HTTP $code)"
-echo "$response" | head -n -1 | jq -r '.message // empty' 2>/dev/null
+code=$(echo "${response}" | tail -n1)
+body=$(echo "${response}" | sed '$d')
+if [[ "${code}" == "200" ]]; then
+  echo "✅️ file ${file_name} updated in PR ${pr_number}"
+  exit 0
+fi
+
+echo "🔴 error: Update failed: ${file_name} (HTTP ${code})" >&2
+if jq -e . >/dev/null 2>&1 <<< "${body}"; then
+  jq -r '.message // empty' <<< "${body}" >&2
+else
+  echo "${body}" >&2
+fi
 exit 1
