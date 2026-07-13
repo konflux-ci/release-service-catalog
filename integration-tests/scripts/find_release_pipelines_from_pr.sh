@@ -165,7 +165,7 @@ _emit_integration_testcase_string() {
         TEMP_MANAGED_PIPELINENAMES+=("push-artifacts-to-cdn")
         ;;
       "push-disk-images")
-        TEMP_MANAGED_PIPELINENAMES+=("push-disk-images-to-cdn")
+        TEMP_MANAGED_PIPELINENAMES+=("push-disk-images" "push-disk-images-to-cdn")
         ;;
       "request-advisory-oci-artifact")
         TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
