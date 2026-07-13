@@ -24,7 +24,6 @@ This is the Release Service Catalog - a collection of Tekton resources (Tasks, P
 ```bash
 yamllint .                                                # YAML style (120ch, --- start)
 gitlint --commits origin/development..HEAD                # Conventional commit format
-check-jsonschema --check-metaschema schema/dataKeys.json  # Schema validation
 pre-commit run --all-files                                # All hooks including vault encryption check
 ```
 
@@ -75,5 +74,4 @@ Run the full validation sequence:
 yamllint .
 gitlint --commits origin/development..HEAD
 pre-commit run --all-files
-check-jsonschema --check-metaschema schema/dataKeys.json
 ```

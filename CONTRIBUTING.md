@@ -398,12 +398,6 @@ but the catalog PR pairing process will be complete.
 * Pairing is typically only required for breaking changes, so once the catalog PR is merged, things are now in a broken state. This should be resolved ASAP by
 marking the release-service PR as ready, merging it, and promoting its results to the infra-deployments overlays.
 
-### Data Keys Schema
-
-This repository maintains a json schema for the data key used in various tasks in this repo. It is stored [here](schema/dataKeys.json).
-
-If your change adds or removes a key to the data file, the schema must be updated accordingly as part of your pull request.
-
 ### Checkton check
 
 This repository uses [checkton](https://github.com/chmeliik/checkton) to run [shellcheck](https://www.shellcheck.net) on the embedded shell in the Tekton resources.
