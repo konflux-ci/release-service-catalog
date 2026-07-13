@@ -346,11 +346,31 @@ create_kubernetes_resources() {
 
     echo "Building and applying tenant resources..."
     kustomize build "$tmpDir/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
-    kubectl create -f "$tmpDir/tenant-resources.yaml"
+    local max_retries=5
+    local attempt
+    for attempt in $(seq 1 "${max_retries}"); do
+        if kubectl create -f "$tmpDir/tenant-resources.yaml"; then
+            break
+        fi
+        if [ "${attempt}" -eq "${max_retries}" ]; then
+            log_error "kubectl create tenant resources failed after ${max_retries} attempts"
+        fi
+        echo "Retrying kubectl create tenant resources (attempt ${attempt}/${max_retries})..."
+        sleep "$((1 + RANDOM % 3))"
+    done
 
     echo "Building and applying managed resources..."
     kustomize build "$tmpDir/managed" | envsubst > "$tmpDir/managed-resources.yaml"
-    kubectl apply -f "$tmpDir/managed-resources.yaml"
+    for attempt in $(seq 1 "${max_retries}"); do
+        if kubectl apply -f "$tmpDir/managed-resources.yaml"; then
+            break
+        fi
+        if [ "${attempt}" -eq "${max_retries}" ]; then
+            log_error "kubectl apply managed resources failed after ${max_retries} attempts"
+        fi
+        echo "Retrying kubectl apply managed resources (attempt ${attempt}/${max_retries})..."
+        sleep "$((1 + RANDOM % 3))"
+    done
 
     echo "Kubernetes resources applied."
 }
