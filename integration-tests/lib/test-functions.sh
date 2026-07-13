@@ -220,6 +220,23 @@ cleanup_resources() {
         echo "Skipping Release CR cleanup: uuid or tenant_namespace not set" | tee -a "${cleanup_log_file}"
     fi
 
+    # Clean up ImageRepository objects created by the image controller for test components.
+    # These may have no ownerReferences, so they may not be cascade-deleted with the Component.
+    # Relies on PTSV_COMPONENTS so any component a suite adds is covered automatically.
+    if [ -n "$tenant_namespace" ]; then
+        for component in ${PTSV_COMPONENTS}; do
+            local _v="${component}_name"
+            local comp="${!_v}"
+            if [ -n "$comp" ]; then
+                echo "Deleting ImageRepository for component ${comp}..." | tee -a "${cleanup_log_file}"
+                kubectl delete imagerepository -n "${tenant_namespace}" \
+                    -l "appstudio.redhat.com/component=${comp}" \
+                    --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
+                    echo "Warning: Failed to delete ImageRepository for component ${comp}" | tee -a "${cleanup_log_file}"
+            fi
+        done
+    fi
+
     if [ -n "$advisory_yaml_dir" ] && [ -d "$advisory_yaml_dir" ]; then
         echo "Removing advisory YAML directory..." | tee -a "${cleanup_log_file}"
         rm -rf "${advisory_yaml_dir}" >> "${cleanup_log_file}" 2>&1
