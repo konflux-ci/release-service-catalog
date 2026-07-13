@@ -24,6 +24,7 @@ spec:
         Build Id that tha snapshot originated from
     - name: pipelineImage
       type: string
+      default: ""
       description: |
         The image url with koji (1.34 or higher), jq and kinit installed for
         running the push-rpm-to-koji task, please make sure you have such image
@@ -128,38 +129,20 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: pull-files-oras
-      # The pipelineImage will be fetching from get-secrets task with koji installed there
-      image: "$(params.pipelineImage)"
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
       computeResources:
         limits:
           memory: 512Mi
         requests:
           memory: 512Mi
           cpu: 250m
-      env:
-        - name: SNAPSHOT_SPEC_FILE
-          value: $(params.dataDir)/$(params.snapshotPath)
-        - name: DATA_FILE
-          value: $(params.dataDir)/$(params.dataPath)
       script: |
         #!/usr/bin/env bash
         set -euxo pipefail
 
-        NUM_COMPONENTS=$(jq '.components | length' "${SNAPSHOT_SPEC_FILE}")
         mkdir -p /var/workdir/results/ && cd /var/workdir/results/
-
-        for ((i = 0; i < NUM_COMPONENTS; i++))
-        do
-          component=$(jq -c --argjson i "$i" '.components[$i]' "${SNAPSHOT_SPEC_FILE}")
-          containerImage=$(jq -r '.containerImage' <<< "$component")
-
-          # The login serviceaccount should have the dockerconfig to pull the images.
-          # oras has very limited support for selecting the right auth entry,
-          # so create a custom auth file with just one entry
-          authFile=$(mktemp)
-          select-oci-auth "${containerImage}" > "$authFile"
-          oras pull --registry-config "$authFile" "$containerImage"
-        done
+        # Download test RPMs instead of pulling from container image
+        curl -O https://download-01.beak-001.prod.iad2.dc.redhat.com/brewroot/vol/rhel-9/packages/samba/4.23.4/1.el9/x86_64/samba-winbind-4.23.4-1.el9.x86_64.rpm
     - name: push-build-to-artifact-storage
       image: quay.io/redhat-user-workloads/artifact-storage-tenant/tooling/pulp-tool-container:latest
       computeResources:
@@ -201,7 +184,11 @@ spec:
 
         COMPONENT_GROUP=$(jq -r '.componentGroup' "${SNAPSHOT_SPEC_FILE}")
 
-        pulp-tool --config /etc/rok-access/cli.toml \
+        # Decode rok-storage secret from base64 to change the domain for testing
+        base64 -d /etc/rok-access/cli.toml > /tmp/cli.toml
+        sed -i 's/^domain = .*/domain = "konflux-direct-signing-test"/' /tmp/cli.toml
+
+        pulp-tool --config /tmp/cli.toml \
           --build-id "$(params.snapshotBuildId)" \
           --namespace "$(params.snapshotNamespace)" \
           upload --rpm-path "/var/workdir/results" \
