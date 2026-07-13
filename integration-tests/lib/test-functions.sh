@@ -381,7 +381,7 @@ fetch_component_build_status_annotation() {
 _wait_for_component_initialization() {
     echo "Waiting for component ${_component_name} in namespace ${tenant_namespace} to be initialized..."
 
-    local max_attempts=60  # 10 minutes with 10-second intervals
+    local max_attempts=60  # 20 minutes with 20-second intervals
     local attempt=1
     local component_annotations=""
     local initialization_success=false
@@ -392,8 +392,8 @@ _wait_for_component_initialization() {
       if ! component_annotations=$(fetch_component_build_status_annotation "${_component_name}"); then
         log_warning "Could not reach component ${_component_name} (kubectl get failed); retrying..."
         if [ $attempt -lt $max_attempts ]; then
-          echo "Waiting 10 seconds before retry..."
-          sleep 10
+          echo "Waiting 20 seconds before retry..."
+          sleep 20
         fi
         attempt=$((attempt + 1))
         continue
@@ -412,8 +412,8 @@ _wait_for_component_initialization() {
             break
         else
             log_warning "Could not get component PR from annotations: ${component_annotations}"
-            echo "Waiting 10 seconds before retry..."
-            sleep 10
+            echo "Waiting 20 seconds before retry..."
+            sleep 20
         fi
 
 
@@ -422,8 +422,8 @@ _wait_for_component_initialization() {
 
         # Wait before retrying (except on the last attempt)
         if [ $attempt -lt $max_attempts ]; then
-          echo "Waiting 10 seconds before retry..."
-          sleep 10
+          echo "Waiting 20 seconds before retry..."
+          sleep 20
         fi
       fi
 
