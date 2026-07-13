@@ -320,9 +320,6 @@ _accumulate_one_catalog_changed_path() {
   if echo "$file" | grep -q "^stepactions/"; then
     SELECT_ALL_TESTCASES=true
     return 1
-  elif [[ "$file" =~ ^schema/dataKeys.json$ ]] && [ -f "$file" ]; then
-    SELECT_ALL_TESTCASES=true
-    return 1
   elif echo "$file" | grep -q "^integration-tests/"; then
     # Check if the file is in lib/, scripts/, or is run-test.sh - these should trigger all test suites
     if echo "$file" | grep -q -E "^integration-tests/(lib|scripts)/|^integration-tests/run-test\.sh$"; then
