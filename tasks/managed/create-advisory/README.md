@@ -9,7 +9,6 @@ Only all `redhat-pending` or all `redhat-prod` repositories may be specified in 
 
 | Name                               | Description                                                                                                                | Optional | Default value                                       |
 |------------------------------------|----------------------------------------------------------------------------------------------------------------------------|----------|-----------------------------------------------------|
-| jsonKey                            | The json key containing the advisory data                                                                                  | Yes      | .releaseNotes                                       |
 | releasePlanAdmissionPath           | Path to the JSON string of the ReleasePlanAdmission in the data workspace                                                  | No       | -                                                   |
 | snapshotPath                       | Path to the JSON string of the Snapshot spec in the data workspace                                                         | No       | -                                                   |
 | dataPath                           | Path to the data JSON in the data workspace                                                                                | No       | -                                                   |
