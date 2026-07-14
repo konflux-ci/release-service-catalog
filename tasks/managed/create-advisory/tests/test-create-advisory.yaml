@@ -2,12 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-create-advisory-skip-purl-prepopulated
+  name: test-create-advisory
 spec:
   description: |
-    Assert that the update-purl step is skipped when all artifacts
-    already have real (non-placeholder) PURLs populated upstream,
-    such as Python wheel releases.
+    Happy-path smoke test for create-advisory. Verifies an InternalRequest is
+    created with the expected params (prod secrets for redhat-prod repos) and
+    that advisory_url is written to the task result and results file.
+    Other scenarios are covered by pytest in release-service-utils.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -52,96 +53,73 @@ spec:
             runAsUser: 1001
         steps:
           - name: create-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:26b772928384de22a94b6bde27cc7f881e0c9c5cf9d16df0f816853158658999
             script: |
               #!/usr/bin/env bash
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" << 'EOF'
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" << EOF
               {
                 "apiVersion": "appstudio.redhat.com/v1alpha1",
                 "kind": "ReleasePlanAdmission",
                 "metadata": {
-                  "name": "calunga-push-to-pulp-prod",
-                  "namespace": "rhtap-releng-tenant"
+                  "name": "test",
+                  "namespace": "default"
                 },
                 "spec": {
-                  "applications": ["my-python-app"],
-                  "policy": "calunga-policy",
+                  "applications": [
+                    "app"
+                  ],
+                  "policy": "policy",
                   "pipeline": {
                     "pipelineRef": {
                       "resolver": "git",
                       "params": [
                         {
                           "name": "url",
-                          "value": "https://github.com/konflux-ci/release-service-catalog.git"
+                          "value": "github.com"
                         },
                         {
                           "name": "revision",
-                          "value": "production"
+                          "value": "main"
                         },
                         {
                           "name": "pathInRepo",
-                          "value": "pipelines/managed/calunga-push-to-pulp/calunga-push-to-pulp.yaml"
+                          "value": "pipeline.yaml"
                         }
                       ]
-                    }
+                    },
+                    "serviceAccountName": "sa"
                   },
-                  "serviceAccountName": "release-calunga",
-                  "origin": "calunga-tenant"
+                  "origin": "dev"
                 }
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << 'EOF'
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
               {
-                "application": "my-python-app",
+                "componentGroup": "myapp",
                 "components": [
                   {
-                    "name": "my-package",
-                    "repository": "quay.io/redhat-prod/my-package"
+                    "name": "comp",
+                    "repository": "quay.io/redhat-prod/repo"
                   }
                 ]
               }
               EOF
 
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
-                "mapping": {
-                  "components": [
-                    {
-                      "name": "my-package",
-                      "contentType": "generic"
-                    }
-                  ]
-                },
                 "releaseNotes": {
-                  "product_name": "My Python Package",
-                  "product_version": "1.2.3",
-                  "product_id": [100],
-                  "type": "RHBA",
-                  "synopsis": "My Python Package 1.2.3 Release",
-                  "topic": "Python wheel release",
-                  "description": "This release provides my-package 1.2.3",
-                  "solution": "Install via pip",
-                  "references": [],
-                  "content": {
-                    "artifacts": [
-                      {
-                        "architecture": "noarch",
-                        "os": "any",
-                        "purl": "pkg:pypi/my-package@1.2.3",
-                        "component": "my-package"
-                      }
-                    ]
-                  }
+                  "type": "RHEA",
+                  "live_id": 1111,
+                  "allow_custom_live_id": true
                 },
                 "sign": {
                   "configMapName": "cm"
-                },
-                "intention": "production"
+                }
               }
               EOF
           - name: create-trusted-artifact
@@ -164,12 +142,12 @@ spec:
           value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
+        - name: environment
+          value: production
         - name: resultsDirPath
           value: "$(context.pipelineRun.uid)/results"
         - name: synchronously
           value: "false"
-        - name: request
-          value: "test-request"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: ociStorage
@@ -190,6 +168,8 @@ spec:
         - setup
     - name: check-result
       params:
+        - name: advisory_url
+          value: $(tasks.run-task.results.advisory_url)
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
@@ -198,6 +178,8 @@ spec:
         - run-task
       taskSpec:
         params:
+          - name: advisory_url
+            type: string
           - name: sourceDataArtifact
             type: string
           - name: dataDir
@@ -228,33 +210,93 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:26b772928384de22a94b6bde27cc7f881e0c9c5cf9d16df0f816853158658999
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -ex
 
-              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              # Count the number of InternalRequests
+              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
 
-              # Verify the PURL was NOT updated by create-advisory.
-              # When all artifacts already have real PURLs, update-purl should
-              # skip entirely and leave them unchanged.
-              PURL=$(jq -r '.releaseNotes.content.artifacts[0].purl' "$DATA_FILE")
-              EXPECTED_PURL="pkg:pypi/my-package@1.2.3"
-
-              if [ "$PURL" != "$EXPECTED_PURL" ]; then
-                echo "Error: PURL was modified when it should have been skipped"
-                echo "Expected: $EXPECTED_PURL"
-                echo "Got: $PURL"
+              # Check if the number of InternalRequests is as expected
+              if [ "$requestsCount" -ne 1 ]; then
+                echo "Unexpected number of InternalRequests. Expected: 1, Found: $requestsCount"
                 exit 1
               fi
 
-              echo "Success: PURL was correctly left unchanged for pre-populated artifacts"
+              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+
+              # Check if the 'pipelineRef' field contains the 'create-advisory' pipeline
+              if [[ "$(echo "$internalRequest" | jq -r '.spec.pipeline.pipelineRef.params[2].value' )" != \
+              "pipelines/internal/create-advisory"* ]]; then
+                echo "InternalRequest doesn't contain 'create-advisory' in 'pipeline' field"
+                exit 1
+              fi
+
+              # Check the componentGroup parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.componentGroup' )" != "myapp" ]; then
+                echo "InternalRequest has the wrong application parameter"
+                exit 1
+              fi
+
+              # Check the origin parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.origin' )" != "dev" ]; then
+                echo "InternalRequest has the wrong origin parameter"
+                exit 1
+              fi
+
+              # Check the advisory_json parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.advisory_json' | base64 -d | gunzip -c)" != \
+              '{"type":"RHEA","live_id":1111,"allow_custom_live_id":true}' ]; then
+                echo "InternalRequest has the wrong advisory_json parameter"
+                exit 1
+              fi
+
+              # Check the config_map_name parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.config_map_name' )" != "cm" ]; then
+                echo "InternalRequest has the wrong config_map_name parameter"
+                exit 1
+              fi
+
+              # Check the taskGitUrl parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.taskGitUrl' )" != "http://localhost" ]; then
+                echo "InternalRequest has the wrong taskGitUrl parameter"
+                exit 1
+              fi
+
+              # Check the taskGitRevision parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.taskGitRevision' )" != "main" ]; then
+                echo "InternalRequest has the wrong taskGitRevision parameter"
+                exit 1
+              fi
+
+              echo Test that the advisory_url result was properly set
+              test "$(params.advisory_url)" == "https://access.redhat.com/errata/RHBA-2025:1111"
+
+              echo Test that the advisory_url was properly added to the results file
+              test "$(jq -r '.advisory.url' \
+                "$(params.dataDir)/$(context.pipelineRun.uid)/results/create-advisory-results.json")" == \
+                "https://access.redhat.com/errata/RHBA-2025:1111"
+
+              # Check the advisory_secret_name parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.advisory_secret_name' )" != \
+                "create-advisory-prod-secret" ]; then
+                echo "InternalRequest has the wrong advisory_secret_name parameter"
+                exit 1
+              fi
+
+              # Check the errata_secret_name parameter
+              if [ "$(echo "$internalRequest" | jq -r '.spec.params.errata_secret_name' )" != \
+                "errata-prod-service-account" ]; then
+                echo "InternalRequest has the wrong errata_secret_name parameter"
+                exit 1
+              fi
   finally:
     - name: cleanup
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:26b772928384de22a94b6bde27cc7f881e0c9c5cf9d16df0f816853158658999
             script: |
               #!/usr/bin/env bash
               set -eux
