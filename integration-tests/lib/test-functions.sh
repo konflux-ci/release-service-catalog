@@ -13,6 +13,27 @@ log_warning() {
     echo "⚠️ Warning: $1"
 }
 
+# Retry wrapper for kubectl commands (handles transient conflicts on shared resources)
+kubectl_retry() {
+    local max_attempts=5
+    local wait_seconds=3
+    local attempt=1
+    local ret=0
+
+    while [ "${attempt}" -le "${max_attempts}" ]; do
+        ret=0
+        kubectl "$@" && return 0 || ret=$?
+        if [ "${attempt}" -lt "${max_attempts}" ]; then
+            echo "⚠️ kubectl $1 failed (attempt ${attempt}/${max_attempts}), retrying in ${wait_seconds}s..."
+            sleep "${wait_seconds}"
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    echo "❌ kubectl $1 failed after ${max_attempts} attempts"
+    return "${ret}"
+}
+
 # Function to check for required environment variables
 # depends on global variables: PTSV_COMPONENTS
 check_env_vars() {
@@ -341,16 +362,16 @@ create_kubernetes_resources() {
     if [ -f "${managed_infra_secrets_file}" ]; then
         echo "Applying infrastructure secrets (these persist across test runs)..."
         envsubst < "${managed_infra_secrets_file}" > "$tmpDir/managed-infra-resources.yaml"
-        kubectl apply -f "$tmpDir/managed-infra-resources.yaml" -n "${managed_namespace}"
+        kubectl_retry apply -f "$tmpDir/managed-infra-resources.yaml" -n "${managed_namespace}"
     fi
 
     echo "Building and applying tenant resources..."
     kustomize build "$tmpDir/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
-    kubectl create -f "$tmpDir/tenant-resources.yaml"
+    kubectl_retry create -f "$tmpDir/tenant-resources.yaml"
 
     echo "Building and applying managed resources..."
     kustomize build "$tmpDir/managed" | envsubst > "$tmpDir/managed-resources.yaml"
-    kubectl apply -f "$tmpDir/managed-resources.yaml"
+    kubectl_retry apply -f "$tmpDir/managed-resources.yaml"
 
     echo "Kubernetes resources applied."
 }
