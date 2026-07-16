@@ -8,8 +8,10 @@ It extracts OCP versions from container image annotations, resolves index templa
 placeholders, and updates the original snapshot with component-specific resolved indexes. These resolved
 indexes take into account the OCP version targeted as well as the release strategy (i.e. hotfix and preGA).
 
-Expects each component in the snapshot to have an ocpVersion field (e.g., "v4.14"),
-which is automatically attached by the filter-published-fbc-images task.
+Expects each component in the snapshot to have an ocpVersion field as a JSON array
+(e.g., ["v4.14"] or ["v4.17", "v4.18"]), automatically attached by the
+filter-published-fbc-images task. For multi-version components, produces an
+ocpVersionMetadata array with per-version resolved indexes.
 
 ## Parameters
 
