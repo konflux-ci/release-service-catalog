@@ -72,7 +72,7 @@ Most are shared permanent secrets used by production pipelines.
 
 | ConfigMap Name | Purpose |
 |---------------|---------|
-| `hacbs-signing-pipeline-config-redhatrelease2` | Signing pipeline config; must contain `data.SIG_KEY_NAME` |
+| `hacbs-signing-pipeline-config-staging-e2e` | Signing pipeline config; must contain `data.SIG_KEY_NAME` or `data.SIG_KEY_NAMES` |
 
 ### CGW Product (stage)
 

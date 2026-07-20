@@ -179,7 +179,18 @@ spec:
         AUTHOR=$(jq -r '.status.attribution.author' "$(params.dataDir)/$(params.releasePath)")
         if [[ "${AUTHOR}" == "null" ]] ; then echo "No author found in Release.Status. Failing..." ; exit 1 ; fi
         configMapName=$(jq -er '.sign.configMapName' "${DATA_FILE}")
-        signingKeyName=$(kubectl get configmap "$configMapName" -o jsonpath="{.data.SIG_KEY_NAME}")
+        configMapJson=$(kubectl get "configmap/${configMapName}" -o json)
+        # Some configmaps (e.g. e2e/staging ones) only define a comma-separated
+        # SIG_KEY_NAMES list rather than a single SIG_KEY_NAME. Use the first entry,
+        # matching the SIG_KEY_NAMES parsing convention used by rh-sign-image/sign-index-image.
+        jqquery='(.data // {})|if has("SIG_KEY_NAME") then .SIG_KEY_NAME
+        elif has("SIG_KEY_NAMES") then (.SIG_KEY_NAMES|split(",")|.[0]|gsub("^\\s+|\\s+$";""))
+        else "" end'
+        signingKeyName=$(jq -r "$jqquery" <<< "${configMapJson}")
+        if [[ -z "${signingKeyName}" ]] ; then
+          echo "No SIG_KEY_NAME or SIG_KEY_NAMES found in configmap ${configMapName}. Failing..."
+          exit 1
+        fi
         RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/push-artifacts-results.json"
         FILES=$(jq -c '{"artifacts": [.components[].staged?.files[]?.filename]}' <<< "$snapshot")
         echo "$FILES" > "$RESULTS_FILE"
