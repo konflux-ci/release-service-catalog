@@ -52,7 +52,7 @@ cat > "/tmp/configmap.json" << EOF
     "namespace": "default"
   },
   "data": {
-    "SIG_KEY_ID": "testKey"
+    "SIG_KEY_NAME": "testKey"
   }
 }
 EOF
