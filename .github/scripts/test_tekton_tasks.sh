@@ -15,9 +15,10 @@ shopt -s nullglob
 
 WORKSPACE_TEMPLATE=${BASH_SOURCE%/*/*}/resources/workspace-template.yaml
 
-# For tasks that use a step command/args referencing a .py file, merge test mocks
-# into that step: prefer tests/mocks.yaml (render_python_task_mocks_from_yaml.py)
-# else tests/mocks.sh (legacy: body after shebang). Task-specific hooks still run after.
+# For tasks that use a step command/args referencing a .py file or python -m module,
+# merge test mocks into that step: prefer tests/mocks.yaml
+# (render_python_task_mocks_from_yaml.py) else tests/mocks.sh (legacy: body after
+# shebang). Task-specific hooks still run after.
 apply_python_command_mocks_merge() {
   local task_copy="$1"
   local tests_dir="$2"
