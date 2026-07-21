@@ -142,39 +142,22 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: prepare-repo
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:f5e7b305ba8e30dc066c24025c98287952ba98023f37512c7539cfd5330c8b77
       computeResources:
         limits:
           memory: 256Mi
         requests:
           memory: 256Mi
           cpu: 150m
-      script: |
-        #!/usr/bin/env bash
-        set -eux
-
-        CHARON_FILE="$(params.dataDir)/$(params.charonParamFilePath)"
-        # shellcheck source=/dev/null
-        . "$CHARON_FILE"
-        mkdir -p /workdir/mrrc
-        cd /workdir/mrrc
-
-        IFS='%' read -ra ADDR <<< "$CHARON_OCI_REGISTRY"
-        for r in "${ADDR[@]}"
-        do
-          echo "Downloading the maven repo zip $r"
-          SOURCE_REPO=${r%%@sha256:*}
-          AUTH_FILE=$(mktemp)
-          hash=${r##*@sha256:}
-          short_hash=${hash:0:6}
-          repodir="/workdir/mrrc/$short_hash"
-          mkdir -p "$repodir"
-          select-oci-auth "${SOURCE_REPO}" > "$AUTH_FILE"
-          oras pull --registry-config "$AUTH_FILE" "$r" -o "$repodir"
-        done
+      command: ["python3", "/home/scripts/python/tasks/managed/publish_to_mrrc_prepare_repo.py"]
+      env:
+        - name: DATA_DIR
+          value: "$(params.dataDir)"
+        - name: CHARON_PARAM_FILE_PATH
+          value: "$(params.charonParamFilePath)"
       volumeMounts:
         - name: mrrc-workdir
-          mountPath: "/workdir"
+          mountPath: "/var/workdir/mrrc"
     - name: upload-single-maven-zip
       image: quay.io/konflux-ci/charon@sha256:2b11516e682a2c985612fc64a3b833e05d9f3efb35793db6c29f4a81545c74bc
       computeResources:
@@ -200,7 +183,7 @@ spec:
           registry="${ADDR[0]}"
           hash=${registry##*@sha256:}
           short_hash=${hash:0:6}
-          repodir="/workdir/mrrc/$short_hash"
+          repodir="/var/workdir/mrrc/$short_hash"
 
           # Check if there are multiple zips in this single archive
           repo_zips=("$repodir"/*.zip)
@@ -239,7 +222,7 @@ spec:
         - name: "charon-aws-vol"
           mountPath: "/home/charon/.aws"
         - name: mrrc-workdir
-          mountPath: "/workdir"
+          mountPath: "/var/workdir/mrrc"
         - name: "charon-signca-vol"
           mountPath: "/home/charon/radasca"
         - name: trusted-ca
@@ -278,7 +261,7 @@ spec:
         do
           hash=${registry##*@sha256:}
           short_hash=${hash:0:6}
-          repodir="/workdir/mrrc/$short_hash"
+          repodir="/var/workdir/mrrc/$short_hash"
           repo_zips=("$repodir"/*.zip)
 
           # Check if any zips found in this archive
@@ -299,7 +282,7 @@ spec:
         if [ ${#ADDR[@]} -gt 1 ] || [ $total_zip_count -gt 1 ]; then
           echo "Total $total_zip_count zip(s) found across ${#ADDR[@]} archive(s), will merge"
 
-          mergedir="/workdir/mrrc/merged"
+          mergedir="/var/workdir/mrrc/merged"
           mkdir -p "$mergedir"
           charon merge -p "$productName" -v "$productVersion" -m "${mergedir}/merged.zip" "${repodir_arr[@]}"
         else
@@ -309,48 +292,26 @@ spec:
         - name: "charon-aws-vol"
           mountPath: "/home/charon/.aws"
         - name: mrrc-workdir
-          mountPath: "/workdir"
+          mountPath: "/var/workdir/mrrc"
     - name: push-merged-maven-repo-to-registry
-      image: quay.io/konflux-ci/release-service-utils:02a8ddcd16113371a255fd1ef0a196399d300162
+      image: quay.io/konflux-ci/release-service-utils@sha256:f5e7b305ba8e30dc066c24025c98287952ba98023f37512c7539cfd5330c8b77
       computeResources:
         limits:
           memory: 1Gi
         requests:
           memory: 1Gi
           cpu: 250m
-      script: |
-        #!/usr/bin/env bash
-        set -eux
-
-        mergedir="/workdir/mrrc/merged"
-        # Check if the merged zip is available, if so push it to the registry, or skip pushing
-        if [ -f "${mergedir}/merged.zip" ]; then
-          cp "${mergedir}/merged.zip" "./merged.zip"
-          select-oci-auth "$IMAGE" >auth.json
-          [ -n "$IMAGE_EXPIRES_AFTER" ] && EXPIRE_LABEL=("--annotation" "quay.expires-after=$IMAGE_EXPIRES_AFTER")
-          echo "Pushing image ${IMAGE} to registry"
-
-          RESULTING_TAG=$(date +%Y%m%d-%H%M%S)-$(uuidgen)
-          if ! oras push "$IMAGE:$RESULTING_TAG" \
-            --registry-config auth.json \
-            "${EXPIRE_LABEL[@]}" \
-            --artifact-type application/vnd.maven+zip "merged.zip"; then
-            echo "Failed to push image ${IMAGE}:${RESULTING_TAG} to registry"
-            exit 1
-          fi
-          if ! RESULTING_DIGEST=$(oras resolve --registry-config auth.json "${IMAGE}:${RESULTING_TAG}"); then
-            echo "Failed to get digest for ${IMAGE}:${RESULTING_TAG} from registry"
-            exit 1
-          fi
-          echo -n "$RESULTING_DIGEST" | tee "$(results.IMAGE_DIGEST.path)"
-          echo -n "$RESULTING_TAG" | tee "$(results.IMAGE_TAG.path)"
-          echo -n "Push merged zip ${IMAGE}:${RESULTING_TAG}@${RESULTING_DIGEST} successfully"
-        else
-          echo "The merged maven zip file is not found!"
-        fi
+      command: ["python3", "/home/scripts/python/tasks/managed/publish_to_mrrc_push_merged.py"]
+      env:
+        - name: WORK_DIR
+          value: "/var/workdir/mrrc"
+        - name: RESULT_IMAGE_DIGEST
+          value: "$(results.IMAGE_DIGEST.path)"
+        - name: RESULT_IMAGE_TAG
+          value: "$(results.IMAGE_TAG.path)"
       volumeMounts:
         - name: mrrc-workdir
-          mountPath: "/workdir"
+          mountPath: "/var/workdir/mrrc"
     - name: upload-merged-maven-zip
       image: quay.io/konflux-ci/charon@sha256:2b11516e682a2c985612fc64a3b833e05d9f3efb35793db6c29f4a81545c74bc
       computeResources:
@@ -376,7 +337,7 @@ spec:
           target="$CHARON_TARGET"
           productName="$CHARON_PRODUCT_NAME"
           productVersion="$CHARON_PRODUCT_VERSION"
-          mergedir="/workdir/mrrc/merged"
+          mergedir="/var/workdir/mrrc/merged"
 
           IMAGE_DIGEST="$(cat "$(results.IMAGE_DIGEST.path)")"
           IMAGE_TAG="$(cat "$(results.IMAGE_TAG.path)")"
@@ -403,7 +364,7 @@ spec:
         - name: "charon-aws-vol"
           mountPath: "/home/charon/.aws"
         - name: mrrc-workdir
-          mountPath: "/workdir"
+          mountPath: "/var/workdir/mrrc"
         - name: "charon-signca-vol"
           mountPath: "/home/charon/radasca"
         - name: trusted-ca
