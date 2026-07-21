@@ -49,7 +49,11 @@ EOF
 
 function koji() {
     echo "koji $*" >> "$(params.dataDir)/koji_calls.txt"
-    if [[ "$*" == *CGInitBuild*\"test-foo\"* ]]; then
+    if [[ "$*" == *getBuildTarget*-sidetag* ]]; then
+        echo '{"dest_tag_name": "mock-target-sidetag"}'
+    elif [[ "$*" == *getBuildTarget* ]]; then
+        echo '{"dest_tag_name": "mock-target-candidate"}'
+    elif [[ "$*" == *CGInitBuild*\"test-foo\"* ]]; then
         echo '{"build_id": 111, "token": "mock-token"}'
     elif [[ "$*" == *CGInitBuild*\"test-bar\"* ]]; then
         echo '{"build_id": 222, "token": "mock-token"}'
