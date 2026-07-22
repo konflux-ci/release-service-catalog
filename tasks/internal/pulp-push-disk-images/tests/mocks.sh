@@ -45,6 +45,11 @@ function gzip() {
 function pulp_push_wrapper() {
     echo Mock pulp_push_wrapper called with: $*
 
+    if [[ ! "$*" =~ --pulp-task-timeout-seconds[[:space:]]+[1-9][0-9]* ]]; then
+        echo "Error: pulp_push_wrapper called without a valid positive --pulp-task-timeout-seconds value"
+        exit 1
+    fi
+
     if [[ "$*" != *"--pulp-url https://pulp.com"* ]]; then
         printf "Mocked failure of pulp_push_wrapper" > /nonexistent/location
     fi
