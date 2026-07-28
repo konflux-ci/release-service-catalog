@@ -119,6 +119,16 @@ verify_release_contents() {
     else
         log_error "GitHub release URL was empty in first release"
     fi
+
+    # Verify first release advisory URL
+    local first_advisory_url
+    first_advisory_url="$(jq -r '.status.artifacts.advisory.url // ""' <<< "${first_release_json}" 2>/dev/null || true)"
+    echo "Checking advisory URL..."
+    if [ -n "${first_advisory_url}" ]; then
+        echo "✅ advisory_url: ${first_advisory_url}"
+    else
+        log_error "advisory_url was empty in first release"
+    fi
     echo "✅ First release verified successfully"
 
     # Capture asset list from the first release for later comparison
@@ -187,6 +197,19 @@ EOF
         second_failures=$((second_failures + 1))
     fi
 
+    # Verify second release has a non-empty advisory URL
+    # Note: Unlike the RH advisories pipeline, release-to-github creates a new advisory for each release
+    # (no already-released advisory filter), so the URLs may differ between runs.
+    local second_advisory_url
+    second_advisory_url="$(jq -r '.status.artifacts.advisory.url // ""' <<< "${second_release_json}" 2>/dev/null || true)"
+    echo "Second release advisory URL: ${second_advisory_url}"
+    if [ -n "${second_advisory_url}" ]; then
+        echo "✅ Second release has advisory URL: ${second_advisory_url}"
+    else
+        echo "🔴 advisory_url was empty in second release"
+        second_failures=$((second_failures + 1))
+    fi
+
     # Verify create-github-release detected the existing release and skipped creation
     echo "Checking that create-github-release detected existing release..."
     local create_release_logs
@@ -245,6 +268,7 @@ EOF
     echo "  • Second release: detected existing release → skipped creation (no duplicate)"
     echo "  • Second release: sign-base64-blob re-signed (expected — fresh workspace per run)"
     echo "  • GitHub release URL consistent across both runs: ${first_url}"
+    echo "  • Advisory URLs present in both releases"
     echo "  • No duplicate GitHub release created"
     echo "  • GitHub release assets identical across both runs (no extra files uploaded)"
     echo ""
