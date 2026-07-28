@@ -31,8 +31,10 @@ verify_release_contents() {
 
       local failures=0
       local url
+      local advisory_url
 
       url=$(jq -r '.status.artifacts."github-release".url // ""' <<< "${release_json}")
+      advisory_url="$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}" 2>/dev/null || true)"
       echo "Checking url: ${url}..."
       if [ -n "${url}" ]; then
         # get tag from URL
@@ -49,6 +51,14 @@ verify_release_contents() {
         fi
       else
         echo "🔴 url was empty!"
+        failures=$((failures+1))
+      fi
+
+      echo "Checking advisory URL..."
+      if [ -n "${advisory_url}" ]; then
+        echo "✅️ advisory_url: ${advisory_url}"
+      else
+        echo "🔴 advisory_url was empty!"
         failures=$((failures+1))
       fi
 
