@@ -1,0 +1,180 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-upload-npm-pulp
+spec:
+  description: |
+    Sunny-day path for upload-npm-pulp with mocked HTTP: upload a new package,
+    then confirm a second identical package is skipped (version refresh)
+  params:
+    - name: ociStorage
+      type: string
+    - name: ociArtifactExpiresAfter
+      type: string
+      default: "1d"
+    - name: orasOptions
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      type: string
+      default: ""
+    - name: dataDir
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              FILES="$(params.dataDir)/files/sha256_abc123"
+              mkdir -p "${FILES}"
+              tmp="$(mktemp -d)"
+              trap 'rm -rf "${tmp}"' EXIT
+              mkdir -p "${tmp}/package"
+              jq -nc '{name:"lodash",version:"4.17.21",cpu:"x64",os:"linux"}' \
+                > "${tmp}/package/package.json"
+              tar -czf "${FILES}/lodash-4.17.21.tgz" -C "${tmp}" package
+              jq -nc '{compliance_level:"L1"}' \
+                > "${FILES}/lodash-4.17.21.tl-compliance.json"
+
+              # Second copy of the same name/version (different path) to exercise
+              # post-upload repository version refresh + digest match skip.
+              mkdir -p "$(params.dataDir)/files/sha256_def456"
+              cp "${FILES}/lodash-4.17.21.tgz" \
+                "$(params.dataDir)/files/sha256_def456/lodash-4.17.21.tgz"
+              cp "${FILES}/lodash-4.17.21.tl-compliance.json" \
+                "$(params.dataDir)/files/sha256_def456/lodash-4.17.21.tl-compliance.json"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: upload-npm-pulp
+      params:
+        - name: SERVICE_ACCOUNT_SECRET_NAME
+          value: upload-npm-pulp-test-credentials
+        - name: PULP_BASE_URL
+          value: https://test.packages.redhat.com
+        - name: PULP_API_ROOT
+          value: /api
+        - name: PULP_DOMAIN
+          value: test-domain
+        - name: PULP_REPOSITORY
+          value: npm-registry
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: filesDir
+          value: files
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: ociStorage
+          value: $(params.ociStorage)
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              # Setup seeds version=1; one successful upload should bump to >= 2.
+              readonly EXPECTED_STORED_PACKAGE_COUNT=1
+              readonly MIN_REPOSITORY_VERSION_AFTER_UPLOAD=2
+
+              MOCK_DIR="$(params.dataDir)/files/.mock-pulp"
+              STATE="${MOCK_DIR}/state.json"
+              VERSION_FILE="${MOCK_DIR}/version"
+
+              # One upload + one skip (matching digest after version refresh)
+              if [[ ! -f "${STATE}" ]]; then
+                echo "ERROR: mock pulp state missing at ${STATE}"
+                find "$(params.dataDir)/files" -print | sort
+                exit 1
+              fi
+              COUNT="$(jq 'keys | length' "${STATE}")"
+              if [[ "${COUNT}" -ne "${EXPECTED_STORED_PACKAGE_COUNT}" ]]; then
+                echo "ERROR: expected ${EXPECTED_STORED_PACKAGE_COUNT} stored package, got ${COUNT}"
+                cat "${STATE}"
+                exit 1
+              fi
+              # Version bumped at least once by upload
+              VER="$(cat "${VERSION_FILE}")"
+              if [[ "${VER}" -lt "${MIN_REPOSITORY_VERSION_AFTER_UPLOAD}" ]]; then
+                echo "ERROR: expected repository version bump after upload, got ${VER}"
+                exit 1
+              fi
+              echo "Upload + skip-after-refresh checks passed"
+      runAfter:
+        - run-task
