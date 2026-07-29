@@ -3,6 +3,11 @@ set -eux
 # mocks to be injected into task step scripts
 echo "MOCK SETUP"
 
+# cosign3's outcome queues (see the cosign3 mock below). Pre-created so that
+# a test which never populates one of them means "always fail" for that call
+# type, rather than erroring out on a missing file.
+touch "$(params.dataDir)/mock_cosign_verify_exit_codes"
+touch "$(params.dataDir)/mock_cosign_sign_exit_codes"
 
 _TEST_MANIFEST_LIST_OCI_REFERENCE="quay.io/redhat-user-workloads/test-product/test-image0@sha256:0000"
 _TEST_MANIFEST_LIST_REFERENCE="quay.io/redhat-user-workloads/test-product/test-image1@sha256:1111"
@@ -151,30 +156,38 @@ function select-oci-auth() {
 }
 
 function cosign3 () {
-  # check if call should end successfully
-  # mock_cosign_success_calls file is expected to contain lines with "1" or "0" where
-  # "1" means that the call should end successfully and "0" means that the call should end with an error
-  # following command pops the first line from the file and stores it in successfull_run variable
+  # mock_cosign_verify_exit_codes / mock_cosign_sign_exit_codes are expected to contain
+  # lines with "0" or "1": the exit status this call should return, following normal
+  # shell conventions (0 = success). They're queued separately per call type (verify vs
+  # sign) because verify and sign calls for different, concurrently signed digests
+  # interleave in real time - a single shared queue can't guarantee a sign call won't
+  # consume an entry meant for a still-retrying verify call, or vice versa.
+  # following command pops the first line from the file and stores it in exit_status
   # Use flock to prevent race conditions when multiple parallel cosign calls access the file
-  successfull_run=$(
-    flock -x "$(params.dataDir)/mock_cosign_success_calls.lock" bash -c \
-      "sed -n '1p' '$(params.dataDir)/mock_cosign_success_calls' && \
-       sed -i '1d' '$(params.dataDir)/mock_cosign_success_calls'"
+  if [ "$1" = "verify" ]; then
+    exit_code_queue="$(params.dataDir)/mock_cosign_verify_exit_codes"
+  else
+    exit_code_queue="$(params.dataDir)/mock_cosign_sign_exit_codes"
+  fi
+  exit_status=$(
+    flock -x "${exit_code_queue}.lock" bash -c \
+      "sed -n '1p' '${exit_code_queue}' && \
+       sed -i '1d' '${exit_code_queue}'"
   )
+  # an empty/exhausted queue defaults to failure
+  exit_status="${exit_status:-1}"
 
   if [ "$1" = "verify" ]; then
     mock_existing_sig_file=$(echo "${*: -1}" | tr "/" "-")
     echo "$@" >> $(params.dataDir)/mock_cosign_verify_calls
-    # if the call shouldn't end successfully, exit with error
-    if [ "$successfull_run" != "1" ]; then
+    if [ "$exit_status" != "0" ]; then
       return 1
     fi
     cat "$(params.dataDir)/$mock_existing_sig_file"
   else
     echo "running cosign: $@"
     echo "$@" >> "$(params.dataDir)/mock_cosign_sign_calls"
-    # if the call shouldn't end successfully, exit with error
-    if [ "$successfull_run" != "1" ]; then
+    if [ "$exit_status" != "0" ]; then
       >&2 echo "- SIMULATED ERROR -"
       echo "- SIMULATED ERROR -" >> "$(params.dataDir)/mock_cosign_sign_calls"
       return 1
