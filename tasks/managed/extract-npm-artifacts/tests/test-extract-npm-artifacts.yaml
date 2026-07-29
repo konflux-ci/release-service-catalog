@@ -1,0 +1,317 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-extract-npm-artifacts
+spec:
+  description: |
+    Extract npm packages from two component images (namespaced pull dirs),
+    populate releaseNotes with SBOM and fallback PURLs (incl. scoped).
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/content
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Build fixture tarballs here (release-service-utils has jq/tar).
+              # The oras mock only copies them — the oras image has no jq.
+              FIXTURE_TMPS=()
+              make_fixture() {
+                local fixture_name="${1}"
+                local tgz_name="${2}"
+                local pkg_name="${3}"
+                local pkg_version="${4}"
+                local purl="${5}"
+
+                local fixtures tmp
+                fixtures="$(params.dataDir)/.fixtures/${fixture_name}"
+                mkdir -p "${fixtures}"
+                tmp="$(mktemp -d)"
+                # Track all fixture temps for EXIT (RETURN alone misses early script exit).
+                FIXTURE_TMPS+=("${tmp}")
+                trap 'rm -rf "${FIXTURE_TMPS[@]+"${FIXTURE_TMPS[@]}"}"' EXIT
+                mkdir -p "${tmp}/package/sboms"
+                jq -nc \
+                  --arg name "${pkg_name}" \
+                  --arg version "${pkg_version}" \
+                  '{name: $name, version: $version, cpu: "x64", os: "linux"}' \
+                  > "${tmp}/package/package.json"
+                if [[ -n "${purl}" ]]; then
+                  jq -nc --arg purl "${purl}" '{
+                    spdxVersion: "SPDX-2.3",
+                    packages: [{
+                      name: "pkg",
+                      externalRefs: [{
+                        referenceCategory: "PACKAGE-MANAGER",
+                        referenceType: "purl",
+                        referenceLocator: $purl
+                      }]
+                    }]
+                  }' > "${tmp}/package/sboms/redhat.spdx.json"
+                else
+                  jq -nc '{spdxVersion: "SPDX-2.3", packages: []}' \
+                    > "${tmp}/package/sboms/redhat.spdx.json"
+                fi
+                tar -czf "${fixtures}/${tgz_name}" -C "${tmp}" package
+                jq -nc '{compliance_level: "A"}' \
+                  > "${fixtures}/${tgz_name%.tgz}.tl-compliance.json"
+              }
+
+              make_fixture scoped \
+                "calunga-esbuild-0.28.0.tgz" \
+                "@calunga/esbuild" \
+                "0.28.0" \
+                "pkg:npm/%40calunga/esbuild@0.28.0"
+              make_fixture fallback \
+                "calunga-core-1.0.0.tgz" \
+                "@calunga/core" \
+                "1.0.0" \
+                ""
+
+              # Two components with distinct digests → isolated extract dirs
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << 'EOF'
+              {
+                "application": "test-app",
+                "components": [
+                  {
+                    "name": "esbuild",
+                    "containerImage": "quay.io/test/esbuild@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                  },
+                  {
+                    "name": "core",
+                    "containerImage": "quay.io/test/core@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "@calunga/esbuild"
+                    }
+                  ]
+                },
+                "releaseNotes": {
+                  "product_id": [123],
+                  "type": "RHBA",
+                  "synopsis": "Test advisory",
+                  "content": {
+                    "artifacts": []
+                  }
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: extract-npm-artifacts
+      params:
+        - name: SNAPSHOT_PATH
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: filesDir
+          value: files
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)"
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              # Expected fixture counts for this test pipeline.
+              readonly EXPECTED_TGZ_COUNT=2
+              readonly EXPECTED_ARTIFACT_COUNT=2
+              readonly MIN_PROVENANCE_FILE_COUNT=1
+
+              FILES_DIR="$(params.dataDir)/files"
+
+              if [ ! -d "${FILES_DIR}" ]; then
+                echo "ERROR: Files directory not found: ${FILES_DIR}"
+                exit 1
+              fi
+
+              # Namespaced extract dirs (digest with : → _)
+              if [ ! -d "${FILES_DIR}/sha256_1111111111111111111111111111111111111111111111111111111111111111" ]; then
+                echo "ERROR: missing namespaced dir for scoped component"
+                find "${FILES_DIR}" -maxdepth 2 -print
+                exit 1
+              fi
+              if [ ! -d "${FILES_DIR}/sha256_2222222222222222222222222222222222222222222222222222222222222222" ]; then
+                echo "ERROR: missing namespaced dir for fallback component"
+                find "${FILES_DIR}" -maxdepth 2 -print
+                exit 1
+              fi
+
+              TGZ_COUNT="$(find "${FILES_DIR}" -type f -name '*.tgz' | wc -l)"
+              if [ "${TGZ_COUNT}" -ne "${EXPECTED_TGZ_COUNT}" ]; then
+                echo "ERROR: expected ${EXPECTED_TGZ_COUNT} .tgz files, got ${TGZ_COUNT}"
+                find "${FILES_DIR}" -type f -print
+                exit 1
+              fi
+
+              PROV_DIR="${FILES_DIR}/chains-provenance"
+              if [ ! -d "${PROV_DIR}" ]; then
+                echo "ERROR: chains-provenance directory not found"
+                exit 1
+              fi
+              PROV_COUNT="$(find "${PROV_DIR}" -name '*.json' | wc -l)"
+              if [ "${PROV_COUNT}" -lt "${MIN_PROVENANCE_FILE_COUNT}" ]; then
+                echo "ERROR: No Chains provenance files found"
+                ls -la "${PROV_DIR}"
+                exit 1
+              fi
+
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              ARTIFACT_COUNT="$(jq '[.releaseNotes.content.artifacts[]] | length' "${DATA_FILE}")"
+              if [ "${ARTIFACT_COUNT}" -ne "${EXPECTED_ARTIFACT_COUNT}" ]; then
+                echo "ERROR: Expected ${EXPECTED_ARTIFACT_COUNT} artifacts, got ${ARTIFACT_COUNT}"
+                jq . "${DATA_FILE}"
+                exit 1
+              fi
+
+              # SBOM PURL for @calunga/esbuild
+              ESBUILD_PURL="$(jq -r '
+                .releaseNotes.content.artifacts[]
+                | select(.component == "@calunga/esbuild")
+                | .purl' "${DATA_FILE}")"
+              if [ "${ESBUILD_PURL}" != "pkg:npm/%40calunga/esbuild@0.28.0" ]; then
+                echo "ERROR: bad esbuild PURL: ${ESBUILD_PURL}"
+                exit 1
+              fi
+
+              # Fallback canonical scoped PURL (must not encode / as %2F)
+              CORE_PURL="$(jq -r '
+                .releaseNotes.content.artifacts[]
+                | select(.component == "@calunga/core")
+                | .purl' "${DATA_FILE}")"
+              if [ "${CORE_PURL}" != "pkg:npm/%40calunga/core@1.0.0" ]; then
+                echo "ERROR: bad core fallback PURL: ${CORE_PURL}"
+                exit 1
+              fi
+              if [[ "${CORE_PURL}" == *"%2F"* || "${CORE_PURL}" == *"%2f"* ]]; then
+                echo "ERROR: scoped PURL incorrectly encodes /: ${CORE_PURL}"
+                exit 1
+              fi
+
+              MAPPED_TYPE="$(jq -r '
+                .mapping.components[]
+                | select(.name == "@calunga/esbuild")
+                | .contentType' "${DATA_FILE}")"
+              if [ "${MAPPED_TYPE}" != "generic" ]; then
+                echo "ERROR: Expected contentType generic, got: ${MAPPED_TYPE}"
+                jq '.mapping.components' "${DATA_FILE}"
+                exit 1
+              fi
+
+              echo "Files extracted:"
+              find "${FILES_DIR}" -type f -print | sort
+              echo "Release notes artifacts:"
+              jq '.releaseNotes.content.artifacts' "${DATA_FILE}"
+              echo "All checks passed!"
+      runAfter:
+        - run-task

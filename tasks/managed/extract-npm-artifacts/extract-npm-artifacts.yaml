@@ -1,0 +1,150 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: extract-npm-artifacts
+spec:
+  description: |
+    Extract npm packages from OCI snapshot artifacts for Pulp upload.
+    Pulls each snapshot component image with oras into a digest-namespaced
+    directory, populates releaseNotes.content.artifacts from embedded SPDX
+    pkg:npm PURLs, and fetches Tekton Chains SLSA provenance (hard-fails if
+    missing, unverifiable, or not trusted). Provenance must match the image
+    digest and come from Konflux Chains with pipelineRef.name promote-npm or
+    build-npm and an invocationId in a trusted tenant namespace (default
+    calunga-tenant). Business logic runs as a single plumbing-utils command
+    (npm-release-extract); requires at least one .tgz after extract
+  params:
+    - name: SNAPSHOT_PATH
+      type: string
+      description: Path to the snapshot spec file containing image information
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact to use to obtain the Snapshot
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: /var/workdir/content
+    - name: filesDir
+      type: string
+      description: The relative path within dataDir where files will be extracted
+      default: files
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for the trusted artifacts created
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: trustedProvenanceNamespaces
+      type: string
+      description: >
+        Comma-separated Kubernetes namespaces allowed to produce accepted
+        Chains provenance. Matched against runDetails.metadata.invocationId
+        as "<namespace>/..."
+      default: "calunga-tenant"
+    - name: taskGitUrl
+      type: string
+      description: >-
+        The url to the git repo where the release-service-catalog tasks and
+        stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: dataPath
+      type: string
+      description: Path to data.json relative to dataDir
+  results:
+    - name: sourceDataArtifact
+      description: Produced trusted data artifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: SNAPSHOT_PATH
+        value: $(params.SNAPSHOT_PATH)
+      - name: IMAGES_TXT
+        value: $(params.dataDir)/images.txt
+      - name: FILES_DIR
+        value: $(params.dataDir)/$(params.filesDir)
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: TRUSTED_ARTIFACTS_EXTRACT_DIR
+        value: $(params.dataDir)
+      - name: DATA_FILE
+        value: $(params.dataDir)/$(params.dataPath)
+      - name: TRUSTED_PROVENANCE_NAMESPACES
+        value: $(params.trustedProvenanceNamespaces)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: extract
+      image: quay.io/redhat-user-workloads/calunga-tenant/plumbing-utils@sha256:9e1b3d30dc05413b1d499a19f7b7ca38469098845b50a337f1c3170918efe987
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      command: ["npm-release-extract"]
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
