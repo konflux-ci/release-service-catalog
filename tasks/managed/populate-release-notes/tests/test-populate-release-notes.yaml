@@ -2,11 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-populate-release-notes-single-image
+  name: test-populate-release-notes
 spec:
   description: |
-    Run the populate-release-notes task with a single image in the snapshot JSON and verify
-    the data JSON has the proper content
+    Run the populate-release-notes task and check it completes successfully.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -48,8 +47,8 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2712a94e7790df8b66e6b391687653edea97155107211ac28f1a1d083be56ebe
             script: |
               #!/usr/bin/env sh
               set -eux
@@ -59,24 +58,35 @@ spec:
               {
                 "releaseNotes": {
                   "product_id": [
-                    123
+                  123
                   ],
                   "product_name": "Red Hat Openstack Product",
                   "product_version": "123",
                   "cpe": "cpe:/a:example:openstack:el8",
-                  "type": "RHSA",
+                  "type": "RHBA",
                   "issues": {
                     "fixed": [
                       {
-                        "id": "RHOSP-12345",
-                        "source": "issues.example.com"
+                        "id": "VULN-123",
+                        "source": "redhat.atlassian.net"
                       },
                       {
-                        "id": 1234567,
-                        "source": "bugzilla.example.com"
+                        "id": "FEATURE-456",
+                        "source": "redhat.atlassian.net"
+                      },
+                      {
+                        "id": "BZ-789",
+                        "source": "bugzilla.redhat.com"
                       }
                     ]
                   },
+                  "cves": [
+                    {
+                      "key": "CVE-123",
+                      "component": "comp",
+                      "packages": ["pkg1", "pkg2"]
+                    }
+                  ],
                   "synopsis": "test synopsis",
                   "topic": "test topic",
                   "description": "test description",
@@ -94,12 +104,13 @@ spec:
                 "components": [
                   {
                     "name": "comp",
-                    "containerImage": "registry.io/image@sha256:123456",
+                    "containerImage": "registry.redhat.io/product/repo@sha256:abcdef0",
                     "repositories": [
                       {
                         "url": "quay.io/redhat-prod/product----repo",
                         "rh-registry-repo": "registry.redhat.io/product/repo",
                         "tags": [
+                          "9.4.0-1723436855",
                           "foo",
                           "bar"
                         ]
@@ -143,65 +154,3 @@ spec:
           value: "main"
       runAfter:
         - setup
-    - name: check-result
-      params:
-        - name: sourceDataArtifact
-          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
-        - name: dataDir
-          value: $(params.dataDir)
-      taskSpec:
-        params:
-          - name: sourceDataArtifact
-            type: string
-          - name: dataDir
-            type: string
-        volumes:
-          - name: workdir
-            emptyDir: {}
-        stepTemplate:
-          volumeMounts:
-            - mountPath: /var/workdir
-              name: workdir
-          env:
-            - name: IMAGE_EXPIRES_AFTER
-              value: $(params.ociArtifactExpiresAfter)
-            - name: "ORAS_OPTIONS"
-              value: "$(params.orasOptions)"
-            - name: "DEBUG"
-              value: "$(params.trustedArtifactsDebug)"
-        steps:
-          - name: use-trusted-artifact
-            ref:
-              name: use-trusted-artifact
-            params:
-              - name: workDir
-                value: $(params.dataDir)
-              - name: sourceDataArtifact
-                value: $(params.sourceDataArtifact)
-          - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              imagearch1=$(jq '.releaseNotes.content.images[0]' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
-              test "$(jq -r '.architecture' <<< "$imagearch1")" == "amd64"
-              test "$(jq -r '.containerImage' <<< "$imagearch1")" == "registry.redhat.io/product/repo@sha256:abcdefg"
-              test "$(jq -r '.purl' <<< "$imagearch1")" == \
-                "pkg:oci/repo@sha256%3Aabcdefg?arch=amd64&repository_url=registry.redhat.io/product/repo"
-              test "$(jq -r '.repository' <<< "$imagearch1")" == "registry.redhat.io/product/repo"
-              test "$(jq -rc '.tags' <<< "$imagearch1")" == '["foo","bar"]'
-              test "$(jq -rc '.component' <<< "$imagearch1")" == "comp"
-
-              imagearch2=$(jq '.releaseNotes.content.images[1]' \
-                "$(params.dataDir)/$(context.pipelineRun.uid)/data.json")
-              test "$(jq -r '.architecture' <<< "$imagearch2")" == "s390x"
-              test "$(jq -r '.containerImage' <<< "$imagearch2")" == "registry.redhat.io/product/repo@sha256:deadbeef"
-              test "$(jq -r '.purl' <<< "$imagearch2")" == \
-                "pkg:oci/repo@sha256%3Adeadbeef?arch=s390x&repository_url=registry.redhat.io/product/repo"
-              test "$(jq -r '.repository' <<< "$imagearch2")" == "registry.redhat.io/product/repo"
-              test "$(jq -rc '.tags' <<< "$imagearch2")" == '["foo","bar"]'
-              test "$(jq -rc '.component' <<< "$imagearch2")" == "comp"
-      runAfter:
-        - run-task

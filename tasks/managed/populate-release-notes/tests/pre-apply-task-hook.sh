@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 TASK_PATH="$1"
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Add mocks to the beginning of task step script
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
+# Bind port 443 for the in-pod Jira mock without running as root
+yq -i '(.spec.steps[] | select(.name == "populate-release-notes")).securityContext.capabilities = {"add": ["NET_BIND_SERVICE"]}' "$TASK_PATH"
 
 # Create a dummy access token secret (and delete it first if it exists)
 kubectl delete secret konflux-advisory-jira-secret --ignore-not-found
