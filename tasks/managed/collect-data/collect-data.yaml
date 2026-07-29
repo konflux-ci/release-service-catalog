@@ -152,13 +152,13 @@ spec:
       runAsUser: 1001
   steps:
     - name: collect-data
-      image: quay.io/konflux-ci/release-service-utils@sha256:440c27f13adab931460a9371df82d3757b77f7ccc1b7604d737e0c78760a95c9
+      image: quay.io/konflux-ci/release-service-utils@sha256:f88c25bacfd8575198419a8465804980ba6531dfb2b4717a7ebc4415df43910d
       computeResources:
         limits:
-          memory: 64Mi
+          memory: 128Mi
         requests:
-          memory: 64Mi
-          cpu: 50m
+          memory: 128Mi
+          cpu: 100m
       env:
         - name: "RELEASE"
           value: '$(params.release)'
@@ -170,206 +170,39 @@ spec:
           value: '$(params.releaseServiceConfig)'
         - name: "SNAPSHOT"
           value: '$(params.snapshot)'
-      script: |
-        #!/usr/bin/env bash
-        set -eo pipefail
-
-        if [ -f "/mnt/trusted-ca/ca-bundle.crt" ]; then
-            export SSL_CERT_FILE="/mnt/trusted-ca/ca-bundle.crt"
-        fi
-
-        set -x
-        echo -n "$(params.subdirectory)" > "$(results.subdirectory.path)"
-
-        RESULTS_DIR_PATH="results"
-        if [ -n "$(params.subdirectory)" ]; then
-          mkdir -p "$(params.dataDir)/$(params.subdirectory)"
-          RESULTS_DIR_PATH="$(params.subdirectory)/results"
-        fi
-
-        mkdir -p "$(params.dataDir)/$RESULTS_DIR_PATH"
-        echo -n "$RESULTS_DIR_PATH" > "$(results.resultsDir.path)"
-
-        RELEASE_PATH="$(params.subdirectory)/release.json"
-        echo -n "$RELEASE_PATH" > "$(results.release.path)"
-        get-resource "release" "${RELEASE}" | tee "$(params.dataDir)/$RELEASE_PATH"
-
-        RELEASEPLAN_PATH="$(params.subdirectory)/release_plan.json"
-        echo -n "$RELEASEPLAN_PATH" > "$(results.releasePlan.path)"
-        get-resource "releaseplan" "${RELEASE_PLAN}" | tee "$(params.dataDir)/$RELEASEPLAN_PATH"
-
-        RELEASEPLANADMISSION_PATH="$(params.subdirectory)/release_plan_admission.json"
-        echo -n "$RELEASEPLANADMISSION_PATH" > "$(results.releasePlanAdmission.path)"
-        get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
-          | tee "$(params.dataDir)/$RELEASEPLANADMISSION_PATH"
-
-        RELEASESERVICECONFIG_PATH="$(params.subdirectory)/release_service_config.json"
-        echo -n "$RELEASESERVICECONFIG_PATH" > "$(results.releaseServiceConfig.path)"
-        get-resource "releaseserviceconfig" "${RELEASE_SERVICE_CONFIG}" \
-          | tee "$(params.dataDir)/$RELEASESERVICECONFIG_PATH"
-
-        echo -e "\nFetching Snapshot Spec"
-        SNAPSHOTSPEC_PATH="$(params.subdirectory)/snapshot_spec.json"
-        echo -n "$SNAPSHOTSPEC_PATH" > "$(results.snapshotSpec.path)"
-        # Empty-string componentGroup is treated as unset; fall back to .application, then drop it.
-        get-resource "snapshot" "${SNAPSHOT}" "{.spec}" \
-          | jq '(if (.componentGroup == null or .componentGroup == "")
-            then .componentGroup = .application else . end)
-            | del(.application)' \
-          | tee "$(params.dataDir)/$SNAPSHOTSPEC_PATH"
-        labels=$(get-resource "snapshot" "${SNAPSHOT}" "{.metadata.labels}")
-        BUILD_ID=$(jq -r '."appstudio.openshift.io/build-pipelinerun" // ""' <<< "${labels}")
-        echo -n "${BUILD_ID}" | tee "$(results.snapshotBuildId.path)"
-
-        echo -e "\nGenerating collectors data"
-        collectors_status=$(get-resource "release" "${RELEASE}" "{.status.collectors}")
-        echo "***collectors status"
-        echo "${collectors_status}"
-        echo "***"
-
-        collectors_result=$(jq -c '
-          def deepmerge(a; b):
-            reduce b[] as $item (a;
-            reduce ($item | keys_unsorted[]) as $key (.;
-            $item[$key] as $val | ($val | type) as $type | .[$key] = if ($type == "object") then
-            deepmerge({}; [if .[$key] == null then {} else .[$key] end, $val])
-            elif ($type == "array") then
-            (.[$key] + $val | unique)
-            else
-            $val
-            end)
-            );
-
-          # Ensure we safely handle missing collectors
-          (.? // {}) as $collectors |
-
-          # Flatten and combine the managed and tenant sections
-          [($collectors.managed? // {} | to_entries | map(.value)) +
-           ($collectors.tenant? // {} | to_entries | map(.value))] |
-           flatten |
-           deepmerge({}; .)
-        ' <<< "${collectors_status}")
-        echo "***collectors"
-        jq <<< "$collectors_result"
-        echo "***"
-
-        echo -e "\nFetching merged data json"
-        release_result=$(get-resource "release" "${RELEASE}" "{.spec.data}")
-
-        release_plan_result=$(get-resource "releaseplan" "${RELEASE_PLAN}" "{.spec.data}")
-
-        release_plan_admission_result=$(get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
-            "{.spec.data}")
-
-        # Merge collectors and Release keys. Release has higher priority
-        merged_output=$(merge-json "$collectors_result" "$release_result")
-
-        # Merge now with ReleasePlan keys. ReleasePlan has higher priority
-        merged_output=$(merge-json "$merged_output" "$release_plan_result")
-
-        # Finally merge with ReleasePlanAdmission keys. ReleasePlanAdmission has higher priority
-        merged_output=$(merge-json "$merged_output" "$release_plan_admission_result")
-
-        DATA_PATH="$(params.subdirectory)/data.json"
-        echo -n "$DATA_PATH" > "$(results.data.path)"
-        echo "$merged_output" | tee "$(params.dataDir)/$DATA_PATH"
-
-        # get pipeline ref info
-        pipelineref=$(jq -c '.spec.pipeline.pipelineRef' \
-          "$(params.dataDir)/$(params.subdirectory)/release_plan_admission.json")
-        resolver=$(jq -r '.resolver // ""' <<< "${pipelineref}")
-        if [ "${resolver}" == "git" ] ; then
-          url=$(jq -r '.params[] | select(.name=="url") | .value' <<< "${pipelineref}")
-          revision=$(jq -r '.params[] | select(.name=="revision") | .value' <<< "${pipelineref}")
-          pathinrepo=$(jq -r '.params[] | select(.name=="pathInRepo") | .value' <<< "${pipelineref}")
-          orgrepo="${url#*/*/*/}"
-          org=$(echo "${orgrepo}" | cut -f1 -d/)
-          repo=$(echo "${orgrepo}" | cut -f2 -d/ | cut -d. -f1)
-
-          sha=$(curl -s "https://api.github.com/repos/${org}/${repo}/commits/${revision}" | jq -r '.sha // ""')
-
-        fi
-
-        org="${org:-unknown}"
-        repo="${repo:-unknown}"
-        revision="${revision:-unknown}"
-        pathinrepo="${pathinrepo:-unknown}"
-        sha="${sha:-unknown}"
-
-        echo ""
-        echo "Release Pipeline Ref Info:"
-        echo "--------------------------"
-
-        json=$(jq -n -c \
-          --arg org "${org}" \
-          --arg repo "${repo}" \
-          --arg revision "${revision}" \
-          --arg pathinrepo "${pathinrepo}" \
-          --arg sha "${sha}" \
-          '$ARGS.named')
-
-        echo "${json}" > "$(results.releasePipelineMetadata.path)"
-        # pretty print for log message
-        jq . <<< "$json"
-
-        SINGLE_COMPONENT_MODE=$(jq -r '.singleComponentMode // "false"' "$(params.dataDir)/$DATA_PATH")
-        SNAPSHOT_NAME=$(echo "${SNAPSHOT}" | cut -f2 -d/)
-        SNAPSHOT_NAMESPACE=$(echo "${SNAPSHOT}" | cut -f1 -d/)
-
-        echo -n "${SINGLE_COMPONENT_MODE}" | tee "$(results.singleComponentMode.path)"
-        echo -n "${SNAPSHOT_NAME}" | tee "$(results.snapshotName.path)"
-        echo -n "${SNAPSHOT_NAMESPACE}" | tee "$(results.snapshotNamespace.path)"
-
-    - name: check-data-key-sources
-      image: quay.io/konflux-ci/release-service-utils@sha256:440c27f13adab931460a9371df82d3757b77f7ccc1b7604d737e0c78760a95c9
-      computeResources:
-        limits:
-          memory: 32Mi
-        requests:
-          memory: 32Mi
-          cpu: 10m
-      script: |
-        #!/usr/bin/env bash
-        set -ex
-
-        DISALLOWED_KEYS_JSON='{
-            "Release": [
-                "releaseNotes.product_id",
-                "releaseNotes.product_name",
-                "releaseNotes.product_version",
-                "releaseNotes.product_stream",
-                "releaseNotes.cpe",
-                "releaseNotes.allow_custom_live_id"
-            ],
-            "ReleasePlan": [
-                "releaseNotes.product_id",
-                "releaseNotes.product_name",
-                "releaseNotes.product_version",
-                "releaseNotes.product_stream",
-                "releaseNotes.cpe",
-                "releaseNotes.allow_custom_live_id"
-            ],
-            "ReleasePlanAdmission": [
-            ]
-        }'
-
-        RC=0
-
-        check_source () { # Expected arguments are [CRD from DISALLOWED_KEYS_JSON, file]
-            for KEY in $(jq -r ".$1[]" <<< "$DISALLOWED_KEYS_JSON") ; do
-                if [[ $(jq ".spec.data.$KEY" "$2") != "null" ]] ; then
-                    echo "Found disallowed key: $KEY in resource $1"
-                    RC=1
-                fi
-            done
-        }
-
-        check_source "Release" "$(params.dataDir)/$(params.subdirectory)/release.json"
-        check_source "ReleasePlan" "$(params.dataDir)/$(params.subdirectory)/release_plan.json"
-        check_source "ReleasePlanAdmission" \
-            "$(params.dataDir)/$(params.subdirectory)/release_plan_admission.json"
-
-        exit $RC
+        - name: "PARAM_SUBDIRECTORY"
+          value: '$(params.subdirectory)'
+        - name: "PARAM_DATA_DIR"
+          value: '$(params.dataDir)'
+        - name: "RESULT_RELEASE"
+          value: '$(results.release.path)'
+        - name: "RESULT_RELEASE_PLAN"
+          value: '$(results.releasePlan.path)'
+        - name: "RESULT_RELEASE_PLAN_ADMISSION"
+          value: '$(results.releasePlanAdmission.path)'
+        - name: "RESULT_RELEASE_SERVICE_CONFIG"
+          value: '$(results.releaseServiceConfig.path)'
+        - name: "RESULT_SNAPSHOT_SPEC"
+          value: '$(results.snapshotSpec.path)'
+        - name: "RESULT_DATA"
+          value: '$(results.data.path)'
+        - name: "RESULT_RESULTS_DIR"
+          value: '$(results.resultsDir.path)'
+        - name: "RESULT_SINGLE_COMPONENT_MODE"
+          value: '$(results.singleComponentMode.path)'
+        - name: "RESULT_SNAPSHOT_NAME"
+          value: '$(results.snapshotName.path)'
+        - name: "RESULT_SNAPSHOT_NAMESPACE"
+          value: '$(results.snapshotNamespace.path)'
+        - name: "RESULT_SNAPSHOT_BUILD_ID"
+          value: '$(results.snapshotBuildId.path)'
+        - name: "RESULT_RELEASE_PIPELINE_METADATA"
+          value: '$(results.releasePipelineMetadata.path)'
+        - name: "RESULT_SUBDIRECTORY"
+          value: '$(results.subdirectory.path)'
+        - name: "CA_CERT_PATH"
+          value: '$(params.caCertPath)'
+      command: ["python3", "-m", "collect_data"]
     - name: create-trusted-artifact
       computeResources:
         limits:
