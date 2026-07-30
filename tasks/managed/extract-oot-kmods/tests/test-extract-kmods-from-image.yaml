@@ -26,31 +26,63 @@ spec:
     - name: dataDir
       description: The location where data will be stored
       type: string
-    - name: taskGitUrl
-      type: string
-      description: The git repository URL for task and StepAction resolution
-      default: https://github.com/enriquebelarte/release-service-catalog.git
-    - name: taskGitRevision
-      type: string
-      description: The git revision for task and StepAction resolution
-      default: signed-kmods-release
   tasks:
     - name: setup
       taskSpec:
         params:
           - name: dataDir
             type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:a9cded57ab847178ebc4807d9a7ca0642ea1903ddddfc9327748983cc7501703
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              # Create the trusted artifacts data directory structure
               mkdir -p "$(params.dataDir)"
 
-              echo "Basic setup completed - mocks will be handled by pre-apply-task-hook.sh"
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
+              {
+                "components": [
+                  {
+                    "containerImage": "quay.io/mock/image@sha256:dummy",
+                    "source": {
+                      "git": {
+                        "url": "https://github.com/mock/repo",
+                        "revision": "abc123"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
       params:
         - name: dataDir
           value: $(params.dataDir)
@@ -63,8 +95,6 @@ spec:
           value: /kmods
         - name: signedKmodsPath
           value: signed-kmods
-        - name: snapshot
-          value: my-snapshot
         - name: snapshotPath
           value: snapshot.json
         - name: ociStorage
@@ -76,29 +106,24 @@ spec:
         - name: trustedArtifactsDebug
           value: $(params.trustedArtifactsDebug)
         - name: sourceDataArtifact
-          value: ""
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
         - name: taskGitUrl
-          value: $(params.taskGitUrl)
+          value: "http://localhost"
         - name: taskGitRevision
-          value: $(params.taskGitRevision)
+          value: "main"
       runAfter:
         - setup
+
     - name: check-result
       taskSpec:
         params:
           - name: dataDir
             type: string
-          - name: ociStorage
-            type: string
           - name: sourceDataArtifact
             type: string
             default: ""
-          - name: taskGitUrl
-            type: string
-          - name: taskGitRevision
-            type: string
         volumes:
           - name: workdir
             emptyDir: {}
@@ -121,75 +146,44 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:a9cded57ab847178ebc4807d9a7ca0642ea1903ddddfc9327748983cc7501703
             script: |
               #!/usr/bin/env bash
               set -eux
 
-                if [ -d "$(params.dataDir)/signed-kmods" ]; then
-                  echo "SUCCESS: Signed kmods directory was found in dataDir"
+              if [ ! -d "$(params.dataDir)/signed-kmods" ]; then
+                echo "ERROR: Signed kmods directory not found"
+                exit 1
+              fi
 
-                  # Check for architecture-specific subdirectory structure
-                  arch_found=false
-                  for arch_dir in "$(params.dataDir)/signed-kmods"/*/; do
-                    if [ -d "$arch_dir" ]; then
-                      arch_name=$(basename "$arch_dir")
-                      echo "Found architecture directory: $arch_name"
-                      arch_found=true
+              arch_found=false
+              for arch_dir in "$(params.dataDir)/signed-kmods"/*/; do
+                if [ -d "$arch_dir" ]; then
+                  arch_name=$(basename "$arch_dir")
+                  echo "Found architecture directory: $arch_name"
+                  arch_found=true
 
-                      # Check if any .ko files exist recursively in the architecture directory
-                      ko_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
-                      if [ "$ko_count" -gt 0 ]; then
-                        echo "SUCCESS: Found $ko_count kernel module files in $arch_name (including subdirectories)"
-                        echo "Kernel module files were extracted successfully with recursive directory structure:"
-                        find "$arch_dir" -name "*.ko" -type f | sort | while read -r ko_file; do
-                          echo "  $ko_file"
-                        done
-
-                        # Verify we have files in subdirectories (testing recursive extraction)
-                        subdir_ko_count=$(find "$arch_dir" -mindepth 2 -name "*.ko" -type f | wc -l)
-                        if [ "$subdir_ko_count" -gt 0 ]; then
-                          echo "SUCCESS: Found $subdir_ko_count .ko files in subdirectories" \
-                               "(recursive extraction working)"
-                        else
-                          echo "INFO: All .ko files are in top-level directory"
-                        fi
-                      else
-                        echo "WARNING: No .ko files found in architecture directory $arch_name"
-                        echo "Directory contents:"
-                        ls -la "$arch_dir" || echo "Directory is empty"
-                      fi
-
-                      # Check if envfile was copied
-                      if [ -f "$arch_dir/envfile" ]; then
-                        echo "SUCCESS: Environment file was copied successfully for $arch_name"
-                        cat "$arch_dir/envfile"
-                      else
-                        echo "WARNING: envfile not found for $arch_name"
-                      fi
-                    fi
-                  done
-
-                  if [ "$arch_found" = false ]; then
-                    echo "ERROR: No architecture directories found in signed-kmods"
-                    echo "Contents of signed-kmods directory:"
-                    ls -la "$(params.dataDir)/signed-kmods" || echo "Directory is empty"
+                  ko_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
+                  if [ "$ko_count" -eq 0 ]; then
+                    echo "ERROR: No .ko files found in $arch_name"
                     exit 1
                   fi
-                else
-                  echo "ERROR: Signed kmods directory not found"
-                  exit 1
+                  echo "SUCCESS: Found $ko_count kernel module files in $arch_name"
+
+                  if [ -f "$arch_dir/envfile" ]; then
+                    echo "SUCCESS: envfile found for $arch_name"
+                  fi
                 fi
+              done
+
+              if [ "$arch_found" = false ]; then
+                echo "ERROR: No architecture directories found in signed-kmods"
+                exit 1
+              fi
       params:
         - name: dataDir
           value: $(params.dataDir)
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: $(tasks.run-task.results.sourceDataArtifact)
-        - name: taskGitUrl
-          value: $(params.taskGitUrl)
-        - name: taskGitRevision
-          value: $(params.taskGitRevision)
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
       runAfter:
         - run-task
