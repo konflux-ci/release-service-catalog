@@ -2,13 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-update-package-collection-missing-json
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-update-package-collection-skip-non-rhel
 spec:
   description: |
-    Test update-package-collection task with missing pushOptions object
-    keys in data.json. It should fail the pipeline due to the missing keys.
+    Test that the update-package-collection task exits cleanly when the product
+    is not RHEL (e.g. CentOS Stream), without calling pc-manager.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -49,45 +47,68 @@ spec:
               value: "$(params.orasOptions)"
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
-          # Use the same security context as the main task to avoid permission issues
           securityContext:
             runAsUser: 1001
+          computeResources:
+            limits:
+              memory: 128Mi
+            requests:
+              memory: 128Mi
+              cpu: 25m
         steps:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
-              set -eux
+              #!/usr/bin/env bash
+              set -euxo pipefail
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
-
-              # Missing pushOptions object parameter in data.json
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "mapping": {
                   "components": [
                     {
-                      "name": "test-foo",
+                      "name": "centos-stream-test-foo",
                       "pushSourceContainer": false,
-                      "repository": "quay.io/test/test-foo",
-                      "package-collections": ["test-collection-1", "test-collection-2"]
+                      "repository": "quay.io/test/centos-stream-test-foo"
                     }
                   ]
                 },
+                "pushOptions": {
+                  "koji_profile": "stream",
+                  "download_koji_base_url": "https://kojihub.stream.rdu2.redhat.com/kojihub",
+                  "koji_import_draft": null,
+                  "koji_tags": [
+                    "c11s-konflux-draft"
+                  ],
+                  "pushKeytab": {
+                    "name": "test.keytab",
+                    "principal": "test@test.com",
+                    "secret": "test-secrets"
+                  },
+                  "pushPipelineImage": "test-image"
+                },
                 "releaseNotes": {
-                  "product_short_name": "rhel"
+                  "product_short_name": "stream"
                 },
                 "intention": "production"
               }
               EOF
-
-              # Create valid snapshot file
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
-                "application": "rpms",
+                "application": "centos-stream",
+                "componentGroup": "centos-stream",
+                "artifacts": {},
                 "components": [
                   {
-                    "containerImage": "quay.io/test/test-foo@sha256:111",
-                    "name": "test-foo"
+                    "containerImage": "quay.io/test/centos-stream-test-foo@sha256:111",
+                    "name": "centos-stream-test-foo",
+                    "source": {
+                      "git": {
+                        "revision": "abc123",
+                        "url": "https://gitlab.com/redhat/centos-stream/rpms/test-foo"
+                      }
+                    }
                   }
                 ]
               }
@@ -140,3 +161,67 @@ spec:
           value: "3"
       runAfter:
         - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+          computeResources:
+            limits:
+              memory: 128Mi
+            requests:
+              memory: 128Mi
+              cpu: 25m
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              exit_code=0
+
+              # pc-manager (uv) should NOT have been called for a non-RHEL product
+              if [ -f "$(params.dataDir)/uv_calls.txt" ] && \
+                 grep -q "pc-manager" "$(params.dataDir)/uv_calls.txt"; then
+                echo "TEST FAILED: pc-manager was called but should have been skipped for non-RHEL product"
+                cat "$(params.dataDir)/uv_calls.txt"
+                exit_code=1
+              else
+                echo "TEST PASSED: pc-manager was not called for non-RHEL product (stream)"
+              fi
+
+              exit $exit_code
