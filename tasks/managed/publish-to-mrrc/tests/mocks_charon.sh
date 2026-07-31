@@ -1,60 +1,8 @@
 #!/usr/bin/env bash
-set -eux
+set -euxo pipefail
 
-# mocks to be injected into task step scripts
-
-function oras(){
-  echo Mock oras called with: "$*" >&2
-  echo "$*" >> "$(params.dataDir)/mock_oras.txt"
-
-  if [[ "$*" == "pull --registry-config"* ]]
-  then
-    echo Mock oras called with: "$*" >&2
-    echo $4 >&2
-    IFS='/' arrIN=(${4}); unset IFS;
-    IFS='@' zip=(${arrIN[2]}); unset IFS;
-    registry="$4"
-    hash=${registry##*@sha256:}
-    short_hash=${hash:0:6}
-    chmod 777 /workdir/mrrc/"$short_hash"
-
-    # If archive name contains "multi-zips", create multiple .zip files
-    if [[ "${zip[0]}" == *"multi-zips"* ]]; then
-      # Create actual zip files with dummy content using Python
-      # (zip command not available in all container images)
-      python3 -c "
-import zipfile
-with zipfile.ZipFile('/workdir/mrrc/$short_hash/artifact1.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
-    zf.writestr('file1.txt', 'dummy content 1')
-with zipfile.ZipFile('/workdir/mrrc/$short_hash/artifact2.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
-    zf.writestr('file2.txt', 'dummy content 2')
-"
-      echo "Created multiple zips for multi-zips scenario" >&2
-    else
-      # Create actual zip file with dummy content using Python
-      python3 -c "
-import zipfile
-with zipfile.ZipFile('/workdir/mrrc/$short_hash/${zip[0]}', 'w', zipfile.ZIP_DEFLATED) as zf:
-    zf.writestr('dummy.txt', 'dummy maven repo content')
-"
-    fi
-  elif [[ "$*" == "push "* ]]
-  then
-    echo Mock oras push called with: "$*" >&2
-    # Simulate successful push - just return success
-    return 0
-  elif [[ "$*" == "resolve --registry-config"* ]]
-  then
-    echo Mock oras resolve called with: "$*" >&2
-    # Return a fake digest for the resolve command
-    echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    return 0
-  else
-    echo Mock oras called with: "$*" >&2
-    echo Error: Unexpected call >&2
-    exit 1
-  fi
-}
+# Mock for bash script steps upload-single-maven-zip, merge-multiple-maven-zips and
+# upload-merged-maven-zip.
 
 function charon(){
   echo Mock charon called with: "$*" >&2
@@ -108,14 +56,14 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     # Check if this is for a merged result or individual archive
     if [[ "$registry" == *":"*"@"* ]]; then
       # This is a merged result (has tag and digest)
-      mkdir -p /workdir/mrrc/merged
-      touch /workdir/mrrc/merged/signing.json
+      mkdir -p /var/workdir/mrrc/merged
+      touch /var/workdir/mrrc/merged/signing.json
       echo "Created signing file for merged result" >&2
     else
       # This is for an individual archive
       hash=${registry##*@sha256:}
       short_hash=${hash:0:6}
-      touch /workdir/mrrc/"$short_hash"/signing.json
+      touch /var/workdir/mrrc/"$short_hash"/signing.json
       echo "Created signing file for individual archive" >&2
     fi
 
@@ -134,8 +82,3 @@ with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
     return 0
   fi
 }
-
-function select-oci-auth() {
-  echo "$*" >> "$(params.dataDir)/mock_select-oci-auth.txt"
-}
-

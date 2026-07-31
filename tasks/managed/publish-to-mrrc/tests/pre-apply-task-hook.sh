@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
 TASK_PATH="$1"
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
-# Create a dummy charon aws crendentials secret (and delete it first if it exists)
+# Create a dummy charon aws credentials secret (and delete it first if it exists)
 aws_creds=$(cat <<- EOF
 [test]
 aws_user = test-user
@@ -21,16 +22,17 @@ kubectl create secret generic test-ca \
   --from-literal=client-key.password="testpass" \
   --from-literal=mrrc-signing.crt="testca"
 
-# Add mocks to the beginning of scripts
+# Python entrypoint mocks are merged from tests/mocks.yaml and tests/mocks/ by
+# test_tekton_tasks.sh (see CONTRIBUTING.md).
+#
+# Bash script steps need mocks injected via yq prepend.
 # Step 0: use-trusted-artifact (ref - no script)
-# Step 1: prepare-repo (script)
-# Step 2: upload-single-maven-zip (script)
-# Step 3: merge-multiple-maven-zips (script)
-# Step 4: push-merged-maven-repo-to-registry (script)
-# Step 5: upload-merged-maven-zip (script)
+# Step 1: prepare-repo (Python entrypoint - uses mocks.yaml)
+# Step 2: upload-single-maven-zip (bash script - needs yq mock injection)
+# Step 3: merge-multiple-maven-zips (bash script - needs yq mock injection)
+# Step 4: push-merged-maven-repo-to-registry (Python entrypoint - uses mocks.yaml)
+# Step 5: upload-merged-maven-zip (bash script - needs yq mock injection)
 # Step 6: create-trusted-artifact (ref - no script)
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
-yq -i '.spec.steps[2].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[2].script' "$TASK_PATH"
-yq -i '.spec.steps[3].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[3].script' "$TASK_PATH"
-yq -i '.spec.steps[4].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[4].script' "$TASK_PATH"
-yq -i '.spec.steps[5].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[5].script' "$TASK_PATH"
+yq -i '.spec.steps[2].script = load_str("'"$SCRIPT_DIR"'/mocks_charon.sh") + .spec.steps[2].script' "$TASK_PATH"
+yq -i '.spec.steps[3].script = load_str("'"$SCRIPT_DIR"'/mocks_charon.sh") + .spec.steps[3].script' "$TASK_PATH"
+yq -i '.spec.steps[5].script = load_str("'"$SCRIPT_DIR"'/mocks_charon.sh") + .spec.steps[5].script' "$TASK_PATH"

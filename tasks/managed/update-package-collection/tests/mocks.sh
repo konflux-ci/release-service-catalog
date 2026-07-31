@@ -44,7 +44,11 @@ EOF
 
 function koji() {
     echo "koji $*" >> "$(params.dataDir)/koji_calls.txt"
-    if [[ "$*" == *getInheritanceData* ]]; then
+    if [[ "$*" == *getBuildTarget*-sidetag* ]]; then
+        echo '{"dest_tag_name": "mock-target-sidetag"}'
+    elif [[ "$*" == *getBuildTarget* ]]; then
+        echo '{"dest_tag_name": "mock-target-candidate"}'
+    elif [[ "$*" == *getInheritanceData* ]]; then
         # Only return inheritance data for mock-target collections (koji tags)
         if [[ "$*" == *mock-target* ]]; then
             echo '[{"name": "rhel-10.9-beta", "priority": 10}, {"name": "rhel-10.1-beta", "priority": 20}]'

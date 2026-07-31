@@ -24,9 +24,6 @@ spec:
       type: string
       default: "360"
       description: Max seconds waiting for the status update
-    - name: buildTimestamp
-      type: string
-      description: Build timestamp for the publishing image
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
@@ -148,22 +145,27 @@ spec:
 
         LENGTH="$(jq -r '.components | length' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
         for((i=0; i<LENGTH; i++)); do
-          targetIndex=$(jq -r --argjson i "$i" \
+          targetIndex=$(jq -r --argjson i "${i}" \
             '.components[$i].target_index' "$(params.dataDir)/$(params.internalRequestResultsFile)")
+          targetIndexWithTimestamp=$(jq -r --argjson i "${i}" \
+            '.components[$i].target_index_with_timestamp' "$(params.dataDir)/$(params.internalRequestResultsFile)")
 
-          sourceIndex="$(jq -r  --argjson i "$i" \
+          sourceIndex="$(jq -r --argjson i "${i}" \
             '.components[$i].index_image' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
+          sourceIndexResolved="$(jq -r --argjson i "${i}" \
+            '.components[$i].index_image_resolved' "$(params.dataDir)/$(params.internalRequestResultsFile)")"
 
-          targetOcpVersion=$(jq -r --argjson i "$i" \
+          targetOcpVersion=$(jq -r --argjson i "${i}" \
             '.components[$i].ocp_version' "$(params.dataDir)/$(params.internalRequestResultsFile)")
 
-          buildTimestamp=$(jq -r --argjson i "$i" '.components[$i].completion_time' \
-            "$(params.dataDir)/$(params.internalRequestResultsFile)")
-
-          publishingImages=("$targetIndex")
-          # only publish the extra timestamp-based tag if the targetIndex does not have it already
-          if [[ ! "$targetIndex" =~ .*"$buildTimestamp"$ ]]; then
-            publishingImages+=("${targetIndex}-${buildTimestamp}")
+          publishingImages=("${targetIndex}")
+          publishingSources=("${sourceIndex}")
+          # only publish the extra tag when it does not contain a timestamp already
+          # which is the case for pre-ga and hotfix
+          if [ "${targetIndex}" != "${targetIndexWithTimestamp}" ]; then
+            publishingImages+=("${targetIndexWithTimestamp}")
+            # Use resolved digest for timestamped tag to avoid race with parallel IIB builds
+            publishingSources+=("${sourceIndexResolved}")
           fi
 
           requestTimeout=$(params.requestTimeout)
@@ -176,12 +178,12 @@ spec:
           for((x=0; x<${#publishingImages[@]}; x++ )); do
               echo "=== Creating internal request to publish image:"
               echo ""
-              echo "- from: ${sourceIndex}"
-              echo "- to: ${publishingImages[$x]}"
+              echo "- from: ${publishingSources[${x}]}"
+              echo "- to: ${publishingImages[${x}]}"
 
               internal-request --pipeline "${request}" \
-                  -p sourceIndex="${sourceIndex}" \
-                  -p targetIndex="${publishingImages[$x]}" \
+                  -p sourceIndex="${publishingSources[${x}]}" \
+                  -p targetIndex="${publishingImages[${x}]}" \
                   -p targetOcpVersion="${targetOcpVersion}" \
                   -p publishingCredentials="${credentials}" \
                   -p retries="$(params.retries)" \
@@ -212,11 +214,11 @@ spec:
               requestMessage=$(echo "${results}" | jq -r '.requestMessage // ""')
 
               if echo "${requestMessage}" | grep -qi "error"; then
-                echo "ERROR: Publish to ${publishingImages[$x]} failed"
+                echo "ERROR: Publish to ${publishingImages[${x}]} failed"
                 echo "requestMessage: ${requestMessage}"
                 exit 1
               fi
-              echo "=== published successfully (${publishingImages[$x]})"
+              echo "=== published successfully (${publishingImages[${x}]})"
 
               echo ""
               echo ""
