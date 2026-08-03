@@ -8,3 +8,7 @@ def graphql_query(
     graphql_api: str, body: dict[str, Any], allow_not_found: bool = False
 ) -> dict[str, Any]:
     return {"find_signatures": {"data": [], "error": None}}
+
+
+def _get_session(retry_allowed_methods: Any = None) -> None:
+    return None
