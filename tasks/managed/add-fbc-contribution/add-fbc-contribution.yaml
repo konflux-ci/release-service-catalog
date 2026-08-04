@@ -26,6 +26,9 @@ spec:
     at the end to allow for timed out requests to finish so that we can just get the final
     result. This will slightly compress the time in which batches are entered into the IIB
     queue to reduce the effect of a full queue on a single release.
+
+    Timeout values can be configured per OCP version using .fbc.timeoutOverrides in the data
+    file to accommodate versions that require longer build times.
   params:
     - name: snapshotPath
       description: Path to the JSON string of the mapped Snapshot spec in the data workspace
@@ -196,13 +199,41 @@ spec:
         default_build_timeout_seconds="3600"
         default_request_timeout_seconds="3600"
 
-        build_timeout_seconds=$(jq -r --arg build_timeout_seconds "${default_build_timeout_seconds}" \
+        # Get base timeouts from data file
+        base_build_timeout_seconds=$(jq -r --arg build_timeout_seconds "${default_build_timeout_seconds}" \
             '.fbc.buildTimeoutSeconds // $build_timeout_seconds' "${DATA_FILE}")
-        request_timeout_seconds=$(jq -r --arg request_timeout_seconds "${default_request_timeout_seconds}" \
+        base_request_timeout_seconds=$(jq -r --arg request_timeout_seconds "${default_request_timeout_seconds}" \
             '.fbc.requestTimeoutSeconds // $request_timeout_seconds' "${DATA_FILE}")
+        
         internal_request_service_account=$(jq -r '.fbc.internalRequestServiceAccount // "release-service-account"' \
             "${DATA_FILE}")
         publishing_credentials=$(jq -r '.fbc.publishingCredentials // "catalog-publishing-secret"' "$DATA_FILE")
+        
+        # Function to get timeout for a specific OCP version
+        # Checks for OCP-version-specific overrides in data file, otherwise uses base timeout
+        # Format: .fbc.timeoutOverrides."v4.12".requestTimeoutSeconds
+        get_timeout_for_ocp_version() {
+            local ocp_version="$1"
+            local timeout_type="$2"  # "request" or "build"
+            local default_value="$3"
+            
+            # Check data file overrides
+            local override_value
+            if [ "${timeout_type}" = "request" ]; then
+                override_value=$(jq -r --arg ocp_version "${ocp_version}" \
+                    '.fbc.timeoutOverrides[$ocp_version].requestTimeoutSeconds // empty' "${DATA_FILE}")
+            else
+                override_value=$(jq -r --arg ocp_version "${ocp_version}" \
+                    '.fbc.timeoutOverrides[$ocp_version].buildTimeoutSeconds // empty' "${DATA_FILE}")
+            fi
+            
+            # Use override if present, otherwise use base timeout
+            if [ -n "${override_value}" ] && [ "${override_value}" != "null" ]; then
+                echo "${override_value}"
+            else
+                echo "${default_value}"
+            fi
+        }
 
         # Use pre-determined values from prepare-fbc-parameters
         iib_service_account_secret="$(params.iibServiceAccountSecret)"
@@ -266,10 +297,9 @@ spec:
         groups_dir="$(params.dataDir)/ocp-groups"
         mkdir -p "$groups_dir"
 
-        # Calculate timeout for batches
+        # Timeout calculation will be done per OCP version group
+        # This allows different OCP versions to have different timeout values
         finally_task_timeout=300
-        pipeline_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds + finally_task_timeout )))
-        task_timeout=$(date -u "+%Hh%Mm%Ss" -d @$(( request_timeout_seconds )))
 
         # Group components by OCP version for isolated processing
         # Expands multi-version components into separate instances per version
@@ -338,6 +368,27 @@ spec:
             local group_components="$2"
 
             echo "INFO: Processing OCP group $group_ocp_version"
+
+            # Get OCP-version-specific timeouts
+            local group_request_timeout_seconds
+            group_request_timeout_seconds=$(get_timeout_for_ocp_version \
+                "${group_ocp_version}" "request" "${base_request_timeout_seconds}")
+            local group_build_timeout_seconds
+            group_build_timeout_seconds=$(get_timeout_for_ocp_version \
+                "${group_ocp_version}" "build" "${base_build_timeout_seconds}")
+            
+            # Calculate timeouts for this OCP version group
+            local group_pipeline_timeout_seconds=$(( group_request_timeout_seconds + finally_task_timeout ))
+            local group_pipeline_timeout
+            group_pipeline_timeout=$(date -u "+%Hh%Mm%Ss" -d "@${group_pipeline_timeout_seconds}")
+            local group_task_timeout
+            group_task_timeout=$(date -u "+%Hh%Mm%Ss" -d "@${group_request_timeout_seconds}")
+            local group_script_timeout_seconds=${group_pipeline_timeout_seconds}
+            
+            if [ "${group_request_timeout_seconds}" != "${base_request_timeout_seconds}" ]; then
+                echo "INFO: Using custom timeout override for OCP ${group_ocp_version}:" \
+                  "request=${group_request_timeout_seconds}s, build=${group_build_timeout_seconds}s"
+            fi
 
             # Get group-specific parameters from first component (all should have same values within group)
             local first_component
@@ -437,7 +488,7 @@ spec:
                     -p fbcFragments="$(printf '%s' "${batch_fragments}" | jq -c .)" \
                     -p iibServiceAccountSecret="${iib_service_account_secret}" \
                     -p publishingCredentials="${publishing_credentials}" \
-                    -p buildTimeoutSeconds="${build_timeout_seconds}" \
+                    -p buildTimeoutSeconds="${group_build_timeout_seconds}" \
                     -p buildTags="$(jq -c . <<< "${group_build_tags}")" \
                     -p addArches="$(jq -c . <<< "${add_arches}")" \
                     -p mustPublishIndexImage="${mustPublishIndexImage}" \
@@ -447,15 +498,24 @@ spec:
                     --service-account "${internal_request_service_account}" \
                     -l ${TASK_LABEL}="${TASK_ID}" \
                     -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-                    --pipeline-timeout "${pipeline_timeout}" \
-                    --task-timeout "${task_timeout}" \
-                    -t "${request_timeout_seconds}" \
+                    --pipeline-timeout "${group_pipeline_timeout}" \
+                    --task-timeout "${group_task_timeout}" \
+                    -t "${group_script_timeout_seconds}" \
                     | tee "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log"
 
                 # Extract request name
                 local internalRequest
                 internalRequest=$(awk -F"'" '/created/ { print $2 }' \
                     "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log")
+
+                if [ -z "${internalRequest}" ]; then
+                    echo "ERROR: Failed to extract InternalRequest name from output"
+                    echo "Output file contents:"
+                    cat "$(params.dataDir)/ir-$(context.taskRun.uid)-batch-$((batch_num + 1))-output.log"
+                    return 1
+                fi
+
+                echo "INFO: InternalRequest '${internalRequest}' created for batch $((batch_num + 1))"
 
                 # Validate internal request succeeded
                 local request_status
@@ -472,6 +532,21 @@ spec:
                         -o jsonpath='{.status.conditions[?(@.type=="Succeeded")].message}')
                     echo "Reason: ${request_reason}"
                     echo "Message: ${request_message}"
+                    
+                    # Additional diagnostics
+                    echo "INFO: InternalRequest details:"
+                    kubectl get internalrequest "${internalRequest}" -o yaml | grep -A 20 "status:" || true
+                    
+                    # Check if there's a PipelineRun associated
+                    local pipeline_run
+                    pipeline_run=$(kubectl get internalrequest "${internalRequest}" \
+                        -o jsonpath='{.status.results}' | jq -r '.internalRequestPipelineRunName // empty')
+                    if [ -n "${pipeline_run}" ]; then
+                        echo "INFO: Associated PipelineRun: ${pipeline_run}"
+                        echo "INFO: PipelineRun status:"
+                        kubectl get pipelinerun "${pipeline_run}" -o jsonpath='{.status.conditions}' | jq . || true
+                    fi
+                    
                     return 1
                 fi
 
