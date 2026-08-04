@@ -16,6 +16,7 @@ This is the Release Service Catalog - a collection of Tekton resources (Tasks, P
 - **Commits**: Conventional commits enforced by gitlint, scope is a Jira ticket ID: `feat(JIRA-1234): message`, `fix(JIRA-1234): message`
 - **YAML style**: 120-char max, consistent indentation, `---` document start, max 1 empty line
 - **Tekton tasks**: Trusted Artifacts tasks with non-`release-service-utils` images MUST set `stepTemplate.securityContext.runAsUser: 1001`; all tasks SHOULD specify compute resource requirements
+- **New tasks**: implement logic as a standalone script (usually Python) in the [release-service-utils repo](https://github.com/konflux-ci/release-service-utils), referenced via `command`, rather than inline `script` shell code — see [RELEASE-2455](https://redhat.atlassian.net/browse/RELEASE-2455)
 - **Vault files** (`.*vault.*\.(yaml|yml)$`): MUST be encrypted with `ansible-vault` before commit
 - **READMEs** under `tasks/` and `pipelines/`: auto-generated, do not edit by hand
 

@@ -110,6 +110,20 @@ This repo uses [MintMaker](https://konflux-ci.dev/docs/mintmaker/user/) to autom
 All other images should be referenced the same way as the release-service-utils image, by digest. For example: `registry.access.redhat.com/ubi8/ubi@sha256:c94bc309b197f9fc465052123ead92bf50799ba72055bd040477ded`.
 This allows MintMaker to automatically manage and update image digests.
 
+### Adding New Tasks
+
+When adding a new task, its logic should be implemented as a standalone script (usually Python) defined in the
+[release-service-utils repo](https://github.com/konflux-ci/release-service-utils), rather than written inline in
+the task's `script` field. The task step should then reference the script via `command`, for example:
+
+```yaml
+command: ["/home/scripts/python/tasks/managed/my_new_script.py"]
+```
+
+This makes the logic easier to unit test, reuse, and maintain outside of the Tekton YAML. This is part of an
+ongoing effort to convert existing tasks as well, tracked in
+[RELEASE-2455](https://redhat.atlassian.net/browse/RELEASE-2455).
+
 ### Compute Resources
 
 All steps in the [managed](tasks/managed) and [internal](tasks/internal) tasks have `computeResources` defined. This is because the namespace in which these run is often under a very high load.
