@@ -75,8 +75,14 @@ function skopeo() {
 }
 
 function get-image-architectures() {
-  echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
-  echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
+  local image="$1"
+  if [[ "$image" == *"dual"* ]]; then
+    # Dual-compression index: get-image-architectures dedups to the gzip entry per arch
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "sha256:dualgzip"}'
+  else
+    echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
+  fi
 }
 
 function select-oci-auth() {

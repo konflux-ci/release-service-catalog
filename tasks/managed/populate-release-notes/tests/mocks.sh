@@ -4,8 +4,14 @@ set -eux
 # mocks to be injected into task step scripts
 
 function get-image-architectures() {
-    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "sha256:abcdefg"}'
-    echo '{"platform":{"architecture": "s390x", "os": "linux"}, "digest": "sha256:deadbeef"}'
+    if [[ "$1" == *"dual"* ]]; then
+        # Dual-compression index: get-image-architectures dedups to the gzip entry per arch
+        echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "sha256:amd64gzip"}'
+        echo '{"platform":{"architecture": "s390x", "os": "linux"}, "digest": "sha256:s390gzip"}'
+    else
+        echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "sha256:abcdefg"}'
+        echo '{"platform":{"architecture": "s390x", "os": "linux"}, "digest": "sha256:deadbeef"}'
+    fi
 }
 
 function curl-with-retry() {

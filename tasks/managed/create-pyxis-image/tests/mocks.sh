@@ -84,6 +84,10 @@ function get-image-architectures() {
   if [[ "$*" =~ registry.io/multi-arch-image.?@sha256:mydigest.? ]]; then
     echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
     echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
+  elif [[ "$*" =~ registry.io/dual-compression-image.?@sha256:mydigest.? ]]; then
+    # Dual-compression index: get-image-architectures dedups to the gzip entry per arch
+    echo '{"platform":{"architecture": "amd64", "os": "linux"}, "digest": "abcdefg"}'
+    echo '{"platform":{"architecture": "ppc64le", "os": "linux"}, "digest": "deadbeef"}'
   elif [[ "$1" = registry.io/fail-get-image-architectures@sha256:mydigest ]]; then
     echo "Simulating get-image-architectures failure" >&2
     return 1
