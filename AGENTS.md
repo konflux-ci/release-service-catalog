@@ -58,7 +58,9 @@ Test locally first. Use `--pr-mode` for pre-merge validation. Check `test-result
 - **jq flags**: `-r` for raw output, `-c` for compact, `-e` to exit non-zero on false/null
 - **Tekton results**: `echo -n "value" > "$(results.name.path)"` — always `-n` to avoid trailing newlines
 - **curl**: use `--retry 3`, `-s` for silent, `--fail-with-body` for error handling; pipe to `jq -r` for parsing
-- **Error handling**: trap EXIT to write success/failure to results; always `exit 0` (let Tekton results carry status)
+- **Error handling**: internal tasks MUST always `exit 0` and write success/failure to `$(results.result.path)`.
+  Use a `trap EXIT` handler or write the result explicitly at each exit point. A non-zero exit prevents Tekton
+  from setting results that the calling managed task needs. Managed and collector tasks can use non-zero exit codes as appropriate to signal errors
 - **Secrets**: `set +x` before using sensitive values, re-enable after; read from mounted files, not env vars
 - **Cleanup**: `mktemp` + `trap 'rm -f "${TEMP_FILE}"' EXIT`; use `pushd`/`popd` for directory changes
 
