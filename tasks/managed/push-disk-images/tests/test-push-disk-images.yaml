@@ -2,12 +2,10 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-disk-images-fail-ir-failure
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-push-disk-images
 spec:
   description: |
-    Run the push-disk-images task and ensure it fails when the internal request fails
+    Run the push-disk-images task with the stage env and verify the results file is created
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -49,47 +47,44 @@ spec:
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup
-            image: quay.io/konflux-ci/release-service-utils@sha256:42d0820b4a7a5998a0d8f9549928120f0d527a7e78336ed0e33b6543057d74af
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:b1b7e9ec9c856e8d36c514c5220daa2569738d53c712369c9968cd748ca6814a
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/results"
-              cat > "$(params.dataDir)/snapshot_spec.json" << EOF
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              mkdir "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
                 "application": "disk-images",
                 "components": [
                   {
-                    "name": "failing-disk-image",
+                    "name": "nvidia-disk-image",
                     "containerImage": "quay.io/workload/tenant/disk-image/nvidia@sha256:123456",
-                    "repository": "repo1"
-                  },
-                  {
-                    "name": "amd-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/amd@sha256:abcdefg",
-                    "repository": "repo2"
+                    "repository": "repo1",
+                    "staged": {
+                      "files": [
+                        {
+                          "filename": "rhel-ai-nvidia-aws-1.3-x86_64.ami",
+                          "source": "disk.raw"
+                        }
+                      ]
+                    }
                   }
                 ]
               }
               EOF
 
-              cat > "$(params.dataDir)/data.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "contentGateway": {
                   "productName": "Konflux test product",
                   "productCode": "KTestProduct",
-                  "productVersionName": "KTestProduct 1",
-                  "components": [
-                    {
-                      "name": "test-component",
-                      "description": "Red Hat OpenShift Local Sandbox Test",
-                      "label": "Checksum File Sandbox Test"
-                    }
-                  ]
+                  "productVersionName": "KTestProduct 1"
                 },
                 "cdn": {
-                  "env": "production"
+                  "env": "stage"
                 }
               }
               EOF
@@ -108,13 +103,13 @@ spec:
         name: push-disk-images
       params:
         - name: snapshotPath
-          value: "snapshot_spec.json"
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
         - name: dataPath
-          value: "data.json"
+          value: "$(context.pipelineRun.uid)/data.json"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: resultsDirPath
-          value: results
+          value: "$(context.pipelineRun.uid)/results"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -126,19 +121,58 @@ spec:
         - name: trustedArtifactsDebug
           value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: https://localhost
+          value: "https://localhost"
         - name: taskGitRevision
-          value: main
+          value: "main"
       runAfter:
         - setup
-  finally:
-    - name: cleanup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
       taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:42d0820b4a7a5998a0d8f9549928120f0d527a7e78336ed0e33b6543057d74af
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:b1b7e9ec9c856e8d36c514c5220daa2569738d53c712369c9968cd748ca6814a
             script: |
-              #!/usr/bin/env sh
-              set -eux
+              #!/usr/bin/env bash
+              set -ex
 
-              kubectl delete internalrequests --all
+              results=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-disk-images-results.json")
+
+              expected="rhel-ai-nvidia-aws-1.3-x86_64.ami"
+              if [ "$(jq -r '."disk-image-files"[]' <<< "$results")" != "$expected" ]; then
+                echo "push-disk-images results do not contain expected file names"
+                exit 1
+              fi
