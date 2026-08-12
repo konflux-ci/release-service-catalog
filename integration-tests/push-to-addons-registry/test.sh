@@ -248,7 +248,7 @@ verify_release_contents() {
     echo ""
     echo "Verifying arches and skopeo pullability for each image..."
 
-    for i in 0 1; do
+    for i in $(seq 0 $((image_count - 1))); do
         local img_url img_shasum img_arches
         img_url=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
         img_shasum=$(jq -r --argjson idx "$i" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
@@ -256,6 +256,11 @@ verify_release_contents() {
           | map((tostring | split("/") | .[-1]))
           | unique
           | join(" ")' <<< "${release_json}")
+
+        local is_single_arch=0
+        if [[ "${img_url}" == *"component2"* ]]; then
+            is_single_arch=1
+        fi
 
         echo ""
         echo "Image ${i}: url=${img_url}, shasum=${img_shasum}, arches=${img_arches}"
@@ -266,7 +271,7 @@ verify_release_contents() {
             continue
         fi
 
-        if [ "$i" -eq 0 ]; then
+        if [ "${is_single_arch}" -eq 0 ]; then
             echo "Checking image ${i} arches include amd64 and arm64..."
             if [[ " ${img_arches} " == *" amd64 "* && " ${img_arches} " == *" arm64 "* ]]; then
                 echo "✅️ Image ${i} has required arches: ${img_arches}"
@@ -295,7 +300,7 @@ verify_release_contents() {
         echo "Verifying image ${i} pullability with skopeo..."
         if [[ "${img_shasum}" == sha256:* ]]; then
             set +e
-            if [ "$i" -eq 0 ]; then
+            if [ "${is_single_arch}" -eq 0 ]; then
                 "${SCRIPT_DIR}/scripts/skopeo-verify-image.sh" \
                     "${img_url}" "${img_shasum}" \
                     "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" \
