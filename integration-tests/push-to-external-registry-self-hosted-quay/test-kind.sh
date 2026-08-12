@@ -3,13 +3,13 @@
 # test-kind.sh - E2E test for push-to-external-registry on self-hosted Quay (Kind cluster).
 #
 # This script is a standalone test that runs against a Kind cluster where Quay has
-# been deployed (via the deploy-konflux-ci task with skip-quay=false). It initializes
+# been deployed (via the deploy-konflux task) and Quay deployed (via the deploy-quay task). It initializes
 # Quay (creates admin user, org, robot account, copies a source image), creates all
 # necessary Kubernetes resources, triggers a release via a Snapshot, and verifies the
 # release pipeline completes successfully.
 #
 # Prerequisites:
-#   - Kind cluster with Konflux and Quay deployed (deploy-konflux-ci task)
+#   - Kind cluster with Konflux deployed (deploy-konflux task) and Quay deployed (deploy-quay task)
 #   - KUBECONFIG set to the Kind cluster
 #
 # Environment Variables:

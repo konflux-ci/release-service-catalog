@@ -14,8 +14,8 @@ initialization (admin user, org, robot account, image copy).
 
 The test expects the following to be available in the Kind cluster:
 
-- **Konflux deployed** via the `deploy-konflux-ci` task with `skip-quay=false`
-  and `SKIP_QUAY_ADMIN_INIT=true`
+- **Konflux deployed** via the `deploy-konflux` task (operator-based)
+- **Quay deployed** via the separate `deploy-quay` task with `SKIP_QUAY_ADMIN_INIT=true`
 - **Quay pods running** (Postgres, Redis, Quay) in the `quay` namespace
 
 The test script (`test-kind.sh`) handles all Quay initialization itself.
@@ -40,6 +40,7 @@ This test is run by `integration-tests/pipelines/e2e-tests-kind-quay-pipeline.ya
 which orchestrates:
 
 1. Provision a Kind cluster on AWS
-2. Deploy Konflux with Quay enabled
-3. Run this test (which initializes Quay and triggers the release)
-4. Deprovision the cluster
+2. Deploy Konflux via the operator-based `deploy-konflux` task
+3. Deploy Quay via the separate `deploy-quay` task
+4. Run this test (which initializes Quay and triggers the release)
+5. Deprovision the cluster
