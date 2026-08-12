@@ -56,6 +56,15 @@ spec:
       description: The name of the secret containing the ansible vault password.
       type: string
       default: 'e2e-test-vault-password'
+    - name: konflux-ready-timeout
+      description: Timeout for waiting on the Konflux CR Ready condition.
+      type: string
+      default: 30m
+    - name: konflux-cr-configmap
+      description: >-
+        ConfigMap in the pipeline namespace containing the Konflux CR to apply.
+      type: string
+      default: konflux-deploy-cr
   tasks:
     - name: test-metadata
       taskRef:
@@ -149,32 +158,90 @@ spec:
         resolver: git
         params:
           - name: url
-            value: https://github.com/konflux-ci/tekton-integration-catalog
+            value: https://github.com/konflux-ci/konflux-ci.git
           - name: revision
             value: main
           - name: pathInRepo
-            value: tasks/konflux-ci/deploy/0.2/deploy-konflux-ci.yaml
+            value: .tekton/tasks/deploy-konflux/task.yaml
       params:
         - name: cluster-access-secret
           value: kfg-$(context.pipelineRun.name)
-        - name: repo-url
+        - name: git-url
           value: https://github.com/konflux-ci/konflux-ci.git
-        - name: repo-branch
-          value: legacy
-        - name: component-name
-          value: release-service-catalog
-        - name: component-pr-owner
-          value: $(tasks.test-metadata.results.pull-request-author)
-        - name: component-pr-sha
-          value: ""
-        - name: component-pr-source-branch
-          value: $(tasks.test-metadata.results.source-repo-branch)
-        - name: oci-ref
-          value: $(params.oci-container-repo):$(context.pipelineRun.name)
-        - name: credentials-secret-name
+        - name: revision
+          value: main
+        - name: konflux-ready-timeout
+          value: $(params.konflux-ready-timeout)
+        - name: konflux-cr-configmap
+          value: $(params.konflux-cr-configmap)
+        - name: konflux-cr-configmap-key
+          value: konflux-cr.yaml
+        - name: oci-container-repo
+          value: $(params.oci-container-repo)
+        - name: oci-container-repo-credentials-secret
           value: $(params.konflux-test-infra-secret)
-        - name: skip-quay
-          value: "false"
+        - name: pipeline-run-name
+          value: $(context.pipelineRun.name)
+    - name: deploy-quay
+      when:
+        - input: "$(tasks.test-metadata.results.pull-request-author)"
+          operator: notin
+          values: ["red-hat-konflux[bot]"]
+        - input: "$(tasks.check-if-related-test.results.result)"
+          operator: in
+          values: ["true"]
+      runAfter:
+        - deploy-konflux
+      params:
+        - name: cluster-access-secret
+          value: kfg-$(context.pipelineRun.name)
+      taskSpec:
+        params:
+          - name: cluster-access-secret
+        volumes:
+          - name: cluster-kubeconfig
+            secret:
+              secretName: $(params.cluster-access-secret)
+        steps:
+          - name: deploy-local-quay
+            image: quay.io/konflux-ci/release-service-utils@sha256:0b35e861c83b9c1141e3a8d7a8924cc9c4ae0b09dc87938971eee66ee9b9aaaf
+            env:
+              - name: KUBECONFIG
+                value: /tmp/cluster-kubeconfig/kubeconfig
+              - name: SKIP_QUAY_ADMIN_INIT
+                value: "true"
+            volumeMounts:
+              - name: cluster-kubeconfig
+                mountPath: /tmp/cluster-kubeconfig
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # Wait for cluster API to settle after the operator deployment
+              echo "Waiting for cluster API to be reachable..."
+              for i in $(seq 1 30); do
+                if kubectl get nodes --request-timeout=10s &>/dev/null; then
+                  echo "Cluster is reachable"
+                  break
+                fi
+                if [ "${i}" -eq 30 ]; then
+                  echo "ERROR: cluster not reachable after 150s"
+                  exit 1
+                fi
+                sleep 5
+              done
+
+              REPO=$(mktemp -d)
+
+              git init "${REPO}"
+              git -C "${REPO}" fetch --depth 1 \
+                https://github.com/konflux-ci/konflux-ci.git main
+              git -C "${REPO}" checkout FETCH_HEAD
+
+              # shellcheck source=/dev/null
+              source "${REPO}/deploy-deps.sh"
+
+              SKIP_QUAY=false deploy_quay
     - name: self-hosted-quay-test
       timeout: 3h
       when:
@@ -185,7 +252,7 @@ spec:
           operator: in
           values: ["true"]
       runAfter:
-        - deploy-konflux
+        - deploy-quay
       params:
         - name: cluster-access-secret
           value: kfg-$(context.pipelineRun.name)
