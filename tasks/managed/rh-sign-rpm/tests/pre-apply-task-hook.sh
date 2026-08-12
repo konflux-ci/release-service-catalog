@@ -23,10 +23,6 @@ cat > "/tmp/rpm-signing-pipeline.json" << EOF
   "spec": {
     "params": [
       {
-        "name": "pipeline_image",
-        "type": "string"
-      },
-      {
         "name": "artifact_json",
         "type": "string"
       },
