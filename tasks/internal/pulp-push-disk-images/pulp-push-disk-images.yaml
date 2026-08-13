@@ -86,7 +86,7 @@ spec:
 
   steps:
     - name: pull-and-push-images
-      image: quay.io/konflux-ci/release-service-utils@sha256:def74473ef2a7acfaa2a3cff2a806634d5b91420150c003b8d461e4198d1035f
+      image: quay.io/konflux-ci/release-service-utils@sha256:42d0820b4a7a5998a0d8f9549928120f0d527a7e78336ed0e33b6543057d74af
       computeResources:
         limits:
           memory: 512Mi
@@ -107,20 +107,237 @@ spec:
       securityContext:
         runAsUser: 1001
       env:
-        - name: SNAPSHOT_JSON
-          value: $(params.snapshot_json)
-        - name: CERT_EXPIRATION_WARN_DAYS
-          value: $(params.certExpirationWarnDays)
-        - name: CONCURRENT_LIMIT
-          value: $(params.concurrentLimit)
-        - name: EXODUS_GW_ENV
-          value: $(params.exodusGwEnv)
-        - name: CGW_HOSTNAME
-          value: $(params.cgwHostname)
-        - name: RESULT_RESULT
-          value: $(results.result.path)
-      command:
-        - python3
-      args:
-        - -u
-        - /home/scripts/python/tasks/internal/pulp_push_disk_images.py
+        - name: "SNAPSHOT_JSON"
+          value: "$(params.snapshot_json)"
+      script: |
+        #!/usr/bin/env bash
+        set -e
+
+        # Check certificate expiration for all certificates used in this step
+        echo "=== Checking certificate expiration ==="
+
+        # Check Exodus Gateway certificate
+        echo "Checking Exodus Gateway certificate"
+        if ! check_cert_expiration "/mnt/exodusGwSecret/cert" "$(params.certExpirationWarnDays)"; then
+          echo "ERROR: Exodus Gateway certificate validation failed"
+          exit 1
+        fi
+
+        # Check Pulp certificate
+        echo "Checking Pulp certificate"
+        if ! check_cert_expiration "/mnt/pulpSecret/konflux-release-rhsm-pulp.crt" \
+            "$(params.certExpirationWarnDays)"; then
+          echo "ERROR: Pulp certificate validation failed"
+          exit 1
+        fi
+
+        # Check UDCache certificate
+        echo "Checking UDCache certificate"
+        if ! check_cert_expiration "/mnt/udcacheSecret/cert" "$(params.certExpirationWarnDays)"; then
+          echo "ERROR: UDCache certificate validation failed"
+          exit 1
+        fi
+
+        echo "=== All certificates are valid ==="
+
+        EXODUS_CERT="$(cat /mnt/exodusGwSecret/cert)"
+        EXODUS_KEY="$(cat /mnt/exodusGwSecret/key)"
+        EXODUS_URL="$(cat /mnt/exodusGwSecret/url)"
+        PULP_URL="$(cat /mnt/pulpSecret/pulp_url)"
+        PULP_CERT="$(cat /mnt/pulpSecret/konflux-release-rhsm-pulp.crt)"
+        PULP_KEY="$(cat /mnt/pulpSecret/konflux-release-rhsm-pulp.key)"
+        UDC_URL="$(cat /mnt/udcacheSecret/url)"
+        UDC_CERT="$(cat /mnt/udcacheSecret/cert)"
+        UDC_KEY="$(cat /mnt/udcacheSecret/key)"
+        DOCKER_CONFIG_JSON="$(cat /mnt/redhat-workloads-token/.dockerconfigjson)"
+
+        CGW_USERNAME="$(cat "/mnt/cgwSecret/username")"
+        CGW_PASSWORD="$(cat "/mnt/cgwSecret/token")"
+
+        # export the variables used by the scripts in release-service-utils
+        export CGW_USERNAME CGW_PASSWORD
+
+        set -x
+
+        STDERR_FILE=/tmp/stderr.txt
+
+        exitfunc() {
+            local err=$1
+            local line=$2
+            local command="$3"
+            if [ "$err" -eq 0 ] ; then
+                echo -n "Success" > "$(results.result.path)"
+            else
+                echo "$0: ERROR '$command' failed at line $line - exited with status $err" \
+                  > "$(results.result.path)"
+                if [ -f "$STDERR_FILE" ] ; then
+                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
+                fi
+            fi
+            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+        }
+        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+        # Setup required variables
+        export EXODUS_GW_CERT=/tmp/exodus.crt
+        export EXODUS_GW_KEY=/tmp/exodus.key
+        export PULP_CERT_FILE=/tmp/pulp.crt
+        export PULP_KEY_FILE=/tmp/pulp.key
+        export UDCACHE_CERT=/tmp/udc.crt
+        export UDCACHE_KEY=/tmp/udc.key
+        EXODUS_GW_ENV=$(params.exodusGwEnv)
+        export EXODUS_GW_ENV
+        export EXODUS_GW_URL="$EXODUS_URL"
+        export EXODUS_PULP_HOOK_ENABLED=True
+        export EXODUS_GW_TIMEOUT=7200
+        mkdir -p ~/.docker
+
+        set +x
+        echo "$EXODUS_CERT" > "$EXODUS_GW_CERT"
+        echo "$EXODUS_KEY" > "$EXODUS_GW_KEY"
+        echo "$PULP_CERT" > "$PULP_CERT_FILE"
+        echo "$PULP_KEY" > "$PULP_KEY_FILE"
+        echo "$UDC_CERT" > "$UDCACHE_CERT"
+        echo "$UDC_KEY" > "$UDCACHE_KEY"
+        # Quotes are added to the secret so it applies in k8s nicely. But now we have to remove them
+        echo "$DOCKER_CONFIG_JSON" | sed -r 's/(^|\})[^{}]+(\{|$)/\1\2/g' > ~/.docker/config.json
+        set -x
+
+        DISK_IMAGE_DIR="$(mktemp -d)"
+        export DISK_IMAGE_DIR
+
+        process_component() { # Expected argument is [component json]
+            COMPONENT=$1
+            PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}")
+            DESTINATION="${DISK_IMAGE_DIR}/$(jq -er '.staged.destination' <<< "${COMPONENT}")/FILES" \
+              || (echo "Missing staged.destination value for component. This should be an existing pulp repo. \
+                  Failing" && exit 1)
+            mkdir -p "${DESTINATION}"
+            DOWNLOAD_DIR=$(mktemp -d)
+            cd "$DOWNLOAD_DIR"
+            # oras has very limited support for selecting the right auth entry,
+            # so create a custom auth file with just one entry
+            AUTH_FILE=$(mktemp)
+            select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
+            oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
+            NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
+            for ((i = 0; i < NUM_MAPPED_FILES; i++)) ; do
+                FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
+                SOURCE=$(jq -er '.source' <<< "$FILE")
+                FILENAME=$(jq -er '.filename' <<< "$FILE")
+                # The .qcow2 images are not zipped
+                if [ -f "${SOURCE}.gz" ] ; then
+                    gzip -d "${SOURCE}.gz"
+                fi
+                DESTINATION_FILE="${DESTINATION}/${FILENAME}"
+                # Albeit a rare one, this is a race condition since this is run in parallel.
+                # The race condition is if two files have the same $DESTINATION_FILE and both
+                # if checks are run before either mv is run a few lines below.
+                if [ -f "${DESTINATION_FILE}" ] ; then
+                    echo -n "Multiple files use the same destination value: $DESTINATION" >&2
+                    echo " and filename value: $FILENAME. Failing..." >&2
+                    exit 1
+                fi
+                mv "$SOURCE" "${DESTINATION_FILE}" || echo "didn't find mapped file: ${SOURCE}"
+            done
+
+        }
+
+        process_component_for_developer_portal() { # Expected argument are [component json], [content_directory]
+          COMPONENT=$1
+
+          productName="$(jq -er '.contentGateway.productName' <<< "${COMPONENT}")" \
+            || (echo "Missing contentGateway.productName value for component. This should be an existing product \
+                  in the Developer Portal. Failing" && exit 1)
+
+          productCode="$(jq -er '.contentGateway.productCode' <<< "${COMPONENT}")" \
+            || (echo "Missing contentGateway.productCode value for component. This should be an existing product \
+                  in the Developer Portal. Failing" && exit 1)
+
+          productVersionName="$(jq -er '.contentGateway.productVersionName' <<< "${COMPONENT}")" \
+            || (echo "Missing contentGateway.productVersionName value for component. This should be an existing \
+                  product in the Developer Portal. Failing" && exit 1)
+
+          filePrefix="$(jq -er '.contentGateway.filePrefix' <<< "${COMPONENT}")" \
+            || (echo "Missing contentGateway.filePrefix value for component. This should be the prefix for files to \
+                  upload to the Developer Portal. Failing" && exit 1)
+
+          # Set proxy for preprod CGW environment (requires squid proxy for access)
+          if [[ "$(params.cgwHostname)" == *"developers.qa.redhat.com"* ]]; then
+            export HTTP_PROXY="http://squid.corp.redhat.com:3128"
+            export HTTPS_PROXY="http://squid.corp.redhat.com:3128"
+            echo "Using squid proxy for preprod CGW access"
+          fi
+
+          developer_portal_wrapper --debug --product-name "${productName}" \
+            --product-code "${productCode}" \
+            --product-version-name "${productVersionName}" \
+            --cgw-hostname "$(params.cgwHostname)" \
+            --content-directory "$2" \
+            --file-prefix "${filePrefix}"
+
+        }
+
+        RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+
+        # use the 1st component's version
+        VERSION=$(jq -cr '.components[0].staged.version // ""' <<< "$SNAPSHOT_JSON")
+        if [ "${VERSION}" == "" ] ; then
+          echo "Error: version not specified in .components[0].staged.version. Needed to publish to customer portal"
+          exit 1
+        fi
+
+        # Process each component in parallel
+        for ((i = 0; i < NUM_COMPONENTS; i++)) ; do
+            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+            # Limit batch size to concurrent limit
+            while (( ${RUNNING_JOBS@P} >= $(params.concurrentLimit) )); do
+                wait -n
+            done
+            process_component "$COMPONENT" 2> "$STDERR_FILE" &
+        done
+
+        # Wait for remaining processes to finish
+        while (( ${RUNNING_JOBS@P} > 0 )); do
+            wait -n
+        done
+
+        # Change to the subdir with the images
+        cd "${DISK_IMAGE_DIR}"
+
+        STAGED_JSON='{"header":{"version": "0.2"},"payload":{"files":[]}}'
+
+        # Add the files to the payload
+        # shell check wants us to find ./* but that adds `./` to the paths which breaks the script
+        # shellcheck disable=SC2035
+        while IFS= read -r -d '' file ; do
+            STAGED_JSON=$(jq --arg filename "$(basename "$file")" --arg path "$file" \
+              --arg version "$VERSION" \
+              '.payload.files[.payload.files | length] =
+              {"filename": $filename, "relative_path": $path, "version": $version}' <<< "$STAGED_JSON")
+        done < <(find * -type f -print0)
+
+        echo "$STAGED_JSON" | yq -P -I 4 > staged.yaml
+
+        pulp_push_wrapper --debug --source "${DISK_IMAGE_DIR}" --pulp-url "$PULP_URL" \
+          --pulp-cert $PULP_CERT_FILE --pulp-key $PULP_KEY_FILE --udcache-url "$UDC_URL" \
+          2> >(tee -a "$STDERR_FILE" >&2)
+
+        relative_paths=$(echo "$STAGED_JSON" | jq -erc .payload.files[].relative_path)
+        component_destinations=()
+        for path in $relative_paths:
+        do
+          parent_dir=$(dirname "$path")
+          component_destinations+=("${DISK_IMAGE_DIR}/$parent_dir")
+        done
+
+        ## Process Files for Developer Portal / CGW
+        ##
+        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        for ((i = 0; i < NUM_COMPONENTS; i++)) ; do
+            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+            process_component_for_developer_portal "$COMPONENT" "${component_destinations[$i]}" \
+              2> >(tee -a "$STDERR_FILE" >&2)
+        done
