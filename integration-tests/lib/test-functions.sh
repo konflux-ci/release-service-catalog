@@ -996,13 +996,30 @@ is_task_skipped() {
     local task_name=$2
 
     local pipelinerun_name
-    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
 
     local skipped_task
-    skipped_task=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
-        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")
+    skipped_task="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")"
 
     [[ -n "${skipped_task}" ]]
+}
+
+# Return 0 (true) if the named task appears in the PipelineRun's childReferences
+# (i.e., it actually executed), 1 (false) otherwise.
+did_task_run() {
+    local release_name="${1}"
+    local task_name="${2}"
+
+    local pipelinerun_name
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
+
+    local task_ref
+    task_ref="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" -o json \
+        | jq -r --arg task_name "${task_name}" \
+            '.status.childReferences[]? | select(.pipelineTaskName == $task_name) | .name // empty')"
+
+    [[ -n "${task_ref}" ]]
 }
 
 # Return the value of a named pipeline-level result from the managed PipelineRun
