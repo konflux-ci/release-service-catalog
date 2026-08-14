@@ -81,6 +81,15 @@
 #   - A trap is set to call the 'cleanup_resources' function on EXIT,
 #     regardless of success or failure (unless --skip-cleanup is used).
 #     The cleanup function receives the exit code, line number, and command.
+#   - Do not replace or clear the EXIT trap from suite test.sh. Use optional hooks below
+#     or subshell-scoped EXIT traps for temporary files.
+#
+# Optional functions in <suite_name>/test.sh (detected with `type ... &>/dev/null`):
+#   patch_managed_secrets_after_decrypt  - After decrypt_secrets; adjust managed secrets on disk.
+#   post_create_kubernetes_resources     - After create_kubernetes_resources.
+#   suite_exit_cleanup                   - First step inside cleanup_resources (e.g. temp cred files).
+#
+# Optional executable unit tests: <suite_name>/test-*.sh (run before e2e setup; see run-suite-unit-tests.sh).
 #
 
 
@@ -157,6 +166,14 @@ else
     exit 1
 fi
 
+# Run suite unit tests (test-*.sh) before cluster setup.
+if compgen -G "${SUITE_DIR}/test-*.sh" >/dev/null; then
+    for unit_test in "${SUITE_DIR}"/test-*.sh; do
+        echo "Running suite unit test: ${unit_test}"
+        bash "${unit_test}" || exit 1
+    done
+fi
+
 PTSV_BUILD_PIPELINE=""
 PTSV_BUILD_PIPELINE_BUNDLE="latest"
 if [ -z "$PTSV_COMPONENTS" ]; then
@@ -172,12 +189,13 @@ if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIP
     )
 fi
 
-# If custom pipeline is specified, set annotation variable for later use in component patching
-if [[ -n "${PTSV_BUILD_PIPELINE}" ]]; then
-    export PTSV_BUILD_PIPELINE_VALUE=$(
-        printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}"
-    )
-fi
+# Pipeline annotation for Component resources (envsubst in tenant component YAML).
+_build_pipeline_name="${PTSV_BUILD_PIPELINE:-docker-build-multi-platform-oci-ta}"
+export PTSV_BUILD_PIPELINE_VALUE="$(
+    jq -nc --arg name "${_build_pipeline_name}" --arg bundle "${PTSV_BUILD_PIPELINE_BUNDLE}" \
+        '{name: $name, bundle: $bundle}'
+)"
+unset _build_pipeline_name
 
 if [ -z "$PTSV_EXPECTED_ARCHES" ]; then
     PTSV_EXPECTED_ARCHES="amd64"
@@ -645,8 +663,8 @@ finalize_run() {
 # Capture failure details before the EXIT trap performs cleanup.
 trap 'record_failure_metadata $? $LINENO "$BASH_COMMAND"' ERR
 
-# Trap EXIT signal to call cleanup function
-# Pass error code, line number, and command to the cleanup function
+# Trap EXIT signal to call cleanup function (pass error code, line number, and command).
+# Optional suite_exit_cleanup() in <suite>/test.sh runs first inside cleanup_resources.
 trap 'finalize_run $? $LINENO "$BASH_COMMAND"' EXIT
 
 reset_failure_context
@@ -656,6 +674,11 @@ parse_options "${args[@]}" # Parses options and sets CLEANUP, NO_CVE, INTERACTIV
 decrypt_secrets "${SUITE_DIR}"
 FAILURE_METADATA_ENABLED="true"
 write_run_test_metadata "RUNNING"
+
+if type patch_managed_secrets_after_decrypt &>/dev/null; then
+    set_current_step "setup" "patch_managed_secrets_after_decrypt"
+    patch_managed_secrets_after_decrypt
+fi
 
 set_current_step "setup" "create_github_repositories"
 create_github_repositories

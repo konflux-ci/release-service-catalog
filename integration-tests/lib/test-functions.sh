@@ -148,6 +148,8 @@ get_build_pipeline_run_url() { # args are ns, app, name
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
 # Optional variables: component2_repo_name (for multi-component tests), uuid (from test.env), tenant_namespace
+# Optional suite hook: suite_exit_cleanup() in <suite>/test.sh (runs before resource cleanup; always invoked).
+# Suites that patch decrypt_secrets output in place should delete those files here so the next run decrypts fresh.
 cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
@@ -158,6 +160,12 @@ cleanup_resources() {
 
   if [ "$err" -ne 0 ] ; then
     echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
+  fi
+
+  if type suite_exit_cleanup &>/dev/null; then
+    if ! ( set +eo pipefail; suite_exit_cleanup ); then
+      echo "Warning: suite_exit_cleanup failed (temporary credential files may remain on disk; continuing with resource cleanup)" >&2
+    fi
   fi
 
   if [ "${CLEANUP}" == "true" ]; then
@@ -1038,13 +1046,30 @@ is_task_skipped() {
     local task_name=$2
 
     local pipelinerun_name
-    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
 
     local skipped_task
-    skipped_task=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
-        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")
+    skipped_task="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")"
 
     [[ -n "${skipped_task}" ]]
+}
+
+# Return 0 (true) if the named task appears in the PipelineRun's childReferences
+# (i.e., it actually executed), 1 (false) otherwise.
+did_task_run() {
+    local release_name="${1}"
+    local task_name="${2}"
+
+    local pipelinerun_name
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
+
+    local task_ref
+    task_ref="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" -o json \
+        | jq -r --arg task_name "${task_name}" \
+            '.status.childReferences[]? | select(.pipelineTaskName == $task_name) | .name // empty')"
+
+    [[ -n "${task_ref}" ]]
 }
 
 # Return the value of a named pipeline-level result from the managed PipelineRun
@@ -1459,6 +1484,49 @@ wait_for_multi_component_snapshot() {
     echo "$snapshot_name"
 }
 
+# Validate URL, shasum, and arches on each image entry in release status JSON.
+# Arguments: $1=release JSON, $2=optional context label for messages
+# Returns 0 when all image entries are valid (or there are no images), 1 otherwise.
+# Uses PTSV_EXPECTED_ARCHES (defaults to amd64).
+validate_release_image_artifact_fields() {
+    local release_json="${1}"
+    local context_label="${2:-Release}"
+    local image_count failure_count=0 i
+    local expected_arches="${PTSV_EXPECTED_ARCHES:-amd64}"
+
+    image_count="$(jq -r '(.status.artifacts.images // []) | length' <<< "${release_json}")"
+    if [ "${image_count}" -eq 0 ]; then
+        return 0
+    fi
+
+    echo "Validating ${image_count} image artifact(s) for ${context_label}..."
+    for ((i = 0; i < image_count; i++)); do
+        local image_url image_shasum str_image_arches
+        image_url="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")"
+        image_shasum="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")"
+        str_image_arches="$(jq -r --argjson idx "${i}" \
+            '[.status.artifacts.images[$idx].arches[]?] | sort | unique | join(" ")' <<< "${release_json}")"
+
+        if [ -z "${image_url}" ]; then
+            echo "🔴 ${context_label} image[${i}]: image_url was empty"
+            failure_count=$((failure_count + 1))
+        fi
+        if [ -z "${image_shasum}" ]; then
+            echo "🔴 ${context_label} image[${i}]: image_shasum was empty"
+            failure_count=$((failure_count + 1))
+        fi
+        if [ "${str_image_arches}" != "${expected_arches}" ]; then
+            echo "🔴 ${context_label} image[${i}]: expected arches '${expected_arches}', found '${str_image_arches}'"
+            failure_count=$((failure_count + 1))
+        fi
+    done
+
+    if [ "${failure_count}" -eq 0 ]; then
+        echo "✅ ${context_label}: all image artifacts have valid URL, shasum, and arches"
+    fi
+    return $((failure_count > 0 ? 1 : 0))
+}
+
 check_container_images() {
     local expected_count image_count
 
@@ -1473,7 +1541,11 @@ check_container_images() {
         failures=$((failures+1))
     fi
 
-    echo "Verifying each image artifact..."
+    if ! validate_release_image_artifact_fields "${release_json}" "Release"; then
+        failures=$((failures + 1))
+    fi
+
+    echo "Verifying each image artifact (pullability and signatures)..."
 
     local rpa_json
     rpa_json=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
@@ -1502,34 +1574,13 @@ check_container_images() {
 
     for ((i = 0; i < image_count; i++)); do
         local failures=0
-        local image_url image_arch image_shasum
-        image_url=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
-        image_arches=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.arches // ""' <<< "${release_json}")
-        image_shasum=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
+        local image_url image_shasum
+        image_url="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")"
+        image_shasum="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")"
 
-        echo "Checking Image URL..."
-        if [ -n "${image_url}" ]; then
-            echo "✅️ image_url: ${image_url}"
-        else
-            echo "🔴 image_url was empty"
-            failures=$((failures+1))
-        fi
-
-        str_image_arches=$(echo "${image_arches}" |  jq -r '. | sort | unique | join(" ")')
-        echo "Checking image arches..."
-        if [ "${str_image_arches}" = "$PTSV_EXPECTED_ARCHES" ]; then
-            echo "✅️ Found required image arches: $PTSV_EXPECTED_ARCHES"
-        else
-            echo "🔴 Expected image arches: '$PTSV_EXPECTED_ARCHES', found: '${image_arches}'"
-            failures=$((failures+1))
-        fi
-
-        echo "Checking Image Shasum..."
-        if [ -n "${image_shasum}" ]; then
-            echo "✅️ image_shasum: ${image_shasum}"
-        else
-            echo "🔴 image_shasum was empty"
-            failures=$((failures+1))
+        if [ -z "${image_url}" ] || [ -z "${image_shasum}" ]; then
+            echo "Skipping skopeo/cosign checks for image[${i}] (missing URL or shasum)"
+            continue
         fi
 
         # Use digest instead of tag, tag can be overwritten by concurrent tests
