@@ -1,0 +1,169 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-request-blob-signature
+spec:
+  description: |
+    Run the request-and-upload-signature task and make sure that task succeeds
+  workspaces:
+    - name: tests-workspace
+  tasks:
+    - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        workspaces:
+          - name: data
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils:9d57cd95e60f0c61a118fe9261f5941815d33469
+            securityContext:
+              runAsUser: 1001
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              cat << EOF | jq -Mc > "$(workspaces.data.path)/mocked_signing_response"
+              {
+                "signer_result": {"status": "ok", "error_message": ""},
+                "operation_results": [
+                  [
+                    {"i": 1,
+                     "msg": {
+                       "errors": [],
+                       "pub_task_id": "123456",
+                       "repo": "test-repo",
+                       "request_id": "1",
+                       "request_received_time": "3000-01-01T01:01:01.000000",
+                       "requested_by": "test-user",
+                       "sig_key_id": "test-signing-key",
+                       "sig_keyname": "test-signing-key",
+                       "signature_type": "container_signature",
+                       "signed_payload": "signed-data",
+                       "signing_server_requested": "3000-01-01T01:01:01.000000",
+                       "signing_server_responded": "3000-01-01T01:01:02.000000",
+                       "signing_status": "success"
+                     },
+                     "msg_id": "msg-id-1",
+                     "timestamp": 1738685708,
+                     "topic": "/topic/VirtualTopic.eng.test.dist.sign.123456",
+                     "username": "1001030000"
+                    },
+                    {"amq6100_originalDestination": "topic://VirtualTopic.eng.test.dist.sign.123456",
+                     "content-type": "text/plain",
+                     "amq6100_destination": "queue://Consumer.test-user.123456.VirtualTopic.eng.test.dist.sign.123456"
+                    }
+                  ]],
+                "operation": {
+                  "digests": ["sha256:123456"],
+                  "references": ["registry.redhat.io/myproduct/myrepo:abc"],
+                  "signing_key": "test-signing-key",
+                  "task_id": "123456"},
+                  "signing_key": "test-signing-key"
+              }
+              EOF
+              touch "$(workspaces.data.path)/mock_pubtools-pyxis-upload-signatures.txt"
+              touch "$(workspaces.data.path)/signing_response.json"
+    - name: run-task
+      taskRef:
+        name: request-blob-signature
+      params:
+        - name: pipeline_image
+          value: "quay.io/konflux-ci/release-service-utils:9d57cd95e60f0c61a118fe9261f5941815d33469"
+        - name: blob
+          value: "test_data"
+        - name: requester
+          value: test-user
+        - value: containerisvsign
+          name: sig_key_names
+        - value: operatorpipelines
+          name: umb_client_name
+        - value: VirtualTopic.eng.robosignatory.isv.sign
+          name: umb_listen_topic
+        - value: VirtualTopic.eng.operatorpipelines.isv.sign
+          name: umb_publish_topic
+        - value: umb.api.redhat.com
+          name: umb_url
+        - name: umb_ssl_cert_secret_name
+          value: umb-ssl-cert
+        - name: signature_data_file
+          value: "signing_response.json"
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      runAfter:
+        - setup
+    - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils:82012e03002128f2a226acb23dc5c6fc1c37f5b6
+            securityContext:
+              runAsUser: 1001
+            env:
+              - name: "SIGNED_PAYLOAD"
+                value: '$(tasks.run-task.results.signed_payload)'
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              umb_publish_topic=VirtualTopic.eng.operatorpipelines.isv.sign
+              umb_batch_publish_topic=VirtualTopic.eng.hacbs-signing-pipeline.konflux.sign
+              umb_listen_topic=VirtualTopic.eng.robosignatory.isv.sign
+              umb_batch_listen_topic=VirtualTopic.eng.robosignatory.konflux.sign
+              requester=test-user
+              umb_client_name=operatorpipelines
+
+              cat <<EOF > "/tmp/expected_config.yaml"
+              msg_signer:
+                messaging_brokers:
+                  - "amqps://umb.api.redhat.com:5671"
+                messaging_cert_key: /tmp/umb.pem.1234
+                messaging_ca_cert: /etc/pki/tls/certs/ca-bundle.crt
+                topic_send_to: topic://${umb_publish_topic}
+                topic_listen_to: queue://Consumer.test-mock.${requester}-{task_id}.${umb_listen_topic}
+                environment: prod
+                service: ${umb_client_name}
+                timeout: 60
+                retries: 2
+                send_retries: 2
+                message_id_key: request_id
+                log_level: debug
+              msg_batch_signer:
+                messaging_brokers:
+                  - "amqps://umb.api.redhat.com:5671"
+                messaging_cert_key: /tmp/umb.pem.1234
+                messaging_ca_cert: /etc/pki/tls/certs/ca-bundle.crt
+                topic_send_to: topic://${umb_batch_publish_topic}
+                topic_listen_to: queue://Consumer.test-mock.${requester}-{task_id}.${umb_batch_listen_topic}.{task_id}
+                environment: prod
+                service: ${umb_client_name}
+                timeout: 60
+                retries: 2
+                send_retries: 2
+                message_id_key: request_id
+                log_level: debug
+                chunk_size: 200
+              EOF
+              diff -Naur "/tmp/expected_config.yaml" "$(workspaces.data.path)/pubtools-sign-config.yaml"
+
+              expected="--requester ${requester} \
+              --signing-key containerisvsign \
+              --signing-key-name containerisvsign \
+              --config-file "$(workspaces.data.path)/pubtools-sign-config.yaml" \
+              --blob-file temp_file \
+              --signer-type single \
+              --task-id 1234"
+              echo "$expected" > "/tmp/expected"
+              cat "$(workspaces.data.path)/mock_pubtools-sign.txt"
+              diff -Naur "/tmp/expected" "$(workspaces.data.path)/mock_pubtools-sign.txt"
+
+              expected_result="signed-data"
+              echo "$expected_result" > "/tmp/expected_result"
+              echo "$SIGNED_PAYLOAD" > "/tmp/actual_result"
+              diff -Naur "/tmp/expected_result" "/tmp/actual_result"
+      runAfter:
+        - run-task
