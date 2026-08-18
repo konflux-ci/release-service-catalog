@@ -77,7 +77,8 @@ function curl() {
 
   # Repository list / refresh (match URL path, not repository_version= query values)
   if [[ "${joined}" == *"/repositories/npm/npm/"* \
-     && "${joined}" != *"/content/"* ]]; then
+     && "${joined}" != *"/content/"* \
+     && "${joined}" != *"modify/"* ]]; then
     local ver
     ver="$(_mock_version)"
     jq -nc --argjson ver "${ver}" '{
@@ -131,6 +132,18 @@ function curl() {
       && mv "${MOCK_PULP_STATE}.tmp" "${MOCK_PULP_STATE}"
     _bump_version
     echo '{"pulp_href":"/api/pulp/test-domain/api/v3/content/npm/packages/uploaded/"}'
+    return 0
+  fi
+
+  # Add uploaded content to the repository (async task)
+  if [[ "${joined}" == *"modify/"* ]]; then
+    _bump_version
+    echo '{"task":"/api/pulp/test-domain/api/v3/tasks/task-uuid/"}'
+    return 0
+  fi
+
+  if [[ "${joined}" == *"/tasks/"* ]]; then
+    echo '{"state":"completed"}'
     return 0
   fi
 
@@ -226,18 +239,27 @@ function curl() {
     return 0
   fi
 
-  # Content list / existence
+  # Content list / existence. RH Pulp has no version= filter; the client
+  # lists by name and filters version in jq. Keep version= lookup so the
+  # currently pinned plumbing-utils image still works.
   if [[ "${joined}" == *"/content/npm/packages/"* ]]; then
     local name version key entry
     name="$(_arg_value name "${args[@]}" || true)"
     version="$(_arg_value version "${args[@]}" || true)"
-    key="$(_pkg_key "${name}" "${version}")"
-    entry="$(jq -c --arg key "${key}" '.[$key] // empty' "${MOCK_PULP_STATE}")"
-    if [[ -z "${entry}" ]]; then
-      echo '{"count":0,"results":[]}'
+    if [[ -n "${version}" ]]; then
+      key="$(_pkg_key "${name}" "${version}")"
+      entry="$(jq -c --arg key "${key}" '.[$key] // empty' "${MOCK_PULP_STATE}")"
+      if [[ -z "${entry}" ]]; then
+        echo '{"count":0,"next":null,"results":[]}'
+        return 0
+      fi
+      jq -nc --argjson entry "${entry}" '{count:1, next:null, results:[$entry]}'
       return 0
     fi
-    jq -nc --argjson entry "${entry}" '{count:1, results:[$entry]}'
+    jq -nc --arg name "${name}" --slurpfile state "${MOCK_PULP_STATE}" '
+      ($state[0] | to_entries | map(.value) | map(select(.name == $name))) as $r
+      | {count: ($r | length), next: null, results: $r}
+    '
     return 0
   fi
 
