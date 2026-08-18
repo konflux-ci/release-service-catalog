@@ -89,6 +89,33 @@ spec:
           value: $(params.snapshot)
         - name: requireInternalServices
           value: "false"
+    - name: extract-requester-from-release
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: hub/kubernetes-actions/kubernetes-actions.yaml
+      params:
+        - name: image
+          value: "quay.io/hacbs-release/cloud-builders-kubectl\
+            @sha256:8ab94be8b2b4f3d117f02d868b39540fddd225447abf4014f7ba4765cb39f753"
+        - name: script
+          value: |
+            set -x
+
+            NAMESPACE=$(echo $(params.release) | cut -d '/' -f 1)
+            NAME=$(echo $(params.release) | cut -d '/' -f 2)
+
+            AUTHOR=$(kubectl get release ${NAME} -n ${NAMESPACE} \
+            -o=jsonpath='{.status.attribution.author}' | tee $(results.output-result.path))
+
+            if [[ ${AUTHOR} == "" ]] ; then exit 1 ; fi
+      runAfter:
+        - verify-access-to-resources
     - name: collect-data
       taskRef:
         resolver: "git"
@@ -364,6 +391,49 @@ spec:
         - input: $(tasks.collect-task-params.results.extractedValues[3])
           operator: in
           values: ["promote"]
+    - name: rh-sign-rpm
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/rh-sign-rpm/rh-sign-rpm.yaml
+      params:
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: releasePlanAdmissionPath
+          value: "$(tasks.collect-data.results.releasePlanAdmission)"
+        - name: artifactsJsonPath
+          value: "artifacts/pulp_results.json"
+        - name: requester
+          value: "$(tasks.extract-requester-from-release.results.output-result)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.push-artifacts-to-storage.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: signedRpmsDomain
+          value: "rok-storage"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - push-artifacts-to-storage
+      when:
+        - input: $(tasks.collect-task-params.results.extractedValues[3])
+          operator: in
+          values: ["promote"]
     - name: promote-koji-draft-build
       taskRef:
         resolver: "git"
@@ -396,7 +466,7 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - push-artifacts-to-storage
+        - rh-sign-rpm
       when:
         - input: $(tasks.collect-task-params.results.extractedValues[3])
           operator: in
