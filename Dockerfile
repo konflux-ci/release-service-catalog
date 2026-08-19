@@ -21,6 +21,7 @@ RUN dnf install -y /tmp/tektoncd-cli-Linux-64bit.rpm
 RUN dnf -y --setopt=tsflags=nodocs install \
     gettext \
     procps-ng \
+    podman \
     && dnf clean all
 
 RUN curl -L https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${KUSTOMIZE_VERSION}/kustomize_v${KUSTOMIZE_VERSION}_linux_amd64.tar.gz \
