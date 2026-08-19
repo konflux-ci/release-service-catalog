@@ -37,6 +37,7 @@ All integration tests require the following dependencies:
   - `admin:repo_hook`
   - `delete_repo`
   - `repo`
+* Some suites (`rhtap-service-push`, `fbc-release`) use dedicated bot accounts instead of the shared token. See [MAINTENANCE.md](MAINTENANCE.md) for details.
 * **Vault Password**: The password to decrypt the vault files (contact a member of the Release team)
 * **Cluster Access**: Access to the target cluster and tenant/managed namespaces
   - Tests use `stg-rh01` cluster

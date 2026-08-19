@@ -36,11 +36,21 @@ kubectl annotate es e2e-test-service-account-kubeconfig force-sync=$(date +%s) -
   * At this point, the new KUBECONFIG is available which contains the new token
 
 ## Rotating the Github secret
-  * regenerate token from GH with scopes:
-    * repo
-    * admin:repo_hook
-    * delete_repo
-  * decrypt each tenant vault for each suite
+
+Some suites use dedicated bot accounts instead of the shared token:
+  * `rhtap-service-push` uses `rhtap-service-push-e2e-bot` (vault: `stonesoup/staging/release/e2e/rhtap-service-push-e2e-bot`)
+  * `fbc-release` uses `fbc-release-e2e-bot` (vault: `stonesoup/staging/release/e2e/fbc-release-e2e-bot`)
+  * All other suites use the shared token (vault: `stonesoup/staging/release/e2e/e2e-base-github-token`)
+
+All tokens (shared and per-suite) require these classic PAT scopes:
+  * repo
+  * admin:repo_hook
+  * delete_repo
+
+### Rotating a token (shared or per-suite)
+
+  * Regenerate the token from GitHub with the scopes listed above
+  * Decrypt the tenant vault for each suite that uses the token
 ```shell
 ansible-vault decrypt vault/tenant-secrets.yaml --output "resources/tenant/secrets/tenant-secrets.yaml" --vault-password-file /tmp/vaultpass
 ```
@@ -51,10 +61,14 @@ ansible-vault decrypt vault/tenant-secrets.yaml --output "resources/tenant/secre
 ansible-vault encrypt resources/tenant/secrets/tenant-secrets.yaml --output "vault/tenant-secrets.yaml" --vault-password-file /tmp/vaultpass
 ```
   * commit and create PR
-  * update vault at _stonesoup/staging/release/e2e/e2e-base-github-token_
-  * force refresh on rh01 prod
+  * update the corresponding vault secret
+  * force refresh the corresponding ExternalSecret on rh01 prod
 ```shell
+# shared token
 kubectl annotate es e2e-test-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
+# per-suite tokens
+kubectl annotate es rhtap-service-push-e2e-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
+kubectl annotate es fbc-release-e2e-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
 ```
   * Remove any old pipelines-as-code-secret- secrets
 ```
