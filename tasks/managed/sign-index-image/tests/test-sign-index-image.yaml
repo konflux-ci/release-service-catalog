@@ -4,7 +4,9 @@ kind: Pipeline
 metadata:
   name: test-sign-index-image
 spec:
-  description: Test creating a internal request to sign an image
+  description: >-
+    Happy-path smoke test for sign-index-image.
+    Other scenarios are covered by pytest in release-service-utils.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -47,7 +49,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/lgallovi-test/release-service-utils@sha256:4cc5176e207653d7792714a2766c3fc4fff5efd60a6b095f4bbdc8f2772072ef
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -65,23 +67,6 @@ spec:
               {
                 "spec": {
                   "pipeline": {
-                    "pipelineRef": {
-                      "resolver": "git",
-                      "params": [
-                        {
-                          "name": "url",
-                          "value": "https://localhost.git"
-                        },
-                        {
-                          "name": "revision",
-                          "value": "main"
-                        },
-                        {
-                          "name": "pathInRepo",
-                          "value": "pipelines/abc/abc.yaml"
-                        }
-                      ]
-                    },
                     "serviceAccountName": "release-service-account"
                   }
                 }
@@ -144,67 +129,70 @@ spec:
       runAfter:
         - setup
     - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
       taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/lgallovi-test/release-service-utils@sha256:4cc5176e207653d7792714a2766c3fc4fff5efd60a6b095f4bbdc8f2772072ef
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -euxo pipefail
 
-              internalRequests="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers)"
-              internalRequestsCount=$(echo "$internalRequests" | wc -w)
-
-              if [ "$internalRequestsCount" != "1" ] ; then
-                echo "incorrect number of internalRequests created. Expected 1"
+              mock_file="$(params.dataDir)/mock_internal_request.txt"
+              if [ ! -f "${mock_file}" ]; then
+                echo "internal-request was not called"
                 exit 1
               fi
-              expected_references=$(cat << EOF
-              quay.io/testrepo/testimage:tag
-              quay.io/testrepo/testimage:tag
-              EOF
-              )
 
-              for internalRequest in ${internalRequests};
-              do
-                irJson=$(kubectl get internalrequest "${internalRequest}" -o json)
-                params=$(jq -r '.spec.params' <<< "${irJson}")
-                labels=$(jq -r '.metadata.labels' <<< "${irJson}")
+              args=$(cat "${mock_file}")
 
-                if [ "$(jq -r '.references' <<< "${params}")" != \
-                     "$(echo "$expected_references" | tr '\n' ' ')" ]; then
-                  echo "reference image does not match"
-                  exit 1
-                fi
+              if ! echo "${args}" | grep -q "requester=testuser"; then
+                echo "Expected requester=testuser in args: ${args}"
+                exit 1
+              fi
 
-                if [ "$(jq -r '.pyxis_url' <<< "${params}")" != "https://pyxis.stage.engineering.redhat.com" ]; then
-                  echo "pyxis_url does not match"; exit 1; fi
-                if [ "$(jq -r '.signer_type' <<< "${params}")" != "batch" ]; then
-                  echo "signer_type does not match"; exit 1; fi
+              if ! echo "${args}" | grep -q "signer_type=batch"; then
+                echo "Expected signer_type=batch in args: ${args}"
+                exit 1
+              fi
 
-                if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
-                then
-                  echo "requester does not match"
-                  exit 1
-                fi
+              if ! echo "${args}" | grep -q "pyxis_url=https://pyxis.stage.engineering.redhat.com"; then
+                echo "Expected pyxis_url in args: ${args}"
+                exit 1
+              fi
 
-                intention=$(jq -r '.["internal-services.appstudio.openshift.io/intention"]' \
-                  <<< "${labels}")
-                if [ "${intention}" != "staging" ]; then
-                  echo "intention label does not match expected value 'staging'"
-                  exit 1
-                fi
-              done
+              if ! echo "${args}" | grep -q -- "--pipeline simple-signing-pipeline"; then
+                echo "Expected --pipeline simple-signing-pipeline in args: ${args}"
+                exit 1
+              fi
+
+              echo "All checks passed"
       runAfter:
         - run-task
-  finally:
-    - name: cleanup
-      taskSpec:
-        steps:
-          - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              kubectl delete internalrequests --all
