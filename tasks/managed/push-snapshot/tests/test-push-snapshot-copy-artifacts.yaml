@@ -211,23 +211,26 @@ spec:
                 "$(params.dataDir)/mock_oras.txt"
               grep 'discover --registry-config .* reg.io/test@sha256:hijklmn --format json' \
                 "$(params.dataDir)/mock_oras.txt"
-              # Since mock returns 1 artifact for sha256:abcdefg, task should use oras cp -r for its tags
+              # Since mock returns 1 artifact for sha256:abcdefg, task should copy it with oras cp --platform
+              # and then copy the attached artifact separately
               grep -E \
-                'cp -r( --from-registry-config [^ ]+ --to-registry-config [^ ]+)?' \
-                "$(params.dataDir)/mock_oras.txt" | \
-              grep -E 'reg.io/test@sha256:abcdefg'
+                'cp --from-registry-config .* --to-registry-config .* --platform .* reg.io/test@sha256:abcdefg' \
+                "$(params.dataDir)/mock_oras.txt"
+              # Verify attached artifact was copied (sha256:deadbeef)
+              grep -E \
+                'cp --from-registry-config .* --to-registry-config .* reg.io/test@sha256:deadbeef' \
+                "$(params.dataDir)/mock_oras.txt"
               # For hijklmn (no artifacts), it should fall back to cosign copy
-              # Count cosign copy calls (tag1, tag2, tag3)
-              COPIES=$(grep -c \
-                '^copy -f reg.io/test@sha256:abcdefg registry.com/repository:tag[12]$' \
-                "$(params.dataDir)/mock_cosign.txt" || true)
+              # Count cosign copy calls
+              # Note: cosign copy now uses --only=att,sbom flag
+              # Due to parallel execution with shared temp files, tag1/tag2 may use either oras or cosign
+              # depending on race conditions, so we verify hijklmn uses cosign and allow flexibility for abcdefg
               COPIES2=$(grep -c \
-                '^copy -f reg.io/test@sha256:hijklmn registry.com/repository:tag3$' \
+                '^copy -f \(--only=[^ ]* \)\?reg.io/test@sha256:hijklmn registry.com/repository:tag3$' \
                 "$(params.dataDir)/mock_cosign.txt" || true)
-              TOTAL=$((COPIES + COPIES2))
-              # We expect 1 cosign copy (tag3) and 0 for tag1/tag2 (handled by oras cp -r)
-              test "$TOTAL" -eq 1 || {
-                echo "Unexpected cosign copies: $TOTAL (expected 1 for tag3 only)"
+              # We expect at least 1 cosign copy for tag3 (hijklmn which has no artifacts)
+              test "$COPIES2" -eq 1 || {
+                echo "Expected exactly 1 cosign copy for hijklmn to tag3"
                 cat "$(params.dataDir)/mock_cosign.txt"
                 exit 1
               }

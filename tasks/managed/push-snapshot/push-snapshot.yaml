@@ -191,8 +191,23 @@ spec:
                   --format json \
                   >/tmp/artifacts.json
                 then
-                  artifact_count=$(jq -r '.referrers | length' /tmp/artifacts.json || echo "0")
-                  echo "Found $artifact_count artifacts"
+                  # Filter out cosign signatures from the artifacts list
+                  # Cosign signatures use artifactType patterns like:
+                  # - application/vnd.dev.cosign.simplesigning.v1+json
+                  # - dev.cosignproject.cosign/signature
+                  # Save filtered artifacts for later use
+                  jq '
+                    .referrers |
+                    map(select(
+                      (.artifactType // .mediaType) |
+                      test("cosign.*signature|cosign/signature") | not
+                    ))
+                  ' /tmp/artifacts.json > /tmp/filtered_artifacts.json
+                  artifact_count=$(jq 'length' /tmp/filtered_artifacts.json || echo "0")
+                  total_artifacts=$(jq -r '.referrers | length' /tmp/artifacts.json || echo "0")
+                  filtered_artifacts=$((total_artifacts - artifact_count))
+                  echo "Found $total_artifacts total artifacts, filtered out $filtered_artifacts cosign signatures,"
+                  echo "keeping $artifact_count non-signature artifacts"
                   discover_succeeded=true
                   break
                 else
@@ -209,17 +224,41 @@ spec:
             attempt=0
             until [ "$attempt" -gt "$(params.retries)" ] ; do # 0 retries by default which will execute this once
               if [[ "$COPY_BUNDLE_MIGRATIONS" == "true" && "${artifact_count}" -gt 0 ]]; then
-                # Copy the image and all attached artifacts
-                oras cp -r \
+                # Copy the image first (without -r to avoid copying all referrers)
+                if oras cp \
                   --from-registry-config "$SOURCE_AUTH_FILE" \
                   --to-registry-config "$DEST_AUTH_FILE" \
                   "${oras_args[@]}" \
                   "$3" \
-                  "$4:$5" \
-                  && break
+                  "$4:$5"
+                then
+                  # Copy each filtered (non-signature) artifact individually
+                  copy_artifacts_failed=false
+                  for artifact_digest in $(jq -r '.[].digest' /tmp/filtered_artifacts.json); do
+                    artifact_ref="${3%@*}@${artifact_digest}"
+                    printf '  * Copying attached artifact: %s\n' "$artifact_digest"
+                    if ! oras cp \
+                      --from-registry-config "$SOURCE_AUTH_FILE" \
+                      --to-registry-config "$DEST_AUTH_FILE" \
+                      "$artifact_ref" \
+                      "$4:$5"; then
+                      copy_artifacts_failed=true
+                      break
+                    fi
+                  done
+                  if [ "$copy_artifacts_failed" = false ]; then
+                    break
+                  fi
+                fi
               else
-                # Fallback to classic image copy
-                cosign copy -f "$3" "$4:$5" && break
+                # Fallback to classic image copy, excluding signatures
+                # Step 1: Copy the image itself with skopeo (handles multi-arch)
+                # Step 2: Copy attestations/SBOMs with cosign (excluding signatures)
+                if skopeo copy -a --src-authfile "${SOURCE_AUTH_FILE}" --dest-authfile "${DEST_AUTH_FILE}" \
+                  "docker://$3" "docker://$4:$5"; then
+                  # Image copied successfully, now copy attestations/SBOMs (excluding signatures)
+                  cosign copy -f --only=att,sbom "$3" "$4:$5" && break
+                fi
               fi
               attempt=$((attempt+1))
             done
