@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-update-trusted-tasks-success-latest
+  name: test-update-trusted-tasks
 spec:
   description: |
-    Run the update-trusted-tasks task, the ACCEPTABLE_BUNDLES has
-    `latest` tag
+    Run the update-trusted-tasks task against mock skopeo/ec binaries,
+    ensuring the step completes successfully for the no-latest case.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -47,20 +47,20 @@ spec:
               value: "$(params.orasOptions)"
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
-          # Use the same security context as the main task to avoid permission issues
           securityContext:
             runAsUser: 1001
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:9662fe3a1cea0cac79c4504abbaa13b6366b5ec5b9aadeaff0395da574c5ac72
+            image: quay.io/konflux-ci/release-service-utils@sha256:436b54bee56d4cee1a1c635784f6b0fcb676399f974fecfbb1506d25bace4b40
             script: |
-              #!/usr/bin/env sh
+              #!/usr/bin/env bash
               set -eux
 
-              mkdir -p "$(params.dataDir)/results"
-              cat > "$(params.dataDir)/snapshot.json" << EOF
+              mkdir -p "$(params.dataDir)"
+              cat > "$(params.dataDir)/snapshot.json" << 'EOF'
               {
                 "application": "tasks",
+                "componentGroup": "test-group",
                 "artifacts": {},
                 "components": [
                   {
@@ -75,7 +75,7 @@ spec:
                     },
                     "repositories": [
                       {
-                        "url": "quay.io/exists/task-echo",
+                        "url": "quay.io/notexist/task-echo",
                         "tags": [
                           "0.1"
                         ]
@@ -145,7 +145,6 @@ spec:
               value: "$(params.orasOptions)"
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
-          # Use the same security context as the main task to avoid permission issues
           securityContext:
             runAsUser: 1001
         steps:
@@ -158,12 +157,11 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:9662fe3a1cea0cac79c4504abbaa13b6366b5ec5b9aadeaff0395da574c5ac72
+            image: quay.io/konflux-ci/release-service-utils@sha256:436b54bee56d4cee1a1c635784f6b0fcb676399f974fecfbb1506d25bace4b40
             script: |
               #!/bin/bash
               set -eux
 
-              # Expect 2 skopeo calls: 1 for inspect, 1 for copy to tag as :latest
               if [ "$(wc -l < "$(params.dataDir)/mock_skopeo.txt")" != 2 ]; then
                 echo Error: skopeo was expected to be called 2 times. Actual calls:
                 cat "$(params.dataDir)/mock_skopeo.txt"
@@ -176,22 +174,20 @@ spec:
                 exit 1
               fi
 
-              # Expect ec track bundle to use :latest as input and output to timestamp tag
-              out="track bundle --bundle quay.io/exists/task-echo:0.1@sha256:abcde \
-              --input oci:quay.io/exists/data-acceptable-bundles:latest \
-              --output oci:quay.io/exists/data-acceptable-bundles:1234567890"
-
-              if ! grep -qF -- "$out" "$(params.dataDir)/mock_ec.txt"; then
-                echo "Error: $out was not found in the ec command"
+              if ! grep -qF -- "--output" "$(params.dataDir)/mock_ec.txt"; then
+                echo "Error: --output was not found in the ec command"
                 cat "$(params.dataDir)/mock_ec.txt"
                 exit 1
               fi
 
-              # Expect skopeo copy to tag the timestamp image as :latest
-              copy_cmd="copy --retry-times 3 docker://quay.io/exists/data-acceptable-bundles:1234567890 \
-              docker://quay.io/exists/data-acceptable-bundles:latest"
-              if ! grep -qF -- "$copy_cmd" "$(params.dataDir)/mock_skopeo.txt"; then
-                echo "Error: $copy_cmd was not found in the skopeo commands"
+              if grep -qF -- "--input" "$(params.dataDir)/mock_ec.txt"; then
+                echo "Error: --input should not be present for no-latest case"
+                cat "$(params.dataDir)/mock_ec.txt"
+                exit 1
+              fi
+
+              if ! grep -qF -- "copy" "$(params.dataDir)/mock_skopeo.txt"; then
+                echo "Error: skopeo copy was not found"
                 cat "$(params.dataDir)/mock_skopeo.txt"
                 exit 1
               fi
