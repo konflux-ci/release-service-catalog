@@ -1,6 +1,6 @@
 # calunga-push-npm-to-pulp pipeline
 
-Release Components in a Snapshot to a pulp-backed npm registry. Each image in a Component is expected to be an OCI artifact containing npm .tgz packages (and optional *.tl-compliance.json sidecars) under the artifact root. First cut: no Atlas upload and no package signing (signing deferred). Compliance on Pulp is labels-only (tl.compliance_level from OCI sidecars); PULP_FILE_REPOSITORY is intentionally not passed so adjacent compliance JSON file uploads stay disabled until a file repo is provisioned.
+Release Components in a Snapshot to a pulp-backed npm registry. Each image in a Component is expected to be an OCI artifact containing npm .tgz packages (and optional *.tl-compliance.json sidecars) under the artifact root. First cut: no Atlas upload and no package signing (signing deferred). Compliance on Pulp is labels-only (tl.compliance_level from OCI sidecars); PULP_FILE_REPOSITORY is intentionally not passed so adjacent compliance JSON file uploads stay disabled until a file repo is provisioned. After Pulp upload, upload-npm-closure publishes per-package compliance OCI and the npm-closure-index on calunga-npm-registry-main (Quay refs hardcoded in the task).
 
 ## Parameters
 

@@ -2,36 +2,45 @@
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
-  name: extract-npm-artifacts
+  name: upload-npm-closure
 spec:
   description: |
-    Extract npm packages from OCI snapshot artifacts for Pulp upload.
-    Pulls each snapshot component image with oras into a digest-namespaced
-    directory, populates releaseNotes.content.artifacts from embedded SPDX
-    pkg:npm PURLs, and fetches Tekton Chains SLSA provenance (hard-fails if
-    missing, unverifiable, or not trusted). Provenance must match the image
-    digest and come from Konflux Chains with pipelineRef.name promote-npm or
-    build-npm and an invocationId in a trusted tenant namespace (default
-    calunga-tenant). Business logic runs as a single plumbing-utils command
-    (npm-release-extract); requires at least one .tgz after extract
+    Publish TL npm closure metadata after Pulp upload: for each assess
+    *.tl-compliance.json sidecar under FILES_DIR, push per-package compliance
+    OCI and update the global closure index on Quay (calunga-npm-registry-main).
+    Quay refs are fixed for calunga-tenant; COMPLIANCE_IMAGE_PREFIX and
+    CLOSURE_INDEX_IMAGE are set in stepTemplate env. Requires Pulp
+    credentials (same secret as upload-npm-pulp). Business logic runs as a
+    single plumbing-utils command (npm-release-closure-update).
   params:
-    - name: SNAPSHOT_PATH
+    - name: SERVICE_ACCOUNT_SECRET_NAME
       type: string
-      description: Path to the snapshot spec file containing image information
+      description: Secret with Pulp username/password keys (same as upload-npm-pulp)
+      default: rhtl-pulp-credentials-secret
+    - name: PULP_BASE_URL
+      type: string
+      description: The base URL of the Pulp server
+    - name: PULP_API_ROOT
+      type: string
+      description: The API root path of the Pulp server
+      default: "/api/"
+    - name: PULP_DOMAIN
+      type: string
+      description: The domain to use for Pulp operations
+    - name: PULP_REPOSITORY
+      type: string
+      description: The Pulp npm repository (for content href resolution)
     - name: sourceDataArtifact
       type: string
-      description: Trusted Artifact to use to obtain the Snapshot
+      description: Trusted Artifact containing extracted npm packages and sidecars
     - name: dataDir
       type: string
       description: The location where data will be stored
       default: /var/workdir/content
     - name: filesDir
       type: string
-      description: The relative path within dataDir where files will be extracted
+      description: The relative path within dataDir where package files are located
       default: files
-    - name: ociStorage
-      type: string
-      description: The OCI repository where the Trusted Artifacts are stored
     - name: ociArtifactExpiresAfter
       type: string
       description: Expiration date for the trusted artifacts created
@@ -44,13 +53,6 @@ spec:
       description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
       type: string
       default: ""
-    - name: trustedProvenanceNamespaces
-      type: string
-      description: >
-        Comma-separated Kubernetes namespaces allowed to produce accepted
-        Chains provenance. Matched against runDetails.metadata.invocationId
-        as "<namespace>/..."
-      default: "calunga-tenant"
     - name: taskGitUrl
       type: string
       description: >-
@@ -59,34 +61,41 @@ spec:
     - name: taskGitRevision
       type: string
       description: The revision in the taskGitUrl repo to be used
-    - name: dataPath
+    - name: ociStorage
       type: string
-      description: Path to data.json relative to dataDir
+      description: The OCI repository where the Trusted Artifacts are stored
   results:
-    - name: sourceDataArtifact
-      description: Produced trusted data artifact
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
       type: string
   volumes:
+    - name: service-account-secret
+      secret:
+        secretName: $(params.SERVICE_ACCOUNT_SECRET_NAME)
     - name: workdir
       emptyDir: {}
   stepTemplate:
     securityContext:
       runAsUser: 1001
     env:
-      - name: SNAPSHOT_PATH
-        value: $(params.SNAPSHOT_PATH)
-      - name: IMAGES_TXT
-        value: $(params.dataDir)/images.txt
+      - name: PULP_BASE_URL
+        value: $(params.PULP_BASE_URL)
+      - name: PULP_API_ROOT
+        value: $(params.PULP_API_ROOT)
+      - name: PULP_DOMAIN
+        value: $(params.PULP_DOMAIN)
+      - name: PULP_REPOSITORY
+        value: $(params.PULP_REPOSITORY)
       - name: FILES_DIR
         value: $(params.dataDir)/$(params.filesDir)
+      - name: COMPLIANCE_IMAGE_PREFIX
+        value: quay.io/redhat-user-workloads/calunga-tenant/calunga-npm-registry-main
+      - name: CLOSURE_INDEX_IMAGE
+        value: quay.io/redhat-user-workloads/calunga-tenant/calunga-npm-registry-main:npm-closure-index
+      - name: TL_NPM_REGISTRY_URL
+        value: https://packages.redhat.com/api/pulp-content/public-trusted-libraries/javascript
       - name: IMAGE_EXPIRES_AFTER
         value: $(params.ociArtifactExpiresAfter)
-      - name: TRUSTED_ARTIFACTS_EXTRACT_DIR
-        value: $(params.dataDir)
-      - name: DATA_FILE
-        value: $(params.dataDir)/$(params.dataPath)
-      - name: TRUSTED_PROVENANCE_NAMESPACES
-        value: $(params.trustedProvenanceNamespaces)
       - name: "ORAS_OPTIONS"
         value: "$(params.orasOptions)"
       - name: "DEBUG"
@@ -116,15 +125,19 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
-    - name: extract
+    - name: closure-update
       image: quay.io/redhat-user-workloads/calunga-tenant/plumbing-utils@sha256:6c037044d1d15c614b0eaf64e2cfd1c65d8bf7da9080bd23c3a2a5a5cabe13d9
+      volumeMounts:
+        - name: service-account-secret
+          mountPath: "/etc/service-account-secret"
+          readOnly: true
       computeResources:
         limits:
-          memory: 256Mi
+          memory: 512Mi
         requests:
-          memory: 256Mi
+          memory: 512Mi
           cpu: 100m
-      command: ["npm-release-extract"]
+      command: ["npm-release-closure-update"]
     - name: create-trusted-artifact
       computeResources:
         limits:
