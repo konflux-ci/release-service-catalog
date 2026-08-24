@@ -66,7 +66,7 @@ validate_params() {
 
 # Function to set up environment variables and configurations
 setup_env() {
-  if [ -n "$KUBECONFIG" ]; then
+  if [ -n "${KUBECONFIG:-}" ]; then
     echo "Using provided KUBECONFIG"
   fi
 
@@ -85,8 +85,6 @@ setup_env() {
     echo "Defaulting to RELEASE_CATALOG_GIT_REVISION: ${RELEASE_CATALOG_GIT_REVISION}"
   fi
   export RELEASE_CATALOG_GIT_REVISION # Export to make it available
-
-  kubectl config set-context --current --namespace="${managed_namespace}"
 }
 
 # Function to create and apply PipelineRun YAML
@@ -104,6 +102,7 @@ apiVersion: tekton.dev/v1
 kind: PipelineRun
 metadata:
   generateName: request-advisory-oci-artifact-
+  namespace: ${managed_namespace}
   labels:
     ${pipelinerun_label_param}: ${uuid_param}
 spec:
@@ -127,7 +126,7 @@ spec:
         value: pipelines/internal/request-advisory-oci-artifact/request-advisory-oci-artifact.yaml
 EOF
 
-  kubectl create -f "${pipelinerunYaml}" > /dev/null 2> /dev/null
+  kubectl create -f "${pipelinerunYaml}" -n "${managed_namespace}" > /dev/null 2> /dev/null
   rm "${pipelinerunYaml}" # Clean up temp file
 
   # Return the PipelineRun name

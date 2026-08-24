@@ -197,10 +197,12 @@ cleanup_resources() {
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
         echo "Deleting test resources..." | tee -a "${cleanup_log_file}"
         if [ -f "$tmpDir/tenant-resources.yaml" ]; then
-            kubectl delete -f "$tmpDir/tenant-resources.yaml" >> "${cleanup_log_file}" 2>&1
+            kubectl delete -f "$tmpDir/tenant-resources.yaml" -n "${tenant_namespace}" \
+              >> "${cleanup_log_file}" 2>&1
         fi
         if [ -f "$tmpDir/managed-resources.yaml" ]; then
-            kubectl delete -f "$tmpDir/managed-resources.yaml" >> "${cleanup_log_file}" 2>&1
+            kubectl delete -f "$tmpDir/managed-resources.yaml" -n "${managed_namespace}" \
+              >> "${cleanup_log_file}" 2>&1
         fi
         rm -rf "${tmpDir}"
     else
@@ -318,8 +320,13 @@ setup_namespaces() {
       log_error "Tenant namespace ${tenant_namespace} does not exist." 2
     fi
     set -eo pipefail # Re-enable exit on error
-    kubectl config set-context --current --namespace="$tenant_namespace"
-    echo "Namespaces setup complete. Current namespace set to ${tenant_namespace}."
+    # In-cluster auth has no kubeconfig current-context. Later kubectl calls pass -n.
+    if [ -n "${KUBECONFIG:-}" ]; then
+      kubectl config set-context --current --namespace="${tenant_namespace}"
+      echo "Namespaces setup complete. Current namespace set to ${tenant_namespace}."
+    else
+      echo "Namespaces setup complete. No KUBECONFIG; kubectl will use -n flags."
+    fi
 }
 
 # Function to resolve symlinks in a directory for kustomize compatibility
@@ -366,7 +373,7 @@ create_kubernetes_resources() {
     local max_retries=5
     local attempt
     for attempt in $(seq 1 "${max_retries}"); do
-        if kubectl create -f "$tmpDir/tenant-resources.yaml"; then
+        if kubectl create -f "$tmpDir/tenant-resources.yaml" -n "${tenant_namespace}"; then
             break
         fi
         if [ "${attempt}" -eq "${max_retries}" ]; then
@@ -379,7 +386,7 @@ create_kubernetes_resources() {
     echo "Building and applying managed resources..."
     kustomize build "$tmpDir/managed" | envsubst > "$tmpDir/managed-resources.yaml"
     for attempt in $(seq 1 "${max_retries}"); do
-        if kubectl apply -f "$tmpDir/managed-resources.yaml"; then
+        if kubectl apply -f "$tmpDir/managed-resources.yaml" -n "${managed_namespace}"; then
             break
         fi
         if [ "${attempt}" -eq "${max_retries}" ]; then

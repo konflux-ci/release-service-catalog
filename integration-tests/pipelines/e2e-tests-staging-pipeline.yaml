@@ -26,6 +26,9 @@ spec:
     - name: KUBECONFIG_SECRET_NAME
       default: 'kubeconfig-secret'
       type: string
+      description: |
+        Secret with a kubeconfig key. Optional: if the secret is missing, kubectl uses
+        in-cluster configuration.
     - name: PIPELINE_TEST_SUITE_VARS
       default: '{}'
       type: string
@@ -117,6 +120,7 @@ spec:
                   secretKeyRef:
                     name: $(params.KUBECONFIG_SECRET_NAME)
                     key: kubeconfig
+                    optional: true
               - name: PR_NUMBER
                 valueFrom:
                   fieldRef:
@@ -202,13 +206,17 @@ spec:
               export VAULT_PASSWORD_FILE
               set +x
               echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              # KUBECONFIG is optional. When unset, kubectl uses in-cluster config.
+              if [ -n "${KUBECONFIG:-}" ]; then
+                KUBECONFIG_FILE="$(mktemp)"
+                echo "${KUBECONFIG}" > "${KUBECONFIG_FILE}"
+                KUBECONFIG="${KUBECONFIG_FILE}"
+                export KUBECONFIG
+              else
+                # An empty KUBECONFIG value would block in-cluster auth.
+                unset KUBECONFIG
+              fi
               set -x
-              KUBECONFIG_FILE=$(mktemp)
-              set +x
-              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
-              set -x
-              KUBECONFIG="${KUBECONFIG_FILE}"
-              export KUBECONFIG
 
               RELEASE_CATALOG_GIT_URL="$(params.PR_GIT_URL)"
               RELEASE_CATALOG_GIT_REVISION="$(params.PR_GIT_REVISION)"
@@ -290,6 +298,7 @@ spec:
                   secretKeyRef:
                     name: $(params.KUBECONFIG_SECRET_NAME)
                     key: kubeconfig
+                    optional: true
               - name: uuid
                 value: $(context.pipelineRun.uid)
               - name: VAULT_PASSWORD
@@ -346,13 +355,17 @@ spec:
               export VAULT_PASSWORD_FILE
               set +x
               echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              # KUBECONFIG is optional. When unset, kubectl uses in-cluster config.
+              if [ -n "${KUBECONFIG:-}" ]; then
+                KUBECONFIG_FILE="$(mktemp)"
+                echo "${KUBECONFIG}" > "${KUBECONFIG_FILE}"
+                KUBECONFIG="${KUBECONFIG_FILE}"
+                export KUBECONFIG
+              else
+                # An empty KUBECONFIG value would block in-cluster auth.
+                unset KUBECONFIG
+              fi
               set -x
-              KUBECONFIG_FILE=$(mktemp)
-              set +x
-              echo "${KUBECONFIG:?}" > "${KUBECONFIG_FILE}"
-              set -x
-              KUBECONFIG="${KUBECONFIG_FILE}"
-              export KUBECONFIG
 
               # decrypt the secrets since they are part of the resources to be deleted
               #
@@ -374,8 +387,12 @@ spec:
               # they might be already deleted from the cleanup trap
               #
               echo "Deleting resources..."
-              kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found
-              kubectl delete -f "$tmpDir/managed-resources.yaml" --ignore-not-found
+              # shellcheck disable=SC2154 # tenant_namespace and managed_namespace come from test.env
+              kubectl delete -f "$tmpDir/tenant-resources.yaml" -n "${tenant_namespace}" \
+                --ignore-not-found
+              # shellcheck disable=SC2154
+              kubectl delete -f "$tmpDir/managed-resources.yaml" -n "${managed_namespace}" \
+                --ignore-not-found
 
               # Delete Release CRs created by this test run using uuid label
               if [ -n "$uuid" ] && [ -n "$tenant_namespace" ]; then
