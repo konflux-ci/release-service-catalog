@@ -206,8 +206,20 @@ spec:
         echo "$PULP_KEY" > "$PULP_KEY_FILE"
         echo "$UDC_CERT" > "$UDCACHE_CERT"
         echo "$UDC_KEY" > "$UDCACHE_KEY"
-        # Quotes are added to the secret so it applies in k8s nicely. But now we have to remove them
-        echo "$DOCKER_CONFIG_JSON" | sed -r 's/(^|\})[^{}]+(\{|$)/\1\2/g' > ~/.docker/config.json
+        # Quotes are added to the secret so it applies in k8s nicely, so strip a single layer of
+        # wrapping quotes (single or double) before writing it out. The previous brace-counting sed
+        # here corrupted the JSON whenever the pull secret contained more than one registry entry: it
+        # would eat the comma and key between adjacent "}...{" pairs (e.g. between two "auths" entries),
+        # producing invalid JSON that only surfaced later as a cryptic parse error from select-oci-auth.
+        DOCKER_CONFIG_JSON="${DOCKER_CONFIG_JSON%\"}"
+        DOCKER_CONFIG_JSON="${DOCKER_CONFIG_JSON#\"}"
+        DOCKER_CONFIG_JSON="${DOCKER_CONFIG_JSON%\'}"
+        DOCKER_CONFIG_JSON="${DOCKER_CONFIG_JSON#\'}"
+        if ! jq -e -s 'length == 1 and (.[0] | type) == "object"' <<< "${DOCKER_CONFIG_JSON}" > /dev/null 2>&1 ; then
+            echo "ERROR: redhat-workloads-token .dockerconfigjson is not valid JSON after unwrapping quotes" >&2
+            exit 1
+        fi
+        echo "${DOCKER_CONFIG_JSON}" > ~/.docker/config.json
         set -x
 
         DISK_IMAGE_DIR="$(mktemp -d)"
