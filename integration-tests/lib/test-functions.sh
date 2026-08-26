@@ -1099,6 +1099,174 @@ get_pipelinerun_result() {
         -o jsonpath="{.status.results[?(@.name=='${result_name}')].value}"
 }
 
+# --- SBOM Verification Helpers ---
+# These helpers validate Atlas SBOM URLs in Release status.artifacts.sboms
+
+# Verify a single Atlas/Trustify SBOM URL has the required path and a valid UUID.
+# The hostname is not fixed: the release may upload to staging Atlas or a
+# cluster-configured Trustify endpoint.
+# Arguments: $1=url
+# Returns: 0 if valid, 1 otherwise
+verify_atlas_url() {
+    local url="${1}"
+    # Ignore query/fragment so /sboms/urn:uuid:<UUID> is only accepted in the path
+    local url_path="${url%%#*}"
+    url_path="${url_path%%\?*}"
+    local host_re='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$'
+    local ipv4_re='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
+    local uuid_re='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    local path_re="^(/[^[:space:]/?#]+)*/sboms/urn:uuid:${uuid_re}$"
+    local invalid_url="🔴 Atlas URL '${url}' is not an https URL with a valid host and path /sboms/urn:uuid:<UUID>"
+
+    if [[ ! "${url_path}" =~ ^https://([^/?#]+)(/.*)$ ]]; then
+        echo "${invalid_url}"
+        return 1
+    fi
+
+    local authority="${BASH_REMATCH[1]}"
+    local path="${BASH_REMATCH[2]}"
+    local host="${authority}"
+    local port=""
+
+    # Atlas and Trustify links are https://host[:port]/... with no userinfo
+    if [[ "${authority}" == *@* || -z "${authority}" ]]; then
+        echo "${invalid_url}"
+        return 1
+    fi
+
+    if [[ "${authority}" == *:* ]]; then
+        host="${authority%%:*}"
+        port="${authority#*:}"
+        # A second colon is not a numeric port (for example host:80:443)
+        if [[ -z "${host}" || -z "${port}" || "${port}" == *:* ]]; then
+            echo "${invalid_url}"
+            return 1
+        fi
+        if [[ ! "${port}" =~ ^[0-9]+$ ]] || (( ${#port} > 5 )) || (( 10#${port} < 1 || 10#${port} > 65535 )); then
+            echo "🔴 Atlas URL '${url}' has a nonnumeric or out-of-range port"
+            return 1
+        fi
+    fi
+
+    if [[ "${host}" =~ ${ipv4_re} ]]; then
+        local octet
+        for octet in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
+            if (( 10#${octet} > 255 )); then
+                echo "${invalid_url}"
+                return 1
+            fi
+        done
+    elif [[ ! "${host}" =~ ${host_re} ]]; then
+        echo "${invalid_url}"
+        return 1
+    fi
+
+    if [[ ! "${path}" =~ ${path_re} ]]; then
+        echo "${invalid_url}"
+        return 1
+    fi
+
+    return 0
+}
+
+# Verify SBOM structure in Release status.artifacts.sboms
+# Arguments:
+#   $1: sboms_json - the JSON object from .status.artifacts.sboms
+#   $2: expected_product_count - expected number of product SBOMs (default: 1)
+#   $3: expected_component_count - expected number of component SBOMs (default: 1)
+# Increments global $failures variable on errors
+# Sets RUN_TEST_FAILURE_MESSAGE when unset so e2e results capture the SBOM failure
+verify_sboms() {
+    local sboms_json="${1}"
+    local expected_product_count="${2:-1}"
+    local expected_component_count="${3:-1}"
+    local any_failures=0
+    local sbom_failure_messages=()
+    local failure_message=""
+
+    # Verify product SBOMs - require array with valid string URLs
+    if ! jq -e '.product | type == "array"' <<< "${sboms_json}" >/dev/null 2>&1; then
+        failure_message="sboms.product is not an array or is missing"
+        echo "🔴 ${failure_message}"
+        sbom_failure_messages+=("${failure_message}")
+        any_failures=1
+    else
+        local product_count
+        product_count="$(jq -r '.product | length' <<< "${sboms_json}")"
+
+        if [ "${product_count}" -eq "${expected_product_count}" ]; then
+            echo "✅️ Found expected number of product SBOMs: ${product_count}"
+            local idx
+            for ((idx=0; idx<product_count; idx++)); do
+                local atlas_url
+                atlas_url="$(jq -r --argjson i "${idx}" '.product[$i] // empty' <<< "${sboms_json}")"
+                if [ -z "${atlas_url}" ] || [ "${atlas_url}" = "null" ]; then
+                    failure_message="Product SBOM entry ${idx} is null or empty"
+                    echo "🔴 ${failure_message}"
+                    sbom_failure_messages+=("${failure_message}")
+                    any_failures=1
+                elif verify_atlas_url "${atlas_url}"; then
+                    echo "✅️ Valid product SBOM Atlas URL: ${atlas_url}"
+                else
+                    failure_message="Invalid product SBOM Atlas URL: ${atlas_url}"
+                    sbom_failure_messages+=("${failure_message}")
+                    any_failures=1
+                fi
+            done
+        else
+            failure_message="Incorrect number of product SBOMs. Expected ${expected_product_count}, found: ${product_count}"
+            echo "🔴 ${failure_message}"
+            sbom_failure_messages+=("${failure_message}")
+            any_failures=1
+        fi
+    fi
+
+    # Verify component SBOMs - require array with valid string URLs
+    if ! jq -e '.component | type == "array"' <<< "${sboms_json}" >/dev/null 2>&1; then
+        failure_message="sboms.component is not an array or is missing"
+        echo "🔴 ${failure_message}"
+        sbom_failure_messages+=("${failure_message}")
+        any_failures=1
+    else
+        local component_count
+        component_count="$(jq -r '.component | length' <<< "${sboms_json}")"
+
+        if [ "${component_count}" -eq "${expected_component_count}" ]; then
+            echo "✅️ Found expected number of component SBOMs: ${component_count}"
+            local idx
+            for ((idx=0; idx<component_count; idx++)); do
+                local atlas_url
+                atlas_url="$(jq -r --argjson i "${idx}" '.component[$i] // empty' <<< "${sboms_json}")"
+                if [ -z "${atlas_url}" ] || [ "${atlas_url}" = "null" ]; then
+                    failure_message="Component SBOM entry ${idx} is null or empty"
+                    echo "🔴 ${failure_message}"
+                    sbom_failure_messages+=("${failure_message}")
+                    any_failures=1
+                elif verify_atlas_url "${atlas_url}"; then
+                    echo "✅️ Valid component SBOM Atlas URL: ${atlas_url}"
+                else
+                    failure_message="Invalid component SBOM Atlas URL: ${atlas_url}"
+                    sbom_failure_messages+=("${failure_message}")
+                    any_failures=1
+                fi
+            done
+        else
+            failure_message="Incorrect number of component SBOMs. Expected ${expected_component_count}, found: ${component_count}"
+            echo "🔴 ${failure_message}"
+            sbom_failure_messages+=("${failure_message}")
+            any_failures=1
+        fi
+    fi
+
+    if [ "${any_failures}" -eq 1 ]; then
+        if [ -z "${RUN_TEST_FAILURE_MESSAGE:-}" ] && [ "${#sbom_failure_messages[@]}" -gt 0 ]; then
+            RUN_TEST_FAILURE_MESSAGE=$(printf '%s; ' "${sbom_failure_messages[@]}")
+            RUN_TEST_FAILURE_MESSAGE=${RUN_TEST_FAILURE_MESSAGE%; }
+        fi
+        failures=$((failures+1))
+    fi
+}
+
 # Function to verify Release contents
 verify_release_contents() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
