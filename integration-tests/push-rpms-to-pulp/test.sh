@@ -418,6 +418,21 @@ verify_release_contents() {
         fi
     fi
 
+    # Verify SBOM submission to Atlas (process-component-sbom and process-product-sbom tasks)
+    echo "Checking SBOMs uploaded to Atlas..."
+    local sboms
+    sboms="$(jq -r '.status.artifacts.sboms // ""' <<< "${release_json}")"
+
+    if [ -z "${sboms}" ] || [ "${sboms}" = "null" ]; then
+      echo '🔴 The release artifact does NOT contain the "sboms" field.'
+      failures=$((failures+1))
+    else
+      # Expect 1 product SBOM and at least 1 component SBOM
+      # Note: Mobster emits component SBOMs per release-repository/image combination,
+      # so exact count varies with multiarch indexes and children
+      verify_sboms "${sboms}" 1 1 minimum
+    fi
+
     # Verify the managed PipelineRun executed the RPM filtering task (this is a key pipeline behavior).
     managed_plr_full=$(jq -r '.status.managedProcessing.pipelineRun // ""' <<< "${release_json}")
     if [ -z "${managed_plr_full}" ]; then

@@ -3,78 +3,6 @@
 CLEANUP="true"
 NO_CVE="${NO_CVE:-false}"
 
-
-verify_atlas_url() {
-    local url="$1"
-    local prefix="https://atlas.release.stage.devshift.net/sboms/urn:uuid:"
-
-    if [[ ! "$url" == "$prefix"* ]]; then
-        echo "🔴 Atlas URL '$url' has invalid prefix"
-        return 1
-    fi
-
-    local uuid_str="${url#$prefix}"
-
-    # UUID v7 regex pattern
-    if [[ ! "$uuid_str" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-        echo "🔴 Could not parse UUID '$uuid_str' or UUID is not version 7"
-        return 1
-    fi
-
-    return 0
-}
-
-verify_sboms() {
-    local sboms_json="$1"
-    local any_failures=0
-
-    local product_sboms
-    product_sboms=$(jq -r '.product[]? // empty' <<< "$sboms_json" 2>/dev/null)
-    local product_count
-    product_count=$(jq -r '.product | length // 0' <<< "$sboms_json" 2>/dev/null)
-
-    if [ "$product_count" -eq 1 ]; then
-        echo "✅️ Found expected number of product SBOMs: $product_count"
-        while IFS= read -r atlas_url; do
-            if [ -n "$atlas_url" ]; then
-                if verify_atlas_url "$atlas_url"; then
-                    echo "✅️ Valid product SBOM Atlas URL: $atlas_url"
-                else
-                    any_failures=1
-                fi
-            fi
-        done <<< "$product_sboms"
-    else
-        echo "🔴 Incorrect number of product SBOMs. Expected 1, found: $product_count"
-        any_failures=1
-    fi
-
-    local component_sboms
-    component_sboms=$(jq -r '.component[]? // empty' <<< "$sboms_json" 2>/dev/null)
-    local component_count
-    component_count=$(jq -r '.component | length // 0' <<< "$sboms_json" 2>/dev/null)
-
-    if [ "$component_count" -eq 3 ]; then
-        echo "✅️ Found expected number of component SBOMs: $component_count"
-        while IFS= read -r atlas_url; do
-            if [ -n "$atlas_url" ]; then
-                if verify_atlas_url "$atlas_url"; then
-                    echo "✅️ Valid component SBOM Atlas URL: $atlas_url"
-                else
-                    any_failures=1
-                fi
-            fi
-        done <<< "$component_sboms"
-    else
-        echo "🔴 Incorrect number of component SBOMs. Expected 3, found: $component_count"
-        any_failures=1
-    fi
-
-    if [ "$any_failures" -eq 1 ]; then
-        failures=$((failures+1))
-    fi
-}
-
 # Function to verify Release contents
 # Modifies global variable: advisory_yaml_dir
 # Relies on global variables: RELEASE_NAME, RELEASE_NAMESPACE, SCRIPT_DIR, managed_namespace, managed_sa_name, NO_CVE
@@ -235,7 +163,8 @@ verify_release_contents() {
       echo '🔴 The release artifact does NOT contain the "sboms" field.'
       failures=$((failures+1))
     else
-      verify_sboms "$sboms"
+      # Expect 1 product SBOM and exactly 3 component SBOMs (we have 3 components)
+      verify_sboms "${sboms}" 1 3
     fi
 
     if [ "${failures}" -gt 0 ]; then
