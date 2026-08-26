@@ -1018,6 +1018,125 @@ get_pipelinerun_result() {
         -o jsonpath="{.status.results[?(@.name=='${result_name}')].value}"
 }
 
+# --- SBOM Verification Helpers ---
+# These helpers validate Atlas SBOM URLs in Release status.artifacts.sboms
+
+# Verify a single Atlas URL has the correct format and contains a valid UUIDv7
+# Arguments: $1=url
+# Returns: 0 if valid, 1 otherwise
+verify_atlas_url() {
+    local url="${1}"
+    local prefix="https://atlas.release.stage.devshift.net/sboms/urn:uuid:"
+
+    if [[ ! "${url}" == "${prefix}"* ]]; then
+        echo "🔴 Atlas URL '${url}' has invalid prefix"
+        return 1
+    fi
+
+    local uuid_str="${url#"${prefix}"}"
+
+    # UUID v7 regex pattern (version nibble = 7, variant bits = 8-b)
+    if [[ ! "${uuid_str}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+        echo "🔴 Could not parse UUID '${uuid_str}' or UUID is not version 7"
+        return 1
+    fi
+
+    return 0
+}
+
+# Verify SBOM structure in Release status.artifacts.sboms
+# Arguments:
+#   $1: sboms_json - the JSON object from .status.artifacts.sboms
+#   $2: expected_product_count - expected number of product SBOMs (default: 1)
+#   $3: expected_component_count - expected number of component SBOMs (default: 1)
+#   $4: component_match_mode - "exact" (default) or "minimum" for component count matching
+# Increments global $failures variable on errors
+verify_sboms() {
+    local sboms_json="${1}"
+    local expected_product_count="${2:-1}"
+    local expected_component_count="${3:-1}"
+    local component_match_mode="${4:-exact}"
+    local any_failures=0
+
+    # Verify product SBOMs - require array with valid string URLs
+    if ! jq -e '.product | type == "array"' <<< "${sboms_json}" >/dev/null 2>&1; then
+        echo "🔴 sboms.product is not an array or is missing"
+        any_failures=1
+    else
+        local product_count
+        product_count="$(jq -r '.product | length' <<< "${sboms_json}")"
+
+        if [ "${product_count}" -eq "${expected_product_count}" ]; then
+            echo "✅️ Found expected number of product SBOMs: ${product_count}"
+            local idx
+            for ((idx=0; idx<product_count; idx++)); do
+                local atlas_url
+                atlas_url="$(jq -r --argjson i "${idx}" '.product[$i] // empty' <<< "${sboms_json}")"
+                if [ -z "${atlas_url}" ] || [ "${atlas_url}" = "null" ]; then
+                    echo "🔴 Product SBOM entry ${idx} is null or empty"
+                    any_failures=1
+                elif verify_atlas_url "${atlas_url}"; then
+                    echo "✅️ Valid product SBOM Atlas URL: ${atlas_url}"
+                else
+                    any_failures=1
+                fi
+            done
+        else
+            echo "🔴 Incorrect number of product SBOMs. Expected ${expected_product_count}, found: ${product_count}"
+            any_failures=1
+        fi
+    fi
+
+    # Verify component SBOMs - require array with valid string URLs
+    if ! jq -e '.component | type == "array"' <<< "${sboms_json}" >/dev/null 2>&1; then
+        echo "🔴 sboms.component is not an array or is missing"
+        any_failures=1
+    else
+        local component_count
+        component_count="$(jq -r '.component | length' <<< "${sboms_json}")"
+
+        local component_check_passed=false
+        if [ "${component_match_mode}" = "minimum" ]; then
+            if [ "${component_count}" -ge "${expected_component_count}" ]; then
+                echo "✅️ Found at least ${expected_component_count} component SBOM(s): ${component_count}"
+                component_check_passed=true
+            else
+                echo "🔴 Insufficient component SBOMs. Expected at least ${expected_component_count}, found: ${component_count}"
+                any_failures=1
+            fi
+        else
+            # Default: exact match (backward compatible with original collectors behavior)
+            if [ "${component_count}" -eq "${expected_component_count}" ]; then
+                echo "✅️ Found expected number of component SBOMs: ${component_count}"
+                component_check_passed=true
+            else
+                echo "🔴 Incorrect number of component SBOMs. Expected ${expected_component_count}, found: ${component_count}"
+                any_failures=1
+            fi
+        fi
+
+        if [ "${component_check_passed}" = true ]; then
+            local idx
+            for ((idx=0; idx<component_count; idx++)); do
+                local atlas_url
+                atlas_url="$(jq -r --argjson i "${idx}" '.component[$i] // empty' <<< "${sboms_json}")"
+                if [ -z "${atlas_url}" ] || [ "${atlas_url}" = "null" ]; then
+                    echo "🔴 Component SBOM entry ${idx} is null or empty"
+                    any_failures=1
+                elif verify_atlas_url "${atlas_url}"; then
+                    echo "✅️ Valid component SBOM Atlas URL: ${atlas_url}"
+                else
+                    any_failures=1
+                fi
+            done
+        fi
+    fi
+
+    if [ "${any_failures}" -eq 1 ]; then
+        failures=$((failures+1))
+    fi
+}
+
 # Function to verify Release contents
 verify_release_contents() {
     echo "📝 Note: Test Suite may implement ${FUNCNAME[0]}" \
