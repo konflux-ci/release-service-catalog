@@ -149,7 +149,7 @@ spec:
           mountPath: "/etc/secrets"
       script: |
         #!/usr/bin/env bash
-        set -eu
+        set -euo pipefail
 
         AWS_DEFAULT_REGION="$(cat /etc/secrets/AWS_DEFAULT_REGION)"
         AWS_ACCESS_KEY_ID="$(cat /etc/secrets/AWS_ACCESS_KEY_ID)"
@@ -205,7 +205,9 @@ spec:
         }
         echopid(){
             pid=$(jobpid)
-            echo "${pid}: $*"
+            # Written to stderr so it never leaks into a caller's $(...) capture,
+            # e.g. run_cosign's stdout is captured as cosign's own JSON output.
+            echo "${pid}: $*" >&2
         }
         run_cosign () { # Expected arguments are [digest_reference, tag_reference]
             attempt=0
@@ -240,10 +242,16 @@ spec:
               COSIGN_REKOR_ARGS+=("--insecure-ignore-tlog=true")
           fi
           verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
-          found_signatures=$(echo "$verify_output" | jq -j '['\
+          if [ -z "$verify_output" ]; then
+            verify_output="[]"
+          fi
+          if ! found_signatures=$(echo "$verify_output" | jq -j '['\
         '.[]|select(.critical.image."docker-manifest-digest"| contains("'"$digest"'"))'\
         '|select(.critical.identity."docker-reference" == "'"$identity"'")'\
-        ']|length')
+        ']|length'); then
+            echopid "ERROR: cosign verify output for ${reference} was not valid JSON: ${verify_output}"
+            exit 1
+          fi
           echo "$found_signatures"
         }
         function check_and_sign() {
@@ -260,7 +268,8 @@ spec:
           declare -a COSIGN_REKOR_ARGS=()
           found_signatures=$(check_existing_signatures "$identity" "$reference@$digest" "$digest")
           if [ -z "$found_signatures" ]; then
-            found_signatures=0
+            echopid "ERROR: empty signature count for ${identity} ${digest}"
+            exit 1
           fi
           echopid "FOUND SIGNATURES for ${identity} ${digest}: $found_signatures"
 
@@ -377,10 +386,11 @@ spec:
         import sys
         from itertools import zip_longest
         digest_groups = {}
-        # #
+        data = sys.stdin.read().strip()
+        if not data:
+          raise SystemExit(0)
         # Make groups based on reference + digest to avoid signing same digest in parallel
-        # #
-        for x in sys.stdin.read().strip().split(' '):
+        for x in data.split(' '):
           rest, internal_ref = x.split('#')
           rest, digest = rest.split('@')
           public_ref, tag = rest.split(':')

@@ -140,9 +140,7 @@ spec:
           cpu: 650m
       script: |
         #!/bin/bash
-        #
-        #
-        set -ex
+        set -exo pipefail
 
         # Obtain componentGroup from snapshot
         componentGroup=$(jq -rc .componentGroup "$(params.dataDir)/$(params.snapshotPath)")
@@ -207,17 +205,24 @@ spec:
             -o jsonpath='{.items[0]}' --sort-by=.metadata.creationTimestamp )
 
           results=$(jq -r '.status.results' <<< "${IRjson}")
+          if [ -z "${results}" ] || [ "${results}" = "null" ]; then
+            echo "ERROR: InternalRequest returned empty results"
+            echo "${IRjson}"
+            exit 1
+          fi
           internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
           internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
 
           echo "** internalRequestPipelineRunName: ${internalRequestPipelineRunName}"
           echo "** internalRequestTaskRunName: ${internalRequestTaskRunName}"
 
-          if [ "$(jq -jr '.buildState' <<< "${results}")" == "Failed" ]; then
-            echo -en "  FileUpdates Error: "
-            jq -r '.jsonBuildInfo | fromjson | .error' <<< "${results}"
+          buildState="$(jq -jr '.buildState // empty' <<< "${results}")"
+          if [ "${buildState}" != "Success" ] && [ "${buildState}" != "Succeeded" ]; then
+            echo -en "  FileUpdates Error (buildState=${buildState}): "
+            jq -r '.jsonBuildInfo | fromjson | .error // empty' <<< "${results}" || true
             echo -e "  Diff (content might be truncated): "
-            jq -r '.jsonBuildInfo | fromjson | .str | tostring' <<< "${results}" | awk '{ print "\t"$0 }'
+            jq -r '.jsonBuildInfo | fromjson | .str | tostring' <<< "${results}" 2>/dev/null \
+              | awk '{ print "\t"$0 }' || true
             echo -e "=== Finished ===\n"
             exit 1
           else
