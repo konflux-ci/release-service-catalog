@@ -172,11 +172,13 @@ if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIP
     )
 fi
 
-# If custom pipeline is specified, set annotation variable for later use in component patching
+# If custom pipeline is specified, set annotation variable for later use in component patching.
+# Component templates already quote this value; export the JSON only so envsubst does not
+# produce a double-quoted annotation.
 if [[ -n "${PTSV_BUILD_PIPELINE}" ]]; then
-    export PTSV_BUILD_PIPELINE_VALUE=$(
-        printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}"
-    )
+    _ptsv_json=$(printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}")
+    export PTSV_BUILD_PIPELINE_VALUE="${_ptsv_json}"
+    unset _ptsv_json
 fi
 
 if [ -z "$PTSV_EXPECTED_ARCHES" ]; then
