@@ -366,13 +366,13 @@ create_kubernetes_resources() {
     local max_retries=5
     local attempt
     for attempt in $(seq 1 "${max_retries}"); do
-        if kubectl create -f "$tmpDir/tenant-resources.yaml"; then
+        if kubectl apply -f "$tmpDir/tenant-resources.yaml"; then
             break
         fi
         if [ "${attempt}" -eq "${max_retries}" ]; then
-            log_error "kubectl create tenant resources failed after ${max_retries} attempts"
+            log_error "kubectl apply tenant resources failed after ${max_retries} attempts"
         fi
-        echo "Retrying kubectl create tenant resources (attempt ${attempt}/${max_retries})..."
+        echo "Retrying kubectl apply tenant resources (attempt ${attempt}/${max_retries})..."
         sleep "$((1 + RANDOM % 3))"
     done
 
