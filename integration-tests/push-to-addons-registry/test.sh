@@ -332,6 +332,21 @@ verify_release_contents() {
 
     if [ -n "${mergerequest_url}" ]; then
         echo "✅️ mergerequest_url: ${mergerequest_url}"
+
+        # Validate URL format matches expected GitLab MR pattern
+        # Expected: https://gitlab.cee.redhat.com/<namespace>/<project>/-/merge_requests/<number>
+        # Note: HTTP reachability check not possible - internal GitLab is not accessible from CI
+        echo "Validating mergerequest_url format..."
+        # GitLab projects require at least namespace + project (2 path segments)
+        local min_path_segments=2
+        # Path segments exclude / ? # (URL delimiters)
+        local gitlab_mr_url_pattern="^https://gitlab\.cee\.redhat\.com(/[^/?#]+){${min_path_segments},}/-/merge_requests/[0-9]+$"
+        if echo "${mergerequest_url}" | grep -Eq -- "${gitlab_mr_url_pattern}"; then
+            echo "✅️ mergerequest_url has valid GitLab MR format"
+        else
+            echo "🔴 mergerequest_url has invalid format (expected: https://gitlab.cee.redhat.com/<org>/<project>/-/merge_requests/<number>)"
+            failures=$((failures+1))
+        fi
     else
         echo "🔴 mergerequest_url was empty!"
         failures=$((failures+1))
