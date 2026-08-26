@@ -62,6 +62,18 @@ verify_release_contents() {
     # Verify multi-component images using shared helper
     check_container_images
 
+    # Verify run-file-updates merge request URL (RELEASE-2334)
+    echo ""
+    echo "Checking merge request URL from run-file-updates..."
+    local merge_request_url
+    merge_request_url="$(jq -r '.status.artifacts.merge_requests[0]?.url // ""' <<< "${release_json}")"
+    if [ -n "${merge_request_url}" ] && [ "${merge_request_url}" != "unknown" ]; then
+        echo "✅️ Found merge request URL: ${merge_request_url}"
+    else
+        echo "🔴 merge_requests[0].url is empty, missing, or invalid (got: '${merge_request_url}')"
+        failures=$((failures+1))
+    fi
+
     # Additional verification: ensure distinct URLs and shasums for multi-component test
     echo ""
     echo "Verifying distinct URLs and shasums for each component..."
