@@ -10,9 +10,6 @@ spec:
   description: |-
     Tekton task to sign & push to internal oci via an InternalRequest.
   params:
-    - name: releasePath
-      description: Path to the JSON string of the release in the data workspace
-      type: string
     - name: snapshotPath
       type: string
       description: Path to the JSON string of the Snapshot spec in the data workspace
@@ -87,9 +84,6 @@ spec:
     - name: sourceDataArtifact
       type: string
       description: Produced trusted data artifact
-    - name: checksum_map
-      type: string
-      description: OCI artifact reference for checksum map returned from internal push-artifacts-to-cdn
   volumes:
     - name: workdir
       emptyDir: {}
@@ -182,10 +176,6 @@ spec:
         # Remove .metadata from each component to avoid "arg list too long" errors
         # The internal task doesn't need metadata (env_variables, labels, etc.)
         snapshot=$(jq -c '.components |= map(del(.metadata))' "$(params.dataDir)/$(params.snapshotPath)")
-        AUTHOR=$(jq -r '.status.attribution.author' "$(params.dataDir)/$(params.releasePath)")
-        if [[ "${AUTHOR}" == "null" ]] ; then echo "No author found in Release.Status. Failing..." ; exit 1 ; fi
-        configMapName=$(jq -er '.sign.configMapName' "${DATA_FILE}")
-        signingKeyName=$(kubectl get configmap "$configMapName" -o jsonpath="{.data.SIG_KEY_NAME}")
         RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/sign-internal-oci.json"
         FILES=$(jq -c '{"artifacts": [.components[].staged?.files[]?.filename]}' <<< "$snapshot")
         echo "$FILES" > "$RESULTS_FILE"
@@ -206,8 +196,6 @@ spec:
 
         internal-request --pipeline "${REQUEST}" \
           -p snapshot_json="${snapshot}" \
-          -p author="${AUTHOR}" \
-          -p signingKeyName="${signingKeyName}" \
           -p quayURL="${QUAY_URL}" \
           -p destQuayURL="${DEST_QUAY_URL}" \
           -p origin="${ORIGIN}" \
@@ -235,12 +223,6 @@ spec:
         fi
 
         results=$(kubectl get internalrequest "${NAME}" -o=jsonpath='{.status.results}')
-        checksum_map=$(echo "${results}" | jq -r '.checksum_map // empty')
-        echo -n "${checksum_map}" > "$(results.checksum_map.path)"
-        if [ -n "${checksum_map}" ]; then
-          jq --arg cm "${checksum_map}" '. + {"checksum_map": $cm}' "$RESULTS_FILE" > "${RESULTS_FILE}.tmp"
-          mv "${RESULTS_FILE}.tmp" "$RESULTS_FILE"
-        fi
         if [ "$(echo "${results}" | jq -r '.result')" == "Success" ] ; then
           echo "Artifacts pushed"
           echo "${results}" | jq '.'
