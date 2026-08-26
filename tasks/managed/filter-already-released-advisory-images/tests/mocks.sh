@@ -13,6 +13,9 @@ function get-image-architectures() {
     echo '{"platform":{"architecture":"amd64","os":"linux"},"digest":"sha256:amd64digest_abc123"}'
   elif [[ "$image" == *"sha256:def456"* ]]; then
     echo '{"platform":{"architecture":"amd64","os":"linux"},"digest":"sha256:amd64digest_def456"}'
+  elif [[ "$image" == *"sha256:dualdigest"* ]]; then
+    # Dual-compression index: get-image-architectures dedups to the gzip entry per arch
+    echo '{"platform":{"architecture":"amd64","os":"linux"},"digest":"sha256:amd64gzip"}'
   else
     # Default deterministic output
     echo '{"platform":{"architecture":"amd64","os":"linux"},"digest":"sha256:amd64digest_default"}'
@@ -23,7 +26,8 @@ function kubectl() {
   # The IR won't actually be acted upon, so mock it to return Success as the task wants
   if [[ "$*" == *"get internalrequest"*"-o=jsonpath={.status.results}"* ]]
   then
-    UNRELEASED=$(echo -n '["new-component", "multi-repo-component", "single-repo-component"]' | gzip -c | base64 -w 0)
+    # Include dual-compression-component in unreleased list for the dual test
+    UNRELEASED=$(echo -n '["new-component", "multi-repo-component", "single-repo-component", "dual-compression-component"]' | gzip -c | base64 -w 0)
     echo '{
       "result": "Success",
       "unreleased_components": "'"$UNRELEASED"'",

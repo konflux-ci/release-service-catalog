@@ -1,0 +1,260 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-already-released-advisory-images-dual-compression
+spec:
+  description: |
+    Run the filter-already-released-advisory-images task with a dual-compression
+    image index that contains both gzip and zstd:chunked manifests for amd64.
+    get-image-architectures deduplicates to the gzip entry, so the task should
+    create only 1 transformed component (not 2) using the gzip digest.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: "$(params.orasOptions)"
+            - name: DEBUG
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: create-inputs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_release_plan_admission.json" <<EOF
+              {
+                "apiVersion": "appstudio.redhat.com/v1alpha1",
+                "kind": "ReleasePlanAdmission",
+                "metadata": {
+                  "name": "test",
+                  "namespace": "default"
+                },
+                "spec": {
+                  "applications": ["app"],
+                  "origin": "dev"
+                }
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" <<EOF
+              {
+                "application": "myapp",
+                "components": [
+                  {
+                    "name": "dual-compression-component",
+                    "repositories": [
+                      {
+                        "url": "quay.io/redhat-pending/repo",
+                        "rh-registry-repo": "quay.io/redhat-pending/repo"
+                      }
+                    ],
+                    "containerImage": "quay.io/redhat-pending/repo@sha256:dualdigest"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" <<EOF
+              {}
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: filter-already-released-advisory-images
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
+        - name: releasePlanAdmissionPath
+          value: "$(context.pipelineRun.uid)/test_release_plan_admission.json"
+        - name: resultsDirPath
+          value: "$(context.pipelineRun.uid)/results"
+        - name: synchronously
+          value: "false"
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)/$(context.pipelineRun.uid)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: skip_release
+          value: $(tasks.run-task.results.skip_release)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: environment
+          value: $(tasks.run-task.results.environment)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: environment
+            type: string
+          - name: result
+            type: string
+          - name: skip_release
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: verify
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              # Count the number of InternalRequests
+              requestsCount=$(kubectl get InternalRequest -o json | jq -r '.items | length')
+
+              if [ "${requestsCount}" -ne 1 ]; then
+                echo "Unexpected number of InternalRequests. Expected: 1, Found: ${requestsCount}"
+                exit 1
+              fi
+
+              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
+
+              # Check the transformedSnapshot parameter exists and decodes
+              transformedSnapshotB64=$(echo "$internalRequest" | jq -r '.spec.params.transformedSnapshot // empty')
+              if [ -z "${transformedSnapshotB64}" ]; then
+                echo "InternalRequest missing transformedSnapshot parameter"
+                exit 1
+              fi
+              transformedSnapshotJson=$(echo "${transformedSnapshotB64}" | base64 --decode | gzip -d)
+              if ! jq -e 'type=="array"' <<< "${transformedSnapshotJson}" >/dev/null; then
+                echo "transformedSnapshot should be a JSON array"
+                exit 1
+              fi
+
+              # The dedup filter should reduce 2 entries (1 arch x 2 compressions)
+              # to 1 entry (amd64 gzip only). Verify we have exactly 1 transformed
+              # component, not 2.
+              entryCount=$(jq 'length' <<< "${transformedSnapshotJson}")
+              if [ "$entryCount" -ne 1 ]; then
+                echo "Error: expected 1 transformed entry (after dedup), got $entryCount"
+                jq '.' <<< "${transformedSnapshotJson}"
+                exit 1
+              fi
+
+              # Verify the transformed component uses the gzip digest (not the zstd digest)
+              entry=$(jq -c '.[0]' <<< "${transformedSnapshotJson}")
+              if [[ "$(jq -r '.containerImage' <<< "$entry")" != *"@sha256:amd64gzip" ]]; then
+                echo "Error: transformed component should use gzip digest, got: $(jq -r '.containerImage' <<< "$entry")"
+                exit 1
+              fi
+
+              # Check that the result was properly set
+              if [ "$(params.result)" != "Success" ]; then
+                echo "Task failed: $(params.result)"
+                exit 1
+              fi
+
+              # Check that skip_release is set to false
+              if [ "$(params.skip_release)" != "false" ]; then
+                echo "skip_release should be false when the component is not yet released"
+                exit 1
+              fi
+
+              # Check that the environment task result was properly set
+              if [ "$(params.environment)" != "stage" ]; then
+                echo "The environment task result was not set properly"
+                exit 1
+              fi
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: delete-crs
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              kubectl delete internalrequests --all
