@@ -261,14 +261,41 @@ spec:
         release_plan_admission_result=$(get-resource "releaseplanadmission" "${RELEASE_PLAN_ADMISSION}" \
             "{.spec.data}")
 
-        # Merge collectors and Release keys. Release has higher priority
-        merged_output=$(merge-json "$collectors_result" "$release_result")
+        # Write JSON data to temp files to avoid "Argument list too long" errors
+        # when calling merge-json with large JSON as CLI args (e.g., 1000+ components).
+        # Instead, pass the files directly to jq which reads them without execve().
+        merge_dir=$(mktemp -d)
+        trap 'rm -rf "${merge_dir}"' EXIT
 
-        # Merge now with ReleasePlan keys. ReleasePlan has higher priority
-        merged_output=$(merge-json "$merged_output" "$release_plan_result")
+        printf '%s' "${collectors_result}" > "${merge_dir}/1_collectors.json"
+        printf '%s' "${release_result}" > "${merge_dir}/2_release.json"
+        printf '%s' "${release_plan_result}" > "${merge_dir}/3_releaseplan.json"
+        printf '%s' "${release_plan_admission_result}" > "${merge_dir}/4_rpa.json"
 
-        # Finally merge with ReleasePlanAdmission keys. ReleasePlanAdmission has higher priority
-        merged_output=$(merge-json "$merged_output" "$release_plan_admission_result")
+        # Merge all data sources via files in priority order (later files take precedence):
+        # collectors < Release < ReleasePlan < ReleasePlanAdmission
+        merged_output=$(jq -cs '
+          def merge_objects(a; b):
+            a as $a | b as $b |
+            ($a | keys) + ($b | keys) | unique | map({
+              key: .,
+              value: (
+                if ($a[.] | type) == "object" and ($b[.] | type) == "object" then
+                  merge_objects($a[.]; $b[.])
+                elif ($a[.] | type) == "array" and ($b[.] | type) == "array" then
+                  ($a[.] + $b[.]) | unique
+                else
+                  if ($b[.] != null) then $b[.] else $a[.] end
+                end
+              )
+            }) | from_entries;
+          reduce .[] as $item ({}; merge_objects(.; $item))
+        ' "${merge_dir}/1_collectors.json" \
+          "${merge_dir}/2_release.json" \
+          "${merge_dir}/3_releaseplan.json" \
+          "${merge_dir}/4_rpa.json")
+
+        rm -rf "${merge_dir}"
 
         DATA_PATH="$(params.subdirectory)/data.json"
         echo -n "$DATA_PATH" > "$(results.data.path)"
