@@ -1,0 +1,115 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: gpg-sign-and-push-to-cdn-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to pull signed binary artifacts and publish them to Exodus CDN
+    and Content Gateway. Receives signed artifact references from the managed
+    gpg-sign-and-push-to-cdn task via InternalRequest.
+  params:
+    - name: snapshot_json
+      type: string
+      description: String containing a JSON representation of the snapshot spec
+    - name: signed_artifacts_json
+      type: string
+      description: >-
+        JSON mapping of component name to list of signed Trusted Artifact URIs
+    - name: exodusGwSecret
+      type: string
+      description: Env specific secret containing the Exodus Gateway configs
+    - name: exodusGwEnv
+      type: string
+      description: Environment to use in the Exodus Gateway. Options are [live, pre]
+    - name: cgwHostname
+      type: string
+      description: Env specific hostname for content gateway
+    - name: cgwSecret
+      type: string
+      description: Env specific secret containing the content gateway credentials
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+    - name: trustedArtifactsDockerConfigSecret
+      type: string
+      description: The name of the secret that contains dockerconfig json for trusted artifact operations
+      default: quay-token-konflux-release-trusted-artifacts-secret
+  results:
+    - name: result
+      description: Success if the task succeeds, the error otherwise
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: exodus-gw-secret
+      secret:
+        secretName: $(params.exodusGwSecret)
+        defaultMode: 0444
+    - name: cgw-secret
+      secret:
+        secretName: $(params.cgwSecret)
+        defaultMode: 0444
+    - name: ta-dockerconfig
+      secret:
+        secretName: $(params.trustedArtifactsDockerConfigSecret)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+  steps:
+    - name: push-to-cdn
+      image: quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils:on-pr-d8e01994f25a41ef3919398ff7e889cacf4efcbf
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: "1"
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      volumeMounts:
+        - name: workdir
+          mountPath: /var/workdir
+        - name: exodus-gw-secret
+          mountPath: /mnt/exodusGwSecret
+          readOnly: true
+        - name: cgw-secret
+          mountPath: /mnt/cgwSecret
+          readOnly: true
+        - name: ta-dockerconfig
+          mountPath: /mnt/trusted_artifacts_dockerconfig
+          readOnly: true
+      env:
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+      command:
+        - python3
+        - -m
+        - release_service_utils.tasks.internal.gpg_sign_and_push_to_cdn
+      args:
+        - "--snapshot-json"
+        - "$(params.snapshot_json)"
+        - "--signed-artifacts-json"
+        - "$(params.signed_artifacts_json)"
+        - "--exodus-gw-env"
+        - "$(params.exodusGwEnv)"
+        - "--cgw-hostname"
+        - "$(params.cgwHostname)"
