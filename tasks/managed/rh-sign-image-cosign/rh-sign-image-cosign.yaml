@@ -205,7 +205,9 @@ spec:
         }
         echopid(){
             pid=$(jobpid)
-            echo "${pid}: $*"
+            # Written to stderr so it never leaks into a caller's $(...) capture,
+            # e.g. run_cosign's stdout is captured as cosign's own JSON output.
+            echo "${pid}: $*" >&2
         }
         run_cosign () { # Expected arguments are [digest_reference, tag_reference]
             attempt=0
@@ -240,10 +242,13 @@ spec:
               COSIGN_REKOR_ARGS+=("--insecure-ignore-tlog=true")
           fi
           verify_output=$(run_cosign verify "${COSIGN_REKOR_ARGS[@]}" --key "$PUBLIC_KEY_FILE" "$reference")
-          found_signatures=$(echo "$verify_output" | jq -j '['\
+          if ! found_signatures=$(echo "$verify_output" | jq -j '['\
         '.[]|select(.critical.image."docker-manifest-digest"| contains("'"$digest"'"))'\
         '|select(.critical.identity."docker-reference" == "'"$identity"'")'\
-        ']|length')
+        ']|length'); then
+            echopid "ERROR: cosign verify output for ${reference} was not valid JSON: ${verify_output}"
+            exit 1
+          fi
           echo "$found_signatures"
         }
         function check_and_sign() {
