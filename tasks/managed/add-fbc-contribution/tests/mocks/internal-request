@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MAX_PATCH_ATTEMPTS=5
+PATCH_RETRY_DELAY_SECONDS=2
+
+# Mock internal-request command
+# Log the call for debugging
+echo "$@" >> /var/workdir/release/mock_internal-request.txt
+
+# Extract pipeline UID for tracking
+PIPELINE_UID=""
+for arg in "$@"; do
+  if [[ "${arg}" == *"pipelinerun-uid="* ]]; then
+    PIPELINE_UID="$(echo "${arg}" | sed 's/.*pipelinerun-uid=//')"
+    break
+  fi
+done
+
+# Call the real internal-request with async mode and capture output
+/home/utils/internal-request "$@" -s false | tee "/var/workdir/release/ir-output-${PIPELINE_UID:-default}.tmp"
+
+sleep 1
+
+# Extract the IR name from the captured output
+IR_NAME="$(awk -F"'" '/created/ { print $2 }' "/var/workdir/release/ir-output-${PIPELINE_UID:-default}.tmp")"
+
+if [ -z "${IR_NAME}" ]; then
+    # Fallback: try to find IR with matching pipeline UID label
+    if [ -n "${PIPELINE_UID}" ]; then
+      IR_NAME="$(/usr/bin/kubectl get internalrequest -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" --no-headers -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp | tail -1)"
+    fi
+
+    # Final fallback
+    if [ -z "${IR_NAME}" ]; then
+      IR_NAME="$(/usr/bin/kubectl get internalrequest --no-headers -o custom-columns=":metadata.name" \
+          --sort-by=.metadata.creationTimestamp | tail -1)"
+    fi
+fi
+
+if [ -z "${IR_NAME}" ]; then
+    echo "Error: Unable to get IR name for pipeline UID: ${PIPELINE_UID:-none}"
+    /usr/bin/kubectl get internalrequest --no-headers -o custom-columns=":metadata.name"
+    exit 1
+fi
+
+# Determine success/failure based on fbcFragments containing fail.io
+if [[ "$*" == *"fbcFragments="*"fail.io"* ]]; then
+    EXITCODE=1
+    CONDITION_STATUS="False"
+    CONDITION_REASON="Failed"
+    CONDITION_MESSAGE="Internal request failed with exit code 1"
+
+    # For failures, only provide conditions without results
+    LAST_TRANSITION_TIME="$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PATCH_JSON="$(jq -n \
+        --arg status "${CONDITION_STATUS}" \
+        --arg reason "${CONDITION_REASON}" \
+        --arg message "${CONDITION_MESSAGE}" \
+        --arg lastTransitionTime "${LAST_TRANSITION_TIME}" \
+        '{
+          status: {
+            conditions: [
+              {
+                type: "Succeeded",
+                status: $status,
+                reason: $reason,
+                message: $message,
+                lastTransitionTime: $lastTransitionTime
+              }
+            ]
+          }
+        }')"
+else
+    EXITCODE=0
+    CONDITION_STATUS="True"
+    CONDITION_REASON="Succeeded"
+    CONDITION_MESSAGE=""
+
+    # For success, provide results with mock IIB build info
+    JSON_BUILD_INFO="$(jq -nc \
+        --arg updated "2024-03-06T16:39:11.314092Z" \
+        --arg index_image "redhat.com/rh-stage/iib:01" \
+        --arg index_image_resolved "redhat.com/rh-stage/iib@sha256:abcdefghijk" \
+        '{updated: $updated, index_image: $index_image, index_image_resolved: $index_image_resolved}' \
+        | gzip -c | base64 -w0)"
+    LAST_TRANSITION_TIME="$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PATCH_JSON="$(jq -n \
+        --arg jsonBuildInfo "${JSON_BUILD_INFO}" \
+        --argjson exitCode "${EXITCODE}" \
+        --arg status "${CONDITION_STATUS}" \
+        --arg reason "${CONDITION_REASON}" \
+        --arg message "${CONDITION_MESSAGE}" \
+        --arg lastTransitionTime "${LAST_TRANSITION_TIME}" \
+        '{
+          status: {
+            results: {
+              jsonBuildInfo: $jsonBuildInfo,
+              indexImageDigests: "quay.io/a quay.io/b",
+              iibLog: "Dummy IIB Log",
+              exitCode: ($exitCode | tostring)
+            },
+            conditions: [
+              {
+                type: "Succeeded",
+                status: $status,
+                reason: $reason,
+                message: $message,
+                lastTransitionTime: $lastTransitionTime
+              }
+            ]
+          }
+        }')"
+fi
+
+# Patch the InternalRequest status with retry logic
+PATCH_FILE="/var/workdir/release/${IR_NAME}-patch.json"
+echo "${PATCH_JSON}" > "${PATCH_FILE}"
+
+for ((attempt=1; attempt<=MAX_PATCH_ATTEMPTS; attempt++)); do
+    if /usr/bin/kubectl patch internalrequest "${IR_NAME}" --type=merge --subresource status --patch-file "${PATCH_FILE}"; then
+        echo "Successfully patched InternalRequest ${IR_NAME} on attempt ${attempt}"
+        break
+    else
+        echo "Patch attempt ${attempt} failed for InternalRequest ${IR_NAME}, retrying in ${PATCH_RETRY_DELAY_SECONDS} seconds..."
+        if [ "${attempt}" -eq "${MAX_PATCH_ATTEMPTS}" ]; then
+            echo "ERROR: Failed to patch InternalRequest ${IR_NAME} after ${MAX_PATCH_ATTEMPTS} attempts"
+            exit 1
+        fi
+        sleep "${PATCH_RETRY_DELAY_SECONDS}"
+    fi
+done

@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mock kubectl that intercepts InternalRequest creation and patches status
+# Log the call for debugging
+echo "kubectl ${*}" >> /var/workdir/release/mock_kubectl.txt
+
+# Check if this is an InternalRequest creation via stdin
+if [[ "${*}" == "create -f - -o json"* ]]; then
+    # Read stdin (the InternalRequest JSON)
+    INPUT_JSON="$(cat)"
+    echo "${INPUT_JSON}" >> /var/workdir/release/mock_kubectl_input.txt
+
+    # Pass through to real kubectl to create the resource
+    RESULT="$(/usr/bin/kubectl create -f - -o json <<< "${INPUT_JSON}")"
+
+    # Extract the IR name from the result
+    IR_NAME="$(echo "${RESULT}" | jq -r '.metadata.name')"
+
+    # Check if fbcFragments contains fail.io to determine success/failure
+    if echo "${INPUT_JSON}" | grep -q '"fbcFragments".*fail\.io'; then
+        EXITCODE=1
+        CONDITION_STATUS="False"
+        CONDITION_REASON="Failed"
+        CONDITION_MESSAGE="Internal request failed with exit code 1"
+
+        # For failures, only provide conditions without results
+        LAST_TRANSITION_TIME="$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+        PATCH_JSON="$(jq -n \
+            --arg status "${CONDITION_STATUS}" \
+            --arg reason "${CONDITION_REASON}" \
+            --arg message "${CONDITION_MESSAGE}" \
+            --arg lastTransitionTime "${LAST_TRANSITION_TIME}" \
+            '{
+              status: {
+                conditions: [
+                  {
+                    type: "Succeeded",
+                    status: $status,
+                    reason: $reason,
+                    message: $message,
+                    lastTransitionTime: $lastTransitionTime
+                  }
+                ]
+              }
+            }')"
+    else
+        EXITCODE=0
+        CONDITION_STATUS="True"
+        CONDITION_REASON="Succeeded"
+        CONDITION_MESSAGE=""
+
+        # For success, provide results with mock IIB build info
+        JSON_BUILD_INFO="$(jq -nc \
+            --arg updated "2024-03-06T16:39:11.314092Z" \
+            --arg index_image "redhat.com/rh-stage/iib:01" \
+            --arg index_image_resolved "redhat.com/rh-stage/iib@sha256:abcdefghijk" \
+            '{updated: $updated, index_image: $index_image, index_image_resolved: $index_image_resolved}' \
+            | gzip -c | base64 -w0)"
+        LAST_TRANSITION_TIME="$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+        PATCH_JSON="$(jq -n \
+            --arg jsonBuildInfo "${JSON_BUILD_INFO}" \
+            --argjson exitCode "${EXITCODE}" \
+            --arg status "${CONDITION_STATUS}" \
+            --arg reason "${CONDITION_REASON}" \
+            --arg message "${CONDITION_MESSAGE}" \
+            --arg lastTransitionTime "${LAST_TRANSITION_TIME}" \
+            '{
+              status: {
+                results: {
+                  jsonBuildInfo: $jsonBuildInfo,
+                  indexImageDigests: "quay.io/a quay.io/b",
+                  iibLog: "Dummy IIB Log",
+                  exitCode: ($exitCode | tostring)
+                },
+                conditions: [
+                  {
+                    type: "Succeeded",
+                    status: $status,
+                    reason: $reason,
+                    message: $message,
+                    lastTransitionTime: $lastTransitionTime
+                  }
+                ]
+              }
+            }')"
+    fi
+
+    # Patch the InternalRequest status
+    sleep 1
+    PATCH_FILE="/var/workdir/release/${IR_NAME}-patch.json"
+    echo "${PATCH_JSON}" > "${PATCH_FILE}"
+
+    MAX_PATCH_ATTEMPTS=5
+    PATCH_RETRY_DELAY_SECONDS=1
+    for ((attempt=1; attempt<=MAX_PATCH_ATTEMPTS; attempt++)); do
+        if /usr/bin/kubectl patch internalrequest "${IR_NAME}" --type=merge --subresource status --patch-file "${PATCH_FILE}" 2>/dev/null; then
+            echo "Mock: Patched InternalRequest ${IR_NAME} status" >> /var/workdir/release/mock_kubectl.txt
+            break
+        else
+            echo "Patch attempt ${attempt} failed for InternalRequest ${IR_NAME}, retrying in ${PATCH_RETRY_DELAY_SECONDS} second..."
+            if [ "${attempt}" -eq "${MAX_PATCH_ATTEMPTS}" ]; then
+                echo "ERROR: Failed to patch InternalRequest ${IR_NAME} after ${MAX_PATCH_ATTEMPTS} attempts"
+                exit 1
+            fi
+            sleep "${PATCH_RETRY_DELAY_SECONDS}"
+        fi
+    done
+
+    # Return the original create result
+    echo "${RESULT}"
+else
+    # For all other kubectl commands, pass through to real kubectl
+    /usr/bin/kubectl "$@"
+fi
