@@ -2,6 +2,13 @@
 
 set -ex
 
+TASK_PATH="$1"
+
+# Kind cannot usefully provision 200Gi. Shrink the ephemeral PVC for task tests.
+STORAGE_PATH=".spec.volumes[] | select(.name == \"shared-dir\")"
+STORAGE_PATH="${STORAGE_PATH}.ephemeral.volumeClaimTemplate.spec.resources.requests.storage"
+yq -i "(${STORAGE_PATH}) = \"1Gi\"" "${TASK_PATH}"
+
 # Create redhat-workloads-token secret used by extract_artifacts for docker auth
 kubectl delete secret redhat-workloads-token --ignore-not-found
 kubectl create secret generic redhat-workloads-token \
