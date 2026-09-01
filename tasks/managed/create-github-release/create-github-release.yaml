@@ -135,93 +135,37 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: create-release-from-binaries
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:436b54bee56d4cee1a1c635784f6b0fcb676399f974fecfbb1506d25bace4b40
       computeResources:
         limits:
-          memory: 512Mi
-          cpu: 250m
+          memory: 128Mi
+          cpu: 100m
         requests:
-          memory: 512Mi
-          cpu: 250m
+          memory: 128Mi
+          cpu: 100m
       volumeMounts:
         - name: gh-token-secret-vol
           mountPath: "/etc/secrets"
-      script: |
-        #!/usr/bin/env bash
-        set -e
-
-        GH_TOKEN="$(cat /etc/secrets/token)"
-        # export variables required by the script "git-functions" in release-service-utils
-        export GH_TOKEN
-
-        set -x
-
-        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/create-github-release-results.json"
-        CONTENT_DIR="$(params.dataDir)/$CONTENT_DIRECTORY"
-
-        OWNER_REPO=${REPOSITORY#https://github.com/}
-        RELEASE="$(gh api "repos/${OWNER_REPO}/releases" --jq ".[] | select(.tag_name == \"v${RELEASE_VERSION}\")")"
-        if [ -n "$RELEASE" ]; then
-          echo "Release v${RELEASE_VERSION} exists"
-          echo "$REPOSITORY/releases/tag/v${RELEASE_VERSION}" > "$(results.url.path)"
-        else
-          # Extract binary files from the container image to a temp directory.
-          # SHA256SUMS and .sig files are already in CONTENT_DIR via the TA chain.
-          # The pipeline enforces a single component via validate-single-component.
-          SNAPSHOT_SPEC_FILE="$(params.dataDir)/$(params.snapshotPath)"
-          BINARIES_TMP=$(mktemp -d)
-          IMAGE_URL="$(jq -r '.components[0].containerImage // ""' "$SNAPSHOT_SPEC_FILE")"
-          if [ -z "${IMAGE_URL}" ] ; then
-              echo "Error: Unable to get image url from snapshot."
-              exit 1
-          fi
-
-          TMP_DIR=$(mktemp -d)
-          skopeo copy --retry-times 3 docker://"$IMAGE_URL" dir:"$TMP_DIR"
-          cd "$TMP_DIR"
-
-          for DIGEST in $(jq -r ".layers[].digest" manifest.json); do
-            FILE=${DIGEST#sha256:}
-            if tar -tf "$FILE" | grep -q "^$IMAGE_PATH/"; then
-              tar -xzvf "$FILE" "$IMAGE_PATH"
-            fi
-          done
-
-          # Copy only binary files. SHA256SUMS and .sig come via the TA chain
-          # and must not be overwritten by files from the image.
-          if [ -d "$IMAGE_PATH" ]; then
-            shopt -s nullglob
-            for f in "$IMAGE_PATH"/*; do
-              BASENAME="$(basename "$f")"
-              if [[ "$BASENAME" != *SHA256SUMS ]] && [[ "$BASENAME" != *.sig ]]; then
-                cp "$f" "$BINARIES_TMP/"
-              fi
-            done
-            shopt -u nullglob
-          fi
-
-          cd "$CONTENT_DIR"
-          set -o pipefail
-          shopt -s failglob
-
-          gh release create "v${RELEASE_VERSION}" \
-            "$BINARIES_TMP"/*.zip "$BINARIES_TMP"/*.json \
-            ./*SHA256SUMS ./*.sig \
-            --repo "$REPOSITORY" --title "Release $RELEASE_VERSION" | tee "$(results.url.path)"
-
-          rm -rf "$BINARIES_TMP"
-        fi
-
-        jq -n --arg release "$(cat "$(results.url.path)")" '{"github-release": {"url": $release}}' | tee "$RESULTS_FILE"
       env:
-        - name: REPOSITORY
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+        - name: PARAM_REPOSITORY
           value: $(params.repository)
-        - name: RELEASE_VERSION
+        - name: PARAM_RELEASE_VERSION
           value: $(params.release_version)
-        - name: CONTENT_DIRECTORY
+        - name: PARAM_CONTENT_DIRECTORY
           value: $(params.content_directory)
-        - name: IMAGE_PATH
+        - name: PARAM_SNAPSHOT_PATH
+          value: $(params.snapshotPath)
+        - name: PARAM_IMAGE_BINARIES_PATH
           value: $(params.imageBinariesPath)
+        - name: PARAM_RESULTS_DIR_PATH
+          value: $(params.resultsDirPath)
+        - name: GH_SECRET_PATH
+          value: /etc/secrets
+        - name: RESULT_URL_PATH
+          value: $(results.url.path)
+      command: ["/home/scripts/python/tasks/managed/create_github_release.py"]
     - name: create-trusted-artifact
       computeResources:
         limits:

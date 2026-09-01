@@ -48,7 +48,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:436b54bee56d4cee1a1c635784f6b0fcb676399f974fecfbb1506d25bace4b40
             script: |
               #!/usr/bin/env sh
               set -eux
@@ -172,22 +172,42 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:436b54bee56d4cee1a1c635784f6b0fcb676399f974fecfbb1506d25bace4b40
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              if ! grep "release create v1.2.3" < "$(params.dataDir)/mock_gh.txt" 2> /dev/null
-              then
-                echo Error: release create v1.2.3 was expected. Actual call:
-                cat "$(params.dataDir)/mock_gh.txt"
+              RESULTS_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/results/create-github-release-results.json"
+              EXPECTED_URL="https://github.com/foo/bar/releases/tag/v1.2.3"
+
+              if [ ! -f "${RESULTS_FILE}" ]; then
+                echo "Error: Results file not found: ${RESULTS_FILE}"
                 exit 1
               fi
 
-              if [ "$(wc -l < "$(params.dataDir)/mock_gh.txt")" != 2 ]; then
-                echo "Error: gh was expected to be called 2 times. Actual calls:"
-                cat "$(params.dataDir)/mock_gh.txt"
+              ACTUAL_URL=$(jq -r '.["github-release"].url' "${RESULTS_FILE}")
+              if [ "${ACTUAL_URL}" != "${EXPECTED_URL}" ]; then
+                echo "Error: Expected URL '${EXPECTED_URL}', got '${ACTUAL_URL}'"
+                cat "${RESULTS_FILE}"
                 exit 1
               fi
+
+              # Verify skopeo was called for binary extraction
+              SKOPEO_LOG="$(params.dataDir)/mock_skopeo.txt"
+              if [ ! -f "${SKOPEO_LOG}" ]; then
+                echo "Error: skopeo mock was not called (no binary extraction)"
+                exit 1
+              fi
+
+              if ! grep -q "copy.*registry.io/image:tag" "${SKOPEO_LOG}"; then
+                echo "Error: skopeo copy was not called with expected image"
+                cat "${SKOPEO_LOG}"
+                exit 1
+              fi
+
+              echo "Results file validated successfully:"
+              cat "${RESULTS_FILE}"
+              echo "Skopeo calls:"
+              cat "${SKOPEO_LOG}"
       runAfter:
         - run-task
