@@ -47,7 +47,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:95f602cfb374c4798e4fbf3d298efe0218ac55308446d3f70f5df8add9675e83
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -77,16 +77,12 @@ spec:
                 ]
               }
               EOF
-              # create empty cosign verify mock files for manifest list and arch-specific digests
-              for D in sha256:abcdef123456 sha256:amd64digest1234567890 \
-                sha256:arm64digest1234567890 sha256:ppc64ledigest123456 ; do
-                REF="quay.io/redhat-pending/rhtap----preview-operator-index@${D}"
-                touch "$(params.dataDir)/$(echo $REF | tr '/' '-')"
-              done
-
-              # Setup cosign success calls (verify + sign for each operation)
-              for _ in $(seq 1 32); do
-                  echo "1" >> "$(params.dataDir)/mock_cosign_success_calls"
+              # "cosign verify" is never mocked to succeed here, so it genuinely fails
+              # (no output, non-zero exit) for every digest, just like real cosign does
+              # when there's no existing signature yet. All 8 "cosign sign" calls succeed
+              # (4 digests: manifest list + 3 arch-specific, times 2 tags).
+              for _ in $(seq 1 8); do
+                  echo "0" >> "$(params.dataDir)/mock_cosign_sign_exit_codes"
               done
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/signRegistryAccess.txt" << EOF
@@ -112,6 +108,8 @@ spec:
           value: 'test-cosign-secret'
         - name: signRegistryAccessPath
           value: $(context.pipelineRun.uid)/signRegistryAccess.txt
+        - name: retries
+          value: "0"
         - name: concurrentLimit
           value: 4
         - name: ociStorage
@@ -164,16 +162,24 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:95f602cfb374c4798e4fbf3d298efe0218ac55308446d3f70f5df8add9675e83
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              # Verify that all cosign calls were consumed (file should be empty)
-              REMAINING_CALLS=$(wc -l < "$(params.dataDir)/mock_cosign_success_calls" || echo 0)
+              # Verify that all 8 expected "cosign sign" calls were consumed (file should be empty)
+              REMAINING_CALLS=$(wc -l < "$(params.dataDir)/mock_cosign_sign_exit_codes" || echo 0)
 
               if [ "$REMAINING_CALLS" -ne 0 ]; then
-                echo "Expected all cosign calls to be consumed, but $REMAINING_CALLS calls remain"
+                echo "Expected all (8) cosign sign calls to be consumed, but $REMAINING_CALLS calls remain"
+                exit 1
+              fi
+
+              # And that a verify+sign pair happened for each of the 4 digests * 2 tags
+              VERIFY_CALLS=$(wc -l < "$(params.dataDir)/mock_cosign_verify_calls")
+              SIGN_CALLS=$(wc -l < "$(params.dataDir)/mock_cosign_sign_calls")
+              if [ "$VERIFY_CALLS" -ne 8 ] || [ "$SIGN_CALLS" -ne 8 ]; then
+                echo "Expected 8 verify calls and 8 sign calls, got $VERIFY_CALLS verify and $SIGN_CALLS sign"
                 exit 1
               fi
 

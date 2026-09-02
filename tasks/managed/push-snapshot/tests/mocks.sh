@@ -7,7 +7,9 @@ function cosign() {
   echo Mock cosign called with: $*
   echo $* >> "$(params.dataDir)/mock_cosign.txt"
 
-  if [[ "$*" == "copy -f registry.io/parallel-image:tag"*" "*":"* ]]
+  # Handle both old format and new format with --only flag for parallel test
+  if [[ "$*" == copy\ -f\ registry.io/parallel-image:tag* ]] || \
+     [[ "$*" == copy\ -f\ --only=*\ registry.io/parallel-image:tag* ]]
   then
     LOCK_FILE="$(params.dataDir)/${RANDOM}.lock"
     touch $LOCK_FILE
@@ -20,14 +22,17 @@ function cosign() {
   fi
 
   # mock cosign failing for the no-permission test
-  if [[ "$*" == "copy -f registry.io/no-permmission:tag "*":"* ]]
+  # Handle both old format (copy -f) and new format (copy -f --only=...)
+  if [[ "$*" == copy\ -f\ registry.io/no-permmission:tag* ]] || \
+     [[ "$*" == copy\ -f\ --only=*\ registry.io/no-permmission:tag* ]]
   then
     echo Invalid credentials for registry.io/no-permmission:tag
     return 1
   fi
 
   # mock cosign failing the first 3x for the retry test
-  if [[ "$*" == "copy -f registry.io/retry-image:tag "*":"* ]]
+  if [[ "$*" == copy\ -f\ registry.io/retry-image:tag* ]] || \
+     [[ "$*" == copy\ -f\ --only=*\ registry.io/retry-image:tag* ]]
   then
     if [[ "$(wc -l < "$(params.dataDir)/mock_cosign.txt")" -le 3 ]]
     then
@@ -36,7 +41,9 @@ function cosign() {
     fi
   fi
 
-  if [[ "$*" == "copy -f private-registry.io/image:tag "*":"* ]]
+  # Handle both old format and new format with --only flag for private-registry test
+  if [[ "$*" == copy\ -f\ private-registry.io/image:tag* ]] || \
+     [[ "$*" == copy\ -f\ --only=*\ private-registry.io/image:tag* ]]
   then
     # Verify CA certificate file exists and contains valid PEM data
     if [[ ! -f /etc/pki/tls/certs/ca-bundle.crt ]]
@@ -51,7 +58,9 @@ function cosign() {
     fi
   fi
 
-  if [[ "$*" != "copy -f "*":"*" "*":"* ]]
+  # Accept both old format (copy -f src dst) and new format with --only flag
+  if [[ "$*" != copy\ -f\ *:*\ *:* ]] && \
+     [[ "$*" != copy\ -f\ --only=* ]]
   then
     echo Error: Unexpected call
     exit 1
@@ -67,6 +76,9 @@ function skopeo() {
   elif [[ "$*" == "inspect --retry-times 3 --raw docker://"* ]]; then
     echo '{"mediaType": "my_media_type"}'
     return
+  elif [[ "$*" == copy\ -a\ --src-authfile\ *\ --dest-authfile\ *\ docker://*\ docker://* ]]; then
+    # Handle skopeo copy for image data
+    return 0
   fi
 
   # If neither of the above matched, it's an unexpected call
@@ -96,14 +108,15 @@ function oras() {
     return 0
   fi
   # Accept oras cp -r calls (used to copy image and its attached artifacts)
-  if [[ "$1" == "cp" && "$2" == "-r" ]]; then
-    # Simulate success
-    return 0
-  fi
-  # Accept oras cp calls without -r (used for migration artifact copying)
-  if [[ "$1" == "cp" && "$2" == "--from-registry-config" ]]; then
-    # Simulate success
-    return 0
+  if [[ "$1" == "cp" ]]; then
+    if [[ "$2" == "-r" ]]; then
+      # Old format: oras cp -r source dest
+      return 0
+    elif [[ "$2" == "--from-registry-config" ]]; then
+      # New format: oras cp --from-registry-config ... --to-registry-config ... [--platform ...] source dest
+      # This handles both migration artifact copying and regular cp with --platform
+      return 0
+    fi
   fi
   if [[ "$*" == "resolve --registry-config "*" "* ]]; then
     if [[ "$*" =~ "--platform" && "$4" =~ ".src" ]]; then
