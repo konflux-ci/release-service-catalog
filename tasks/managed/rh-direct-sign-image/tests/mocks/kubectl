@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Mock kubectl that intercepts InternalRequest API calls and delegates the rest.
+# The sign-image step calls kubectl for two purposes:
+#   1. get_configmap() — fetching the signing ConfigMap (must reach real API)
+#   2. internal_request — creating and polling InternalRequests (mocked here)
+_self_dir="$(cd "$(dirname "$0")" && pwd)"
+_real=""
+IFS=: read -ra _dirs <<< "$PATH"
+for _d in "${_dirs[@]}"; do
+    if [ "$_d" != "$_self_dir" ] && [ -x "$_d/kubectl" ]; then
+        _real="$_d/kubectl"
+        break
+    fi
+done
+
+case "$1" in
+    create)
+        if [ "$2" = "-f" ] && [ "$3" = "-" ]; then
+            # kubectl create -f - -o json (InternalRequest creation)
+            payload=$(cat)
+            echo "$payload" >> "${DATA_DIR}/mock_internal_request.txt"
+            echo "{\"metadata\": {\"name\": \"mock-ir-$$\"}}"
+            exit 0
+        fi
+        exec "$_real" "$@"
+        ;;
+    get)
+        if [ "$2" = "internalrequest" ]; then
+            ir_name="$3"
+            if echo "$@" | grep -q "jsonpath"; then
+                echo '{}'
+            elif echo "$@" | grep -q -- "-l "; then
+                echo '{"items": []}'
+            else
+                echo "{\"metadata\":{\"name\":\"${ir_name}\"},\"status\":{\"conditions\":[{\"reason\":\"Succeeded\"}],\"pipelineRun\":\"mock-pr-1\"}}"
+            fi
+            exit 0
+        fi
+        exec "$_real" "$@"
+        ;;
+    delete)
+        if [ "$2" = "internalrequest" ]; then
+            echo "internalrequest.appstudio.redhat.com \"$3\" deleted"
+            exit 0
+        fi
+        exec "$_real" "$@"
+        ;;
+    *)
+        exec "$_real" "$@"
+        ;;
+esac
