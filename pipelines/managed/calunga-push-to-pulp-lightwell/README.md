@@ -1,6 +1,6 @@
 # calunga-push-to-pulp-lightwell pipeline
 
-Release Components in a Snapshot to a pulp-backed python index. Each image in a Component is expected to contain a python wheel and sdist under the /releases directory. This is the Lightwell variant without advisory creation or SBOM uploads to Atlas.
+Release Components in a Snapshot to a pulp-backed python index. Each image in a Component is expected to contain a python wheel and sdist under the /releases directory. This is the Lightwell variant without advisory creation or SBOM uploads to Atlas, with optional sdist source mirroring to GitLab.
 
 ## Parameters
 
@@ -17,5 +17,6 @@ Release Components in a Snapshot to a pulp-backed python index. Each image in a 
 | taskGitUrl                      | The url to the git repo where the release-service-catalog tasks to be used are stored                                              | Yes      | https://github.com/konflux-ci/release-service-catalog.git |
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | Yes      | production                                                |
 | signingSecretName               | The name of the AWS KMS signing secret                                                                                             | Yes      | konflux-cosign-signing-production                         |
-| config                          | Name of the ConfigMap with config options, e.g. ociStorage                                                                         | Yes      | release-pipeline-config                                   |
-| dataDir                         | Path used for working directories                                                                                                  | Yes      | /var/workdir/content                                      |
+| ociStorage                      | URL to the OCI artifact storage                                                                                                    | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts      |
+| taisceCuanGitUrl                | Git repository URL where taisce-cuan tasks are stored                                                                              | Yes      | https://github.com/konflux-lightwell/taisce-cuan.git      |
+| taisceCuanGitRevision           | Git revision for taisce-cuan tasks                                                                                                 | Yes      | main                                                      |
