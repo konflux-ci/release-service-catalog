@@ -173,10 +173,6 @@ _emit_integration_testcase_string() {
       "run-collectors")
         TEMP_MANAGED_PIPELINENAMES+=("rh-advisories")
         ;;
-      "simple-signing-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("fbc-release" "rh-advisories" \
-          "rh-push-helm-chart-to-registry-redhat-io" "rh-push-to-registry-redhat-io")
-        ;;
       "update-fbc-catalog")
         TEMP_MANAGED_PIPELINENAMES+=("fbc-release")
         ;;
