@@ -198,13 +198,42 @@ spec:
             exit 0
         fi
 
+        # Fetch and validate tags from a repository. Fails if the repo exists but
+        # returns an empty tag list (likely a transient registry error) to prevent
+        # silently falling back to increment 1 and overwriting existing tags.
+        extract_tags() {
+            local repo="$1"
+            local raw_json
+            raw_json=$(skopeo list-tags --retry-times 3 docker://"${repo}")
+
+            if ! jq -e '.Tags' <<< "${raw_json}" > /dev/null 2>&1; then
+                echo "Error: skopeo list-tags returned invalid response (missing Tags key) for ${repo}" >&2
+                exit 1
+            fi
+
+            local tag_count
+            tag_count=$(jq '.Tags | length' <<< "${raw_json}")
+
+            if [[ "${tag_count}" -eq 0 ]]; then
+                if skopeo inspect --retry-times 3 --no-tags --raw docker://"${repo}" > /dev/null 2>&1; then
+                    echo "Error: Repository ${repo} exists but skopeo list-tags returned an empty tag list." >&2
+                    echo "This may indicate a transient registry error. Failing to prevent overwriting" >&2
+                    echo "existing tags by falling back to increment 1." >&2
+                    exit 1
+                fi
+                echo ""
+                return
+            fi
+
+            jq -r '.Tags[]' <<< "${raw_json}"
+        }
+
         # Function to handle incrementer logic
         increment_tag() {
             local tag_template="$1"
             local repo="$2"
 
-            # Use `skopeo list-tags` to fetch all tags from the repository
-            existing_tags=$(skopeo list-tags --retry-times 3 docker://"${repo}" | jq -r '.Tags[]')
+            existing_tags=$(extract_tags "${repo}") || exit 1
 
             # Remove `{{ incrementer }}` placeholder to get the version prefix for regex pattern
             # shellcheck disable=SC2001
@@ -284,7 +313,7 @@ spec:
                 local repo
                 repo=$(jq -r --argjson r "$r" '.[$r]' <<< "$all_repos_json")
                 local existing_tags
-                existing_tags=$(skopeo list-tags --retry-times 3 docker://"${repo}" | jq -r '.Tags[]')
+                existing_tags=$(extract_tags "${repo}") || exit 1
                 local repo_max
                 repo_max=$(echo "${existing_tags}" | { grep -E "${tag_pattern}" || true; } \
                     | sed -E "s/^${escaped_prefix}//" | sort -nr | head -n1)

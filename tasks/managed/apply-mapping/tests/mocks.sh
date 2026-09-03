@@ -80,6 +80,12 @@ function skopeo() {
       return
   fi
 
+  # Existing repo that transiently returns empty tags (simulates the bug scenario)
+  if [[ "$*" =~ list-tags\ --retry-times\ 3\ docker://repo-empty-tags-existing ]]; then
+      echo '{"Tags": []}'
+      return
+  fi
+
   # Raw manifest inspections (for annotations and config.mediaType) - these use the digest from get-image-architectures
   if [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://quay.io/myorg/helm-chart"* ]]
   then
@@ -94,6 +100,17 @@ function skopeo() {
   then
     echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {"org.opencontainers.image.created": "2024-07-29T02:17:29Z"}}'
     return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://repo-empty-tags-existing"* ]]
+  then
+    # Existing repo that transiently returns empty tags - inspect succeeds
+    echo '{"config": {"mediaType": "application/vnd.oci.image.config.v1+json"}, "annotations": {}}'
+    return
+  elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://repoa"* ]] || \
+       [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://repo2"* ]]
+  then
+    # Genuinely new repos (no manifests yet) - inspect fails
+    echo "Error: repository not found" >&2
+    return 1
   elif [[ "$*" == "inspect --retry-times 3 --no-tags --raw docker://"* ]]
   then
     # Default: standard OCI container image config
