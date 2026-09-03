@@ -1,0 +1,189 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-and-push-to-internal-oci-task
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: >-
+    Extract artifacts from a snapshot, push unsigned content to a source Quay
+    repository, then sign Mac and Windows binaries on remote VMs via SSH.
+    Signed artifacts are pushed to a configurable destination Quay repository
+  params:
+    - name: snapshot_json
+      type: string
+      description: String containing a JSON representation of the snapshot spec
+    - name: concurrentLimit
+      type: string
+      description: The maximum number of images to be pulled at once
+      default: 3
+    - name: quayURL
+      type: string
+      description: Quay URL of the repo where unsigned content is shared between tasks
+      default: quay.io/konflux-artifacts
+    - name: destQuayURL
+      type: string
+      description: Destination Quay URL where signed artifacts will be pushed
+      default: ""
+    - name: origin
+      type: string
+      description: Origin tenant namespace that triggered the release
+    - name: quaySecret
+      type: string
+      description: Secret to interact with the source Quay repository
+      default: quay-credentials
+    - name: destQuaySecret
+      type: string
+      description: Secret to interact with the destination Quay repository
+      default: quay-credentials
+    - name: windowsCredentials
+      type: string
+      description: Secret to interact with the Windows signing host
+      default: windows-credentials
+    - name: windowsSSHKey
+      type: string
+      description: Secret containing SSH private key for the Windows signing host
+      default: windows-ssh-key
+    - name: macHostCredentials
+      type: string
+      description: Secret to interact with the Mac signing host
+      default: mac-host-credentials
+    - name: macSigningCredentials
+      type: string
+      description: Secret to interact with the Mac signing utils
+      default: mac-signing-credentials
+    - name: macSSHKey
+      type: string
+      description: Secret containing SSH private key for the Mac signing host
+      default: mac-ssh-key
+    - name: macSigningScript
+      type: string
+      description: Path to the macOS signing script on the remote host
+      default: ""
+    - name: windowsSigningScript
+      type: string
+      description: Path to the Windows signing script on the remote host
+      default: ""
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: result
+      description: Success if the task succeeds, the error otherwise
+  volumes:
+    - name: shared-dir
+      emptyDir: {}
+    - name: mac-ssh-key-vol
+      secret:
+        secretName: $(params.macSSHKey)
+        defaultMode: 0444
+    - name: windows-ssh-key-vol
+      secret:
+        secretName: $(params.windowsSSHKey)
+        defaultMode: 0444
+    - name: redhat-workloads-token
+      secret:
+        secretName: redhat-workloads-token
+        defaultMode: 0444
+    - name: quay-secret
+      secret:
+        secretName: $(params.quaySecret)
+        defaultMode: 0444
+    - name: dest-quay-secret
+      secret:
+        secretName: $(params.destQuaySecret)
+        defaultMode: 0444
+    - name: mac-host-credentials
+      secret:
+        secretName: $(params.macHostCredentials)
+        defaultMode: 0444
+    - name: mac-signing-credentials
+      secret:
+        secretName: $(params.macSigningCredentials)
+        defaultMode: 0444
+    - name: windows-credentials
+      secret:
+        secretName: $(params.windowsCredentials)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+  
+  steps:
+    - name: sign-and-push-to-internal-oci
+      image: quay.io/rh-ee-semccart/release-service-utils@sha256:ac8c3003872c1c62942eac613093aa0e8e2cbd9fa3b3aa0c8645dc18eb2c1eea
+      securityContext:
+        runAsUser: 1001
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 500m
+      volumeMounts:
+        - name: shared-dir
+          mountPath: /shared
+        - name: redhat-workloads-token
+          mountPath: /mnt/redhat-workloads-token
+        - name: quay-secret
+          mountPath: /mnt/quaySecret
+        - name: dest-quay-secret
+          mountPath: /mnt/destQuaySecret
+        - name: mac-ssh-key-vol
+          mountPath: "/mnt/secrets/mac"
+        - name: mac-host-credentials
+          mountPath: /mnt/macHostCredentials
+        - name: mac-signing-credentials
+          mountPath: /mnt/macSigningCredentials
+        - name: windows-ssh-key-vol
+          mountPath: /mnt/secrets/windows
+        - name: windows-credentials
+          mountPath: /mnt/windowsCredentials
+      env:
+        - name: SNAPSHOT_JSON
+          value: "$(params.snapshot_json)"
+        - name: MAC_SSH_KEY_MOUNT
+          value: /mnt/secrets/mac
+        - name: WINDOWS_SSH_KEY_MOUNT
+          value: /mnt/secrets/windows
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+        - name: HOME
+          value: /tekton/home
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+      command:
+        - python3
+      args:
+        - -u
+        - /home/scripts/python/tasks/internal/sign-and-push-to-internal-oci.py
+        - --concurrent-limit
+        - $(params.concurrentLimit)
+        - --quay-url
+        - $(params.quayURL)
+        - --pipeline-run-uid
+        - $(context.taskRun.uid)
+        - --dest-quay-url
+        - $(params.destQuayURL)
+        - --origin
+        - $(params.origin)
+        - --mac-signing-script
+        - $(params.macSigningScript)
+        - --windows-signing-script
+        - $(params.windowsSigningScript)

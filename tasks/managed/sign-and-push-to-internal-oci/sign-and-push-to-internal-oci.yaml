@@ -1,0 +1,256 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-and-push-to-internal-oci
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to sign & push to internal oci via an InternalRequest.
+  params:
+    - name: snapshotPath
+      type: string
+      description: Path to the JSON string of the Snapshot spec in the data workspace
+    - name: dataPath
+      type: string
+      description: Path to the data JSON in the data workspace
+    - name: releasePlanAdmissionPath
+      description: Path to the JSON string of the releasePlanAdmission in the data workspace
+      type: string
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: resultsDirPath
+      description: Path to the results directory in the data workspace
+      type: string
+    - name: requestTimeout
+      type: string
+      default: "86400"
+      description: Request timeout
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: quayURL
+      description: Quay URL of the repo where unsigned content is shared between tasks
+      type: string
+      default: "quay.io/konflux-artifacts"
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: macSigningScript
+      type: string
+      description: Path to the macOS signing script on the remote host
+      default: ""
+    - name: windowsSigningScript
+      type: string
+      description: Path to the Windows signing script on the remote host
+      default: ""
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: run-script
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 650m
+      script: |
+        #!/usr/bin/env bash
+        set -ex
+
+        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
+        TASK_ID=$(context.taskRun.uid)
+        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
+
+        # default internal workload to be used
+        REQUEST="sign-and-push-to-internal-oci"
+
+        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
+        if [ ! -f "${DATA_FILE}" ] ; then
+          echo "No valid data file was provided."
+          exit 1
+        fi
+        RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
+        if [ ! -f "${RPA_FILE}" ] ; then
+          echo "No valid rpa file was provided."
+          exit 1
+        fi
+
+        # Check if intention is staging and modify quayURL accordingly
+        INTENTION=$(jq -r '.intention // empty' "$DATA_FILE")
+        QUAY_URL="$(params.quayURL)"
+        if [[ "$QUAY_URL" == "quay.io/konflux-artifacts" ]] ; then
+          if [[ "$INTENTION" == "staging" ]] ; then
+            QUAY_URL="quay.io/konflux-artifacts/nonprod"
+          else
+            QUAY_URL="quay.io/konflux-artifacts/prod"
+          fi
+        fi
+
+        # Remove .metadata from each component to avoid "arg list too long" errors
+        # The internal task doesn't need metadata (env_variables, labels, etc.)
+        snapshot=$(jq -c '.components |= map(del(.metadata))' "$(params.dataDir)/$(params.snapshotPath)")
+        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/sign-internal-oci.json"
+        FILES=$(jq -c '{"artifacts": [.components[].staged?.files[]?.filename]}' <<< "$snapshot")
+        echo "$FILES" > "$RESULTS_FILE"
+
+        echo "Creating InternalRequest to sign and push artifacts to internal oci..."
+
+        ORIGIN=$(jq -r '.spec.origin' "${RPA_FILE}")
+        if [[ "$INTENTION" == "staging" ]] ; then
+          DEST_QUAY_URL="quay.io/sign-and-push-to-internal-oci-destination/nonprod"
+        else
+          DEST_QUAY_URL="quay.io/sign-and-push-to-internal-oci-destination/prod"
+        fi
+
+        MAC_SIGNING_SCRIPT="$(params.macSigningScript)"
+        if [[ -z "$MAC_SIGNING_SCRIPT" ]] ; then
+          MAC_SIGNING_SCRIPT="/opt/mac_signing_orchestrator.py"
+        fi
+
+        internal-request --pipeline "${REQUEST}" \
+          -p snapshot_json="${snapshot}" \
+          -p quayURL="${QUAY_URL}" \
+          -p destQuayURL="${DEST_QUAY_URL}" \
+          -p origin="${ORIGIN}" \
+          -p macSigningScript="${MAC_SIGNING_SCRIPT}" \
+          -p windowsSigningScript="$(params.windowsSigningScript)" \
+          -p destQuaySecret="quay-internal-oci" \
+          -p taskGitUrl="$(params.taskGitUrl)" \
+          -p taskGitRevision="$(params.taskGitRevision)" \
+          -l ${TASK_LABEL}="$TASK_ID" \
+          -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
+          -t "$(params.requestTimeout)" \
+          --service-account release-service-account \
+          --pipeline-timeout 24h0m0s \
+          --task-timeout 23h50m0s \
+          --finally-timeout 0h10m0s \
+          -s true
+        
+        # Get the InternalRequest name to fetch results
+        NAME=$(kubectl get internalrequest -l \
+          "${TASK_LABEL}=${TASK_ID},${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
+          --no-headers -o custom-columns=":metadata.name" \
+          --sort-by=.metadata.creationTimestamp | tail -1)
+        if [ -z "${NAME}" ] ; then
+          echo "Warning: Unable to get InternalRequest name"
+        fi
+
+        results=$(kubectl get internalrequest "${NAME}" -o=jsonpath='{.status.results}')
+        if [ "$(echo "${results}" | jq -r '.result')" == "Success" ] ; then
+          echo "Artifacts pushed"
+          echo "${results}" | jq '.'
+        else
+          echo "Artifact push failed"
+          echo "${results}" | jq -r '.result'
+          exit 1
+        fi
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
