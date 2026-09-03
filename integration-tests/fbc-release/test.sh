@@ -96,9 +96,7 @@ configure_test_matrix() {
     # These conditions are additive - multiple patterns can match and enable their respective tests
     
     if [[ "$changed_files" =~ tasks/managed/direct-sign-index-image ]] || \
-       [[ "$changed_files" =~ tasks/managed/rh-sign-image-cosign ]] || \
-       [[ "$changed_files" =~ pipelines/internal/simple-signing-pipeline ]] || \
-       [[ "$changed_files" =~ tasks/internal/request-and-upload-signature ]]; then
+       [[ "$changed_files" =~ tasks/managed/rh-sign-image-cosign ]]; then
         echo "🎯 Detected signing task changes - enabling core scenarios"
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
