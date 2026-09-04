@@ -145,251 +145,50 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: run-script
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      # TEMP: pinned to the release-service-utils#1002 PR-build image (fixes a bug
+      # where #923 added filter_already_released_advisory_images_managed.py under
+      # the pre-restructuring scripts/python/ path, making it unreachable in the
+      # built image) to validate the Tekton task tests before that PR merges.
+      # Revert to the released utils image once konflux-ci/release-service-utils#1002
+      # merges and promotes.
+      image: quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-utils-standalone@sha256:ca7f734f03d1a5c53c0058b20580bbf9bd9ab195f5bf1691186ff0738af49b5e
       computeResources:
         limits:
           memory: 512Mi
         requests:
           memory: 512Mi
           cpu: 650m
-      script: |
-        #!/bin/bash
-        set -x
-
-        SNAPSHOT_FILE="$(params.dataDir)/$(params.snapshotPath)"
-        if [ ! -f "$SNAPSHOT_FILE" ]; then
-            echo "No valid snapshot file was provided at $SNAPSHOT_FILE"
-            exit 1
-        fi
-
-        # Transform snapshot components to architecture-specific images
-        echo "Transforming snapshot components using get-image-architectures..."
-        SNAPSHOT_JSON=$(jq '.' "$SNAPSHOT_FILE")
-        TRANSFORMED_COMPONENTS=$(mktemp)
-        FAILED_COMPONENTS=$(mktemp)
-        echo [] > "$FAILED_COMPONENTS"
-
-        jq -c '.components[]' <<< "$SNAPSHOT_JSON" | while IFS= read -r component; do
-            CONTAINER_IMAGE=$(jq -r '.containerImage' <<< "$component")
-            COMPONENT_NAME=$(jq -r '.name' <<< "$component")
-
-            echo "Processing component: $COMPONENT_NAME with image: $CONTAINER_IMAGE" >&2
-
-            if ! digests=$(get-image-architectures "${CONTAINER_IMAGE}"); then
-                echo "Warning: Failed to resolve architectures for ${CONTAINER_IMAGE}, assuming not released" >&2
-                jq -c --arg name "$COMPONENT_NAME" '. += [$name]' "$FAILED_COMPONENTS" > failed.tmp && \
-                  mv failed.tmp "$FAILED_COMPONENTS"
-                continue
-            fi
-
-            repositories=$(jq -c '.repositories' <<< "$component")
-            NUM_REPOS=$(jq 'length' <<< "$repositories")
-            for ((i = 0; i < NUM_REPOS; i++)); do
-                repo_url=$(jq -r --argjson i "$i" '.[$i]."rh-registry-repo"' <<< "$repositories")
-
-                while IFS= read -r arch_json; do
-                    if [[ -n "$arch_json" ]]; then
-                        arch_digest=$(jq -r '.digest' <<< "$arch_json")
-                        containerImage="${repo_url}@${arch_digest}"
-
-                        # Create minimal object with only the 4 fields needed by the consuming task
-                        jq -n \
-                            --arg name "$COMPONENT_NAME" \
-                            --arg ci "$containerImage" \
-                            --argjson tags "$(jq --argjson i "$i" '.[$i].tags // null' <<< "$repositories")" \
-                            --arg repo "$repo_url" \
-                            '{
-                              name: $name,
-                              containerImage: $ci,
-                              tags: $tags,
-                              repository: $repo
-                            }'
-                    fi
-                done <<< "$digests"
-            done
-        done > "$TRANSFORMED_COMPONENTS"
-
-        # Create transformed snapshot with arch-specific images
-        transformedSnapshot=$(jq -sc '.' "$TRANSFORMED_COMPONENTS" | gzip -c | base64 -w 0)
-        rm -f "$TRANSFORMED_COMPONENTS"
-
-        if [ -z "$transformedSnapshot" ]; then
-            echo "Failed to create transformed snapshot"
-            exit 1
-        fi
-
-        echo "Transformation complete. Arch-specific images created."
-
-        RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
-        if [ ! -f "$RPA_FILE" ]; then
-            echo "No valid ReleasePlanAdmission file was provided at $RPA_FILE"
-            exit 1
-        fi
-        origin=$(jq -r '.spec.origin' "$RPA_FILE")
-        if [ -z "$origin" ]; then
-            echo "Failed to read origin from ReleasePlanAdmission"
-            exit 1
-        fi
-
-        pipelinerun_label="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        # Determine advisory_secret_name based on repositories in snapshot
-        pending_repositories=$(jq -r '.components[] |
-          .repositories[]?.url |
-          select(test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/"))' "$SNAPSHOT_FILE")
-        prod_repositories=$(jq -r '.components[] |
-          .repositories[]?.url |
-          select(test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/"))' "$SNAPSHOT_FILE")
-        orphan_repositories=$(jq -r '.components[] |
-          .repositories[]?.url |
-          select(. != null and . != "") |
-          select(test("quay.io/redhat-prod/|quay.io/rh-flatpaks-prod/") | not) |
-          select(test("quay.io/redhat-pending/|quay.io/rh-flatpaks-stage/") | not)' "$SNAPSHOT_FILE")
-        foundPendingRepositories=false
-        [ -n "${pending_repositories}" ] && foundPendingRepositories=true
-        foundProdRepositories=false
-        [ -n "${prod_repositories}" ] && foundProdRepositories=true
-        foundOrphanRepositories=false
-        [ -n "${orphan_repositories}" ] && foundOrphanRepositories=true
-
-        echo "Repository status:"
-        echo "- Pending repositories: ${foundPendingRepositories}"
-        echo "- Production repositories: ${foundProdRepositories}"
-        echo "- Orphan repositories: ${foundOrphanRepositories}"
-
-        if [ "${foundPendingRepositories}" == "true" ] && [ "${foundProdRepositories}" == "true" ]; then
-          echo "Error: cannot publish to both redhat-pending and redhat-prod repositories"
-          exit 1
-        fi
-
-        if [ "${foundPendingRepositories}" == "false" ] && [ "${foundProdRepositories}" == "false" ]; then
-          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
-          exit 1
-        fi
-
-        if [ "${foundOrphanRepositories}" == "true" ]; then
-          echo "Error: you must publish to either redhat-pending or redhat-prod repositories"
-          exit 1
-        fi
-
-        # Select the correct secret name
-        if [ "${foundPendingRepositories}" == "true" ]; then
-          advisorySecretName="create-advisory-stage-secret"
-          printf "stage" | tee "$(results.environment.path)"
-        else
-          advisorySecretName="create-advisory-prod-secret"
-          printf "production" | tee "$(results.environment.path)"
-        fi
-
-        # Check if skipFilter is true in data.json
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ -f "$DATA_FILE" ] && [ "$(jq -r '.skipFilter' "$DATA_FILE")" = "true" ]; then
-          echo "skipFilter is true in data.json, skipping filtering and passing snapshot unchanged."
-          echo -n "false" > "$(results.skip_release.path)"
-          echo -n "Success" > "$(results.result.path)"
-          # Output the original snapshot unchanged (no filtering)
-          exit 0
-        fi
-
-        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/filter-already-released-advisory-images-results.json"
-        IR_FILE="$(params.dataDir)/$(context.task.name)/ir-result.txt"
-        mkdir -p "$(dirname "$IR_FILE")"
-
-        echo "Creating internal request for filtering already-released advisory images..."
-        # Because of the tee, this will always succeed
-        internal-request --pipeline "filter-already-released-advisory-images" \
-                         -p transformedSnapshot="$transformedSnapshot" \
-                         -p origin="$origin" \
-                         -p advisory_secret_name="$advisorySecretName" \
-                         -p internalRequestPipelineRunName="$(params.pipelineRunUid)" \
-                         -p taskGitUrl="$(params.taskGitUrl)" \
-                         -p taskGitRevision="$(params.taskGitRevision)" \
-                         -s "$(params.synchronously)" \
-                         -l ${pipelinerun_label}="$(params.pipelineRunUid)" \
-                         | tee "$IR_FILE"
-
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_FILE")
-        echo "Internal request created: ${internalRequest}"
-
-        echo "Internal request status:"
-        kubectl get internalrequest "${internalRequest}" -o json | jq .
-
-        results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
-        if [ -z "$results" ]; then
-          echo "No results found in internal request. Status:"
-          kubectl get internalrequest "${internalRequest}" -o yaml
-          exit 1
-        fi
-
-        internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
-        internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
-        latestAdvisoryUrl="$(jq -jr '.advisory_url // ""' <<< "${results}")"
-        latestAdvisoryInternalUrl="$(jq -jr '.advisory_internal_url // ""' <<< "${results}")"
-        echo "Internal request details:"
-        echo "- Pipeline run: ${internalRequestPipelineRunName}"
-        echo "- Task run: ${internalRequestTaskRunName}"
-        echo "- Latest advisory URL: ${latestAdvisoryUrl}"
-        echo "- Latest advisory internal URL: ${latestAdvisoryInternalUrl}"
-
-        if [[ "$(jq -r '.result' <<< "$results")" == "Success" ]]; then
-          echo "Image filtering successful"
-
-          # Get the unreleased components list
-          UNRELEASED_COMPONENTS_RAW=$(jq -r '.unreleased_components // ""' <<< "$results")
-          if [ -z "$UNRELEASED_COMPONENTS_RAW" ]; then
-            echo "No unreleased components list found in results. Results:"
-            echo "$results"
-            exit 1
-          fi
-
-          UNRELEASED_COMPONENTS=$(mktemp)
-          FILTERED_SNAPSHOT=$(mktemp)
-
-          echo "$UNRELEASED_COMPONENTS_RAW" | base64 -d | gunzip | tee "$UNRELEASED_COMPONENTS"
-          # Add in the components that get-image-architectures failed on
-          jq -cn '[inputs] | add | unique' "$UNRELEASED_COMPONENTS" "$FAILED_COMPONENTS" > unreleased.tmp && \
-            mv unreleased.tmp "$UNRELEASED_COMPONENTS"
-
-          # Filter the original snapshot using the unreleased components list
-          jq --slurpfile unreleased "$UNRELEASED_COMPONENTS" '
-            .components = (
-              .components | map(
-                select(
-                  .name as $name | ($unreleased[0] | contains([$name]))
-                )
-              )
-            )
-          ' "$SNAPSHOT_FILE" > "$FILTERED_SNAPSHOT"
-
-          # Check if the filtered snapshot has any components
-          if jq -e '.components | length == 0' < "$FILTERED_SNAPSHOT"; then
-            echo "All images in the snapshot have already been released in advisories. Stopping pipeline."
-            cat "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
-            echo -n "Success" > "$(results.result.path)"
-            echo -n "true" > "$(results.skip_release.path)"
-
-            # Write the latest advisory URLs to results
-            echo -n "$latestAdvisoryUrl" > "$(results.latest_advisory_url.path)"
-            echo -n "$latestAdvisoryInternalUrl" > "$(results.latest_advisory_internal_url.path)"
-
-            # Create results file with advisory information (same format as create-advisory)
-            jq -n --arg url "$latestAdvisoryUrl" --arg internal_url "$latestAdvisoryInternalUrl" \
-              '{"advisory": {"url": $url, "internal_url": $internal_url}}' | tee "$RESULTS_FILE"
-            exit 0
-          fi
-
-          cat "$FILTERED_SNAPSHOT" > "$SNAPSHOT_FILE"
-          echo -n "Success" > "$(results.result.path)"
-          echo -n "false" > "$(results.skip_release.path)"
-
-          # Set advisory URL results to empty when components need release
-          echo -n "" > "$(results.latest_advisory_url.path)"
-          echo -n "" > "$(results.latest_advisory_internal_url.path)"
-        else
-          echo "Filtering failed. Results:"
-          echo "$results"
-          exit 1
-        fi
+      env:
+        - name: SNAPSHOT_FILE
+          value: "$(params.dataDir)/$(params.snapshotPath)"
+        - name: RPA_FILE
+          value: "$(params.dataDir)/$(params.releasePlanAdmissionPath)"
+        - name: DATA_FILE
+          value: "$(params.dataDir)/$(params.dataPath)"
+        - name: RESULTS_FILE
+          value: "$(params.dataDir)/$(params.resultsDirPath)/filter-already-released-advisory-images-results.json"
+        - name: PIPELINE_RUN_UID
+          value: "$(params.pipelineRunUid)"
+        - name: TASK_GIT_URL
+          value: "$(params.taskGitUrl)"
+        - name: TASK_GIT_REVISION
+          value: "$(params.taskGitRevision)"
+        - name: SYNCHRONOUSLY
+          value: "$(params.synchronously)"
+        - name: RESULT_RESULT
+          value: "$(results.result.path)"
+        - name: RESULT_SKIP_RELEASE
+          value: "$(results.skip_release.path)"
+        - name: RESULT_ENVIRONMENT
+          value: "$(results.environment.path)"
+        - name: RESULT_LATEST_ADVISORY_URL
+          value: "$(results.latest_advisory_url.path)"
+        - name: RESULT_LATEST_ADVISORY_INTERNAL_URL
+          value: "$(results.latest_advisory_internal_url.path)"
+      command: ["python3"]
+      args:
+        - "-u"
+        - "/home/scripts/python/tasks/managed/filter_already_released_advisory_images_managed.py"
     - name: create-trusted-artifact
       computeResources:
         limits:
