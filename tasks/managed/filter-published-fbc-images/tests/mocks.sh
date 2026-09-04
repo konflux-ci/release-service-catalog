@@ -53,6 +53,22 @@ skopeo() {
       ocp_version="4.15"
     fi
 
+    # Determine com.redhat.fbc.openshift.version label based on digest pattern
+    local fbc_label=""
+    if [[ "$image" == *"@sha256:labelnull"* ]]; then
+      fbc_label='"com.redhat.fbc.openshift.version": null,'
+    elif [[ "$image" == *"@sha256:labelempty"* ]]; then
+      fbc_label='"com.redhat.fbc.openshift.version": "[]",'
+    elif [[ "$image" == *"@sha256:labelmulti"* ]]; then
+      fbc_label='"com.redhat.fbc.openshift.version": "[\"v4.20\",\"v4.21\"]",'
+    elif [[ "$image" == *"@sha256:labelvalid"* ]]; then
+      fbc_label='"com.redhat.fbc.openshift.version": "[\"v4.21\"]",'
+    elif [[ "$image" == *"@sha256:labelstring"* ]]; then
+      fbc_label='"com.redhat.fbc.openshift.version": "v4.21",'
+    elif [[ "$image" == *"@sha256:nolabel"* ]]; then
+      fbc_label=""
+    fi
+
     echo "Mock skopeo returning OCP version: $ocp_version for image: $image" >&2
 
     # Return mock skopeo inspect JSON with OCP version in base image annotation
@@ -66,6 +82,7 @@ skopeo() {
   "Created": "2024-01-01T00:00:00Z",
   "DockerVersion": "",
   "Labels": {
+    $fbc_label
     "org.opencontainers.image.base.name": "registry.access.redhat.com/ubi9/ubi:$ocp_version"
   },
   "Architecture": "amd64",
@@ -338,12 +355,11 @@ if [[ "$*" == *"inspect"* ]]; then
     # The label should be: '["v4.17","v4.18"]'
     ocp_version="4.17"  # Base image shows v4.17, but component supports both
   elif [[ "$image" == *"@sha256:invalidocp"* ]]; then
-    # Invalid OCP version format for testing validation (three parts instead of two)
     ocp_version="4.14.1"
   fi
-  
+
   echo "  → Returning OCP version: $ocp_version" >&2
-  
+
   cat <<JSONEOF
 {
   "Name": "$image",
