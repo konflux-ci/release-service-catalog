@@ -48,6 +48,19 @@ verify_release_contents() {
                 failures=$((failures+1))
             else
                 echo "✅ push-disk-images TaskRun succeeded: ${push_tr_name}"
+
+                # The actual pulp-push-disk-images internal-request pod runs on the
+                # internal services cluster, not this stage cluster, so its logs may
+                # not be visible here. Print whatever this TaskRun's own logs show,
+                # and fail if the extraction warning shows up: the built image now
+                # really contains releases/test-disk-image.raw (see rpa.yaml), so
+                # this warning would mean a real extraction regression, not an
+                # expected/ignorable gap.
+                if kubectl logs "${push_tr_name}" -n "${managed_namespace}" --all-containers 2>/dev/null \
+                        | grep -q "didn't find mapped file"; then
+                    echo "🔴 push-disk-images TaskRun logged \"didn't find mapped file\" -- the disk image extraction regressed"
+                    failures=$((failures+1))
+                fi
             fi
         fi
     fi
