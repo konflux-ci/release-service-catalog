@@ -150,6 +150,7 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -eux
+        set -o pipefail
 
         echo "DEBUG: Sanity validation of credentials"
         JSON_FILES=(/etc/secrets/*.json)
@@ -189,6 +190,14 @@ spec:
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
         NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
 
+        rh_arch_to_oci_platform() {
+            case "$1" in
+                x86_64)  echo "linux/amd64" ;;
+                aarch64) echo "linux/arm64" ;;
+                *)       echo "linux/$1" ;;
+            esac
+        }
+
         prepare_component() { # Expected argument is [component json]
             COMPONENT=$1
             PRODUCT_INFO=$(jq -c '.productInfo' <<< "${COMPONENT}")
@@ -224,28 +233,68 @@ spec:
             DESTINATION="${DISK_IMGS_DIR}/${IMG_NAME}"
             mkdir -p "${DESTINATION}"
             DOWNLOAD_DIR=$(mktemp -d -p /var/workdir)
-            cd "$DOWNLOAD_DIR"
             # oras has very limited support for selecting the right auth entry,
             # so create a custom auth file with just one entry
             AUTH_FILE=$(mktemp)
             select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
-            oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
+            trap 'rm -rf "${DOWNLOAD_DIR}"; rm -f "${AUTH_FILE}"' EXIT
+
+            # Detect whether the image is a multi-arch index
+            MEDIA_TYPE=$(oras manifest fetch --registry-config "${AUTH_FILE}" "${PULLSPEC}" \
+                | jq -r '.mediaType')
+            IS_MULTIARCH=false
+            if [[ "$MEDIA_TYPE" == "application/vnd.docker.distribution.manifest.list.v2+json" ]] \
+                || [[ "$MEDIA_TYPE" == "application/vnd.oci.image.index.v1+json" ]]; then
+                IS_MULTIARCH=true
+            fi
+
+            if [[ "$IS_MULTIARCH" == "true" ]]; then
+                # Pull once per unique architecture into separate subdirectories
+                mapfile -t UNIQUE_ARCHS < <(jq -r \
+                    '[.staged.files[].filename
+                      | sub("\\.gz$"; "") | sub("\\.[^.]+$"; "")
+                      | split("-") | last
+                    ] | unique | .[]' \
+                    <<< "$COMPONENT")
+                for ARCH in "${UNIQUE_ARCHS[@]}"; do
+                    OCI_PLATFORM=$(rh_arch_to_oci_platform "$ARCH")
+                    ARCH_DIR="${DOWNLOAD_DIR}/${ARCH}"
+                    mkdir -p "$ARCH_DIR"
+                    cd "$ARCH_DIR"
+                    oras pull --registry-config "${AUTH_FILE}" --platform "${OCI_PLATFORM}" "${PULLSPEC}"
+                done
+            else
+                cd "$DOWNLOAD_DIR"
+                oras pull --registry-config "${AUTH_FILE}" "${PULLSPEC}"
+            fi
+
             NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
             for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
                 FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
                 SOURCE=$(jq -er '.source' <<< "$FILE")
                 FILENAME=$(jq -er '.filename' <<< "$FILE")
 
+                # Resolve source path from the correct directory
+                if [[ "$IS_MULTIARCH" == "true" ]]; then
+                    FILE_ARCH=${FILENAME%.gz}
+                    FILE_ARCH=${FILE_ARCH%.*}
+                    FILE_ARCH=${FILE_ARCH##*-}
+                    SOURCE_PATH="${DOWNLOAD_DIR}/${FILE_ARCH}/${SOURCE}"
+                else
+                    SOURCE_PATH="${DOWNLOAD_DIR}/${SOURCE}"
+                fi
+
                 # Fail early if the source file pulled by ORAS does not exist
-                if [ ! -f "${SOURCE}" ]; then
-                    echo "ERROR: Source file '${SOURCE}' for component '${FILENAME}' was not found after oras pull." >&2
+                if [ ! -f "${SOURCE_PATH}" ]; then
+                    echo "ERROR: Source file '${SOURCE_PATH}' for component" \
+                        "'${FILENAME}' was not found after oras pull." >&2
                     exit 1
                 fi
 
                 # Decompress if the source file is gzipped
-                if [[ "${SOURCE}" == *.gz ]]; then
-                    gzip -d "${SOURCE}"
-                    SOURCE="${SOURCE%.gz}"
+                if [[ "${SOURCE_PATH}" == *.gz ]]; then
+                    gzip -d "${SOURCE_PATH}"
+                    SOURCE_PATH="${SOURCE_PATH%.gz}"
                     FILENAME="${FILENAME%.gz}"
                 fi
                 if [ -f "${DESTINATION}/${FILENAME}" ]; then
@@ -263,15 +312,13 @@ spec:
                     *)     echo "Skipping unsupported file: $FILENAME"; continue ;;
                 esac
 
-                mv "$SOURCE" "${DESTINATION}/${FILENAME}"
+                mv "$SOURCE_PATH" "${DESTINATION}/${FILENAME}"
                 RESOURCES_JSON=$(jq --arg filename "$FILENAME" --arg arch "$BUILD_ARCH" \
                     '.images[.images | length] = {"path": $filename, "architecture": $arch}' <<< "$RESOURCES_JSON")
                 RESOURCES_JSON=$(jq --arg image_type "$image_type" \
                     '.type = $image_type' <<< "$RESOURCES_JSON")
             done
             echo "$RESOURCES_JSON" | yq -P -I 4 > "$DESTINATION/resources.yaml"
-            rm -rf "$DOWNLOAD_DIR"
-            rm -f "$AUTH_FILE"
         }
 
         # Process each component in parallel with memory-aware job management

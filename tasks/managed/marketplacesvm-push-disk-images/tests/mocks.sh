@@ -13,21 +13,29 @@ function select-oci-auth() {
 }
 
 function oras() {
-    echo Mock oras called with: $*
-    echo $* > "$(params.dataDir)/mock_oras.txt"
-    pwd > "$(params.dataDir)/mock_oras_workdir.txt"
+    echo "Mock oras called with: $*" >&2
+    echo "$*" >> "$(params.dataDir)/mock_oras.txt"
 
-    if [[ "$*" != "pull --registry-config"* ]]; then
+    if [[ "$*" == "manifest fetch --registry-config"* ]]; then
+        # Return multi-arch media type for pullspecs containing "multiarch"
+        if [[ "$*" == *"multiarch"* ]]; then
+            echo '{"mediaType": "application/vnd.oci.image.index.v1+json"}'
+        else
+            echo '{"mediaType": "application/vnd.oci.image.manifest.v1+json"}'
+        fi
+    elif [[ "$*" == "pull --registry-config"* ]]; then
+        pwd >> "$(params.dataDir)/mock_oras_workdir.txt"
+
+        # Simulate downloaded artifact: create a compressed disk image
+        # Determine the disk format from the pullspec
+        if [[ "$*" == *"azure"* ]]; then
+            echo "dummy disk image content" | gzip > disk.vhd.gz
+        else
+            echo "dummy disk image content" | gzip > disk.raw.gz
+        fi
+    else
         echo Error: Unexpected call to oras
         exit 1
-    fi
-
-    # Simulate downloaded artifact: create a compressed disk image
-    # Determine the disk format from the pullspec
-    if [[ "$*" == *"azure"* ]]; then
-        echo "dummy disk image content" | gzip > disk.vhd.gz
-    else
-        echo "dummy disk image content" | gzip > disk.raw.gz
     fi
 }
 
