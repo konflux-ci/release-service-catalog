@@ -1,0 +1,291 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: python-sdist-mirror
+  annotations:
+    tekton.dev/pipelines.minVersion: 0.12.1
+    tekton.dev/tags: release, managed, python, sdist, mirror, taisce-cuan
+  labels:
+    app.kubernetes.io/version: "0.1"
+spec:
+  description: >-
+    Phase 1 Managed Release Pipeline: mirrors ingested Python sdists and signed provenance
+    from a Snapshot OCI artifact into the canonical internal git repository
+    (gitlab.cee.redhat.com/lightwell/lightwell-builds/pypi.org-<pkg>).
+
+    Unlike wheel release pipelines, this pipeline does NOT perform wheel signing or Pulp
+    wheel uploads; it strictly evaluates Conforma / EC policy and pushes the source tree
+    and provenance to GitLab.
+
+  params:
+    - name: release
+      type: string
+      description: The namespaced name of the Release CR.
+    - name: releasePlan
+      type: string
+      description: The namespaced name of the ReleasePlan CR.
+    - name: releasePlanAdmission
+      type: string
+      description: The namespaced name of the ReleasePlanAdmission CR.
+    - name: releaseServiceConfig
+      type: string
+      description: The namespaced name of the ReleaseServiceConfig CR.
+    - name: snapshot
+      type: string
+      description: The namespaced name of the Snapshot CR.
+    - name: enterpriseContractPolicy
+      type: string
+      description: JSON string containing the Enterprise Contract policy configuration.
+    - name: enterpriseContractExtraRuleData
+      type: string
+      description: Extra rule data for Enterprise Contract.
+      default: ""
+    - name: enterpriseContractTimeout
+      type: string
+      description: Timeout for Enterprise Contract evaluation.
+      default: "1h0m0s"
+    - name: taskGitUrl
+      type: string
+      description: Git repository containing the release tasks.
+      default: "https://github.com/konflux-lightwell/release-service-catalog.git"
+    - name: taskGitRevision
+      type: string
+      description: Git revision for release tasks.
+      default: "development-python"
+    - name: taisceCuanGitUrl
+      type: string
+      description: Git repository containing taisce-cuan tasks.
+      default: "https://github.com/konflux-lightwell/taisce-cuan.git"
+    - name: taisceCuanGitRevision
+      type: string
+      description: Git revision for taisce-cuan tasks.
+      default: "main"
+    - name: ociStorage
+      type: string
+      description: OCI storage repository for Trusted Artifacts.
+      default: "quay.io/konflux-ci/release-service-trusted-artifacts"
+
+  tasks:
+    # ── 1. Collect release and snapshot data ──────────────────────────────────
+    - name: collect-data
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-data/collect-data.yaml
+      params:
+        - name: release
+          value: $(params.release)
+        - name: releasePlan
+          value: $(params.releasePlan)
+        - name: releasePlanAdmission
+          value: $(params.releasePlanAdmission)
+        - name: releaseServiceConfig
+          value: $(params.releaseServiceConfig)
+        - name: snapshot
+          value: $(params.snapshot)
+        - name: subdirectory
+          value: data
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: ociStorage
+          value: $(params.ociStorage)
+
+    # ── 2. Collect task parameters from ReleasePlanAdmission data ─────────────
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".gitForgeUrl"},
+              {"resultIndex": 1, "key": ".gitGroup"},
+              {"resultIndex": 2, "key": ".gitSecretName"},
+              {"resultIndex": 3, "key": ".committerName"},
+              {"resultIndex": 4, "key": ".committerEmail"},
+              {"resultIndex": 5, "key": ".allowSourceOverwrite", "default": "false"},
+              {"resultIndex": 6, "key": ".packageName"},
+              {"resultIndex": 7, "key": ".packageVersion"}
+            ]
+
+    # ── 3. Reduce Snapshot ───────────────────────────────────────────────────
+    - name: reduce-snapshot
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/reduce-snapshot/reduce-snapshot.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: SNAPSHOT
+          value: $(tasks.collect-data.results.snapshot)
+        - name: SINGLE_COMPONENT
+          value: "false"
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+
+    # ── 4. Verify Enterprise Contract (Conforma) ──────────────────────────────
+    - name: verify-enterprise-contract
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/verify-enterprise-contract/verify-enterprise-contract.yaml
+      runAfter:
+        - reduce-snapshot
+      params:
+        - name: SNAPSHOT_FILENAME
+          value: $(tasks.reduce-snapshot.results.reducedSnapshotPath)
+        - name: POLICY_CONFIGURATION
+          value: $(params.enterpriseContractPolicy)
+        - name: STRICT
+          value: "1"
+        - name: IGNORE_REKOR
+          value: "true"
+        - name: EXTRA_RULE_DATA
+          value: $(params.enterpriseContractExtraRuleData)
+        - name: TIMEOUT
+          value: $(params.enterpriseContractTimeout)
+        - name: SOURCE_DATA_ARTIFACT
+          value: "$(tasks.reduce-snapshot.results.sourceDataArtifact)"
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: ociStorage
+          value: $(params.ociStorage)
+
+    # ── 5. Extract sdist + Chains provenance from OCI artifact ───────────────
+    - name: extract-py-artifacts
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/extract-py-artifacts/extract-py-artifacts.yaml
+      runAfter:
+        - verify-enterprise-contract
+      params:
+        - name: SNAPSHOT_PATH
+          value: $(tasks.reduce-snapshot.results.reducedSnapshotPath)
+        - name: sourceDataArtifact
+          value: "$(tasks.verify-enterprise-contract.results.sourceDataArtifact)"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: dataDir
+          value: /var/workdir/content
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+
+    # ── 6. Mirror sources ────────────────────────────────────────────────────
+    - name: mirror-sources
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taisceCuanGitUrl)
+          - name: revision
+            value: $(params.taisceCuanGitRevision)
+          - name: pathInRepo
+            value: tekton/tasks/archive-sources/0.1/archive-sources.yaml
+      runAfter:
+        - extract-py-artifacts
+        - collect-task-params
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.extract-py-artifacts.results.sourceDataArtifact)"
+        - name: dataDir
+          value: /var/workdir/content
+        - name: filesDir
+          value: files
+        - name: gitForgeUrl
+          value: $(tasks.collect-task-params.results.extractedValues[0])
+        - name: gitGroup
+          value: $(tasks.collect-task-params.results.extractedValues[1])
+        - name: gitSecretName
+          value: $(tasks.collect-task-params.results.extractedValues[2])
+        - name: committerName
+          value: $(tasks.collect-task-params.results.extractedValues[3])
+        - name: committerEmail
+          value: $(tasks.collect-task-params.results.extractedValues[4])
+        - name: allowOverwrite
+          value: $(tasks.collect-task-params.results.extractedValues[5])
+        - name: packageName
+          value: $(tasks.collect-task-params.results.extractedValues[6])
+        - name: packageVersion
+          value: $(tasks.collect-task-params.results.extractedValues[7])
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: ociStorage
+          value: $(params.ociStorage)
+
+  finally:
+    # ── 7. Cleanup internal requests ─────────────────────────────────────────
+    - name: cleanup-internal-requests
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/cleanup-internal-requests/cleanup-internal-requests.yaml
+      params:
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
