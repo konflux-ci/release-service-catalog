@@ -2,13 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-extract-py-artifacts-fail-no-wheels
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-extract-py-artifacts-sdist-only
 spec:
-  description: |
-    Assert that extract-py-artifacts fails when no .whl files are found
-    in the extracted artifacts directory.
+  description: Test extracting Python sdist-only packages from OCI artifacts
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -59,7 +55,7 @@ spec:
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
 
-              # Create marker to tell the oras mock not to create .whl files
+              # Tell mock to create sdist only (no wheels)
               touch "$(params.dataDir)/.mock_no_wheels"
 
               # Create a mock snapshot spec with container images
@@ -77,6 +73,13 @@ spec:
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
               {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test_package"
+                    }
+                  ]
+                },
                 "releaseNotes": {
                   "product_id": [123],
                   "type": "RHBA",
@@ -125,3 +128,80 @@ spec:
           value: $(context.pipelineRun.uid)/data.json
       runAfter:
         - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              FILES_DIR="$(params.dataDir)/files"
+
+              # Check that the files directory exists
+              if [ ! -d "${FILES_DIR}" ]; then
+                echo "ERROR: Files directory not found: ${FILES_DIR}"
+                exit 1
+              fi
+
+              # Check that wheel file is absent
+              if [ -f "${FILES_DIR}/test_package-1.0.0-py3-none-any.whl" ]; then
+                echo "ERROR: Wheel file unexpectedly found"
+                exit 1
+              fi
+
+              # Check that sdist file was extracted
+              if [ ! -f "${FILES_DIR}/test_package-1.0.0.tar.gz" ]; then
+                echo "ERROR: Sdist file not found"
+                ls -la "${FILES_DIR}"
+                exit 1
+              fi
+
+              # Check that Chains provenance was fetched
+              PROV_DIR="${FILES_DIR}/chains-provenance"
+              if [ ! -d "${PROV_DIR}" ]; then
+                echo "ERROR: chains-provenance directory not found"
+                exit 1
+              fi
+
+              # Check that releaseNotes artifacts were NOT populated for sdist-only
+              DATA_FILE="$(params.dataDir)/$(context.pipelineRun.uid)/data.json"
+              ARTIFACT_COUNT=$(jq '[.releaseNotes.content.artifacts[] ] | length' "$DATA_FILE")
+              if [ "$ARTIFACT_COUNT" -ne 0 ]; then
+                echo "ERROR: Artifacts unexpectedly populated in releaseNotes"
+                jq . "$DATA_FILE"
+                exit 1
+              fi
+
+              echo "All sdist-only checks passed!"
+      runAfter:
+        - run-task

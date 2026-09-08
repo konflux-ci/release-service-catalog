@@ -264,45 +264,53 @@ spec:
 
         ARTIFACT_COUNT=$(jq 'length' <<< "$DEDUPED")
         if [[ "$ARTIFACT_COUNT" -eq 0 ]]; then
-          echo "ERROR: No .whl files found in ${FILES_DIR}"
-          exit 1
+          echo "No .whl files found in ${FILES_DIR}; checking for source distribution archives..."
+          shopt -s nullglob
+          SDISTS=("${FILES_DIR}"/*.tar.gz "${FILES_DIR}"/*.tar.bz2 "${FILES_DIR}"/*.tar.xz "${FILES_DIR}"/*.zip)
+          shopt -u nullglob
+          if [[ ${#SDISTS[@]} -eq 0 ]]; then
+            echo "ERROR: Neither .whl nor sdist archives found in ${FILES_DIR}"
+            exit 1
+          fi
+          echo "Found ${#SDISTS[@]} source distribution archive(s). Skipping wheel-specific releaseNotes population."
+        else
+          echo "Adding $ARTIFACT_COUNT artifact(s) to releaseNotes.content.artifacts"
+
+          # Append entries to .releaseNotes.content.artifacts[] in data.json
+          TMP_DATA=$(mktemp)
+          jq --argjson artifacts "$DEDUPED" '
+            .releaseNotes.content.artifacts = (.releaseNotes.content.artifacts // []) + $artifacts
+          ' "$DATA_FILE" > "$TMP_DATA" && mv "$TMP_DATA" "$DATA_FILE"
+
+          # Ensure mapping.components[] includes each artifact component with contentType
+          COMPONENT_NAMES=$(jq -r '[.[].component] | unique | .[]' <<< "$DEDUPED")
+          MAPPING_ENTRIES="[]"
+          while IFS= read -r comp; do
+            MAPPING_ENTRIES=$(jq -c --arg name "$comp" \
+              '. + [{name: $name, contentType: "generic"}]' \
+              <<< "$MAPPING_ENTRIES")
+          done <<< "$COMPONENT_NAMES"
+          jq --argjson new_comps "$MAPPING_ENTRIES" '
+            ($new_comps | map(.name)) as $names |
+            (.mapping.components // []) as $existing |
+            ($existing | map(.name)) as $existing_names |
+            .mapping.components = [
+              $existing[] |
+              if (.name as $n | $names | index($n))
+                 and ((.contentGateway?.contentType //
+                       .contentType // "") == "")
+              then . + {contentType: "generic"}
+              else . end
+            ] + [
+              $new_comps[]
+              | select(.name as $n |
+                  $existing_names | index($n) | not)
+            ]
+          ' "$DATA_FILE" > "$TMP_DATA" && mv "$TMP_DATA" "$DATA_FILE"
+
+          echo "Done. Updated artifacts:"
+          jq '.releaseNotes.content.artifacts' "$DATA_FILE"
         fi
-        echo "Adding $ARTIFACT_COUNT artifact(s) to releaseNotes.content.artifacts"
-
-        # Append entries to .releaseNotes.content.artifacts[] in data.json
-        TMP_DATA=$(mktemp)
-        jq --argjson artifacts "$DEDUPED" '
-          .releaseNotes.content.artifacts = (.releaseNotes.content.artifacts // []) + $artifacts
-        ' "$DATA_FILE" > "$TMP_DATA" && mv "$TMP_DATA" "$DATA_FILE"
-
-        # Ensure mapping.components[] includes each artifact component with contentType
-        COMPONENT_NAMES=$(jq -r '[.[].component] | unique | .[]' <<< "$DEDUPED")
-        MAPPING_ENTRIES="[]"
-        while IFS= read -r comp; do
-          MAPPING_ENTRIES=$(jq -c --arg name "$comp" \
-            '. + [{name: $name, contentType: "generic"}]' \
-            <<< "$MAPPING_ENTRIES")
-        done <<< "$COMPONENT_NAMES"
-        jq --argjson new_comps "$MAPPING_ENTRIES" '
-          ($new_comps | map(.name)) as $names |
-          (.mapping.components // []) as $existing |
-          ($existing | map(.name)) as $existing_names |
-          .mapping.components = [
-            $existing[] |
-            if (.name as $n | $names | index($n))
-               and ((.contentGateway?.contentType //
-                     .contentType // "") == "")
-            then . + {contentType: "generic"}
-            else . end
-          ] + [
-            $new_comps[]
-            | select(.name as $n |
-                $existing_names | index($n) | not)
-          ]
-        ' "$DATA_FILE" > "$TMP_DATA" && mv "$TMP_DATA" "$DATA_FILE"
-
-        echo "Done. Updated artifacts:"
-        jq '.releaseNotes.content.artifacts' "$DATA_FILE"
 
     - name: fetch-chains-provenance
       image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3

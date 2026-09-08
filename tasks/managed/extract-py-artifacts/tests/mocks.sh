@@ -33,8 +33,9 @@ function oras() {
 
     if [[ -n "$output_dir" ]]; then
       # Create mock Python package files
-      # If the .mock_no_wheels marker exists, only create sdist (no wheels)
-      if [[ -f "${TRUSTED_ARTIFACTS_EXTRACT_DIR}/.mock_no_wheels" ]]; then
+      if [[ -f "${TRUSTED_ARTIFACTS_EXTRACT_DIR}/.mock_no_artifacts" ]]; then
+        echo "Creating no artifacts for failure test"
+      elif [[ -f "${TRUSTED_ARTIFACTS_EXTRACT_DIR}/.mock_no_wheels" ]]; then
         echo "mock sdist content" > "${output_dir}/test_package-1.0.0.tar.gz"
         echo "Created mock files (no wheels) in ${output_dir}"
       else
