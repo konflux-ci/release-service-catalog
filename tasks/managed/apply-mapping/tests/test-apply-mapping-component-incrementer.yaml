@@ -2,11 +2,22 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping
+  name: test-apply-mapping-component-incrementer
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
-    the data json file and verify that the resulting json contains the expected values.
+    Run the apply-mapping task and verify that {{ component-incrementer }} produces a uniform
+    tag value across all repositories in a component by taking the global maximum increment
+    from every repository and adding 1.
+
+    Test cases:
+    - comp1-multi: 2 repos where repo-ci-a has max increment 3 and repo-ci-b has max increment 5.
+      Both repos must receive tag v1.0.0-6 (global max 5 + 1).
+    - comp2-single: 1 repo (repo-ci-c) with max increment 3.
+      The repo must receive tag v2.0.0-4.
+    - cache behavior: comp1-multi uses {{ component-incrementer }} for both repos. The first
+      translate_tags call queries all repos and caches the result; the second call must hit
+      the cache and not issue any additional skopeo calls. Verified by asserting that each
+      repo-ci-a and repo-ci-b is queried exactly once in the skopeo call log.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -60,38 +71,32 @@ spec:
                 "mapping": {
                   "components": [
                     {
-                      "name": "comp1",
+                      "name": "comp1-multi",
                       "repositories": [
                         {
-                          "url": "repo1"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp2",
-                      "repositories": [
-                        {
-                          "url": "repo2"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp3",
-                      "repositories": [
-                        {
-                          "url": "repo3a"
+                          "url": "repo-ci-a",
+                          "tags": [
+                            "v1.0.0-{{ component-incrementer }}"
+                          ]
                         },
                         {
-                          "url": "repo3b"
-                        },
-                        {
-                          "url": "repo3c"
+                          "url": "repo-ci-b",
+                          "tags": [
+                            "v1.0.0-{{ component-incrementer }}"
+                          ]
                         }
                       ]
                     },
                     {
-                      "name": "comp4",
-                      "customfield": "custom"
+                      "name": "comp2-single",
+                      "repositories": [
+                        {
+                          "url": "repo-ci-c",
+                          "tags": [
+                            "v2.0.0-{{ component-incrementer }}"
+                          ]
+                        }
+                      ]
                     }
                   ]
                 }
@@ -103,26 +108,24 @@ spec:
                 "application": "myapp",
                 "components": [
                   {
-                    "name": "comp1",
-                    "containerImage": "imageurl1@sha256:123456",
+                    "name": "comp1-multi",
+                    "containerImage": "registry.io/image@sha256:123456",
                     "source": {
                       "git": {
-                        "revision": "myrev",
+                        "revision": "testrevision",
                         "url": "myurl"
                       }
                     }
                   },
                   {
-                    "name": "comp3",
-                    "containerImage": "imageurl3@sha256:123456"
-                  },
-                  {
-                    "name": "comp4",
-                    "containerImage": "imageurl4@sha256:123456"
-                  },
-                  {
-                    "name": "comp5",
-                    "containerImage": "imageurl5@sha256:123456"
+                    "name": "comp2-single",
+                    "containerImage": "registry.io/image@sha256:123456",
+                    "source": {
+                      "git": {
+                        "revision": "testrevision",
+                        "url": "myurl"
+                      }
+                    }
                   }
                 ]
               }
@@ -204,56 +207,35 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              echo Test that SNAPSHOT contains component comp1
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp1") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 1
+              SNAPSHOT="$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
 
-              echo Test that SNAPSHOT contains comp1 repository from the mapping file
+              echo Test that comp1-multi repo-ci-a receives the global maximum tag v1.0.0-6
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo1
+                jq -c '.components[] | select(.name=="comp1-multi") |
+                  .repositories[] | select(.url=="repo-ci-a") | .tags' \
+                < "$SNAPSHOT"
+              )" == '["v1.0.0-6"]'
 
-              echo Test that revision of comp1 is correct
+              echo Test that comp1-multi repo-ci-b also receives the same uniform tag v1.0.0-6
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .source.git.revision' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == myrev
+                jq -c '.components[] | select(.name=="comp1-multi") |
+                  .repositories[] | select(.url=="repo-ci-b") | .tags' \
+                < "$SNAPSHOT"
+              )" == '["v1.0.0-6"]'
 
-              echo Test that SNAPSHOT does not contain component comp2
+              echo Test that comp2-single repo-ci-c receives tag v2.0.0-4 based on its own max of 3
               test "$(
-                jq -r '[ .components[] | select(.name=="comp2") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+                jq -c '.components[] | select(.name=="comp2-single") |
+                  .repositories[0].tags' \
+                < "$SNAPSHOT"
+              )" == '["v2.0.0-4"]'
 
-              echo Test that repository 1 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3a
-
-              echo Test that repository 2 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[1].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3b
-
-              echo Test that repository 3 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[2].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3c
-
-              echo Test that customfield of component comp4 was added to its snapshot entry
-              test "$(
-                jq -r '.components[] | select(.name=="comp4") | .customfield' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == custom
-
-              echo Test that SNAPSHOT does not contain component comp5 as it was not included in the mapping file
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp5") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+              echo Test cache behavior: each repo in comp1-multi must be queried exactly once
+              echo "(first translate_tags call queries all repos and caches; second call hits cache)"
+              SKOPEO_LOG="$(params.dataDir)/mock_skopeo.txt"
+              repo_a_calls=$(grep -c "list-tags.*docker://repo-ci-a" "$SKOPEO_LOG" || true)
+              repo_b_calls=$(grep -c "list-tags.*docker://repo-ci-b" "$SKOPEO_LOG" || true)
+              echo "repo-ci-a skopeo list-tags calls: $repo_a_calls (expected: 1)"
+              echo "repo-ci-b skopeo list-tags calls: $repo_b_calls (expected: 1)"
+              test "$repo_a_calls" == "1"
+              test "$repo_b_calls" == "1"
