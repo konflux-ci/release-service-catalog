@@ -2,10 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-artifacts-to-cdn-stage
+  name: test-push-artifacts-to-cdn
 spec:
   description: |
-    Run the push-artifacts task with the stage env and ensure the task succeeds
+    Run the push-artifacts-to-cdn task with the stage env and verify the InternalRequest
+    arguments, results file, and checksum_map result
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -48,7 +49,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:2d393d882d16e3b948dbf2320ca293229a59d66ca646502e66fb00009176d747
+            image: quay.io/konflux-ci/release-service-utils@sha256:441db22666c241ce1f3030615af90cb72d39626b74faa1a42fe5a302531b7259
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -60,14 +61,17 @@ spec:
                 "application": "artifacts",
                 "components": [
                   {
-                    "name": "nvidia-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/nvidia@sha256:123456",
-                    "repository": "repo1"
-                  },
-                  {
-                    "name": "amd-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/amd@sha256:abcdefg",
-                    "repository": "repo2"
+                    "name": "test-component",
+                    "containerImage": "quay.io/workload/tenant/artifacts/test@sha256:123456",
+                    "repository": "repo1",
+                    "staged": {
+                      "files": [
+                        {
+                          "filename": "test-artifact-1.0.tar.gz",
+                          "source": "artifact.tar.gz"
+                        }
+                      ]
+                    }
                   }
                 ]
               }
@@ -78,46 +82,13 @@ spec:
                 "contentGateway": {
                   "productName": "Konflux test product",
                   "productCode": "KTestProduct",
-                  "productVersionName": "KTestProduct 1",
-                  "components": [
-                    {
-                      "name": "test-component",
-                      "description": "Red Hat OpenShift Local Sandbox Test",
-                      "label": "Checksum File Sandbox Test"
-                    }
-                  ]
+                  "productVersionName": "KTestProduct 1"
                 },
                 "cdn": {
                   "env": "stage"
                 },
                 "sign": {
-                  "configMapName": "test-config-map"
-                }
-              }
-              EOF
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
-              {
-                "spec": {
-                  "pipeline": {
-                    "pipelineRef": {
-                      "resolver": "git",
-                      "params": [
-                        {
-                          "name": "url",
-                          "value": "https://localhost.git"
-                        },
-                        {
-                          "name": "revision",
-                          "value": "main"
-                        },
-                        {
-                          "name": "pathInRepo",
-                          "value": "pipelines/abc/abc.yaml"
-                        }
-                      ]
-                    },
-                    "serviceAccountName": "release-service-account"
-                  }
+                  "configMapName": "test-signing-config-map"
                 }
               }
               EOF
@@ -126,7 +97,7 @@ spec:
               {
                 "status": {
                   "attribution": {
-                    "author": "JohnDoe"
+                    "author": "testuser"
                   }
                 }
               }
@@ -146,17 +117,15 @@ spec:
         name: push-artifacts-to-cdn
       params:
         - name: releasePath
-          value: $(context.pipelineRun.uid)/release.json
+          value: "$(context.pipelineRun.uid)/release.json"
         - name: snapshotPath
           value: "$(context.pipelineRun.uid)/snapshot_spec.json"
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
-        - name: releasePlanAdmissionPath
-          value: $(context.pipelineRun.uid)/release_plan_admission.json
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: resultsDirPath
-          value: $(context.pipelineRun.uid)/results
+          value: "$(context.pipelineRun.uid)/results"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -168,7 +137,7 @@ spec:
         - name: trustedArtifactsDebug
           value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: "http://localhost"
+          value: "https://localhost"
         - name: taskGitRevision
           value: "main"
       runAfter:
@@ -179,6 +148,8 @@ spec:
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
         - name: dataDir
           value: $(params.dataDir)
+        - name: checksumMap
+          value: "$(tasks.run-task.results.checksum_map)"
       runAfter:
         - run-task
       taskSpec:
@@ -186,6 +157,8 @@ spec:
           - name: sourceDataArtifact
             type: string
           - name: dataDir
+            type: string
+          - name: checksumMap
             type: string
         volumes:
           - name: workdir
@@ -211,67 +184,42 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:2d393d882d16e3b948dbf2320ca293229a59d66ca646502e66fb00009176d747
+            image: quay.io/konflux-ci/release-service-utils@sha256:441db22666c241ce1f3030615af90cb72d39626b74faa1a42fe5a302531b7259
             script: |
               #!/usr/bin/env bash
               set -ex
 
-              internalRequest=$(kubectl get InternalRequest -o json | jq -r '.items[0]')
-              # check the pipelineRef
-              pipeline="$(jq -r '.spec.pipeline.pipelineRef.params[]|select(.name=="pathInRepo") |.value' \
-                <<< "${internalRequest}")"
-              if [[ ! "$pipeline" =~ push-artifacts-to-cdn ]]; then
-                echo "InternalRequest doesn't contain 'push-artifacts-to-cdn' in 'request' field"
+              results=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-artifacts-results.json")
+
+              expected="test-artifact-1.0.tar.gz"
+              if [ "$(jq -r '.artifacts[]' <<< "$results")" != "$expected" ]; then
+                echo "push-artifacts-to-cdn results do not contain expected file names"
                 exit 1
               fi
 
-              # Check the serviceAccount field
-              if [ "$(jq -r '.spec.serviceAccount' <<< "$internalRequest")" != "release-service-account" ]; then
-                echo "InternalRequest doesn't contain the proper serviceAccount"
+              jq -e --arg uid "$(context.pipelineRun.uid)" '
+                .pipeline == "push-artifacts-to-cdn" and
+                .params.author == "testuser" and
+                .params.signingKeyName == "test-signing-key" and
+                .params.exodusGwSecret == "exodus-prod-secret" and
+                .params.exodusGwEnv == "pre" and
+                .params.pulpSecret == "rhsm-pulp-stage-secret" and
+                .params.udcacheSecret == "udcache-stage-secret" and
+                .params.cgwHostname == "https://developers.qa.redhat.com/content-gateway/rest/admin" and
+                .params.cgwSecret == "cgw-service-account-stage-secret" and
+                .params.quayURL == "quay.io/konflux-artifacts/prod" and
+                .params.taskGitUrl == "https://localhost" and
+                .params.taskGitRevision == "main" and
+                .labels == {"internal-services.appstudio.openshift.io/pipelinerun-uid": $uid} and
+                .service_account == "release-service-account" and
+                .sync == true and
+                .pipeline_timeout == "24h0m0s" and
+                .task_timeout == "23h50m0s" and
+                .finally_timeout == "0h10m0s" and
+                .timeout == 86700
+              ' "$(params.dataDir)/$(context.pipelineRun.uid)/results/internal-request.json"
+
+              if [ "$(params.checksumMap)" != "quay.io/checksum-map@sha256:abcdef" ]; then
+                echo "push-artifacts-to-cdn did not set the expected checksum_map result"
                 exit 1
               fi
-
-              # Check the snapshot parameter
-              if [ "$(jq -r '.spec.params.snapshot_json' <<< "$internalRequest")" != \
-              '{"application":"artifacts","components":[{"name":"nvidia-disk-image","containerImage":'`
-              `'"quay.io/workload/tenant/disk-image/nvidia@sha256:123456","repository":"repo1"},{"name":'`
-              `'"amd-disk-image","containerImage":"quay.io/workload/tenant/disk-image/amd@sha256:abcdefg"'`
-              `',"repository":"repo2"}]}' ]; then
-                echo "InternalRequest has the wrong snapshot_json parameter"
-                exit 1
-              fi
-
-              # Check the exodusGwSecret parameter
-              if [ "$(jq -r '.spec.params.exodusGwSecret' <<< "$internalRequest")" != "exodus-prod-secret" ]; then
-                echo "InternalRequest has the wrong exodusGwSecret parameter"
-                exit 1
-              fi
-
-              # Check the exodusGwEnv parameter
-              if [ "$(jq -r '.spec.params.exodusGwEnv' <<< "$internalRequest")" != "pre" ]; then
-                echo "InternalRequest has the wrong exodusGwEnv parameter"
-                exit 1
-              fi
-
-              # Check the pulpSecret parameter
-              if [ "$(jq -r '.spec.params.pulpSecret' <<< "$internalRequest")" != "rhsm-pulp-stage-secret" ]; then
-                echo "InternalRequest has the wrong pulpSecret parameter"
-                exit 1
-              fi
-
-              # Check the udcacheSecret parameter
-              if [ "$(jq -r '.spec.params.udcacheSecret' <<< "$internalRequest")" != "udcache-stage-secret" ]; then
-                echo "InternalRequest has the wrong udcacheSecret parameter"
-                exit 1
-              fi
-  finally:
-    - name: cleanup
-      taskSpec:
-        steps:
-          - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:2d393d882d16e3b948dbf2320ca293229a59d66ca646502e66fb00009176d747
-            script: |
-              #!/usr/bin/env sh
-              set -eux
-
-              kubectl delete internalrequests --all
