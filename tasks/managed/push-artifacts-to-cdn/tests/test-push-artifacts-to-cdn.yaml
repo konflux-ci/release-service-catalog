@@ -2,12 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-push-artifacts-to-cdn-fail-no-release-author
-  annotations:
-    test/assert-task-failure: "run-task"
+  name: test-push-artifacts-to-cdn
 spec:
   description: |
-    Run the push-artifacts task with no author in the release JSON and verify the task fails as expected
+    Run the push-artifacts-to-cdn task with the stage env and verify the results file
+    and checksum_map result are populated
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -50,26 +49,29 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:b62e2fef45c84259c60c7097f5a572a4c32f957ffeee3eed53eb0b7d560e5234
+            image: quay.io/konflux-ci/release-service-utils@sha256:d3bb0f5a3ff85e30de88cb65953811bb34cc003942750dfc2f97b37a8915726b
             script: |
               #!/usr/bin/env bash
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
               mkdir "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
                 "application": "artifacts",
                 "components": [
                   {
-                    "name": "nvidia-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/nvidia@sha256:123456",
-                    "repository": "repo1"
-                  },
-                  {
-                    "name": "amd-disk-image",
-                    "containerImage": "quay.io/workload/tenant/disk-image/amd@sha256:abcdefg",
-                    "repository": "repo2"
+                    "name": "test-component",
+                    "containerImage": "quay.io/workload/tenant/artifacts/test@sha256:123456",
+                    "repository": "repo1",
+                    "staged": {
+                      "files": [
+                        {
+                          "filename": "test-artifact-1.0.tar.gz",
+                          "source": "artifact.tar.gz"
+                        }
+                      ]
+                    }
                   }
                 ]
               }
@@ -80,54 +82,23 @@ spec:
                 "contentGateway": {
                   "productName": "Konflux test product",
                   "productCode": "KTestProduct",
-                  "productVersionName": "KTestProduct 1",
-                  "components": [
-                    {
-                      "name": "test-component",
-                      "description": "Red Hat OpenShift Local Sandbox Test",
-                      "label": "Checksum File Sandbox Test"
-                    }
-                  ]
+                  "productVersionName": "KTestProduct 1"
                 },
                 "cdn": {
-                  "env": "production"
+                  "env": "stage"
                 },
                 "sign": {
-                  "configMapName": "test-config-map"
-                }
-              }
-              EOF
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
-              {
-                "spec": {
-                  "pipeline": {
-                    "pipelineRef": {
-                      "resolver": "git",
-                      "params": [
-                        {
-                          "name": "url",
-                          "value": "https://localhost.git"
-                        },
-                        {
-                          "name": "revision",
-                          "value": "main"
-                        },
-                        {
-                          "name": "pathInRepo",
-                          "value": "pipelines/abc/abc.yaml"
-                        }
-                      ]
-                    },
-                    "serviceAccountName": "release-service-account"
-                  }
+                  "configMapName": "test-signing-config-map"
                 }
               }
               EOF
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release.json" << EOF
               {
-                "spec": {
-                  "releasePlan": "foo"
+                "status": {
+                  "attribution": {
+                    "author": "testuser"
+                  }
                 }
               }
               EOF
@@ -146,17 +117,15 @@ spec:
         name: push-artifacts-to-cdn
       params:
         - name: releasePath
-          value: $(context.pipelineRun.uid)/release.json
+          value: "$(context.pipelineRun.uid)/release.json"
         - name: snapshotPath
-          value: "$(context.pipelineRun.uid)/test_snapshot_spec.json"
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
         - name: dataPath
           value: "$(context.pipelineRun.uid)/data.json"
-        - name: releasePlanAdmissionPath
-          value: $(context.pipelineRun.uid)/release_plan_admission.json
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: resultsDirPath
-          value: $(context.pipelineRun.uid)/results
+          value: "$(context.pipelineRun.uid)/results"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -168,8 +137,67 @@ spec:
         - name: trustedArtifactsDebug
           value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
-          value: "http://localhost"
+          value: "https://localhost"
         - name: taskGitRevision
           value: "main"
       runAfter:
         - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: checksumMap
+          value: "$(tasks.run-task.results.checksum_map)"
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+          - name: checksumMap
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:d3bb0f5a3ff85e30de88cb65953811bb34cc003942750dfc2f97b37a8915726b
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              results=$(cat "$(params.dataDir)/$(context.pipelineRun.uid)/results/push-artifacts-results.json")
+
+              expected="test-artifact-1.0.tar.gz"
+              if [ "$(jq -r '.artifacts[]' <<< "$results")" != "$expected" ]; then
+                echo "push-artifacts-to-cdn results do not contain expected file names"
+                exit 1
+              fi
+
+              if [ -z "$(params.checksumMap)" ]; then
+                echo "push-artifacts-to-cdn did not set the checksum_map result"
+                exit 1
+              fi
