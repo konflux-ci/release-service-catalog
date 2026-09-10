@@ -175,7 +175,7 @@ create_large_snapshot() {
     : "${large_snapshot_name:?large_snapshot_name must be set}"
     : "${application_name:?application_name must be set}"
     : "${tenant_namespace:?tenant_namespace must be set}"
-    echo "Creating large snapshot manifest with 200 components..." >&2
+    echo "Creating large snapshot manifest from image pool..." >&2
 
     local snapshot_file="${tmpDir}/large-snapshot.yaml"
 
@@ -184,7 +184,7 @@ create_large_snapshot() {
         "${application_name}" \
         "${tenant_namespace}" > "${snapshot_file}" || return 1
 
-    echo "✅ Large snapshot manifest created with 200 components" >&2
+    echo "✅ Large snapshot manifest created" >&2
     echo "${snapshot_file}"
 }
 
@@ -424,7 +424,10 @@ verify_release_contents() {
     echo "2️⃣  Checking Published Images Count..." >&2
     local published_count
     published_count=$(echo "$release_json" | jq -r '.status.artifacts.images | length // 0' 2>/dev/null || echo "0")
-    local expected_count=200
+    local expected_count
+    # Match generate-large-snapshot.sh: strip # comments, trim, skip empties
+    expected_count="$(sed 's/#.*//;s/^[[:space:]]*//;s/[[:space:]]*$//' "${FRESH_BUILDS_FILE}" \
+        | grep -cve '^$' || true)"
 
     echo "   Expected images: ${expected_count}" >&2
     echo "   Published images: ${published_count}" >&2
@@ -775,6 +778,13 @@ cleanup_resources() {
             echo "🗑️  Deleting GitHub repository ${component_repo_name} ..."
             "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}" || \
                 echo "   ⚠ Failed to delete GitHub repository ${component_repo_name}" >&2
+        fi
+
+        # Delete the large snapshot created outside kustomize manifests
+        if [ -n "${large_snapshot_name:-}" ] && [ -n "${tenant_namespace:-}" ]; then
+            echo "🗑️  Deleting large snapshot ${large_snapshot_name} ..."
+            kubectl delete snapshot "${large_snapshot_name}" -n "${tenant_namespace}" --ignore-not-found=true 2>/dev/null || \
+                echo "   ⚠ Failed to delete snapshot ${large_snapshot_name}" >&2
         fi
 
         # Clean up releases created by this test (using originating-tool label)
