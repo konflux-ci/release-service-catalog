@@ -28,6 +28,9 @@ This task supports variable expansion in tag values from the mapping. The curren
   both will receive v1.0.0-6).
 * "{{ oci_version }}" -> The version from OCI image annotations (org.opencontainers.image.version), with fallback
   to OCI image labels if not present in annotations (converts + to _ for tag compliance)
+* "{{ labels.konflux.additional-tags }}" -> Build lets a Containerfile have extra tags via
+  LABEL (konflux.additional-tags="tag1 tag2"); expands to one tag per space and/or comma
+  separated value.
 
 You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
 
