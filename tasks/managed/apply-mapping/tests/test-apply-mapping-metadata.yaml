@@ -2,11 +2,12 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping
+  name: test-apply-mapping-metadata
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
-    the data json file and verify that the resulting json contains the expected values.
+      Run the apply-mapping task with a snapshot JSON and verify that the resulting
+      snapshot contains the metadata extracted from docker://registry.io/metadata.
+      This includes the labels and environment variables.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -60,38 +61,12 @@ spec:
                 "mapping": {
                   "components": [
                     {
-                      "name": "comp1",
+                      "name": "app01",
                       "repositories": [
                         {
                           "url": "repo1"
                         }
                       ]
-                    },
-                    {
-                      "name": "comp2",
-                      "repositories": [
-                        {
-                          "url": "repo2"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp3",
-                      "repositories": [
-                        {
-                          "url": "repo3a"
-                        },
-                        {
-                          "url": "repo3b"
-                        },
-                        {
-                          "url": "repo3c"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp4",
-                      "customfield": "custom"
                     }
                   ]
                 }
@@ -103,26 +78,14 @@ spec:
                 "application": "myapp",
                 "components": [
                   {
-                    "name": "comp1",
-                    "containerImage": "imageurl1@sha256:123456",
+                    "name": "app01",
+                    "containerImage": "registry.io/metadata@sha256:123456",
                     "source": {
                       "git": {
-                        "revision": "myrev",
+                        "revision": "testrevision",
                         "url": "myurl"
                       }
                     }
-                  },
-                  {
-                    "name": "comp3",
-                    "containerImage": "imageurl3@sha256:123456"
-                  },
-                  {
-                    "name": "comp4",
-                    "containerImage": "imageurl4@sha256:123456"
-                  },
-                  {
-                    "name": "comp5",
-                    "containerImage": "imageurl5@sha256:123456"
                   }
                 ]
               }
@@ -204,56 +167,26 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              echo Test that SNAPSHOT contains component comp1
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp1") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 1
+              TEST_SNAPSHOT="$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
 
-              echo Test that SNAPSHOT contains comp1 repository from the mapping file
+              echo "Test that component 0 has the correct environment variables"
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo1
+                jq -c '.components[0] | .metadata.env_variables // []' < "$TEST_SNAPSHOT"
+              )" == '["container=oci","PATH=usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]'
 
-              echo Test that revision of comp1 is correct
+              echo "Test that component 0 has the correct labels"
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .source.git.revision' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == myrev
+                jq -c '.components[0] | .metadata.labels // []' < "$TEST_SNAPSHOT"
+              )" == '[{"name":"build-date","value":"2024-07-29T02:17:29"},'\
+              '{"name":"com.redhat.component","value":"app01"},'\
+              '{"name":"description","value":"it is some app"}]'
 
-              echo Test that SNAPSHOT does not contain component comp2
+              echo "Test that component 0 has the correct annotations"
               test "$(
-                jq -r '[ .components[] | select(.name=="comp2") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+                jq -c '.components[0] | .metadata.annotations // []' < "$TEST_SNAPSHOT"
+              )" == '[{"name":"org.opencontainers.image.created","value":"2024-07-29T02:17:29Z"}]'
 
-              echo Test that repository 1 of component comp3 is correct
+              echo "Test that component 0 has the correct media type"
               test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3a
-
-              echo Test that repository 2 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[1].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3b
-
-              echo Test that repository 3 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[2].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3c
-
-              echo Test that customfield of component comp4 was added to its snapshot entry
-              test "$(
-                jq -r '.components[] | select(.name=="comp4") | .customfield' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == custom
-
-              echo Test that SNAPSHOT does not contain component comp5 as it was not included in the mapping file
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp5") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+                jq -r -c '.components[0] | .metadata.media_type // ""' < "$TEST_SNAPSHOT"
+              )" == 'application/vnd.oci.image.config.v1+json'

@@ -2,11 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping
+  name: test-apply-mapping-implicit-timestamp-tag
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
-    the data json file and verify that the resulting json contains the expected values.
+    Run the apply-mapping task with addImplicitTimestampTag=true and a repository that does not
+    specify {{timestamp}} in its tags. Verify that {{timestamp}} is implicitly added and expanded.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -44,9 +44,9 @@ spec:
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
             - name: "ORAS_OPTIONS"
-              value: "$(params.orasOptions)"
+              value: $(params.orasOptions)
             - name: "DEBUG"
-              value: "$(params.trustedArtifactsDebug)"
+              value: $(params.trustedArtifactsDebug)
         steps:
           - name: setup-values
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
@@ -63,37 +63,15 @@ spec:
                       "name": "comp1",
                       "repositories": [
                         {
-                          "url": "repo1"
+                          "url": "repo2",
+                          "tags": ["latest"]
                         }
                       ]
-                    },
-                    {
-                      "name": "comp2",
-                      "repositories": [
-                        {
-                          "url": "repo2"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp3",
-                      "repositories": [
-                        {
-                          "url": "repo3a"
-                        },
-                        {
-                          "url": "repo3b"
-                        },
-                        {
-                          "url": "repo3c"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp4",
-                      "customfield": "custom"
                     }
-                  ]
+                  ],
+                  "defaults": {
+                    "timestampFormat": "%s"
+                  }
                 }
               }
               EOF
@@ -104,25 +82,13 @@ spec:
                 "components": [
                   {
                     "name": "comp1",
-                    "containerImage": "imageurl1@sha256:123456",
+                    "containerImage": "registry.io/onlycreated@sha256:123456",
                     "source": {
                       "git": {
                         "revision": "myrev",
                         "url": "myurl"
                       }
                     }
-                  },
-                  {
-                    "name": "comp3",
-                    "containerImage": "imageurl3@sha256:123456"
-                  },
-                  {
-                    "name": "comp4",
-                    "containerImage": "imageurl4@sha256:123456"
-                  },
-                  {
-                    "name": "comp5",
-                    "containerImage": "imageurl5@sha256:123456"
                   }
                 ]
               }
@@ -145,6 +111,8 @@ spec:
           value: $(context.pipelineRun.uid)/test_snapshot_spec.json
         - name: dataPath
           value: $(context.pipelineRun.uid)/test_data.json
+        - name: addImplicitTimestampTag
+          value: "true"
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -186,9 +154,9 @@ spec:
             - name: IMAGE_EXPIRES_AFTER
               value: $(params.ociArtifactExpiresAfter)
             - name: "ORAS_OPTIONS"
-              value: "$(params.orasOptions)"
+              value: $(params.orasOptions)
             - name: "DEBUG"
-              value: "$(params.trustedArtifactsDebug)"
+              value: $(params.trustedArtifactsDebug)
         steps:
           - name: use-trusted-artifact
             ref:
@@ -204,56 +172,10 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              echo Test that SNAPSHOT contains component comp1
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp1") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 1
-
-              echo Test that SNAPSHOT contains comp1 repository from the mapping file
-              test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo1
-
-              echo Test that revision of comp1 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp1") | .source.git.revision' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == myrev
-
-              echo Test that SNAPSHOT does not contain component comp2
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp2") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
-
-              echo Test that repository 1 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[0].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3a
-
-              echo Test that repository 2 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[1].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3b
-
-              echo Test that repository 3 of component comp3 is correct
-              test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[2].url' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3c
-
-              echo Test that customfield of component comp4 was added to its snapshot entry
-              test "$(
-                jq -r '.components[] | select(.name=="comp4") | .customfield' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == custom
-
-              echo Test that SNAPSHOT does not contain component comp5 as it was not included in the mapping file
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp5") ] | length' \
-                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+              echo Test that repository tags include both latest and the implicitly added timestamp
+              tags=$(jq -c '.components[] | select(.name=="comp1").repositories[0].tags | sort' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json")
+              echo "tags=$tags"
+              test "$(echo "$tags" | jq 'index("315550800")')" != "null"
+              test "$(echo "$tags" | jq 'index("latest")')" != "null"
+              test "$(echo "$tags" | jq 'length')" -eq 2
