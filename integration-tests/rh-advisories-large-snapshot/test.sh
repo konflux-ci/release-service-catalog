@@ -933,7 +933,7 @@ patch_rpa_with_snapshot_components() {
             '{
                 "name": $name,
                 "repositories": [{
-                    "url": "quay.io/redhat-pending/rhtap----rh-advisories-component",
+                    "url": "quay.io/redhat-pending/rhtap----large-snapshot-component",
                     "tags": [$t0, $t1, $t2, $t3]
                 }]
             }')
