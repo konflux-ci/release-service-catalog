@@ -1,13 +1,29 @@
-# simple e2e test
+# Simple E2E Test
+
 ## Setup
+
 ### Dependencies
+
 * GitHub repo: https://github.com/hacbs-release-tests/e2e-base
 * GitHub personal access token (classic) for above repo with **admin:repo_hook**, **delete_repo**, **repo** scopes.
 * The password to the vault files. (Contact a member of the Release team should you want to run this
   test suite.)
 * Access to the target cluster and tenant and managed namespaces
   * This test uses stg-rh01 and the dev-release-team-tenant and managed-release-team-tenant namespaces.
+
+### Python Requirements
+
+```bash
+# Create and activate a virtual environment (recommended)
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies from the shared library
+pip install -r ../pylib/requirements.txt
+```
+
 ### Required Environment Variables
+
 - GITHUB_TOKEN
   - The GitHub personal access token needed for repo operations
   - The repo in question can be located in [test.env](test.env)
@@ -20,28 +36,49 @@
 - RELEASE_CATALOG_GIT_REVISION
   - The release service catalog revision to use in the RPA
   - This is provided when testing PRs
+
 ### Optional Environment Variables
+
 - KUBECONFIG
   - The KUBECONFIG file to used to login to the target cluster
-  - This is provided when testing PRs 
+  - This is provided when testing PRs
+
 ### Test Properties
+
 #### [test.env](test.env)
+
 - This file contains resource names and configuration values needed for testing.
 - Since this test requires internal services, the tenant and managed namespaces
   should remain as-is.
-#### [test.sh](test.sh)
-- This file contains specific variables and functions needed for the test.
+
+#### [lib/config.py](lib/config.py)
+
+- This file contains test-specific Python configuration that extends the base config.
+
 ### Test Functions
-#### [lib/test-functions.sh](../lib/test-functions.sh)
-- This file contains re-usable functions for tests
+
+#### [../pylib/](../pylib/)
+
+- This directory contains re-usable Python functions for tests.
+
 ### Secrets
+
 - Secrets needed for testing are stored in ansible vault files.
   - [vault/managed-secrets.yaml](vault/managed-secrets.yaml)
   - [vault/tenant-secrets.yaml](vault/tenant-secrets.yaml)
 - The secrets required are contained in the files above.
-### Running the test
 
-```shell
+## Running the Test
+
+### Using Python (Recommended)
+
+```bash
+./run_test.py
+```
+
+### Using Bash (Legacy)
+
+```bash
 ../run-test.sh e2e
 ```
 
@@ -50,20 +87,22 @@
 There is a `--skip-cleanup` option to the script in the event that you want to examine the resources
 after a test has ended.
 
-### Maintenance
+## Maintenance
+
 - Should you require to add or update a secret, follow these steps:
-```shell
+
+```bash
 ansible-vault decrypt vault/tenant-secrets.yaml --output "/tmp/tenant-secrets.yaml" --vault-password-file <vault password file>
 ```
 
-```shell
+```bash
 vi /tmp/tenant-secrets.yaml
 ```
 
-```shell
+```bash
 ansible-vault encrypt /tmp/tenant-secrets.yaml --output "vault/tenant-secrets.yaml" --vault-password-file <vault password file>
 ```
 
-```shell
+```bash
 rm /tmp/tenant-secrets.yaml
 ```
