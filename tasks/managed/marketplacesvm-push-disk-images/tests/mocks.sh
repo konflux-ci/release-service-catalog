@@ -22,6 +22,11 @@ function oras() {
         exit 1
     fi
 
+    # Layered images have no titled OCI blob; oras pull must not create the file.
+    if [[ "$*" == *"layered-"* ]]; then
+        return 0
+    fi
+
     # Simulate downloaded artifact: create a compressed disk image
     # Determine the disk format from the pullspec
     if [[ "$*" == *"azure"* ]]; then
@@ -29,6 +34,63 @@ function oras() {
     else
         echo "dummy disk image content" | gzip > disk.raw.gz
     fi
+}
+
+function skopeo() {
+    echo Mock skopeo called with: $*
+    echo $* >> "$(params.dataDir)/mock_skopeo.txt"
+
+    if [[ "$1" != "copy" || "$*" != *"dir:"* ]]; then
+        echo Error: Unexpected call to skopeo
+        exit 1
+    fi
+    if [[ "$*" != *"layered-"* ]]; then
+        echo Error: Unexpected skopeo pullspec
+        exit 1
+    fi
+    if [[ "$*" == *"layered-skopeo-fail"* ]]; then
+        echo Error: simulating skopeo copy failure
+        exit 1
+    fi
+
+    local dest=""
+    for arg in "$@"; do
+        if [[ "$arg" == dir:* ]]; then
+            dest="${arg#dir:}"
+        fi
+    done
+    if [ -z "${dest}" ]; then
+        echo Error: skopeo copy missing dir: destination
+        exit 1
+    fi
+
+    # skopeo dir transport: manifest.json + blob named by sha256 hex
+    local blob="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    local missing_blob="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    mkdir -p "${dest}"
+    local layer_src
+    layer_src=$(mktemp -d)
+    mkdir -p "${layer_src}/releases"
+    if [[ "$*" == *"layered-missing"* ]]; then
+        echo "unrelated layer content" > "${layer_src}/releases/other.raw"
+        tar -C "${layer_src}" -czf "${dest}/${blob}" releases/other.raw
+        jq -n --arg digest "sha256:${blob}" '{"layers":[{"digest":$digest}]}' \
+            > "${dest}/manifest.json"
+    elif [[ "$*" == *"layered-uncompressed"* ]]; then
+        # Uncompressed layer, docker-style ./ prefix, and a missing first blob.
+        echo "dummy disk image content" > "${layer_src}/releases/test-disk-image.raw"
+        tar -C "${layer_src}" -cf "${dest}/${blob}" ./releases/test-disk-image.raw
+        jq -n \
+            --arg missing "sha256:${missing_blob}" \
+            --arg digest "sha256:${blob}" \
+            '{"layers":[{"digest":$missing},{"digest":$digest}]}' > "${dest}/manifest.json"
+    else
+        echo "dummy disk image content" > "${layer_src}/releases/test-disk-image.raw"
+        tar -C "${layer_src}" -czf "${dest}/${blob}" releases/test-disk-image.raw
+        jq -n --arg digest "sha256:${blob}" '{"layers":[{"digest":$digest}]}' \
+            > "${dest}/manifest.json"
+    fi
+    rm -rf "${layer_src}"
 }
 
 function pushsource-ls() {
