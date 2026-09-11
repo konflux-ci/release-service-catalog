@@ -1,0 +1,209 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rh-direct-sign-artifacts
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Task to sign arbitrary binary artifacts via the middleware-signing pipeline.
+    Each snapshot component's containerImage (an OCI artifact containing a zip
+    with binaries) is submitted for signing. Files not matching exclude patterns
+    are signed and the signing results are returned as a Trusted Artifact.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: requester
+      type: string
+      description: Name of the user that requested the signing, for auditing purposes (passed as onbehalfof)
+    - name: requestTimeout
+      type: string
+      default: "1800"
+      description: InternalRequest timeout
+    - name: concurrentLimit
+      type: string
+      description: The maximum number of signing requests to run in parallel
+      default: "4"
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: signingRepo
+      type: string
+      description: Git repository URL containing the signing tasks
+      default: "https://gitlab.cee.redhat.com/signing/signing.git"
+    - name: signingRevision
+      type: string
+      description: Git revision (branch, tag, or commit) in the signing repository
+      default: "main"
+    - name: signPipeline
+      type: string
+      description: Name of the internal pipeline to use for middleware signing
+      default: "middleware-signing"
+    - name: signPipelineServiceAccount
+      type: string
+      description: Service account to use for the signing pipeline
+      default: "signing-pipeline-sa"
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: >-
+        Expiration date for the trusted artifacts created in the OCI repository.
+        An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 100m
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+
+    - name: sign-artifacts
+      image: quay.io/konflux-ci/release-service-utils@sha256:19b51294e8faf4db356d1c5ba45dd575fece40fcde081152fe4842d3e1bbb232
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: "1"
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      command:
+        - rh_direct_sign_artifacts.py
+      args:
+        - "--snapshot"
+        - "$(params.dataDir)/$(params.snapshotPath)"
+        - "--data-file"
+        - "$(params.dataDir)/$(params.dataPath)"
+        - "--requester"
+        - "$(params.requester)"
+        - "--pipeline"
+        - "$(params.signPipeline)"
+        - "--service-account"
+        - "$(params.signPipelineServiceAccount)"
+        - "--request-timeout"
+        - "$(params.requestTimeout)"
+        - "--task-id"
+        - "$(context.taskRun.uid)"
+        - "--pipelinerun-uid"
+        - "$(params.pipelineRunUid)"
+        - "--signing-repo"
+        - "$(params.signingRepo)"
+        - "--signing-revision"
+        - "$(params.signingRevision)"
+        - "--concurrent-limit"
+        - "$(params.concurrentLimit)"
+        - "--oci-storage"
+        - "$(params.ociStorage)"
+        - "--oras-options"
+        - "$(params.orasOptions)"
+
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+          cpu: 500m
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
