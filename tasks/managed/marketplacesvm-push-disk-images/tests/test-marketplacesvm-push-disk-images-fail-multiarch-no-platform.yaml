@@ -1,0 +1,194 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-marketplacesvm-push-disk-images-fail-multiarch-no-platform
+  annotations:
+    test/assert-task-failure: "run-task"
+spec:
+  description: |
+    Run the marketplacesvm-push-disk-images task with a multi-arch image index whose
+    manifests do not carry platform.architecture metadata (see RHELOPC-2342). The task
+    cannot safely select the correct architecture via oras --platform, so it must fail
+    loudly instead of guessing.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/results"
+              RNOTES="Launch the product via 1-Click or the "
+              RNOTES+="marketplace listing.\n2. Access your "
+              RNOTES+="instance using ssh\n    * Open an SSH client\n"
+              cat > "$(params.dataDir)/snapshot_spec.json" << EOF
+              {
+                "application": "multiarch-no-platform-bootc-1-3-raw-disk-image",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/workload/tenant/test-product/multiarch-no-platform-bootc-1-3-raw-disk-image@sha256:123456",
+                    "name": "multiarch-no-platform-bootc-1-3-raw-disk-image",
+                    "source": {
+                      "git": {
+                        "context": ".",
+                        "dockerfileUrl": "bib-cuda-aws.yaml",
+                        "revision": "1abbfcdbc1c5e8b7aba07673297237ed192b50e2",
+                        "url": "https://gitlab.com/konflux/test-product/disk-images/amd-bootc"
+                      }
+                    },
+                    "contentType": "disk-image",
+                    "productInfo": {
+                      "filePrefix": "test-product-amd-1.3",
+                      "productCode": "TESTPRDOCUT",
+                      "productName": "Test Product",
+                      "productVersionName": "1.3"
+                    },
+                    "pushSourceContainer": false,
+                    "staged": {
+                      "destination": "test-product-1_DOT_3-multi-isos",
+                      "files": [
+                        {
+                          "filename": "test-product-amd-1.3-1732045201-x86_64.raw.gz",
+                          "source": "disk.raw.gz"
+                        },
+                        {
+                          "filename": "test-product-amd-1.3-1732045201-aarch64.raw.gz",
+                          "source": "disk.raw.gz"
+                        }
+                      ],
+                      "version": "1.3"
+                    },
+                    "starmap": [
+                      {
+                        "cloud": "aws",
+                        "mappings": {
+                          "aws-emea": {
+                            "destinations": [
+                              {
+                                "architecture": "x86_64",
+                                "destination": "00000000-0000-0000-0000-000000000000",
+                                "overwrite": false,
+                                "restrict_version": true
+                              },
+                              {
+                                "architecture": "aarch64",
+                                "destination": "11111111-1111-1111-1111-111111111111",
+                                "overwrite": false,
+                                "restrict_version": true
+                              }
+                            ],
+                            "provider": null
+                          }
+                        },
+                        "meta": {
+                          "ena_support": true,
+                          "marketplace_entity_type": "AmiProduct",
+                          "recommended_instance_type": "p5.48xlarge",
+                          "release_notes": "${RNOTES}",
+                          "root_device": "/dev/sda1",
+                          "scanning_port": 22,
+                          "security_groups": [
+                            {
+                              "from_port": 22,
+                              "ip_protocol": "tcp",
+                              "ip_ranges": [
+                                "0.0.0.0/0"
+                              ],
+                              "to_port": 22
+                            }
+                          ],
+                          "sharing_accounts": [
+                            "111111111111"
+                          ],
+                          "sriov_net_support": "simple",
+                          "usage_instructions": "https://access.redhat.com/articles/xyz",
+                          "user_name": "cloud-user",
+                          "virtualization": "hvm",
+                          "volume": "gp3"
+                        },
+                        "name": "test-product-amd",
+                        "workflow": "stratosphere"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: marketplacesvm-push-disk-images
+      params:
+        - name: snapshotPath
+          value: "snapshot_spec.json"
+        - name: cloudMarketplacesSecret
+          value: marketplacesvm-test-secret
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
