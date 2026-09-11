@@ -1,6 +1,6 @@
 # calunga-push-to-pulp-lightwell pipeline
 
-Release Components in a Snapshot to a pulp-backed python index. Each image in a Component is expected to contain a python wheel and sdist under the /releases directory. This is the Lightwell variant without advisory creation or SBOM uploads to Atlas, with optional sdist source mirroring to GitLab.
+Release Components in a Snapshot to a pulp-backed python index. Each image in a Component is expected to contain a python wheel and sdist under the /releases directory. This is the Lightwell variant without advisory creation or SBOM uploads to Atlas.
 
 ## Parameters
 
@@ -18,5 +18,3 @@ Release Components in a Snapshot to a pulp-backed python index. Each image in a 
 | taskGitRevision                 | The revision in the taskGitUrl repo to be used                                                                                     | Yes      | production                                                |
 | signingSecretName               | The name of the AWS KMS signing secret                                                                                             | Yes      | konflux-cosign-signing-production                         |
 | ociStorage                      | URL to the OCI artifact storage                                                                                                    | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts      |
-| taisceCuanGitUrl                | Git repository URL where taisce-cuan tasks are stored                                                                              | Yes      | https://github.com/konflux-lightwell/taisce-cuan.git      |
-| taisceCuanGitRevision           | Git revision for taisce-cuan tasks                                                                                                 | Yes      | main                                                      |
