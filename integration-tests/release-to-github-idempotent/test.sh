@@ -6,7 +6,7 @@
 #   1. Verifying the first (auto-created) release created a GitHub release and signed the blob
 #   2. Creating a second release with the SAME snapshot
 #   3. Verifying the second release detected the existing GitHub release and skipped creating a duplicate
-#      (sign-base64-blob re-signs on each new run since each run starts with a fresh TA workspace;
+#      (sign-checksum-blob re-signs on each new run since each run starts with a fresh TA workspace;
 #       its internal skip-if-sig-exists logic only applies to retries within the same pipeline run)
 #
 # This file is sourced by run-test.sh
@@ -237,20 +237,20 @@ EOF
         second_failures=$((second_failures + 1))
     fi
 
-    # Verify sign-base64-blob completed successfully in the second run.
-    # Note: sign-base64-blob re-signs on every new pipeline run because each run
+    # Verify sign-checksum-blob completed successfully in the second run.
+    # Note: sign-checksum-blob re-signs on every new pipeline run because each run
     # starts with a fresh Trusted Artifacts workspace (no .sig from a prior run).
-    # Its internal idempotency check (if [ -f "$sig_file_path" ]) is designed for
+    # Its internal idempotency check is designed for
     # retry-within-the-same-run scenarios, not cross-run idempotency.
     # The cross-run idempotency is handled by create-github-release, which checks
     # the GitHub API and skips uploading a duplicate release (verified above).
-    echo "Checking that sign-base64-blob completed successfully in second run..."
+    echo "Checking that sign-checksum-blob completed successfully in second run..."
     local sign_logs
-    sign_logs=$(get_managed_task_logs "${second_pipelinerun_name}" "sign-base64-blob")
+    sign_logs=$(get_managed_task_logs "${second_pipelinerun_name}" "sign-checksum-blob")
     if echo "${sign_logs}" | grep -q "done ("; then
-        echo "✅ sign-base64-blob completed successfully in the second run"
+        echo "✅ sign-checksum-blob completed successfully in the second run"
     else
-        echo "🔴 sign-base64-blob did not complete successfully in the second run"
+        echo "🔴 sign-checksum-blob did not complete successfully in the second run"
         second_failures=$((second_failures + 1))
     fi
 
@@ -266,7 +266,7 @@ EOF
     echo "Summary:"
     echo "  • First release:  created GitHub release at v86.${uuid}"
     echo "  • Second release: detected existing release → skipped creation (no duplicate)"
-    echo "  • Second release: sign-base64-blob re-signed (expected — fresh workspace per run)"
+    echo "  • Second release: sign-checksum-blob re-signed (expected — fresh workspace per run)"
     echo "  • GitHub release URL consistent across both runs: ${first_url}"
     echo "  • Advisory URLs present in both releases"
     echo "  • No duplicate GitHub release created"

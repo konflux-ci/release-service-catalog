@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Mock kubectl for the Python steps of sign-checksum-blob. Simulates the
+# generic-signing InternalRequest lifecycle and the signing ConfigMap lookup.
+set -uo pipefail
+
+args="$*"
+echo "Mock kubectl called with: ${args}" >&2
+
+IR_NAME="generic-signing-mock"
+
+# resolve_keyname(): kubectl get cm/<name> -ojson
+if [[ "${args}" == *"get cm/"* ]] || [[ "${args}" == *"get configmap"* ]]; then
+  echo '{"data": {"SIG_KEY_NAME": "testkey"}}'
+  exit 0
+fi
+
+# internal_request.create(): kubectl create -f - -o json (payload on stdin)
+if [[ "${args}" == *"create -f -"* ]]; then
+  cat > "${DATA_DIR}/mock_kubectl_create.json"
+  echo "{\"metadata\": {\"name\": \"${IR_NAME}\"}}"
+  exit 0
+fi
+
+# fetch_results(): kubectl get internalrequest <name> -o=jsonpath={.status.results}
+if [[ "${args}" == *"get internalrequest"* && "${args}" == *"status.results"* ]]; then
+  if [ -f "${DATA_DIR}/mock_empty_payload" ]; then
+    printf ''
+  else
+    printf '{"sourceDataArtifact":"oci://mock-output-ta"}'
+  fi
+  exit 0
+fi
+
+# wait_for_completion(): kubectl get internalrequest <name> -o json (poll)
+if [[ "${args}" == *"get internalrequest"* ]]; then
+  cat <<EOF
+{"metadata": {"name": "${IR_NAME}"}, "status": {"conditions": [{"reason": "Succeeded"}], "pipelineRun": "pr-mock"}}
+EOF
+  exit 0
+fi
+
+echo "Unexpected kubectl call: ${args}" >&2
+exit 1

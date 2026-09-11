@@ -1,0 +1,339 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: sign-checksum-blob
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.62.0"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Submits a direct signing request for the release SHA256SUMS checksum file
+    via the signing service's `generic-signing` pipeline.
+
+    The checksum file is isolated into its own Trusted Artifact (the
+    `generic-signing` pipeline signs every file in the input artifact) and an
+    InternalRequest is submitted with `signMethod=detachsign`. The TA with the
+    result is then downloaded and finalized into the output format
+
+    ## Idempotent Behavior
+
+    This task is **idempotent**. If a valid signature file (`.sig`) already exists in the binaries directory:
+    - The task will validate the existing signature in the prepare step
+    - If valid, it will skip the signing steps and keep the signature as-is
+    - If invalid or corrupted, it will remove the file and submit a fresh request
+
+    This allows the task to be safely retried without creating duplicate signing requests or wasting resources.
+
+    ## Signing data parameters
+
+     The signing configuration should be set as `data.sign` in the _releasePlanAdmission_. The data should be set in the
+     _ReleasePlanAdmission_ as follows:
+
+    ```
+    data:
+        sign:
+            configMapName: <configmap name>
+    ```
+
+    The named ConfigMap (default `signing-config-map`) must expose `SIG_KEY_NAME`, used as the signing key name.
+  params:
+    - name: dataPath
+      description: Path to the JSON string of the merged data to use in the data workspace
+      type: string
+    - name: requester
+      type: string
+      description: Name of the user that requested the signing, for auditing purposes
+    - name: requestTimeout
+      type: string
+      default: "1800"
+      description: InternalRequest timeout
+    - name: binariesPath
+      type: string
+      description: The directory inside the workspace where the binaries are stored
+      default: binaries
+    - name: pipelineRunUid
+      type: string
+      description: The uid of the current pipelineRun. Used as a label value when creating internal requests
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: signingRepo
+      type: string
+      description: Git repository URL containing the generic-signing pipeline
+      default: "https://gitlab.cee.redhat.com/signing/signing.git"
+    - name: signingRevision
+      type: string
+      description: Git revision (branch, tag, or commit) in the signing repository
+      default: "9b0756bc38bc547dbf575a5db1b8c001cda62c67"
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  results:
+    - name: sourceDataArtifact
+      type: string
+      description: Produced trusted data artifact
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: prepare-checksum-input
+      image:
+        quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:6aead72f6537e494186a32434162517aa3f7031adf984c6394ec712b183e71ea
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      command:
+        - sign_checksum_blob.py
+      args:
+        - prepare
+      env:
+        - name: HOME
+          value: /tmp
+        - name: DATA_DIR
+          value: $(params.dataDir)
+        - name: BINARIES_PATH
+          value: $(params.binariesPath)
+        - name: ISOLATED_INPUT_DIR
+          value: checksum-signing-input
+        - name: SIGNATURE_VALID_RESULT
+          value: $(step.results.signature-valid.path)
+        - name: CHECKSUM_FILE_RESULT
+          value: $(step.results.checksum-file.path)
+      results:
+        - name: signature-valid
+          type: string
+        - name: checksum-file
+          type: string
+    - name: create-checksum-input-artifact
+      when:
+        - input: $(steps.prepare-checksum-input.results.signature-valid)
+          operator: in
+          values: ["false"]
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)/checksum-signing-input
+        - name: sourceDataArtifact
+          value: $(params.dataDir)/checksum-input-artifact.txt
+    - name: sign-checksum-blob
+      when:
+        - input: $(steps.prepare-checksum-input.results.signature-valid)
+          operator: in
+          values: ["false"]
+      image:
+        quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:6aead72f6537e494186a32434162517aa3f7031adf984c6394ec712b183e71ea
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 100m
+      command:
+        - sign_checksum_blob.py
+      args:
+        - sign
+      env:
+        - name: HOME
+          value: /tmp
+        - name: INPUT_ARTIFACT_FILE
+          value: $(params.dataDir)/checksum-input-artifact.txt
+        - name: OUTPUT_ARTIFACT_FILE
+          value: $(step.results.signed-ta-ref.path)
+        - name: DATA_DIR
+          value: $(params.dataDir)
+        - name: DATA_PATH
+          value: $(params.dataPath)
+        - name: BINARIES_PATH
+          value: $(params.binariesPath)
+        - name: REQUESTER
+          value: $(params.requester)
+        - name: PIPELINERUN_UID
+          value: $(params.pipelineRunUid)
+        - name: TASK_ID
+          value: $(context.taskRun.uid)
+        - name: SIGNING_REPO
+          value: $(params.signingRepo)
+        - name: SIGNING_REVISION
+          value: $(params.signingRevision)
+        - name: TASK_GIT_URL
+          value: $(params.taskGitUrl)
+        - name: TASK_GIT_REVISION
+          value: $(params.taskGitRevision)
+        - name: OCI_STORAGE
+          value: $(params.ociStorage)
+        - name: REQUEST_TIMEOUT
+          value: $(params.requestTimeout)
+      results:
+        - name: signed-ta-ref
+          type: string
+    - name: get-signed-result
+      when:
+        - input: $(steps.prepare-checksum-input.results.signature-valid)
+          operator: in
+          values: ["false"]
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: "$(steps.sign-checksum-blob.results.signed-ta-ref)"
+    - name: finalize-result
+      when:
+        - input: $(steps.prepare-checksum-input.results.signature-valid)
+          operator: in
+          values: ["false"]
+      image:
+        quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:6aead72f6537e494186a32434162517aa3f7031adf984c6394ec712b183e71ea
+      computeResources:
+        limits:
+          memory: 512Mi
+        requests:
+          memory: 512Mi
+          cpu: 100m
+      command:
+        - sign_checksum_blob.py
+      args:
+        - finalize
+      env:
+        - name: DATA_DIR
+          value: $(params.dataDir)
+        - name: BINARIES_PATH
+          value: $(params.binariesPath)
+        - name: SIGNED_OUTPUT_DIR
+          value: $(params.dataDir)
+        - name: CHECKSUM_FILE
+          value: $(steps.prepare-checksum-input.results.checksum-file)
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
