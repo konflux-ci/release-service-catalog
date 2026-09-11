@@ -34,9 +34,19 @@ wait_for_service_endpoints() {
     "${message}"
 }
 
+CERT_MANAGER_MANIFEST_URL="https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml"
+
 deploy_cert_manager() {
-  retry "kubectl apply -k \"${script_path}/../resources/cert-manager\"" \
+  _cert_manager_overlay="$(mktemp -d)"
+  trap 'rm -rf "${_cert_manager_overlay}"' EXIT
+  if ! retry "curl --fail-with-body --location --retry 3 -sS -o \"${_cert_manager_overlay}/cert-manager.yaml\" \"${CERT_MANAGER_MANIFEST_URL}\"" \
+    "Failed to download cert-manager manifest"; then
+    return 1
+  fi
+  cp "${script_path}/../resources/cert-manager/kustomization.yml" "${_cert_manager_overlay}/kustomization.yml"
+  retry "kubectl apply -k \"${_cert_manager_overlay}\"" \
     "Failed to apply cert-manager resources"
+  rm -rf "${_cert_manager_overlay}"
   sleep 5
   retry "kubectl wait --for=condition=Ready --timeout=120s -l app.kubernetes.io/instance=cert-manager -n cert-manager pod" \
         "Cert manager did not become available within the allocated time"
