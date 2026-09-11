@@ -134,10 +134,12 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: pull-and-push-images-to-marketplaces
-      image: quay.io/konflux-ci/release-service-utils@sha256:17e594729947b9313ce32c9dc0ec10a12f29407fb1360c7706a317af85972b8e
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:441db22666c241ce1f3030615af90cb72d39626b74faa1a42fe5a302531b7259
       computeResources:
         limits:
           memory: 1Gi
+          cpu: 450m
         requests:
           memory: 1Gi
           cpu: 450m
@@ -149,7 +151,7 @@ spec:
           value: $(params.uploadContainerName)
       script: |
         #!/usr/bin/env bash
-        set -eux
+        set -euxo pipefail
 
         echo "DEBUG: Sanity validation of credentials"
         JSON_FILES=(/etc/secrets/*.json)
@@ -158,8 +160,8 @@ spec:
             exit 1
         fi
         for file in "${JSON_FILES[@]}"; do
-            if ! jq -e 'has("marketplace_account") and has("auth")' "$file" > /dev/null 2>&1; then
-                echo "ERROR: Validation failed for credential file: '$file'"  >&2
+            if ! jq -e 'has("marketplace_account") and has("auth")' "${file}" > /dev/null 2>&1; then
+                echo "ERROR: Validation failed for credential file: '${file}'"  >&2
                 echo "The file is missing required keys ('marketplace_account' or 'auth')."  >&2
                 exit 1
             fi
@@ -171,9 +173,9 @@ spec:
 
         # Setup required variables
         SNAPSHOT_JSON=$(jq -c '.' "$(params.dataDir)/$(params.snapshotPath)")
-        STARMAP_MAPPING=$(jq -c '[.components[].starmap[]]' <<< "$SNAPSHOT_JSON")
+        STARMAP_MAPPING=$(jq -c '[.components[].starmap[]]' <<< "${SNAPSHOT_JSON}")
         STARMAP_MAPPING_FILE="$(params.dataDir)/$(dirname "$(params.snapshotPath)")/starmap.yaml"
-        yq -p json -o yaml <<< "$STARMAP_MAPPING" > "$STARMAP_MAPPING_FILE"
+        yq -p json -o yaml <<< "${STARMAP_MAPPING}" > "${STARMAP_MAPPING_FILE}"
 
         BASE_DIR="$(mktemp -d -p /var/workdir)"
         DISK_IMGS_DIR="${BASE_DIR}/starmap/CLOUD_IMAGES"
@@ -187,22 +189,29 @@ spec:
         log_memory_throttle_status 80
 
         RUNNING_JOBS="\j" # Bash parameter for number of jobs currently running
-        NUM_COMPONENTS=$(jq '.components | length' <<< "$SNAPSHOT_JSON")
+        NUM_COMPONENTS=$(jq '.components | length' <<< "${SNAPSHOT_JSON}")
 
         prepare_component() { # Expected argument is [component json]
-            COMPONENT=$1
+            local COMPONENT="${1}"
+            local PRODUCT_INFO PULLSPEC IMG_NAME BUILD_NAME BUILD_VERSION BUILD_RESPIN
+            local RESOURCES_JSON DESTINATION NUM_MAPPED_FILES SOURCE mapped_source
+            local FILE FILENAME BUILD_ARCH image_type MISSING_JSON MSG
+            AUTH_FILE=""
+            EXTRACT_PY=""
+            DOWNLOAD_DIR=""
             PRODUCT_INFO=$(jq -c '.productInfo' <<< "${COMPONENT}")
             PULLSPEC=$(jq -er '.containerImage' <<< "${COMPONENT}")
             IMG_NAME=$(jq -er '.name' <<< "${COMPONENT}")
-            trap 'echo "ERROR: prepare_component failed for component: $IMG_NAME" >&2' ERR
+            trap 'echo "ERROR: prepare_component failed for component: ${IMG_NAME}" >&2' ERR
+            trap 'rm -rf "${DOWNLOAD_DIR:-}"; rm -f "${AUTH_FILE:-}" "${EXTRACT_PY:-}"' EXIT
             BUILD_NAME=$(jq -er '.filePrefix' <<< "${PRODUCT_INFO}")
-            BUILD_NAME=${BUILD_NAME%-*}   # remove version
+            BUILD_NAME="${BUILD_NAME%-*}"   # remove version
             BUILD_VERSION=$(jq -er '.productVersionName' <<< "${PRODUCT_INFO}")
             BUILD_RESPIN=$(jq -er '.staged.files[0].filename' <<< "${COMPONENT}")
             # shellcheck disable=SC2001
-            BUILD_RESPIN=$(echo "$BUILD_RESPIN" | sed -e 's/\.[.a-zA-Z0-9]*$//' )   # Rstrip all extensions
-            BUILD_RESPIN=${BUILD_RESPIN%-*}   # Remove architecture
-            BUILD_RESPIN=${BUILD_RESPIN##*-}   # Lstrip on - to get the respin
+            BUILD_RESPIN=$(echo "${BUILD_RESPIN}" | sed -e 's/\.[.a-zA-Z0-9]*$//' )   # Rstrip all extensions
+            BUILD_RESPIN="${BUILD_RESPIN%-*}"   # Remove architecture
+            BUILD_RESPIN="${BUILD_RESPIN##*-}"   # Lstrip on - to get the respin
             RESOURCES_JSON='
             {
                 "api": "v1",
@@ -212,34 +221,93 @@ spec:
                 "images": []
             }'
             RESOURCES_JSON=$(jq -c \
-                            --arg build_name "$BUILD_NAME" \
-                            --arg build_respin "$BUILD_RESPIN" \
-                            --arg build_date "$(date -d "@$BUILD_RESPIN" +%Y%m%d)" \
-                            --arg build_version "$BUILD_VERSION" \
+                            --arg build_name "${BUILD_NAME}" \
+                            --arg build_respin "${BUILD_RESPIN}" \
+                            --arg build_date "$(date -d "@${BUILD_RESPIN}" +%Y%m%d)" \
+                            --arg build_version "${BUILD_VERSION}" \
                             '.build.name=$build_name |
                             .build.respin=$build_respin |
                             .release.date=$build_date |
-                            .build.version=$build_version' <<< "$RESOURCES_JSON"
+                            .build.version=$build_version' <<< "${RESOURCES_JSON}"
             )
             DESTINATION="${DISK_IMGS_DIR}/${IMG_NAME}"
             mkdir -p "${DESTINATION}"
             DOWNLOAD_DIR=$(mktemp -d -p /var/workdir)
-            cd "$DOWNLOAD_DIR"
+            cd "${DOWNLOAD_DIR}"
             # oras has very limited support for selecting the right auth entry,
             # so create a custom auth file with just one entry
             AUTH_FILE=$(mktemp)
-            select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
-            oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
+            EXTRACT_PY=""
+            select-oci-auth "${PULLSPEC}" > "${AUTH_FILE}"
             NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
+            ALL_SOURCES=()
+            MISSING_SOURCES=()
             for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
-                FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
-                SOURCE=$(jq -er '.source' <<< "$FILE")
-                FILENAME=$(jq -er '.filename' <<< "$FILE")
+                SOURCE=$(jq -er --arg i "${i}" '.staged.files[$i|tonumber].source' \
+                    <<< "${COMPONENT}")
+                mapped_source="${SOURCE}"
+                while [[ "${SOURCE}" == /* ]]; do
+                    SOURCE="${SOURCE#/}"
+                done
+                if [[ -z "${SOURCE}" ]]; then
+                    MSG="Mapped source '${mapped_source}' is empty after removing a leading slash"
+                    echo "ERROR: ${MSG}" >&2
+                    return 1
+                fi
+                case "/${SOURCE}/" in
+                    */../*)
+                        MSG="Mapped source '${mapped_source}' contains a parent-directory component"
+                        echo "ERROR: ${MSG}" >&2
+                        return 1
+                        ;;
+                esac
+                ALL_SOURCES+=("${SOURCE}")
+            done
+            if oras pull --registry-config "${AUTH_FILE}" "${PULLSPEC}"; then
+                for SOURCE in "${ALL_SOURCES[@]}"; do
+                    if [ ! -f "${SOURCE}" ]; then
+                        MISSING_SOURCES+=("${SOURCE}")
+                    fi
+                done
+            else
+                echo "oras pull failed; extracting from image layers:"
+                echo "${ALL_SOURCES[*]}"
+                MISSING_SOURCES=("${ALL_SOURCES[@]}")
+            fi
+            if [ "${#MISSING_SOURCES[@]}" -gt 0 ]; then
+                echo "Extracting mapped sources from image layers:"
+                echo "${MISSING_SOURCES[*]}"
+                MISSING_JSON="$(jq -n --args '$ARGS.positional' -- "${MISSING_SOURCES[@]}")"
+                EXTRACT_PY="$(mktemp)"
+                cat > "${EXTRACT_PY}" <<'PY'
+        import json
+        import os
+        from pathlib import Path
+        import release_service_utils.helpers.oras_utils as oras_utils
+        oras_utils.extract_disk_image_files(
+            os.environ["PULLSPEC"],
+            json.loads(os.environ["MISSING_JSON"]),
+            Path(os.environ["DOWNLOAD_DIR"]),
+        )
+        PY
+                if ! PULLSPEC="${PULLSPEC}" DOWNLOAD_DIR="${DOWNLOAD_DIR}" \
+                    MISSING_JSON="${MISSING_JSON}" python3 "${EXTRACT_PY}"; then
+                    MSG="Layered-image extraction failed for '${PULLSPEC}'"
+                    echo "ERROR: ${MSG}" >&2
+                    return 1
+                fi
+            fi
+            for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
+                FILE=$(jq -c --arg i "${i}" '.staged.files[$i|tonumber]' <<< "${COMPONENT}")
+                SOURCE="${ALL_SOURCES[${i}]}"
+                FILENAME=$(jq -er '.filename' <<< "${FILE}")
 
-                # Fail early if the source file pulled by ORAS does not exist
+                # Fail early if the source file is still missing after oras/extract
                 if [ ! -f "${SOURCE}" ]; then
-                    echo "ERROR: Source file '${SOURCE}' for component '${FILENAME}' was not found after oras pull." >&2
-                    exit 1
+                    MSG="Source file '${SOURCE}' for component '${FILENAME}' "
+                    MSG+="was not found after oras pull from '${PULLSPEC}'."
+                    echo "ERROR: ${MSG}" >&2
+                    return 1
                 fi
 
                 # Decompress if the source file is gzipped
@@ -249,29 +317,30 @@ spec:
                     FILENAME="${FILENAME%.gz}"
                 fi
                 if [ -f "${DESTINATION}/${FILENAME}" ]; then
-                    echo -n "Multiple files use the same destination value: $DESTINATION" >&2
-                    echo " and filename value: $FILENAME. Failing..." >&2
-                    exit 1
+                    echo -n "Multiple files use the same destination value: ${DESTINATION}" >&2
+                    echo " and filename value: ${FILENAME}. Failing..." >&2
+                    return 1
                 fi
 
-                BUILD_ARCH=${FILENAME%.*}   # Rstrip extension
-                BUILD_ARCH=${BUILD_ARCH##*-}  # Lstrip on - to get the arch
+                BUILD_ARCH="${FILENAME%.*}"   # Rstrip extension
+                BUILD_ARCH="${BUILD_ARCH##*-}"  # Lstrip on - to get the arch
 
                 case "${FILENAME}" in
                     *.vhd) image_type="VHD" ;;
                     *.raw) image_type="AMI" ;;
-                    *)     echo "Skipping unsupported file: $FILENAME"; continue ;;
+                    *)     echo "Skipping unsupported file: ${FILENAME}"; continue ;;
                 esac
 
-                mv "$SOURCE" "${DESTINATION}/${FILENAME}"
-                RESOURCES_JSON=$(jq --arg filename "$FILENAME" --arg arch "$BUILD_ARCH" \
-                    '.images[.images | length] = {"path": $filename, "architecture": $arch}' <<< "$RESOURCES_JSON")
-                RESOURCES_JSON=$(jq --arg image_type "$image_type" \
-                    '.type = $image_type' <<< "$RESOURCES_JSON")
+                mv "${SOURCE}" "${DESTINATION}/${FILENAME}"
+                RESOURCES_JSON=$(jq --arg filename "${FILENAME}" --arg arch "${BUILD_ARCH}" \
+                    '.images[.images | length] = {"path": $filename, "architecture": $arch}' \
+                    <<< "${RESOURCES_JSON}")
+                RESOURCES_JSON=$(jq --arg image_type "${image_type}" \
+                    '.type = $image_type' <<< "${RESOURCES_JSON}")
             done
-            echo "$RESOURCES_JSON" | yq -P -I 4 > "$DESTINATION/resources.yaml"
-            rm -rf "$DOWNLOAD_DIR"
-            rm -f "$AUTH_FILE"
+            echo "${RESOURCES_JSON}" | yq -P -I 4 > "${DESTINATION}/resources.yaml"
+            rm -rf "${DOWNLOAD_DIR}"
+            rm -f "${AUTH_FILE}" "${EXTRACT_PY}"
         }
 
         # Process each component in parallel with memory-aware job management
@@ -288,12 +357,12 @@ spec:
                 jobs_collected=$((jobs_collected + 1))
             done
 
-            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            prepare_component "$COMPONENT" &
+            COMPONENT=$(jq -c --arg i "${i}" '.components[$i|tonumber]' <<< "${SNAPSHOT_JSON}")
+            prepare_component "${COMPONENT}" &
             jobs_spawned=$((jobs_spawned + 1))
 
             # Allow memory usage to stabilize before next spawn.
-            sleep $STABILIZATION_DELAY
+            sleep "${STABILIZATION_DELAY}"
         done
 
         # Wait for all remaining jobs - use counter to collect all exit codes
@@ -304,7 +373,7 @@ spec:
         done
 
         # This is redundant since we have set -e, but makes things a bit more clear
-        if [ $success != "true" ]; then
+        if [ "${success}" != "true" ]; then
             echo "ERROR: prepare_component failed for at least one component"
             exit 1
         fi
@@ -321,7 +390,7 @@ spec:
             EXTRA_ARGS+=("--nochannel")
         fi
         marketplacesvm_push_wrapper --debug "${EXTRA_ARGS[@]}" \
-            --source "${BASE_DIR}" --starmap-file "$STARMAP_MAPPING_FILE"
+            --source "${BASE_DIR}" --starmap-file "${STARMAP_MAPPING_FILE}"
 
         # Collect artifacts generated by the wrapper
         if [ -d "${BASE_DIR}/artifacts" ]; then
