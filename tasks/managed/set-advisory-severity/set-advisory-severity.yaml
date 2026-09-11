@@ -115,94 +115,25 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: set-severity
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/lgallovi-test/release-service-utils@sha256:b84d7c02d368d1c9e90ddc9d3bdd042a10041eb6366f120e883a723cb2c27af6
       computeResources:
         limits:
-          memory: 512Mi
+          memory: 768Mi
         requests:
-          memory: 512Mi
-          cpu: 250m
-      script: |
-        #!/usr/bin/env bash
-        set -x
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No data JSON was provided."
-            exit 1
-        fi
-
-        advisoryType=$(jq -r '.releaseNotes.type' "${DATA_FILE}")
-        if [[ "$advisoryType" != "RHSA" ]] ; then
-            echo "Advisory is not of type RHSA. Not setting severity"
-            if [ "$(jq '.releaseNotes | has("severity")' "${DATA_FILE}")" == "true" ] ; then
-              echo "User provided severity key for non RHSA advisory. Removing it"
-              jq 'del(.releaseNotes.severity)' "${DATA_FILE}" > /tmp/data.tmp && mv /tmp/data.tmp "${DATA_FILE}"
-            fi
-            exit 0
-        fi
-
-        # Ensure RHSA is only used if CVEs are provided
-        NUM_CVES=$(jq '
-        (
-          [.releaseNotes.content.images // [] | .[]?.cves.fixed // {} | length] |
-          add
-        ) + (
-          [.releaseNotes.content.artifacts // [] | .[]?.cves.fixed // {} | length] |
-          add
-        )
-        ' "${DATA_FILE}")
-        if [[ "$advisoryType" == "RHSA" ]] && [[ "$NUM_CVES" -eq 0 ]] ; then
-            echo "Provided advisory type is RHSA, but no fixed CVEs were listed"
-            echo "RHSA should only be used if CVEs are fixed in the advisory. Failing..."
-            exit 1
-        fi
-
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        # Cleanly exit here if generic artifacts are detected.
-        if jq -e '.releaseNotes.content.artifacts | length > 0' "$DATA_FILE" > /dev/null; then
-            echo "Generic artifact type detected, not setting advisory severity"
-            exit 0
-        fi
-
-        RELEASENOTESIMAGES=$(jq -c '.releaseNotes.content.images' "${DATA_FILE}" | gzip -c | base64 -w 0)
-
-        IR_FILE="$(params.dataDir)/$(context.task.name)/ir-result.txt"
-        mkdir -p "$(dirname "$IR_FILE")"
-
-        internal-request --pipeline "get-advisory-severity" \
-            --pipeline-timeout "2h0m0s" \
-            --task-timeout "1h55m0s" \
-            -p releaseNotesImages="${RELEASENOTESIMAGES}" \
-            -p taskGitUrl="$(params.taskGitUrl)" \
-            -p taskGitRevision="$(params.taskGitRevision)" \
-            -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-            -t "$(params.requestTimeout)" \
-            -s true \
-            | tee "$IR_FILE" || \
-            (grep "^\[" "$IR_FILE" | jq . && exit 1)
-
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_FILE")
-        echo "done (${internalRequest})"
-
-        results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
-        internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
-        internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
-
-        echo "** internalRequestPipelineRunName: ${internalRequestPipelineRunName}"
-        echo "** internalRequestTaskRunName: ${internalRequestTaskRunName}"
-
-        if [[ "$(echo "${results}" | jq -r '.result')" == "Success" ]]; then
-          SEVERITY=$(jq -r '.severity' <<< "$results")
-          echo "Setting severity to $SEVERITY"
-          jq --arg sev "$SEVERITY" '.releaseNotes.severity = $sev' "${DATA_FILE}" > /tmp/data.tmp \
-            && mv /tmp/data.tmp "${DATA_FILE}"
-        else
-          echo "The InternalRequest to find the severity was unsuccessful"
-          jq -r '.result' <<< "$results"
-          exit 1
-        fi
+          memory: 768Mi
+          cpu: 300m
+      env:
+        - name: DATA_FILE
+          value: "$(params.dataDir)/$(params.dataPath)"
+        - name: PIPELINE_RUN_UID
+          value: "$(params.pipelineRunUid)"
+        - name: REQUEST_TIMEOUT
+          value: "$(params.requestTimeout)"
+        - name: TASK_GIT_URL
+          value: "$(params.taskGitUrl)"
+        - name: TASK_GIT_REVISION
+          value: "$(params.taskGitRevision)"
+      command: ["python3", "-m", "set_advisory_severity"]
     - name: create-trusted-artifact
       computeResources:
         limits:
