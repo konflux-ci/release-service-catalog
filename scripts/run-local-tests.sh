@@ -317,22 +317,27 @@ run_single_test_item() {
     fi
     
     log "Starting test: $test_name (workflow: $workflow_type)"
+
+    local defer_task_cleanup_env=""
+    if [[ "${test_item}" == *tests/test-*.yaml ]]; then
+        defer_task_cleanup_env="DEFER_TASK_CLEANUP=true "
+    fi
     
     # Run test based on workflow type
     local test_cmd
     case "$workflow_type" in
         "trusted-artifacts")
             if [ ${#test_args[@]} -gt 0 ]; then
-                test_cmd="TEST_ITEMS='$test_item' USE_TRUSTED_ARTIFACTS=true DOCKER_CONFIG_JSON='${DOCKER_CONFIG_JSON:-}' '$test_script' '${test_args[*]}'"
+                test_cmd="${defer_task_cleanup_env}TEST_ITEMS='$test_item' USE_TRUSTED_ARTIFACTS=true DOCKER_CONFIG_JSON='${DOCKER_CONFIG_JSON:-}' '$test_script' '${test_args[*]}'"
             else
-                test_cmd="TEST_ITEMS='$test_item' USE_TRUSTED_ARTIFACTS=true DOCKER_CONFIG_JSON='${DOCKER_CONFIG_JSON:-}' '$test_script'"
+                test_cmd="${defer_task_cleanup_env}TEST_ITEMS='$test_item' USE_TRUSTED_ARTIFACTS=true DOCKER_CONFIG_JSON='${DOCKER_CONFIG_JSON:-}' '$test_script'"
             fi
             ;;
         "pvc")
             if [ ${#test_args[@]} -gt 0 ]; then
-                test_cmd="TEST_ITEMS='$test_item' '$test_script' '${test_args[*]}'"
+                test_cmd="${defer_task_cleanup_env}TEST_ITEMS='$test_item' '$test_script' '${test_args[*]}'"
             else
-                test_cmd="TEST_ITEMS='$test_item' '$test_script'"
+                test_cmd="${defer_task_cleanup_env}TEST_ITEMS='$test_item' '$test_script'"
             fi
             ;;
         *)
@@ -355,6 +360,29 @@ run_single_test_item() {
         error "FAILED: $test_name (exit code: $exit_code)"
         return $exit_code
     fi
+}
+
+# Delete Tasks installed for explicit test yaml items when workers set
+# DEFER_TASK_CLEANUP. Directory workers still remove their Task themselves.
+cleanup_shared_tasks() {
+    local item task_name
+    local -a task_names=()
+    for item in "$@"; do
+        if [[ "${item}" != *tests/test-*.yaml ]]; then
+            continue
+        fi
+        task_name="$(basename "$(dirname "$(dirname "${item}")")")"
+        task_names+=("${task_name}")
+    done
+    if [ "${#task_names[@]}" -eq 0 ]; then
+        return 0
+    fi
+    readarray -t task_names < <(printf '%s\n' "${task_names[@]}" | sort -u)
+    for task_name in "${task_names[@]}"; do
+        log "Cleaning up shared task ${task_name}"
+        kubectl delete task "${task_name}" --ignore-not-found=true \
+            || warn "Failed to delete task ${task_name}"
+    done
 }
 
 run_tests_parallel() {
@@ -401,10 +429,16 @@ run_tests_parallel() {
     esac
     
     # Execute tests in parallel using xargs pattern
-    printf '%s\n' "${parallel_items[@]}" | xargs -I {} -P "$max_parallel" bash -c "run_single_test_item_${function_suffix} {}" _
-    
+    local xargs_status=0
+    printf '%s\n' "${parallel_items[@]}" | xargs -I {} -P "$max_parallel" bash -c "run_single_test_item_${function_suffix} {}" _ \
+        || xargs_status="${?}"
+
     # Cleanup exported functions
     unset -f "run_single_test_item_${function_suffix}"
+
+    cleanup_shared_tasks "${test_items[@]}"
+
+    return "${xargs_status}"
 }
 
 generate_test_summary() {
@@ -502,6 +536,9 @@ run_tests() {
         done
         return 0
     fi
+
+    SHARED_TASK_CLEANUP_ITEMS=("${test_items[@]}")
+    trap 'cleanup_shared_tasks "${SHARED_TASK_CLEANUP_ITEMS[@]}"; trap - EXIT' EXIT
     
     # Classify tasks by workflow type unless forced
     local workflow_classification
