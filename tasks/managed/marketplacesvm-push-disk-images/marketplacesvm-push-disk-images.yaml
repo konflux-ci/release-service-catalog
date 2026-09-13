@@ -134,7 +134,7 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: pull-and-push-images-to-marketplaces
-      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
+      image: quay.io/konflux-ci/release-service-utils@sha256:b1b7e9ec9c856e8d36c514c5220daa2569738d53c712369c9968cd748ca6814a
       computeResources:
         limits:
           memory: 1Gi
@@ -231,12 +231,45 @@ spec:
             select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
             oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
             NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
+            MISSING_SOURCES=()
             for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
-                FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
+                SOURCE=$(jq -er --arg i "$i" '.staged.files[$i|tonumber].source' <<< "${COMPONENT}")
+                if [ ! -f "${SOURCE}" ]; then
+                    MISSING_SOURCES+=("${SOURCE}")
+                fi
+            done
+            # Flat OCI artifacts unpack via oras pull. Layered images need skopeo + tar extract.
+            if [ "${#MISSING_SOURCES[@]}" -gt 0 ]; then
+                echo "Files not found after oras pull; extracting from image layers:"
+                echo "${MISSING_SOURCES[*]}"
+                LAYER_DIR=$(mktemp -d -p /var/workdir)
+                skopeo copy --retry-times 3 --authfile "${AUTH_FILE}" \
+                    "docker://${PULLSPEC}" "dir:${LAYER_DIR}"
+                while IFS= read -r digest; do
+                    BLOB="${LAYER_DIR}/${digest#sha256:}"
+                    [ -f "${BLOB}" ] || continue
+                    TAR_Z=()
+                    if gzip -t "${BLOB}" >/dev/null 2>&1; then
+                        TAR_Z=(-z)
+                    fi
+                    for SOURCE in "${MISSING_SOURCES[@]}"; do
+                        SOURCE="${SOURCE#/}"
+                        mkdir -p "$(dirname "${DOWNLOAD_DIR}/${SOURCE}")"
+                        for MEMBER in "${SOURCE}" "./${SOURCE}"; do
+                            if tar "${TAR_Z[@]}" -tf "${BLOB}" "${MEMBER}" >/dev/null 2>&1; then
+                                tar "${TAR_Z[@]}" -xOf "${BLOB}" "${MEMBER}" \
+                                    > "${DOWNLOAD_DIR}/${SOURCE}"
+                            fi
+                        done
+                    done
+                done < <(jq -r '.layers[]?.digest // empty' "${LAYER_DIR}/manifest.json")
+                rm -rf "${LAYER_DIR}"
+            fi
+            for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
+                FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "${COMPONENT}")
                 SOURCE=$(jq -er '.source' <<< "$FILE")
                 FILENAME=$(jq -er '.filename' <<< "$FILE")
 
-                # Fail early if the source file pulled by ORAS does not exist
                 if [ ! -f "${SOURCE}" ]; then
                     echo "ERROR: Source file '${SOURCE}' for component '${FILENAME}' was not found after oras pull." >&2
                     exit 1
