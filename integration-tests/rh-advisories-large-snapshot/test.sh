@@ -777,6 +777,13 @@ cleanup_resources() {
                 echo "   ⚠ Failed to delete GitHub repository ${component_repo_name}" >&2
         fi
 
+        # Delete the large snapshot created outside kustomize manifests
+        if [ -n "${large_snapshot_name:-}" ] && [ -n "${tenant_namespace:-}" ]; then
+            echo "🗑️  Deleting large snapshot ${large_snapshot_name} ..."
+            kubectl delete snapshot "${large_snapshot_name}" -n "${tenant_namespace}" --ignore-not-found=true 2>/dev/null || \
+                echo "   ⚠ Failed to delete snapshot ${large_snapshot_name}" >&2
+        fi
+
         # Clean up releases created by this test (using originating-tool label)
         echo "🗑️  Cleaning up test releases (originating-tool=${originating_tool:-rh-advisories-large-snapshot-test})..."
         local old_releases
