@@ -21,4 +21,4 @@ This enables dynamic JQL queries without modifying ReleasePlan for each release 
 | caTrustConfigMapName         | The name of the ConfigMap to read CA bundle data from                                   | Yes      | trusted-ca                                       |
 | caTrustConfigMapKey          | The name of the key in the ConfigMap that contains the CA bundle data                   | Yes      | ca-bundle.crt                                    |
 | roxConfigDir                 | The relative path in the workspace to the roxctl configuration directory (optional)     | Yes      | ""                                               |
-| roxCentralEndpoint           | The url for RHACS Central (optional, required for sbomdiff collector)                   | Yes      | https://acs-d4dgfbkto15c73biblcg.acs.rhcloud.com |
+| roxCentralEndpoint           | The url for RHACS Central (optional, required for cve collector)                        | Yes      | https://acs-d4dgfbkto15c73biblcg.acs.rhcloud.com |
