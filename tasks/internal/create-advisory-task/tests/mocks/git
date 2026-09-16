@@ -1,10 +1,29 @@
 #!/usr/bin/env bash
-# Tekton test mock for create-advisory (GitPython via helpers/vcs/git.py).
-# push/pull are no-ops (no network). clone seeds a local repo; other git calls
-# delegate to REAL_GIT for local index/commit plumbing.
+# Tekton test mock for create-advisory (helpers/vcs/git.py).
+# Simulates a remote with .git/mock-remote so claim/push/fetch/ls-remote work
+# offline. Merge is simulated by pointing origin/main at HEAD on fetch of main.
 set -eux
 
 REAL_GIT=/usr/bin/git
+
+_mock_remote_dir() {
+  local git_common
+  git_common="$("${REAL_GIT}" rev-parse --git-common-dir 2>/dev/null || true)"
+  if [[ -z "${git_common}" || "${git_common}" == ".git" ]]; then
+    echo ".git/mock-remote"
+  else
+    echo "${git_common}/mock-remote"
+  fi
+}
+
+_init_mock_remote() {
+  local dest="$1"
+  local sha
+  sha="$("${REAL_GIT}" -C "${dest}" rev-parse HEAD)"
+  mkdir -p "${dest}/.git/mock-remote/refs/heads"
+  echo "${sha}" >"${dest}/.git/mock-remote/refs/heads/main"
+  "${REAL_GIT}" -C "${dest}" update-ref refs/remotes/origin/main "${sha}"
+}
 
 if [[ "$1" == "clone" ]]; then
   dest="${@: -1}"
@@ -39,30 +58,103 @@ if [[ "$1" == "clone" ]]; then
 EOF
   "${REAL_GIT}" -C "${dest}" add -A
   "${REAL_GIT}" -C "${dest}" commit -q -m "mock advisory repo seed" --allow-empty
+  "${REAL_GIT}" -C "${dest}" branch -M main
+  _init_mock_remote "${dest}"
   exit 0
 fi
 
-# clone_sparse_shallow: repo.git.sparse_checkout("set", ...)
+# After mocked clone, sparse-checkout is a no-op (tree already populated).
 if [[ "$1" == "sparse-checkout" ]]; then
   exit 0
 fi
 
-# clone_sparse_shallow: repo.git.checkout(revision)
-if [[ "$1" == "checkout" ]]; then
-  exit 0
-fi
-
-# origin_ls_tree_name_only: repo.git.ls_tree("-r", "--name-only", ref)
+# origin_ls_tree_name_only: empty listing means no reserved advisory numbers yet.
 if [[ "$1" == "ls-tree" && "$2" == "-r" && "$3" == "--name-only" ]]; then
   exit 0
 fi
 
-# push_origin_with_rebase_retries: remotes.origin.push(branch)
-if [[ "$1" == "push" ]]; then
+if [[ "$1" == "ls-remote" ]]; then
+  # git ls-remote --heads origin refs/heads/<branch>
+  remote_dir="$(_mock_remote_dir)"
+  expected_ref=""
+  for arg in "$@"; do
+    if [[ "${arg}" == refs/heads/* ]]; then
+      expected_ref="${arg}"
+    fi
+  done
+  if [[ -z "${expected_ref}" ]]; then
+    exit 0
+  fi
+  branch="${expected_ref#refs/heads/}"
+  sha_file="${remote_dir}/refs/heads/${branch}"
+  if [[ -f "${sha_file}" ]]; then
+    printf '%s\t%s\n' "$(cat "${sha_file}")" "${expected_ref}"
+  fi
   exit 0
 fi
 
-# push_origin_with_rebase_retries: repo.git.pull("--rebase", "origin", branch)
+if [[ "$1" == "fetch" ]]; then
+  remote="$2"
+  shift 2
+  remote_dir="$(_mock_remote_dir)"
+  for spec in "$@"; do
+    if [[ "${spec}" == *:* ]]; then
+      src="${spec%%:*}"
+      dst="${spec#*:}"
+      branch="${src#refs/heads/}"
+      sha_file="${remote_dir}/refs/heads/${branch}"
+      if [[ -f "${sha_file}" ]]; then
+        sha="$(cat "${sha_file}")"
+      else
+        sha="$("${REAL_GIT}" rev-parse HEAD)"
+      fi
+      "${REAL_GIT}" update-ref "${dst}" "${sha}"
+    else
+      branch="${spec}"
+      sha_file="${remote_dir}/refs/heads/${branch}"
+      # After an MR merge in this unit test, treat current HEAD as landed on main.
+      if [[ "${branch}" == "main" ]]; then
+        sha="$("${REAL_GIT}" rev-parse HEAD)"
+        mkdir -p "${remote_dir}/refs/heads"
+        echo "${sha}" >"${sha_file}"
+      elif [[ -f "${sha_file}" ]]; then
+        sha="$(cat "${sha_file}")"
+      else
+        sha="$("${REAL_GIT}" rev-parse HEAD)"
+      fi
+      "${REAL_GIT}" update-ref "refs/remotes/${remote}/${branch}" "${sha}"
+    fi
+  done
+  exit 0
+fi
+
+if [[ "$1" == "push" ]]; then
+  remote_dir="$(_mock_remote_dir)"
+  mkdir -p "${remote_dir}/refs/heads"
+  sha="$("${REAL_GIT}" rev-parse HEAD)"
+  branch=""
+  for arg in "$@"; do
+    if [[ "${arg}" == HEAD:refs/heads/* ]]; then
+      branch="${arg#HEAD:refs/heads/}"
+    elif [[ "${arg}" != "push" && "${arg}" != "--force-with-lease"* && "${arg}" != "origin" && "${arg}" != "--force" ]]; then
+      # plain `git push origin <branch>`
+      if [[ "${arg}" != -* ]]; then
+        branch="${arg}"
+      fi
+    fi
+  done
+  if [[ -n "${branch}" ]]; then
+    # create-only claim: fail if remote already has the branch
+    if [[ "$*" == *"--force-with-lease="* && -f "${remote_dir}/refs/heads/${branch}" ]]; then
+      echo "mock remote rejected create-only push of ${branch}" >&2
+      exit 1
+    fi
+    echo "${sha}" >"${remote_dir}/refs/heads/${branch}"
+    "${REAL_GIT}" update-ref "refs/remotes/origin/${branch}" "${sha}"
+  fi
+  exit 0
+fi
+
 if [[ "$1" == "pull" ]]; then
   exit 0
 fi
