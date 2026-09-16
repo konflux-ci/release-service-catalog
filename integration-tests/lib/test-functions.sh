@@ -239,6 +239,21 @@ cleanup_resources() {
         done
     fi
 
+    # Remove the test webhook entries so pipelines-as-code-webhooks-secret doesn't grow to
+    # its limit and cause "etcdserver: request is too large".
+    if [ -n "$tenant_namespace" ]; then
+        for component in ${PTSV_COMPONENTS}; do
+            local _v="${component}_git_url"
+            local _git_url="${!_v}"
+            if [ -n "$_git_url" ]; then
+                echo "Removing webhook secret entry for ${_git_url}..." | tee -a "${cleanup_log_file}"
+                "${SUITE_DIR}/../scripts/remove-webhook-secret-entry.sh" "${tenant_namespace}" "${_git_url}" \
+                    >> "${cleanup_log_file}" 2>&1 || \
+                    echo "Warning: Failed to remove webhook secret entry for ${_git_url}" | tee -a "${cleanup_log_file}"
+            fi
+        done
+    fi
+
     if [ -n "$advisory_yaml_dir" ] && [ -d "$advisory_yaml_dir" ]; then
         echo "Removing advisory YAML directory..." | tee -a "${cleanup_log_file}"
         rm -rf "${advisory_yaml_dir}" >> "${cleanup_log_file}" 2>&1

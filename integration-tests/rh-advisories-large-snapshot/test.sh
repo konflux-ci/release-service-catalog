@@ -780,6 +780,14 @@ cleanup_resources() {
                 echo "   ⚠ Failed to delete GitHub repository ${component_repo_name}" >&2
         fi
 
+        # Remove the test webhook entry so pipelines-as-code-webhooks-secret doesn't grow to
+        # its limit and cause "etcdserver: request is too large".
+        if [ -n "${component_git_url:-}" ] && [ -n "${tenant_namespace:-}" ]; then
+            echo "🗑️  Removing webhook secret entry for ${component_git_url} ..."
+            "${SUITE_DIR}/../scripts/remove-webhook-secret-entry.sh" "${tenant_namespace}" "${component_git_url}" || \
+                echo "   ⚠ Failed to remove webhook secret entry for ${component_git_url}" >&2
+        fi
+
         # Delete the large snapshot created outside kustomize manifests
         if [ -n "${large_snapshot_name:-}" ] && [ -n "${tenant_namespace:-}" ]; then
             echo "🗑️  Deleting large snapshot ${large_snapshot_name} ..."
