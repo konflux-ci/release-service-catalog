@@ -1,0 +1,198 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: generate-py-osv
+spec:
+  description: |
+    Generate OSV security metadata for remediated Python artifacts. Reads the
+    build-index.json OCI referrer from each component image and runs
+    `slan-cuan generate-security-metadata` (fath-cuan process_osv) with OSIDB
+    enrichment. OSV output is threaded onward on the trusted artifact.
+  params:
+    - name: SNAPSHOT_PATH
+      type: string
+      description: Path to the reduced snapshot spec (relative to dataDir).
+    - name: OSIDB_API_URL
+      type: string
+      default: ""
+    - name: OSIDB_KERBEROS_PRINCIPAL
+      type: string
+      default: ""
+    - name: OSIDB_KERBEROS_KEYTAB_PATH
+      type: string
+      default: /var/run/secrets/osidb-keytab/keytab
+    - name: OSIDB_KEYTAB_SECRET_NAME
+      type: string
+      description: Secret holding the OSIDB Kerberos keytab.
+      default: osidb-keytab-secret
+    - name: BUILD_INDEX_MEDIA_TYPE
+      type: string
+      default: application/vnd.lightwell.build-index.v1+json
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact containing the reduced snapshot spec and files
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: /var/workdir
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for the trusted artifacts created
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+  results:
+    - name: sourceDataArtifact
+      description: Produced trusted data artifact
+      type: string
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: osidb-keytab
+      secret:
+        secretName: $(params.OSIDB_KEYTAB_SECRET_NAME)
+        optional: true
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: SNAPSHOT_PATH
+        value: $(params.dataDir)/$(params.SNAPSHOT_PATH)
+      - name: SECURITY_METADATA_DIR
+        value: $(params.dataDir)/security_metadata
+      - name: BUILD_INDEX_MEDIA_TYPE
+        value: $(params.BUILD_INDEX_MEDIA_TYPE)
+      - name: OSIDB_API_URL
+        value: $(params.OSIDB_API_URL)
+      - name: OSIDB_KERBEROS_PRINCIPAL
+        value: $(params.OSIDB_KERBEROS_PRINCIPAL)
+      - name: OSIDB_KERBEROS_KEYTAB_PATH
+        value: $(params.OSIDB_KERBEROS_KEYTAB_PATH)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    volumeMounts:
+      - name: workdir
+        mountPath: /var/workdir
+      - name: osidb-keytab
+        mountPath: /var/run/secrets/osidb-keytab
+        readOnly: true
+  steps:
+    - name: prepare-workdir
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 32Mi
+          cpu: 10m
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      command:
+        - mkdir
+        - -p
+        - $(params.dataDir)
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 10m
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: generate
+      image: quay.io/light-castle/slan-cuan:latest
+      computeResources:
+        limits:
+          memory: 512Mi
+          cpu: 500m
+        requests:
+          memory: 512Mi
+          cpu: 250m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        mkdir -p "${SECURITY_METADATA_DIR}"
+        IDX_DIR="$(params.dataDir)/build-index"
+        mkdir -p "${IDX_DIR}"
+
+        # Pull the build-index referrer for each component image and generate OSV.
+        jq -r '.components[].containerImage' "${SNAPSHOT_PATH}" | while read -r IMG; do
+          echo "Discovering build-index referrer on ${IMG}"
+          DIGEST=$(oras discover ${ORAS_OPTIONS} \
+            --artifact-type "${BUILD_INDEX_MEDIA_TYPE}" \
+            --format go-template --template '{{range .referrers}}{{.reference}}{{"\n"}}{{end}}' \
+            "${IMG}" | head -n1)
+          if [ -z "${DIGEST}" ]; then
+            echo "No build-index referrer on ${IMG}; skipping."
+            continue
+          fi
+          oras pull ${ORAS_OPTIONS} -o "${IDX_DIR}" "${DIGEST}"
+
+          slan-cuan --verbose generate-security-metadata \
+            --index-basedir "build-index" \
+            --index-filename "build-index.json" \
+            --workdir "$(params.dataDir)" \
+            --output-dir "${SECURITY_METADATA_DIR}" \
+            --osidb-api-url "${OSIDB_API_URL}" \
+            --osidb-kerberos-principal "${OSIDB_KERBEROS_PRINCIPAL}" \
+            --osidb-keytab "${OSIDB_KERBEROS_KEYTAB_PATH}"
+        done
+
+        echo "Generated OSV files:"
+        ls -la "${SECURITY_METADATA_DIR}" || true
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
