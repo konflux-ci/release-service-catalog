@@ -1,0 +1,134 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-py-osv-pulp
+spec:
+  description: Test publishing Python OSV files to a Pulp file repository
+  params:
+    - name: ociStorage
+      type: string
+    - name: ociArtifactExpiresAfter
+      type: string
+      default: "1d"
+    - name: orasOptions
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      type: string
+      default: ""
+    - name: dataDir
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              mkdir -p "$(params.dataDir)/security_metadata"
+              echo '{"schema_version":"1.6.8","id":"x_RHLW-CVE-2024-0001-0.4.0"}' \
+                > "$(params.dataDir)/security_metadata/x_RHLW-CVE-2024-0001-0.4.0.json"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: push-py-osv-pulp
+      params:
+        - name: PULP_URL
+          value: https://test.packages.redhat.com
+        - name: PULP_DOMAIN
+          value: test-domain
+        - name: PULP_FILE_REPOSITORY
+          value: osv-python-test
+        - name: SERVICE_ACCOUNT_SECRET_NAME
+          value: rhtl-pulp-credentials-secret
+        - name: securityMetadataDir
+          value: security_metadata
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: ociStorage
+          value: $(params.ociStorage)
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: orasOptions
+          value: $(params.orasOptions)
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+          - name: sourceDataArtifact
+            type: string
+          - name: orasOptions
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+        steps:
+          - name: restore
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              test -f "$(params.dataDir)/security_metadata/.osv_upload_marker"
+              echo "All checks passed!"
+      runAfter:
+        - run-task

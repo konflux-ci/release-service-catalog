@@ -1,0 +1,184 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-py-osv-pulp
+spec:
+  description: |
+    Publish generated Python OSV security-metadata files to a dedicated Pulp
+    file repository. Restores the trusted artifact produced by generate-py-osv
+    (or push-py-pulp) and uploads each JSON file under securityMetadataDir to
+    PULP_FILE_REPOSITORY using the pulp CLI. This is a sibling of push-py-pulp
+    (upload-py-pulp): the wheels go to a Python package repository, the OSV
+    files go to a separate Pulp file repository.
+  params:
+    - name: SERVICE_ACCOUNT_SECRET_NAME
+      type: string
+      description: >-
+        The name of the secret containing the terms-based registry service account credentials
+      default: rhtl-pulp-credentials-secret
+    - name: PULP_URL
+      type: string
+      description: The base URL of the Pulp server
+    - name: PULP_DOMAIN
+      type: string
+      description: The domain to use for Pulp operations
+    - name: PULP_FILE_REPOSITORY
+      type: string
+      description: The Pulp file repository to publish OSV security metadata to
+    - name: securityMetadataDir
+      type: string
+      description: The relative path within dataDir where OSV security metadata files are located
+      default: security_metadata
+    - name: sourceDataArtifact
+      type: string
+      description: Trusted Artifact containing the generated OSV security metadata files
+    - name: dataDir
+      type: string
+      description: The location where data will be stored
+      default: /var/workdir
+    - name: ociArtifactExpiresAfter
+      type: string
+      description: Expiration date for the trusted artifacts created
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: ociStorage
+      type: string
+      description: The OCI repository where the Trusted Artifacts are stored
+  results:
+    - description: Produced trusted data artifact
+      name: sourceDataArtifact
+      type: string
+    - description: Count of OSV security metadata files uploaded to the Pulp file repository
+      name: SECURITY_METADATA_UPLOADED
+      type: string
+  volumes:
+    - name: service-account-secret
+      secret:
+        secretName: $(params.SERVICE_ACCOUNT_SECRET_NAME)
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+    env:
+      - name: PULP_URL
+        value: $(params.PULP_URL)
+      - name: PULP_DOMAIN
+        value: $(params.PULP_DOMAIN)
+      - name: PULP_FILE_REPOSITORY
+        value: $(params.PULP_FILE_REPOSITORY)
+      - name: SECURITY_METADATA_DIR
+        value: $(params.dataDir)/$(params.securityMetadataDir)
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    volumeMounts:
+      - name: service-account-secret
+        mountPath: "/etc/service-account-secret"
+        readOnly: true
+      - name: workdir
+        mountPath: /var/workdir
+  steps:
+    - name: prepare-workdir
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 32Mi
+          cpu: 10m
+        requests:
+          memory: 32Mi
+          cpu: 10m
+      command:
+        - mkdir
+        - -p
+        - $(params.dataDir)
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 10m
+        requests:
+          memory: 64Mi
+          cpu: 10m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: publish
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+          cpu: 100m
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        PULP_USERNAME=$(< /etc/service-account-secret/username)
+        PULP_PASSWORD=$(< /etc/service-account-secret/password)
+        export PULP_USERNAME PULP_PASSWORD
+
+        UPLOADED=0
+        for f in "${SECURITY_METADATA_DIR}"/*.json; do
+          [ -e "$f" ] || continue
+          echo "Uploading OSV security metadata: $(basename "$f")"
+          pulp --base-url "${PULP_URL}" --domain "${PULP_DOMAIN}" file content upload \
+            --file "$f" --relative-path "$(basename "$f")" \
+            --repository "${PULP_FILE_REPOSITORY}"
+          UPLOADED=$((UPLOADED + 1))
+        done
+
+        echo "Security metadata: ${UPLOADED} file(s) uploaded"
+        echo -n "${UPLOADED}" > "$(results.SECURITY_METADATA_UPLOADED.path)"
+    - name: create-trusted-artifact
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 250m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: "$(params.taskGitUrl)"
+          - name: revision
+            value: "$(params.taskGitRevision)"
+          - name: pathInRepo
+            value: stepactions/create-trusted-artifact/create-trusted-artifact.yaml
+      params:
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(results.sourceDataArtifact.path)
