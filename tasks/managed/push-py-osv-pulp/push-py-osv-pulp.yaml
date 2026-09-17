@@ -143,15 +143,33 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -euo pipefail
+
+        # pulp-cli does not read PULP_USERNAME/PULP_PASSWORD env vars (its
+        # --username/--password options have no envvar= binding), so
+        # credentials must be passed via a --config cli.toml instead. Using a
+        # short-lived config file (rather than --username/--password flags)
+        # also avoids putting the password in process-visible CLI args.
+        CONFIG_FILE=$(mktemp)
+        trap 'rm -f "${CONFIG_FILE}"' EXIT
+
+        set +x
         PULP_USERNAME=$(< /etc/service-account-secret/username)
         PULP_PASSWORD=$(< /etc/service-account-secret/password)
-        export PULP_USERNAME PULP_PASSWORD
+        cat > "${CONFIG_FILE}" <<EOF
+        [cli]
+        base_url = "${PULP_URL}"
+        username = "${PULP_USERNAME}"
+        password = "${PULP_PASSWORD}"
+        EOF
+        chmod 600 "${CONFIG_FILE}"
+        unset PULP_USERNAME PULP_PASSWORD
+        set -x
 
         UPLOADED=0
         for f in "${SECURITY_METADATA_DIR}"/*.json; do
           [ -e "$f" ] || continue
           echo "Uploading OSV security metadata: $(basename "$f")"
-          pulp --base-url "${PULP_URL}" --domain "${PULP_DOMAIN}" file content upload \
+          pulp --config "${CONFIG_FILE}" --domain "${PULP_DOMAIN}" file content upload \
             --file "$f" --relative-path "$(basename "$f")" \
             --repository "${PULP_FILE_REPOSITORY}"
           UPLOADED=$((UPLOADED + 1))
