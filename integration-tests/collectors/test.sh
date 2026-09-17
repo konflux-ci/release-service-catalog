@@ -97,7 +97,7 @@ verify_release_contents() {
     advisory_url=$(jq -r '.status.artifacts.advisory.url // ""' <<< "${release_json}")
     advisory_internal_url=$(jq -r '.status.artifacts.advisory.internal_url // ""' <<< "${release_json}")
     catalog_url=$(jq -r '.status.artifacts.catalog_urls[]?.url // ""' <<< "${release_json}")
-    cve=$(jq -r '.status.collectors.tenant.cve.releaseNotes.cves[]? | select(.key == "CVE-2024-8260") | .key // ""' <<< "${release_json}")
+    cve=$(jq -r '.status.collectors.tenant."gitlog-cve".releaseNotes.cves[]? | select(.key == "CVE-2024-8260") | .key // ""' <<< "${release_json}")
     sboms=$(jq -r '.status.artifacts.sboms // ""' <<< "${release_json}")
 
     # Verify container images using shared helper
