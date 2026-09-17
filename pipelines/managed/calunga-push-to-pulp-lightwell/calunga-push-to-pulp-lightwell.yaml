@@ -46,26 +46,6 @@ spec:
       type: string
       description: The revision in the taskGitUrl repo to be used
       default: production
-    - name: pulpBaseUrl
-      type: string
-      description: The base URL of the Pulp server
-      default: https://packages.redhat.com
-    - name: pulpDomain
-      type: string
-      description: The domain to use for Pulp operations
-      default: public-trusted-libraries
-    - name: pulpApiRoot
-      type: string
-      description: The API root path of the Pulp server
-      default: "/api/"
-    - name: serviceAccountSecretName
-      type: string
-      description: The name of the secret containing the Pulp service account credentials
-      default: rhtl-pulp-credentials-secret
-    - name: pulpRepository
-      type: string
-      description: The Pulp repository to upload packages to
-      default: main
     - name: signingSecretName
       type: string
       description: The name of the AWS KMS signing secret
@@ -74,8 +54,11 @@ spec:
       description: Name of the ConfigMap with config options, e.g. ociStorage
       type: string
       default: release-pipeline-config
+    - name: dataDir
+      type: string
+      description: Path used for working directories
+      default: /var/workdir/content
   tasks:
-
     - name: config
       taskRef:
         params:
@@ -120,6 +103,41 @@ spec:
         - name: ociStorage
           value: $(tasks.config.results.ociStorage)
 
+    - name: collect-task-params
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/collect-task-params/collect-task-params.yaml
+      runAfter:
+        - collect-data
+      params:
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+        - name: ociStorage
+          value: $(tasks.config.results.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.collect-data.results.sourceDataArtifact)"
+        - name: dataPath
+          value: $(tasks.collect-data.results.data)
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: keysToExtract
+          value: |
+            [
+              {"resultIndex": 0, "key": ".pulp.baseUrl"},
+              {"resultIndex": 1, "key": ".pulp.domain"},
+              {"resultIndex": 2, "key": ".pulp.apiRoot"},
+              {"resultIndex": 3, "key": ".pulp.repository"},
+              {"resultIndex": 4, "key": ".pulp.secretName"}
+            ]
+
     - name: reduce-snapshot
       taskRef:
         resolver: "git"
@@ -132,7 +150,7 @@ spec:
             value: tasks/managed/reduce-snapshot/reduce-snapshot.yaml
       params:
         - name: SNAPSHOT
-          value: $(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)
+          value: $(params.dataDir)/$(tasks.collect-data.results.snapshotSpec)
         - name: SINGLE_COMPONENT
           value: $(tasks.collect-data.results.singleComponentMode)
         - name: SINGLE_COMPONENT_CUSTOM_RESOURCE
@@ -140,7 +158,7 @@ spec:
         - name: SINGLE_COMPONENT_CUSTOM_RESOURCE_NS
           value: $(tasks.collect-data.results.snapshotNamespace)
         - name: SNAPSHOT_PATH
-          value: $(workspaces.data.path)/$(tasks.collect-data.results.snapshotSpec)
+          value: $(params.dataDir)/$(tasks.collect-data.results.snapshotSpec)
         - name: taskGitUrl
           value: $(params.taskGitUrl)
         - name: taskGitRevision
@@ -149,6 +167,8 @@ spec:
           value: "$(tasks.collect-data.results.sourceDataArtifact)"
         - name: ociStorage
           value: $(tasks.config.results.ociStorage)
+        - name: dataDir
+          value: $(params.dataDir)
       runAfter:
         - collect-data
 
@@ -204,7 +224,7 @@ spec:
         - name: taskGitRevision
           value: $(params.taskGitRevision)
         - name: dataDir
-          value: /var/workdir/content
+          value: $(params.dataDir)
         - name: dataPath
           value: $(tasks.collect-data.results.data)
       runAfter:
@@ -255,19 +275,19 @@ spec:
             value: tasks/managed/upload-py-pulp/upload-py-pulp.yaml
       params:
         - name: PULP_BASE_URL
-          value: $(params.pulpBaseUrl)
-        - name: PULP_API_ROOT
-          value: $(params.pulpApiRoot)
+          value: $(tasks.collect-task-params.results.extractedValues[0])
         - name: PULP_DOMAIN
-          value: $(params.pulpDomain)
-        - name: SERVICE_ACCOUNT_SECRET_NAME
-          value: $(params.serviceAccountSecretName)
+          value: $(tasks.collect-task-params.results.extractedValues[1])
+        - name: PULP_API_ROOT
+          value: $(tasks.collect-task-params.results.extractedValues[2])
         - name: PULP_REPOSITORY
-          value: $(params.pulpRepository)
+          value: $(tasks.collect-task-params.results.extractedValues[3])
+        - name: SERVICE_ACCOUNT_SECRET_NAME
+          value: $(tasks.collect-task-params.results.extractedValues[4])
         - name: sourceDataArtifact
           value: "$(tasks.rh-sign-python-wheels.results.sourceDataArtifact)"
         - name: dataDir
-          value: /var/workdir/content
+          value: $(params.dataDir)
         - name: taskGitUrl
           value: $(params.taskGitUrl)
         - name: taskGitRevision
