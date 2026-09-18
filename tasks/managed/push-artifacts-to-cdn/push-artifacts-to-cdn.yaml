@@ -20,9 +20,6 @@ spec:
     - name: dataPath
       type: string
       description: Path to the data JSON in the data workspace
-    - name: releasePlanAdmissionPath
-      description: Path to the JSON string of the releasePlanAdmission in the data workspace
-      type: string
     - name: pipelineRunUid
       type: string
       description: The uid of the current pipelineRun. Used as a label value when creating internal requests
@@ -35,10 +32,6 @@ spec:
     - name: resultsDirPath
       description: Path to the results directory in the data workspace
       type: string
-    - name: requestTimeout
-      type: string
-      default: "86400"
-      description: Request timeout
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
@@ -132,148 +125,33 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: run-script
-      image: quay.io/konflux-ci/release-service-utils@sha256:d3bb0f5a3ff85e30de88cb65953811bb34cc003942750dfc2f97b37a8915726b
+      image: quay.io/redhat-user-workloads/rhtap-release-2-tenant/release-service-utils-standalone:on-pr-46a7006a1f89a15c01107714e41f1a30a30fa764
       computeResources:
         limits:
-          memory: 512Mi
+          memory: 600Mi
         requests:
-          memory: 512Mi
-          cpu: 650m
-      script: |
-        #!/usr/bin/env bash
-        set -exo pipefail
-
-        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
-        TASK_ID=$(context.taskRun.uid)
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        # default internal workload to be used
-        REQUEST="push-artifacts-to-cdn"
-
-        DATA_FILE="$(params.dataDir)/$(params.dataPath)"
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No valid data file was provided."
-            exit 1
-        fi
-        RPA_FILE="$(params.dataDir)/$(params.releasePlanAdmissionPath)"
-        if [ ! -f "${RPA_FILE}" ] ; then
-            echo "No valid rpa file was provided."
-            exit 1
-        fi
-
-        # Check if intention is staging and modify quayURL accordingly
-        INTENTION=$(jq -r '.intention // empty' "$DATA_FILE")
-        QUAY_URL="$(params.quayURL)"
-        if [[ "$INTENTION" == "staging" ]]; then
-          QUAY_URL="quay.io/konflux-artifacts/nonprod"
-        else
-          # For production releases, use prod path
-          QUAY_URL="quay.io/konflux-artifacts/prod"
-        fi
-
-        # Remove .metadata from each component to avoid "arg list too long" errors
-        # The internal task doesn't need metadata (env_variables, labels, etc.)
-        snapshot=$(jq -c '.components |= map(del(.metadata))' "$(params.dataDir)/$(params.snapshotPath)")
-        # .cdn.env is likely to change in the future. This is just for POC
-        env=$(jq -r '.cdn.env' "$(params.dataDir)/$(params.dataPath)")
-        AUTHOR=$(jq -r '.status.attribution.author' "$(params.dataDir)/$(params.releasePath)")
-        if [[ "${AUTHOR}" == "null" ]] ; then echo "No author found in Release.Status. Failing..." ; exit 1 ; fi
-        configMapName=$(jq -er '.sign.configMapName' "${DATA_FILE}")
-        configMapJson=$(kubectl get "configmap/${configMapName}" -o json)
-        # Some configmaps (e.g. e2e/staging ones) only define a comma-separated
-        # SIG_KEY_NAMES list rather than a single SIG_KEY_NAME. Use the first entry,
-        # matching the SIG_KEY_NAMES parsing convention used by rh-sign-image/sign-index-image.
-        jqquery='(.data // {})|if has("SIG_KEY_NAME") then .SIG_KEY_NAME
-        elif has("SIG_KEY_NAMES") then (.SIG_KEY_NAMES|split(",")|.[0]|gsub("^\\s+|\\s+$";""))
-        else "" end'
-        signingKeyName=$(jq -r "$jqquery" <<< "${configMapJson}")
-        if [[ -z "${signingKeyName}" ]] ; then
-          echo "No SIG_KEY_NAME or SIG_KEY_NAMES found in configmap ${configMapName}. Failing..."
-          exit 1
-        fi
-        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/push-artifacts-results.json"
-        FILES=$(jq -c '{"artifacts": [.components[].staged?.files[]?.filename]}' <<< "$snapshot")
-        echo "$FILES" > "$RESULTS_FILE"
-
-        # There are three envs supported...production, stage, and qa
-        exodusGwSecret=""
-        exodusGwEnv=""
-        pulpSecret=""
-        udcacheSecret=""
-
-        if [ "${env}" = "production" ] ; then
-          exodusGwSecret="exodus-prod-secret"
-          exodusGwEnv="live"
-          pulpSecret="rhsm-pulp-prod-secret"
-          udcacheSecret="udcache-prod-secret"
-          cgwHostname="https://developers.redhat.com/content-gateway/rest/admin"
-          cgwSecret="cgw-service-account-prod-secret"
-        elif [ "${env}" = "stage" ] ; then
-          # The url is the same for exodus in both prod and stage, it is just a different env and pulp url
-          exodusGwSecret="exodus-prod-secret"
-          exodusGwEnv="pre"
-          pulpSecret="rhsm-pulp-stage-secret"
-          udcacheSecret="udcache-stage-secret"
-          # CGW 'stage' env is 'qa' as of now, hence the confusing 'stage' in secret name and 'qa' in url
-          cgwHostname="https://developers.qa.redhat.com/content-gateway/rest/admin"
-          cgwSecret="cgw-service-account-stage-secret"
-        elif [ "${env}" = "qa" ]; then
-          exodusGwSecret="exodus-stage-secret"
-          exodusGwEnv="live"
-          pulpSecret="rhsm-pulp-qa-secret"
-          udcacheSecret="udcache-qa-secret"
-          cgwHostname="https://developers.qa.redhat.com/content-gateway/rest/admin"
-          cgwSecret="cgw-service-account-stage-secret"
-        else
-          echo "cdn.env in the data file must be one of [production, stage, qa]."
-          exit 1
-        fi
-
-        echo "Creating InternalRequest to push artifacts..."
-
-        internal-request --pipeline "${REQUEST}" \
-          -p snapshot_json="${snapshot}" \
-          -p author="${AUTHOR}" \
-          -p signingKeyName="${signingKeyName}" \
-          -p exodusGwSecret="${exodusGwSecret}" \
-          -p exodusGwEnv="${exodusGwEnv}" \
-          -p pulpSecret="${pulpSecret}" \
-          -p udcacheSecret="${udcacheSecret}" \
-          -p cgwHostname="${cgwHostname}" \
-          -p cgwSecret="${cgwSecret}" \
-          -p quayURL="${QUAY_URL}" \
-          -p taskGitUrl="$(params.taskGitUrl)" \
-          -p taskGitRevision="$(params.taskGitRevision)" \
-          -l ${TASK_LABEL}="${TASK_ID}" \
-          -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-          -t "$(params.requestTimeout)" \
-          --service-account release-service-account \
-          --pipeline-timeout 24h0m0s \
-          --task-timeout 23h50m0s \
-          --finally-timeout 0h10m0s \
-          -s true
-
-        # Get the InternalRequest name to fetch results
-        NAME=$(kubectl get internalrequest -l \
-          "${TASK_LABEL}=${TASK_ID},${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
-          --no-headers -o custom-columns=":metadata.name" \
-          --sort-by=.metadata.creationTimestamp | tail -1)
-        if [ -z "${NAME}" ]; then
-          echo "ERROR: Unable to get InternalRequest name"
-          exit 1
-        fi
-
-        results=$(kubectl get internalrequest "${NAME}" -o=jsonpath='{.status.results}')
-        checksum_map=$(echo "${results}" | jq -r '.checksum_map // empty')
-        echo -n "${checksum_map}" > "$(results.checksum_map.path)"
-        if [ "$(echo "${results}" | jq -r '.result')" == "Success" ]; then
-          echo "Artifacts pushed"
-          echo "${results}" | jq '.'
-        else
-          echo "Artifact push failed"
-          echo "${results}" | jq -r '.result'
-          exit 1
-        fi
+          memory: 600Mi
+          cpu: 700m
+      env:
+        - name: "PARAM_RELEASE_PATH"
+          value: "$(params.releasePath)"
+        - name: "PARAM_SNAPSHOT_PATH"
+          value: "$(params.snapshotPath)"
+        - name: "PARAM_DATA_PATH"
+          value: "$(params.dataPath)"
+        - name: "PARAM_PIPELINE_RUN_UID"
+          value: "$(params.pipelineRunUid)"
+        - name: "PARAM_RESULTS_DIR_PATH"
+          value: "$(params.resultsDirPath)"
+        - name: "PARAM_DATA_DIR"
+          value: "$(params.dataDir)"
+        - name: "PARAM_TASK_GIT_URL"
+          value: "$(params.taskGitUrl)"
+        - name: "PARAM_TASK_GIT_REVISION"
+          value: "$(params.taskGitRevision)"
+        - name: "RESULT_CHECKSUM_MAP"
+          value: "$(results.checksum_map.path)"
+      command: ["python3", "/home/scripts/python/tasks/managed/push_artifacts_to_cdn.py"]
     - name: create-trusted-artifact
       computeResources:
         limits:
