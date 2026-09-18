@@ -266,11 +266,16 @@ patch_component_source_before_merge() {
   export GH_TOKEN=${secret_value}
 
   # Patch each PaC pipeline to add multi-arch support and source image build
+  local pr_response
+  pr_response=$(curl -sS --retry 3 --fail-with-body -H "Authorization: token ${GH_TOKEN}" \
+      "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}")
+  head_sha=$(jq -r '.head.sha' <<< "${pr_response}")
+  head_ref=$(jq -r '.head.ref' <<< "${pr_response}")
+  head_repo_full_name=$(jq -r '.head.repo.full_name' <<< "${pr_response}")
+
   local file_names=".tekton/${component_name}-pull-request.yaml .tekton/${component_name}-push.yaml "
   for file_name in ${file_names}; do
     echo "Patching ${file_name}..."
-    head_sha=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
-    "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}" | jq -r '.head.sha')
 
     decoded_contents=$(curl -s -H "Authorization: token ${GH_TOKEN}" \
         "https://api.github.com/repos/${component_repo_name}/contents/${file_name}?ref=${head_sha}" | \
@@ -289,7 +294,9 @@ patch_component_source_before_merge() {
         "${pr_number}" \
         "${file_name}" \
         "Update component source before merge" \
-        "${encoded_contents}"
+        "${encoded_contents}" \
+        "${head_ref}" \
+        "${head_repo_full_name}"
   done
 
   echo "✅️ Successfully patched component source!"
