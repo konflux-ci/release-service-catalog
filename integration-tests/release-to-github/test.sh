@@ -91,3 +91,15 @@ patch_component_source() {
   "${SCRIPT_DIR}/scripts/rename-github-file.sh" "${component_repo_name}" "main_86.15272_SHA256SUMS" "main_86.${uuid}_SHA256SUMS" -b "${component_branch}"
   echo "✅️ Successfully patched component source!"
 }
+
+# Create the signing ConfigMap used by the direct checksum-signing task.
+post_create_kubernetes_resources() {
+  kubectl delete configmap signing-config-map \
+    -n "${managed_namespace}" --ignore-not-found
+  kubectl create configmap signing-config-map \
+    -n "${managed_namespace}" \
+    --from-literal=SIG_KEY_NAME=redhate2etesting \
+    --from-literal=KERBEROS_KEYTAB_SECRET=konflux-release-signing-stage-sa \
+    --from-literal=KERBEROS_KEYTAB=keytab \
+    --from-literal=KERBEROS_PRINCIPAL=konflux-release-signing-stage@IPA.REDHAT.COM
+}
