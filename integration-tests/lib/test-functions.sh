@@ -1430,6 +1430,31 @@ check_container_images() {
 
     echo "Verifying each image artifact..."
 
+    local rpa_json
+    rpa_json=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
+        -n "${managed_namespace}" -o json)
+    local cosign_secret_name
+    cosign_secret_name=$(jq -r '.spec.data.sign.cosignSecretName // ""' <<< "${rpa_json}")
+
+    local rekor_url rekor_public_key_file public_key_file
+    if [ -n "${cosign_secret_name}" ] && [ "${cosign_secret_name}" != "null" ]; then
+        echo "Fetching cosign secret for signature verification..."
+        local sign_secret_json
+        sign_secret_json=$(kubectl get secret "${cosign_secret_name}" -n "${managed_namespace}" -o json)
+
+        rekor_url=$(jq -r '.data.REKOR_URL' <<< "${sign_secret_json}" | base64 -d)
+
+        rekor_public_key_file=$(mktemp)
+        jq -r '.data.REKOR_PUBLIC_KEY' <<< "${sign_secret_json}" | base64 -d > "${rekor_public_key_file}"
+
+        public_key_file=$(mktemp)
+        jq -r '.data.PUBLIC_KEY' <<< "${sign_secret_json}" | base64 -d > "${public_key_file}"
+
+        trap 'rm -f "${rekor_public_key_file}" "${public_key_file}"' RETURN
+    else
+        echo "No cosign secret configured, skipping signature verification"
+    fi
+
     for ((i = 0; i < image_count; i++)); do
         local failures=0
         local image_url image_arch image_shasum
@@ -1466,7 +1491,7 @@ check_container_images() {
         local image_pullspec="${image_url%:*}@${image_shasum}"
 
         echo "Verifying multi-arch image pullability with skopeo (${image_pullspec})..."
-        AUTH_FILE="$(mktemp)"
+        AUTH_FILE="$(mktemp -d)/config.json"
         yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
             "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" | base64 -d > "${AUTH_FILE}"
 
@@ -1480,14 +1505,59 @@ check_container_images() {
             fi
         done
 
+        if [ -n "${cosign_secret_name}" ] && [ "${cosign_secret_name}" != "null" ]; then
+            echo "Signatures verification for ${image_pullspec}..."
+
+            # Save tracing state and disable it to prevent password leaking
+            case $- in
+                *x*) xtrace_active=1; set +x ;;
+                *) xtrace_active=0 ;;
+            esac
+
+            local registry_username registry_password auth_token auth_decoded
+            registry_username=$(jq -r '.auths | to_entries[0].value.username // ""' "${AUTH_FILE}")
+            registry_password=$(jq -r '.auths | to_entries[0].value.password // ""' "${AUTH_FILE}")
+
+            if [ -z "${registry_username}" ] || [ "${registry_username}" = "null" ]; then
+                auth_token=$(jq -r '.auths | to_entries[0].value.auth // ""' "${AUTH_FILE}")
+                if [ -n "${auth_token}" ] && [ "${auth_token}" != "null" ]; then
+                    auth_decoded=$(echo "${auth_token}" | base64 -d)
+                    registry_username="${auth_decoded%%:*}"
+                    registry_password="${auth_decoded#*:}"
+                fi
+            fi
+
+            local cosign_verify_opts=()
+            if [ -n "${registry_username}" ] && [ "${registry_username}" != "null" ]; then
+                cosign_verify_opts+=(--registry-username "${registry_username}")
+            fi
+            if [ -n "${registry_password}" ] && [ "${registry_password}" != "null" ]; then
+                cosign_verify_opts+=(--registry-password "${registry_password}")
+            fi
+
+            if SIGSTORE_REKOR_PUBLIC_KEY="${rekor_public_key_file}" cosign verify \
+                    --key "${public_key_file}" --rekor-url "${rekor_url}" \
+                    "${cosign_verify_opts[@]}" "${image_pullspec}"; then
+                # Restore tracing state
+                if [ "${xtrace_active}" -eq 1 ]; then set -x; fi
+                echo "✅️ cosign verify succeeded for ${image_pullspec}"
+            else
+                # Restore tracing state
+                if [ "${xtrace_active}" -eq 1 ]; then set -x; fi
+                echo "🔴 cosign verify failed for ${image_pullspec}"
+                failures=$((failures+1))
+            fi
+        fi
+
         if [ "${failures}" -gt 0 ]; then
           echo "🔴 Test has FAILED with ${failures} failure(s)!"
           failed_releases="${RELEASE_NAME} ${failed_releases}"
         else
           echo "✅️ All release checks passed. Success!"
         fi
+
     done
     if [ -f "${AUTH_FILE}" ]; then
-        rm -f "${AUTH_FILE}"
+	    rm -rf "$(dirname ${AUTH_FILE})"
     fi
 }
