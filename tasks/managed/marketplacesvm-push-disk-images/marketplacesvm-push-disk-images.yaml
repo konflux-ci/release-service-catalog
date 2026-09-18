@@ -76,6 +76,12 @@ spec:
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
   results:
+    - name: status
+      type: string
+      description: Success if the task succeeds, Failure otherwise
+    - name: message
+      type: string
+      description: Success if the task succeeds, otherwise the error that occurred
     - name: sourceDataArtifact
       type: string
       description: >
@@ -134,7 +140,8 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: pull-and-push-images-to-marketplaces
-      image: quay.io/konflux-ci/release-service-utils@sha256:3cb03b14ac9d90ff27070036ce2b50712e65aa285daeb28852254a745bb25dfc
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:d84bb7da0988c3cbce65ed714beddda4694b9e3201af56a135ac5843a05abe1e
       computeResources:
         limits:
           memory: 1Gi
@@ -149,18 +156,45 @@ spec:
           value: $(params.uploadContainerName)
       script: |
         #!/usr/bin/env bash
-        set -eux
+        set -euxo pipefail
+
+        set_task_result() {
+            echo -n "${1}" > "$(results.status.path)"
+            echo -n "${2}" > "$(results.message.path)"
+        }
+
+        exitfunc() {
+            local err="${1}"
+            local line="${2}"
+            local command="${3}"
+            if [ "${err}" -ne 0 ]; then
+                if [[ ! -s "$(results.status.path)" ]] || \
+                    [[ "$(cat "$(results.status.path)")" != "Failure" ]]; then
+                    set_task_result "Failure" \
+                        "ERROR '${command}' failed at line ${line} - exited with status ${err}"
+                fi
+            fi
+            rm -f "${EXTRACT_PY:-}"
+            if [ -n "${_MOCK_BIN:-}" ]; then
+                rm -rf "${_MOCK_BIN}"
+            fi
+        }
+        trap 'exitfunc $? ${LINENO} "${BASH_COMMAND}"' EXIT
 
         echo "DEBUG: Sanity validation of credentials"
         JSON_FILES=(/etc/secrets/*.json)
         if [[ ! -f "${JSON_FILES[0]}" ]]; then
-            echo "ERROR: No credential files found in /etc/secrets/" >&2
+            MSG="No credential files found in /etc/secrets/"
+            echo "ERROR: ${MSG}" >&2
+            set_task_result "Failure" "${MSG}"
             exit 1
         fi
         for file in "${JSON_FILES[@]}"; do
             if ! jq -e 'has("marketplace_account") and has("auth")' "$file" > /dev/null 2>&1; then
-                echo "ERROR: Validation failed for credential file: '$file'"  >&2
+                MSG="Validation failed for credential file: '${file}'"
+                echo "ERROR: ${MSG}"  >&2
                 echo "The file is missing required keys ('marketplace_account' or 'auth')."  >&2
+                set_task_result "Failure" "${MSG}"
                 exit 1
             fi
         done
@@ -229,17 +263,76 @@ spec:
             # so create a custom auth file with just one entry
             AUTH_FILE=$(mktemp)
             select-oci-auth "${PULLSPEC}" > "$AUTH_FILE"
-            oras pull --registry-config "$AUTH_FILE" "$PULLSPEC"
             NUM_MAPPED_FILES=$(jq '.staged.files | length' <<< "${COMPONENT}")
+            ALL_SOURCES=()
+            MISSING_SOURCES=()
             for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
-                FILE=$(jq -c --arg i "$i" '.staged.files[$i|tonumber]' <<< "$COMPONENT")
+                SOURCE=$(jq -er --arg i "${i}" '.staged.files[$i|tonumber].source' <<< "${COMPONENT}")
+                if [[ -z "${SOURCE}" || "${SOURCE}" == /* ]]; then
+                    MSG="Mapped source '${SOURCE}' must be a relative path"
+                    echo "ERROR: ${MSG}" >&2
+                    set_task_result "Failure" "${MSG}"
+                    return 1
+                fi
+                case "/${SOURCE}/" in
+                    */../*)
+                        MSG="Mapped source '${SOURCE}' contains a parent-directory component"
+                        echo "ERROR: ${MSG}" >&2
+                        set_task_result "Failure" "${MSG}"
+                        return 1
+                        ;;
+                esac
+                ALL_SOURCES+=("${SOURCE}")
+            done
+            # Flat OCI artifacts unpack via oras pull. A failed pull (layered image)
+            # or missing files after a successful pull use the extraction helper.
+            if oras pull --registry-config "${AUTH_FILE}" "${PULLSPEC}"; then
+                for SOURCE in "${ALL_SOURCES[@]}"; do
+                    if [ ! -f "${SOURCE}" ]; then
+                        MISSING_SOURCES+=("${SOURCE}")
+                    fi
+                done
+            else
+                echo "oras pull failed; extracting from image layers:"
+                echo "${ALL_SOURCES[*]}"
+                MISSING_SOURCES=("${ALL_SOURCES[@]}")
+            fi
+            if [ "${#MISSING_SOURCES[@]}" -gt 0 ]; then
+                echo "Extracting mapped sources from image layers:"
+                echo "${MISSING_SOURCES[*]}"
+                MISSING_JSON=$(jq -n --args '$ARGS.positional' -- "${MISSING_SOURCES[@]}")
+                EXTRACT_PY=$(mktemp)
+                trap 'rm -f "${EXTRACT_PY}"' EXIT
+                cat > "${EXTRACT_PY}" <<'PY'
+        import json
+        import os
+        from pathlib import Path
+        import release_service_utils.helpers.oras_utils as oras_utils
+        oras_utils.extract_disk_image_files(
+            os.environ["PULLSPEC"],
+            json.loads(os.environ["MISSING_JSON"]),
+            Path(os.environ["DOWNLOAD_DIR"]),
+        )
+        PY
+                if ! PULLSPEC="${PULLSPEC}" DOWNLOAD_DIR="${DOWNLOAD_DIR}" \
+                    MISSING_JSON="${MISSING_JSON}" python3 "${EXTRACT_PY}"; then
+                    MSG="Layered-image extraction failed for '${PULLSPEC}'"
+                    echo "ERROR: ${MSG}" >&2
+                    set_task_result "Failure" "${MSG}"
+                    return 1
+                fi
+            fi
+            for ((i = 0; i < NUM_MAPPED_FILES; i++)); do
+                FILE=$(jq -c --arg i "${i}" '.staged.files[$i|tonumber]' <<< "${COMPONENT}")
                 SOURCE=$(jq -er '.source' <<< "$FILE")
                 FILENAME=$(jq -er '.filename' <<< "$FILE")
 
-                # Fail early if the source file pulled by ORAS does not exist
                 if [ ! -f "${SOURCE}" ]; then
-                    echo "ERROR: Source file '${SOURCE}' for component '${FILENAME}' was not found after oras pull." >&2
-                    exit 1
+                    MSG="Source file '${SOURCE}' for component '${FILENAME}' "
+                    MSG+="was not found after oras pull from '${PULLSPEC}'."
+                    echo "ERROR: ${MSG}" >&2
+                    set_task_result "Failure" "${MSG}"
+                    return 1
                 fi
 
                 # Decompress if the source file is gzipped
@@ -249,9 +342,11 @@ spec:
                     FILENAME="${FILENAME%.gz}"
                 fi
                 if [ -f "${DESTINATION}/${FILENAME}" ]; then
-                    echo -n "Multiple files use the same destination value: $DESTINATION" >&2
-                    echo " and filename value: $FILENAME. Failing..." >&2
-                    exit 1
+                    MSG="Multiple files use the same destination value: ${DESTINATION} "
+                    MSG+="and filename value: ${FILENAME}."
+                    echo "ERROR: ${MSG}" >&2
+                    set_task_result "Failure" "${MSG}"
+                    return 1
                 fi
 
                 BUILD_ARCH=${FILENAME%.*}   # Rstrip extension
@@ -288,8 +383,13 @@ spec:
                 jobs_collected=$((jobs_collected + 1))
             done
 
-            COMPONENT=$(jq -c --arg i "$i" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
-            prepare_component "$COMPONENT" &
+            COMPONENT=$(jq -c --arg i "${i}" '.components[$i|tonumber]' <<< "$SNAPSHOT_JSON")
+            # Workers inherit the step EXIT trap. Clear it so worker exit codes
+            # and nested cleanup traps stay local to prepare_component.
+            (
+                trap - EXIT
+                prepare_component "${COMPONENT}"
+            ) &
             jobs_spawned=$((jobs_spawned + 1))
 
             # Allow memory usage to stabilize before next spawn.
@@ -304,8 +404,12 @@ spec:
         done
 
         # This is redundant since we have set -e, but makes things a bit more clear
-        if [ $success != "true" ]; then
+        if [ "${success}" != "true" ]; then
             echo "ERROR: prepare_component failed for at least one component"
+            if [[ ! -s "$(results.status.path)" ]] || \
+                [[ "$(cat "$(results.status.path)")" != "Failure" ]]; then
+                set_task_result "Failure" "prepare_component failed for at least one component"
+            fi
             exit 1
         fi
 
@@ -327,6 +431,7 @@ spec:
         if [ -d "${BASE_DIR}/artifacts" ]; then
             cp -r "${BASE_DIR}/artifacts" "$(params.dataDir)/artifacts"
         fi
+        set_task_result "Success" "Success"
     - name: create-trusted-artifact
       computeResources:
         limits:

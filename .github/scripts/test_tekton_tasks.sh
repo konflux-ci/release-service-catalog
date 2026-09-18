@@ -146,6 +146,41 @@ needs_mock_host_aliases() {
   [[ -n "$mock_host" && "$mock_host" != "null" && "$mock_host" != "$mock_bind" ]]
 }
 
+cleanup_test_resources() {
+  if [[ "${NO_CLEANUP}" == "true" ]]; then
+    return 0
+  fi
+
+  echo "  Cleaning up test resources..."
+  if [ -n "${PIPELINERUN:-}" ]; then
+    kubectl delete pipelinerun "${PIPELINERUN}" --ignore-not-found=true
+    kubectl delete taskrun -l "tekton.dev/pipelineRun=${PIPELINERUN}" --ignore-not-found=true
+    kubectl delete pod -l "tekton.dev/pipelineRun=${PIPELINERUN}" --ignore-not-found=true
+  fi
+  if [ -n "${TEST_NAME:-}" ]; then
+    kubectl delete pipeline "${TEST_NAME}" --ignore-not-found=true
+  fi
+}
+
+cleanup_task_resources() {
+  if [[ "${NO_CLEANUP}" == "true" ]]; then
+    return 0
+  fi
+  # run-local-tests.sh sets this for parallel test-file workers so siblings can
+  # keep using the same Task until cleanup_shared_tasks runs.
+  if [[ "${DEFER_TASK_CLEANUP:-}" == "true" ]]; then
+    return 0
+  fi
+  echo "Cleaning up task ${TASK_NAME}"
+  kubectl delete task "${TASK_NAME}" --ignore-not-found=true
+}
+
+fail_with_cleanup() {
+  cleanup_test_resources
+  cleanup_task_resources
+  exit 1
+}
+
 show_help() {
   echo "Usage: $0 [--remove-compute-resources] [--no-cleanup] [item1] [item2] [...]"
   echo
@@ -436,7 +471,7 @@ do
       if [ "$PR_STATUS" == "True" ]
       then
         echo "  Pipeline $TEST_NAME succeeded but was expected to fail"
-        exit 1
+        fail_with_cleanup
       else
         echo "  Pipeline $TEST_NAME failed (expected). Checking that it failed in task ${ASSERT_TASK_FAILURE}..."
 
@@ -446,7 +481,7 @@ do
         then
           echo "    Unable to find task $ASSERT_TASK_FAILURE in childReferences of pipelinerun $PIPELINERUN. Pipelinerun failed earlier?"
           kubectl get pr $PIPELINERUN -o json
-          exit 1
+          fail_with_cleanup
         else
           echo "    Found taskrun $TASKRUN"
         fi
@@ -454,7 +489,7 @@ do
         then
           echo "    Taskrun did not fail - pipelinerun failed later on?"
           kubectl get tr $TASKRUN -o json
-          exit 1
+          fail_with_cleanup
         else
           echo "    Taskrun failed as expected"
         fi
@@ -491,52 +526,27 @@ do
         done
         echo "  === END DEBUG ==="
 
-        exit 1
+        fail_with_cleanup
       fi
     fi
 
-    if [[ "$NO_CLEANUP" != "true" ]]; then
-      # Cleanup test resources to prevent cluster exhaustion when running many tests
-      echo "  Cleaning up test resources..."
-      kubectl delete pipelinerun $PIPELINERUN --ignore-not-found=true
-      kubectl delete pipeline $TEST_NAME --ignore-not-found=true
-
-      # Clean up old completed PipelineRuns (keep only last 5 to avoid filling the cluster)
-      OLD_PRS=$(kubectl get pipelineruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -5)
-      if [ ! -z "$OLD_PRS" ]; then
-        echo "$OLD_PRS" | xargs -r kubectl delete pipelinerun --ignore-not-found=true
+    ASSERT_EXPECTED_ERROR="$(yq '.metadata.annotations.test/assert-expected-error' < "${TEST_PATH}")"
+    if [ "${ASSERT_EXPECTED_ERROR}" != "null" ] && [ -n "${ASSERT_EXPECTED_ERROR}" ]
+    then
+      echo "  Checking PipelineRun logs for expected error text: ${ASSERT_EXPECTED_ERROR}"
+      if ! tkn pr logs "${PIPELINERUN}" | grep -F -- "${ASSERT_EXPECTED_ERROR}" >/dev/null
+      then
+        echo "  Expected error text not found in PipelineRun logs"
+        fail_with_cleanup
       fi
-
-      # Clean up completed TaskRuns to free disk space
-      OLD_TRS=$(kubectl get taskruns -o json | jq -r '.items[] | select(.status.conditions[0].status != "Unknown") | .metadata.name' | head -n -10)
-      if [ ! -z "$OLD_TRS" ]; then
-        echo "  Cleaning up completed TaskRuns..."
-        echo "$OLD_TRS" | xargs -r kubectl delete taskrun --ignore-not-found=true
-      fi
-
-      # Clean up old Pods in terminal states to free disk space (and their emptyDir volumes)
-      # Keep last 10 of each status (Succeeded, Failed, Unknown)
-      OLD_PODS=$(kubectl get pods -o json | jq -r '
-        .items
-        | group_by(.status.phase)
-        | map(select(.[0].status.phase == "Succeeded" or .[0].status.phase == "Failed" or .[0].status.phase == "Unknown"))
-        | map(.[:-10])
-        | flatten
-        | .[].metadata.name
-      ')
-      if [ ! -z "$OLD_PODS" ]; then
-        echo "  Cleaning up old Pods in terminal states (and emptyDir volumes)..."
-        echo "$OLD_PODS" | xargs -r kubectl delete pod --ignore-not-found=true
-      fi
+      echo "  Found expected error text in logs"
     fi
+
+    cleanup_test_resources
     echo
   done
 
-  if [[ "$NO_CLEANUP" != "true" ]]; then
-    # Cleanup task after all its tests complete
-    echo "Cleaning up task $TASK_NAME"
-    kubectl delete task $TASK_NAME --ignore-not-found=true
-  fi
+  cleanup_task_resources
 
   KIND_NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
   if [ ! -z "$KIND_NODE" ]; then
