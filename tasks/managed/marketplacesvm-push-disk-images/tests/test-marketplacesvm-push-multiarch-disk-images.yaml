@@ -2,10 +2,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-marketplacesvm-push-disk-images-pre-push
+  name: test-marketplacesvm-push-multiarch-disk-images
 spec:
   description: |
-    Run the marketplacesvm-push-disk-images task in pre-push mode and ensure it succeeds
+    Run the marketplacesvm-push-disk-images task with a multi-arch component containing
+    two architectures (x86_64 and aarch64) to verify per-platform oras pulls.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -36,8 +37,6 @@ spec:
           - name: workdir
             emptyDir: {}
         stepTemplate:
-          securityContext:
-            runAsUser: 1001
           volumeMounts:
             - mountPath: /var/workdir
               name: workdir
@@ -48,6 +47,8 @@ spec:
               value: "$(params.orasOptions)"
             - name: "DEBUG"
               value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
         steps:
           - name: setup
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
@@ -61,12 +62,12 @@ spec:
               RNOTES+="instance using ssh\n    * Open an SSH client\n"
               cat > "$(params.dataDir)/snapshot_spec.json" << EOF
               {
-                "application": "amd-bootc-1-3-raw-disk-image",
+                "application": "multiarch-bootc-1-3-raw-disk-image",
                 "artifacts": {},
                 "components": [
                   {
-                    "containerImage": "quay.io/workload/tenant/test-product/amd-bootc-1-3-raw-disk-image@sha256:123456",
-                    "name": "amd-bootc-1-3-raw-disk-image",
+                    "containerImage": "quay.io/workload/tenant/test-product/multiarch-bootc-1-3-raw-disk-image@sha256:123456",
+                    "name": "multiarch-bootc-1-3-raw-disk-image",
                     "source": {
                       "git": {
                         "context": ".",
@@ -84,10 +85,14 @@ spec:
                     },
                     "pushSourceContainer": false,
                     "staged": {
-                      "destination": "test-product-1_DOT_3-x86_64-isos",
+                      "destination": "test-product-1_DOT_3-multi-isos",
                       "files": [
                         {
                           "filename": "test-product-amd-1.3-1732045201-x86_64.raw.gz",
+                          "source": "disk.raw.gz"
+                        },
+                        {
+                          "filename": "test-product-amd-1.3-1732045201-aarch64.raw.gz",
                           "source": "disk.raw.gz"
                         }
                       ],
@@ -104,6 +109,12 @@ spec:
                                 "destination": "00000000-0000-0000-0000-000000000000",
                                 "overwrite": false,
                                 "restrict_version": true
+                              },
+                              {
+                                "architecture": "aarch64",
+                                "destination": "11111111-1111-1111-1111-111111111111",
+                                "overwrite": false,
+                                "restrict_version": true
                               }
                             ],
                             "provider": null
@@ -113,6 +124,12 @@ spec:
                               {
                                 "architecture": "x86_64",
                                 "destination": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                                "overwrite": false,
+                                "restrict_version": true
+                              },
+                              {
+                                "architecture": "aarch64",
+                                "destination": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
                                 "overwrite": false,
                                 "restrict_version": true
                               }
@@ -154,6 +171,78 @@ spec:
                 ]
               }
               EOF
+
+              cat > "$(params.dataDir)/starmap.json" << EOF
+              [
+                {
+                  "cloud": "aws",
+                  "mappings": {
+                    "aws-emea": {
+                      "destinations": [
+                        {
+                          "architecture": "x86_64",
+                          "destination": "00000000-0000-0000-0000-000000000000",
+                          "overwrite": false,
+                          "restrict_version": true
+                        },
+                        {
+                          "architecture": "aarch64",
+                          "destination": "11111111-1111-1111-1111-111111111111",
+                          "overwrite": false,
+                          "restrict_version": true
+                        }
+                      ],
+                      "provider": null
+                    },
+                    "aws-na": {
+                      "destinations": [
+                        {
+                          "architecture": "x86_64",
+                          "destination": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                          "overwrite": false,
+                          "restrict_version": true
+                        },
+                        {
+                          "architecture": "aarch64",
+                          "destination": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                          "overwrite": false,
+                          "restrict_version": true
+                        }
+                      ],
+                      "provider": null
+                    }
+                  },
+                  "meta": {
+                    "ena_support": true,
+                    "marketplace_entity_type": "AmiProduct",
+                    "recommended_instance_type": "p5.48xlarge",
+                    "release_notes": "${RNOTES}",
+                    "root_device": "/dev/sda1",
+                    "scanning_port": 22,
+                    "security_groups": [
+                      {
+                        "from_port": 22,
+                        "ip_protocol": "tcp",
+                        "ip_ranges": [
+                          "0.0.0.0/0"
+                        ],
+                        "to_port": 22
+                      }
+                    ],
+                    "sharing_accounts": [
+                      "111111111111"
+                    ],
+                    "sriov_net_support": "simple",
+                    "usage_instructions": "https://access.redhat.com/articles/xyz",
+                    "user_name": "cloud-user",
+                    "virtualization": "hvm",
+                    "volume": "gp3"
+                  },
+                  "name": "test-product-amd",
+                  "workflow": "stratosphere"
+                }
+              ]
+              EOF
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -172,8 +261,6 @@ spec:
           value: "snapshot_spec.json"
         - name: cloudMarketplacesSecret
           value: marketplacesvm-test-secret
-        - name: prePush
-          value: true
         - name: ociStorage
           value: $(params.ociStorage)
         - name: orasOptions
@@ -234,37 +321,82 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              # Single component fixture: Expected "prepare_component" to be called once
-              expected_pullspec="quay.io/workload/tenant/test-product/amd-bootc-1-3-raw-disk-image@sha256:123456"
+              STARMAP_EXPECTED_DATA=$(jq -c '.' "$(params.dataDir)/starmap.json")
+              TASK_STARMAP_DATA=$(yq -p yaml -o json < "$(params.dataDir)/starmap.yaml")
+              TASK_STARMAP_DATA=$(jq -c '.' <<< "$TASK_STARMAP_DATA")
+              if [[ "$TASK_STARMAP_DATA" != "$STARMAP_EXPECTED_DATA" ]]; then
+                  echo "Execution failed: Mismatch on expected StArMap data."
+                  echo "Got: $TASK_STARMAP_DATA"
+                  echo "Expected: $STARMAP_EXPECTED_DATA"
+                  exit 1
+              fi
+
+              # Single component fixture: select-oci-auth should be called once
+              expected_pullspec="quay.io/workload/tenant/test-product/multiarch-bootc-1-3-raw-disk-image@sha256:123456"
               if [[ $(wc -l < "$(params.dataDir)/mock_select-oci-auth.txt") != 1 ]]; then
-                  echo "Error: select-oci-auth was expected to be called a 1 time. Actual calls:"
+                  echo "Error: select-oci-auth was expected to be called 1 time. Actual calls:"
                   cat "$(params.dataDir)/mock_select-oci-auth.txt"
                   exit 1
               elif [[ $(<"$(params.dataDir)/mock_select-oci-auth.txt") != "$expected_pullspec" ]]; then
-                  echo "Error: select-oci-auth was expected to be called with $expected_pullspec. Actual: "
+                  echo "Error: select-oci-auth was expected to be called with $expected_pullspec. Actual:"
                   cat "$(params.dataDir)/mock_select-oci-auth.txt"
                   exit 1
               fi
-              if [[ $(wc -l < "$(params.dataDir)/mock_oras.txt") != 2 ]]; then
-                  echo "Error: oras was expected to be called 2 times (manifest fetch + pull). Actual calls:"
+
+              # Multi-arch: expect 3 oras calls (1 manifest fetch + 2 platform-specific pulls)
+              if [[ $(wc -l < "$(params.dataDir)/mock_oras.txt") != 3 ]]; then
+                  echo "Error: oras was expected to be called 3 times (manifest fetch + 2 pulls). Actual calls:"
                   cat "$(params.dataDir)/mock_oras.txt"
                   exit 1
-              elif ! grep -q "manifest fetch.*$expected_pullspec" "$(params.dataDir)/mock_oras.txt"; then
+              fi
+              if ! grep -q "manifest fetch.*$expected_pullspec" "$(params.dataDir)/mock_oras.txt"; then
                   echo "Error: oras manifest fetch was expected for $expected_pullspec. Actual:"
                   cat "$(params.dataDir)/mock_oras.txt"
                   exit 1
-              elif ! grep -q "pull.*$expected_pullspec" "$(params.dataDir)/mock_oras.txt"; then
-                  echo "Error: oras pull was expected for $expected_pullspec. Actual:"
+              fi
+              if ! grep -q "\-\-platform linux/amd64" "$(params.dataDir)/mock_oras.txt"; then
+                  echo "Error: oras pull with --platform linux/amd64 was expected. Actual:"
+                  cat "$(params.dataDir)/mock_oras.txt"
+                  exit 1
+              fi
+              if ! grep -q "\-\-platform linux/arm64" "$(params.dataDir)/mock_oras.txt"; then
+                  echo "Error: oras pull with --platform linux/arm64 was expected. Actual:"
                   cat "$(params.dataDir)/mock_oras.txt"
                   exit 1
               fi
 
+              # Verify each pull ran in its own arch subdirectory, and that the subdirectory
+              # matches the --platform used for that same pull (guards against swapped archs)
+              if [[ $(wc -l < "$(params.dataDir)/mock_oras_workdir.txt") != 2 ]]; then
+                  echo "Error: oras pull was expected to be called 2 times. Actual workdirs:"
+                  cat "$(params.dataDir)/mock_oras_workdir.txt"
+                  exit 1
+              fi
+              if [[ $(sort -u "$(params.dataDir)/mock_oras_workdir.txt" | wc -l) != 2 ]]; then
+                  echo "Error: oras pull was expected to run in 2 distinct subdirectories. Actual workdirs:"
+                  cat "$(params.dataDir)/mock_oras_workdir.txt"
+                  exit 1
+              fi
+              PULL_CALLS=$(grep "^pull --registry-config" "$(params.dataDir)/mock_oras.txt")
+              PULL_WORKDIRS=$(cat "$(params.dataDir)/mock_oras_workdir.txt")
+              PULL_CORRELATION=$(paste -d'|' <(echo "$PULL_CALLS") <(echo "$PULL_WORKDIRS"))
+              if ! grep -q -- "--platform linux/amd64.*|.*/x86_64$" <<< "$PULL_CORRELATION"; then
+                  echo "Error: the linux/amd64 oras pull was expected to run in the x86_64 subdirectory. Actual:"
+                  echo "$PULL_CORRELATION"
+                  exit 1
+              fi
+              if ! grep -q -- "--platform linux/arm64.*|.*/aarch64$" <<< "$PULL_CORRELATION"; then
+                  echo "Error: the linux/arm64 oras pull was expected to run in the aarch64 subdirectory. Actual:"
+                  echo "$PULL_CORRELATION"
+                  exit 1
+              fi
+
               if [[ $(wc -l < "$(params.dataDir)/mock_wrapper.txt") != 1 ]]; then
-                  echo "Error: wrapper was expected to be called a 1 time. Actual calls:"
+                  echo "Error: wrapper was expected to be called 1 time. Actual calls:"
                   cat "$(params.dataDir)/mock_wrapper.txt"
                   exit 1
-              elif [[ $(<"$(params.dataDir)/mock_wrapper.txt") != *"--nochannel"* ]]; then
-                  echo "Error: wrapper was expected to be called with '--nochannel'. Actual call:"
+              elif [[ $(<"$(params.dataDir)/mock_wrapper.txt") == *"--nochannel"* ]]; then
+                  echo "Error: wrapper was expected to be called without '--nochannel'. Actual call:"
                   cat "$(params.dataDir)/mock_wrapper.txt"
                   exit 1
               fi
@@ -284,12 +416,6 @@ spec:
               if [[ "$WRAPPER_ARGS" != *"--source /var/workdir/tmp."* ]]; then
                   echo "Error: BASE_DIR should be under /var/workdir/tmp.*"
                   echo "Actual wrapper args: $WRAPPER_ARGS"
-                  exit 1
-              fi
-              ORAS_WORKDIR=$(<"$(params.dataDir)/mock_oras_workdir.txt")
-              if [[ "$ORAS_WORKDIR" != /var/workdir/tmp.* ]]; then
-                  echo "Error: DOWNLOAD_DIR should be under /var/workdir/tmp.*"
-                  echo "Actual: $ORAS_WORKDIR"
                   exit 1
               fi
 
@@ -320,24 +446,36 @@ spec:
                   exit 1
               fi
 
+              # Verify both architectures are present in pushsource-ls output
+              if ! grep -q "arch='x86_64'" "$PUSHSOURCE_OUTPUT"; then
+                  echo "Error: pushsource-ls output missing x86_64 architecture"
+                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+              if ! grep -q "arch='aarch64'" "$PUSHSOURCE_OUTPUT"; then
+                  echo "Error: pushsource-ls output missing aarch64 architecture"
+                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+
               STARMAP_NAMES=$(jq -r '[.components[].starmap[].name] | unique | .[]' \
                   "$(params.dataDir)/snapshot_spec.json")
-              BUILD_INFO_NAME=$(grep -oP "KojiBuildInfo\(name='\K[^']*" "$PUSHSOURCE_OUTPUT")
+              BUILD_INFO_NAME=$(grep -oP "KojiBuildInfo\(name='\K[^']*" "$PUSHSOURCE_OUTPUT" | head -1)
               if ! echo "$STARMAP_NAMES" | grep -qx "$BUILD_INFO_NAME"; then
                   echo "Error: build_info.name '$BUILD_INFO_NAME' not found in starmap names:"
                   echo "$STARMAP_NAMES"
                   exit 1
               fi
+
               expected_patterns=(
                   "AmiPushItem"
                   "name='test-product-amd-1\.3-1732045201-x86_64\.raw'"
-                  "src='.*/CLOUD_IMAGES/amd-bootc-1-3-raw-disk-image/test-product-amd-1\.3-1732045201-x86_64\.raw'"
+                  "name='test-product-amd-1\.3-1732045201-aarch64\.raw'"
+                  "src='.*/CLOUD_IMAGES/multiarch-bootc-1-3-raw-disk-image/"
                   "name='test-product-amd'"
                   "version='1\.3'"
                   "respin=1732045201"
-                  # date is derived from BUILD_RESPIN: date -d @1732045201 +%Y%m%d -> 20241119
                   "date=datetime\.date\(2024, 11, 19\)"
-                  "arch='x86_64'"
                   "type='AMI'"
               )
               for pattern in "${expected_patterns[@]}"; do
@@ -349,12 +487,14 @@ spec:
               done
 
               # Verify staged directory contents
-              PUSHSOURCE_SRC=$(grep -oP "src='\\K[^']*" "$PUSHSOURCE_OUTPUT")
-              if ! grep -q "$PUSHSOURCE_SRC" "$STAGED_DIR_OUTPUT" ; then
-                  echo "Error: staged file path does not match pushsource-ls src value."
-                  echo "pushsource-ls src: $PUSHSOURCE_SRC"
+              if ! grep -q "x86_64.raw" "$STAGED_DIR_OUTPUT"; then
+                  echo "Error: staged directory should contain x86_64 raw file"
                   cat "$STAGED_DIR_OUTPUT"
-                  cat "$PUSHSOURCE_OUTPUT"
+                  exit 1
+              fi
+              if ! grep -q "aarch64.raw" "$STAGED_DIR_OUTPUT"; then
+                  echo "Error: staged directory should contain aarch64 raw file"
+                  cat "$STAGED_DIR_OUTPUT"
                   exit 1
               fi
 
