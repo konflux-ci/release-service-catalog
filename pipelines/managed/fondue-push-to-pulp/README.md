@@ -1,0 +1,20 @@
+# "fondue-push-to-pulp" pipeline
+
+"Release Python wheels from a Snapshot's OCI artifacts to a Pulp-backed Python package index. Each Component image in the Snapshot is expected to contain Python wheels under the /releases directory. The pipeline collects the release data, verifies the Snapshot against the Enterprise Contract policy using Conforma, extracts the wheels from the component images, and uploads them to a Pulp repository. The Pulp connection settings (base URL, domain, API root, repository, and credentials secret) are read from the ReleasePlanAdmission data"
+
+## Parameters
+
+| Name                              | Description                                                                                                                               | Optional | Default value                                               |
+|-----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|----------|-------------------------------------------------------------|
+| "release"                         | "The namespaced name (namespace/name) of the Release custom resource initiating this pipeline execution"                                  | No       | -                                                           |
+| "releasePlan"                     | "The namespaced name (namespace/name) of the releasePlan"                                                                                 | No       | -                                                           |
+| "releasePlanAdmission"            | "The namespaced name (namespace/name) of the releasePlanAdmission"                                                                        | No       | -                                                           |
+| "releaseServiceConfig"            | "The namespaced name (namespace/name) of the releaseServiceConfig"                                                                        | No       | -                                                           |
+| "snapshot"                        | "The namespaced name (namespace/name) of the snapshot"                                                                                    | No       | -                                                           |
+| "enterpriseContractPolicy"        | "JSON representation of the EnterpriseContractPolicy"                                                                                     | No       | -                                                           |
+| "enterpriseContractExtraRuleData" | "Extra rule data to be merged into the policy specified in params.enterpriseContractPolicy. Use syntax\n\"key1=value1,key2=value2...\"\n" | Yes      | "pipeline_intention=release"                                |
+| "taskGitUrl"                      | "The url to the git repo where the release-service-catalog tasks to be used are stored"                                                   | Yes      | "https://github.com/konflux-ci/release-service-catalog.git" |
+| "taskGitRevision"                 | "The revision in the taskGitUrl repo to be used"                                                                                          | Yes      | "production"                                                |
+| "signingSecretName"               | "The name of the AWS KMS signing secret used to sign the Python wheels"                                                                   | Yes      | "konflux-cosign-signing-stage"                              |
+| "config"                          | "Name of the ConfigMap with config options, e.g. ociStorage"                                                                              | Yes      | "release-pipeline-config"                                   |
+| "dataDir"                         | "Path used for working directories"                                                                                                       | Yes      | "/var/workdir/content"                                      |
