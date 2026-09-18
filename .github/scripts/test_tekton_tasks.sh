@@ -8,49 +8,135 @@
 # - Connection to a running k8s cluster (e.g. kind)
 # - Tekton installed on the cluster
 # - tkn installed
+# - Bash 4.3+ (uses nameref variables via local -n)
 #
+
+# Require Bash 4.3+ for nameref (local -n) support
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+  echo "Error: test_tekton_tasks.sh requires bash >= 4.3 (found ${BASH_VERSINFO[*]})" >&2
+  exit 1
+fi
 
 # yield empty strings for unmatched patterns
 shopt -s nullglob
 
 WORKSPACE_TEMPLATE=${BASH_SOURCE%/*/*}/resources/workspace-template.yaml
 
-# For tasks that use a step command/args referencing a .py file or python -m module,
-# merge test mocks into that step: prefer tests/mocks.yaml
-# (render_python_task_mocks_from_yaml.py) else tests/mocks.sh (legacy: body after
-# shebang). Task-specific hooks still run after.
+# Read a Tekton YAML string array without splitting multiline elements on newlines.
+# Uses sentinel technique to preserve trailing newlines stripped by command substitution,
+# then removes the single newline yq -r adds as a record terminator.
+# Propagates yq errors to caller instead of masking them.
+# errexit-safe: uses || { } to handle failures without triggering set -e.
+read_tekton_string_array() {
+  local yaml_path="$1"
+  local yq_path="$2"
+  local -n _out_ref="$3"
+  local count idx val rc yq_rc
+
+  _out_ref=()
+  # errexit-safe: || { } prevents set -e from exiting before we can handle the error
+  count="$(yq "${yq_path} | length" "${yaml_path}")" || {
+    rc=$?
+    echo "read_tekton_string_array: yq length query failed (rc=${rc})" >&2
+    return "${rc}"
+  }
+  [[ "${count}" =~ ^[0-9]+$ ]] || count=0
+  for ((idx = 0; idx < count; idx++)); do
+    # Append sentinel 'x' to preserve trailing newlines; propagate yq exit status
+    # errexit-safe: || { } prevents set -e from exiting before we can handle the error
+    val="$({
+      yq -r "${yq_path} | .[${idx}]" "${yaml_path}"
+      yq_rc=$?
+      printf x
+      exit "${yq_rc}"
+    })" || {
+      rc=$?
+      echo "read_tekton_string_array: yq element query failed at index ${idx} (rc=${rc})" >&2
+      return "${rc}"
+    }
+    val="${val%x}"
+    # Remove the single trailing newline yq -r adds as record terminator
+    val="${val%$'\n'}"
+    _out_ref+=("${val}")
+  done
+}
+
+# Pick a quoted-heredoc delimiter that does not appear in *body* (full-line or substring).
+# Mirrors render_python_task_mocks_from_yaml.py::_heredoc_lines.
+pick_tekton_heredoc_delimiter() {
+  local body="$1"
+  local label="$2"
+  local delim try suffix
+
+  for ((try = 1; try <= 8; try++)); do
+    suffix="$(python3 -c 'import secrets; print(secrets.token_hex(16), end="")')" || {
+      echo "Error: python3 failed to generate random suffix for heredoc delimiter" >&2
+      return 1
+    }
+    if [[ -z "${suffix}" ]]; then
+      echo "Error: python3 returned empty suffix for heredoc delimiter" >&2
+      return 1
+    fi
+    delim="TEKTONARG${suffix}"
+    if [[ "${body}" != *"${delim}"* ]] \
+      && ! printf '%s\n' "${body}" | grep -Fxq -- "${delim}"; then
+      printf '%s' "${delim}"
+      return 0
+    fi
+  done
+
+  echo "Error: could not pick a heredoc delimiter for ${label}" >&2
+  return 1
+}
+
+# True when command/args look like a Python task entrypoint (.py path or python -m).
+is_python_task_entrypoint() {
+  local joined="$1"
+  [[ "${joined}" == *".py"* ]] \
+    || [[ "${joined}" == *"python -m "* ]] \
+    || [[ "${joined}" == *"python3 -m "* ]]
+}
+
+# For tasks that use a step command/args with a Python entrypoint, merge test mocks
+# into that step: prefer tests/mocks.yaml (render_python_task_mocks_from_yaml.py)
+# else tests/mocks.sh (legacy: body after shebang). Task-specific hooks still run after.
 apply_python_command_mocks_merge() {
   local task_copy="$1"
   local tests_dir="$2"
   local mocks_sh="${tests_dir}/mocks.sh"
   local mocks_yaml="${tests_dir}/mocks.yaml"
-  local step_count i merged_tmp w joined _tt_scripts_dir
+  local step_count i merged_tmp w joined _tt_scripts_dir delimiter
   local -a command_from_task args_from_task entrypoint_argv
 
   [[ -f "$mocks_yaml" ]] || [[ -f "$mocks_sh" ]] || return 0
 
   _tt_scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-  step_count=$(yq '.spec.steps | length' "$task_copy")
+  step_count="$(yq '.spec.steps | length' "${task_copy}")" || {
+    echo "apply_python_command_mocks_merge: failed to get step count from ${task_copy}" >&2
+    return 1
+  }
 
   for ((i = 0; i < step_count; i++)); do
     command_from_task=()
     args_from_task=()
-    mapfile -t command_from_task < <(
-      yq -r ".spec.steps[$i].command // [] | .[]?" "$task_copy" 2>/dev/null
-    )
+    read_tekton_string_array "${task_copy}" ".spec.steps[${i}].command // []" command_from_task || {
+      echo "apply_python_command_mocks_merge: failed to read command for step ${i}" >&2
+      return 1
+    }
     [[ ${#command_from_task[@]} -gt 0 ]] || continue
 
-    mapfile -t args_from_task < <(
-      yq -r ".spec.steps[$i].args // [] | .[]?" "$task_copy" 2>/dev/null
-    )
+    read_tekton_string_array "${task_copy}" ".spec.steps[${i}].args // []" args_from_task || {
+      echo "apply_python_command_mocks_merge: failed to read args for step ${i}" >&2
+      return 1
+    }
 
     entrypoint_argv=("${command_from_task[@]}" "${args_from_task[@]}")
     joined=""
     for w in "${entrypoint_argv[@]}"; do
       joined+=" $w"
     done
-    [[ "$joined" == *".py"* ]] || [[ "$joined" == *"python"*" -m "* ]] || [[ "${command_from_task[0]}" == "python"* ]] || continue
+    is_python_task_entrypoint "${joined}" || continue
 
     if [[ -f "$mocks_yaml" ]]; then
       echo "  Merging tests/mocks.yaml into step $i (Python entrypoint) for task tests"
@@ -61,20 +147,27 @@ apply_python_command_mocks_merge() {
     merged_tmp=$(mktemp)
     {
       echo '#!/usr/bin/env bash'
-      echo "TASK_ENTRYPOINT=("
+      # Build TASK_ENTRYPOINT incrementally to preserve trailing newlines.
+      # Command substitution strips trailing newlines, so we use the sentinel
+      # technique: append 'x', then strip it, preserving any original newlines.
+      echo "TASK_ENTRYPOINT=()"
       for w in "${entrypoint_argv[@]}"; do
-        # Tekton placeholders must stay unescaped so Tekton can substitute them
-        # (printf %q would escape the '$').  Use single quotes so that JSON
-        # values with embedded double quotes survive bash array construction.
-        # Tekton does raw text replacement on the whole script string before
-        # bash sees it, so single quotes do not prevent substitution.
-        if [[ "$w" == *'$('* ]]; then
-          printf "  '%s'\n" "$w"
+        # Placeholders must survive Tekton substitution even when values contain
+        # single quotes; heredoc avoids breaking the wrapper.
+        if [[ "${w}" == *'$('* ]]; then
+          delimiter="$(pick_tekton_heredoc_delimiter "${w}" "TASK_ENTRYPOINT placeholder")" \
+            || return 1
+          printf 'arg="$({ cat <<'"'"'%s'"'"'\n' "${delimiter}"
+          printf '%s\n' "${w}"
+          printf '%s\n' "${delimiter}"
+          # Sentinel technique: printf x, then strip it to preserve trailing newlines.
+          # Also strip the heredoc's trailing newline (Tekton args don't legitimately
+          # end with newlines, and the heredoc syntax requires one before the delimiter).
+          printf 'printf x; })"; arg="${arg%%x}"; arg="${arg%%$'"'"'\n'"'"'}"; TASK_ENTRYPOINT+=("${arg}")\n'
         else
-          printf '  %q\n' "$w"
+          printf 'TASK_ENTRYPOINT+=( %q )\n' "${w}"
         fi
       done
-      echo ")"
       if [[ -f "$mocks_yaml" ]]; then
         python3 "${_tt_scripts_dir}/render_python_task_mocks_from_yaml.py" "$tests_dir"
       else
