@@ -5,6 +5,9 @@ Tekton task that creates a release in GitHub.com via the API.
 It extracts binary files from the container image and uploads them along with
 SHA256SUMS and signature files (from the TA chain) to the GitHub release.
 
+Binary uploads accept any combination of *.zip, *.tar.gz, and *.json from the
+image. SHA256SUMS and .sig files from the trusted-artifact chain are required.
+
 ## Parameters
 
 | Name                    | Description                                                                                                                | Optional | Default value        |
