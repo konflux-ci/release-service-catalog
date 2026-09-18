@@ -89,51 +89,15 @@ if [ -z "${DEST_REPO_CHECK}" ]; then
   echo "⚠️  Destination repository ${dest_repo} not found"
   echo "   Attempting to create it automatically..."
   
-  # Pass the full repository path to the create script (it now handles org/repo format)
   if [ -n "${DEBUG}" ]; then
     echo "🐛 Full dest_repo: ${dest_repo}"
   fi
   
-  # Get the directory where this script is located to find the helper script
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   "${SCRIPT_DIR}/create-github-repo.sh" "${dest_repo}" "Automatically created for branch copy from ${source_repo}" false
   
   if [ $? -ne 0 ]; then
     echo "🔴 error: failed to create destination repository ${dest_repo}"
-    exit 1
-  fi
-  
-  # Verify the repository was created successfully with retry logic
-  # GitHub API may take a moment to propagate the newly created repository
-  echo "Re-verifying destination repository ${dest_repo}..."
-  max_attempts=5
-  attempt=1
-  verification_success=false
-
-  while [ $attempt -le $max_attempts ]; do
-    DEST_REPO_RECHECK_RESPONSE=$(curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${dest_repo} 2> /dev/null)
-    if [ -n "${DEBUG}" ]; then
-      echo "🐛 Destination repo recheck API response: ${DEST_REPO_RECHECK_RESPONSE}"
-    fi
-    DEST_REPO_CHECK=$(echo "${DEST_REPO_RECHECK_RESPONSE}" | jq -r '.full_name // ""')
-    if [ -n "${DEST_REPO_CHECK}" ]; then
-      verification_success=true
-      break
-    fi
-
-    echo "⚠️  Repository not yet available (attempt ${attempt}/${max_attempts})"
-    if [ $attempt -lt $max_attempts ]; then
-      echo "Waiting 3 seconds before retry..."
-      sleep 3
-    fi
-    attempt=$((attempt + 1))
-  done
-
-  if [ "$verification_success" = false ]; then
-    echo "🔴 error: destination repository ${dest_repo} still not accessible after ${max_attempts} attempts"
-    if [ -n "${DEBUG}" ]; then
-      echo "🐛 Last response: ${DEST_REPO_RECHECK_RESPONSE}"
-    fi
     exit 1
   fi
 

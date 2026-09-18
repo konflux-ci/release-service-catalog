@@ -55,7 +55,7 @@ get_changed_files() {
     if [[ -n "${PR_NUMBER:-}" ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
         echo "🔍 Detecting changed task directories from PR #${PR_NUMBER}..."
         curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/konflux-ci/release-service-catalog/pulls/${PR_NUMBER}/files" | \
+            "https://api.github.com/repos/konflux-ci/release-service-catalog/pulls/${PR_NUMBER}/files?per_page=100" | \
             jq -r '.[].filename' | \
             grep '^tasks/' | \
             cut -d'/' -f1-3 | \
