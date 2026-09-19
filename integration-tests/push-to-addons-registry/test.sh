@@ -70,13 +70,19 @@ patch_component_source_before_merge() {
     ".tekton/${component_name}-pull-request.yaml"
     ".tekton/${component_name}-push.yaml"
   )
-  local head_sha pr_response
+  local head_sha head_ref head_repo_full_name pr_response
   pr_response=$(github_api_get_json "${secret_value}" \
     "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}" \
     "GitHub API error fetching PR ${pr_number}" \
     "failed to fetch PR ${pr_number} from ${component_repo_name} (check PaC token and repo access)") || exit 1
   head_sha=$(jq -r -e '.head.sha' <<< "${pr_response}") || {
     log_error "missing or invalid .head.sha in PR ${pr_number} response"
+  }
+  head_ref=$(jq -r -e '.head.ref' <<< "${pr_response}") || {
+    log_error "missing or invalid .head.ref in PR ${pr_number} response"
+  }
+  head_repo_full_name=$(jq -r -e '.head.repo.full_name' <<< "${pr_response}") || {
+    log_error "missing or invalid .head.repo.full_name in PR ${pr_number} response"
   }
 
   for file_name in "${file_names[@]}"; do
@@ -132,7 +138,9 @@ patch_component_source_before_merge() {
       "${pr_number}" \
       "${file_name}" \
       "Update PaC templates for multi-arch build" \
-      "${encoded_contents}" || log_error "failed to update ${file_name} in PR ${pr_number}"
+      "${encoded_contents}" \
+      "${head_ref}" \
+      "${head_repo_full_name}" || log_error "failed to update ${file_name} in PR ${pr_number}"
   done
 
   echo "✅️ Successfully patched component PaC templates for multi-arch."

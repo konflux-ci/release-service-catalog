@@ -71,8 +71,8 @@
 #                                     (Resolved to: ${SCRIPT_DIR}/lib/test-functions.sh)
 #   Helper Scripts (typically called by functions in sourced scripts):
 #     - Located in `../scripts/` relative to this script's directory.
-#       (e.g., delete-single-branch.sh, create-branch-from-base.sh,
-#        wait-for-release.sh, get-advisory-content.sh, etc.).
+#       (e.g., delete-single-branch.sh, wait-for-release.sh,
+#        get-advisory-content.sh, etc.).
 #
 # Exit Behavior:
 #   - Exits 0 on successful completion of all steps and verifications.
