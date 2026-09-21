@@ -17,7 +17,6 @@ Unlike wheel release pipelines, this pipeline does NOT perform wheel signing or 
 | enterpriseContractTimeout       | Timeout for Enterprise Contract evaluation                                | Yes      | 1h0m0s                                                           |
 | taskGitUrl                      | Git repository containing the release tasks                               | Yes      | https://github.com/konflux-lightwell/release-service-catalog.git |
 | taskGitRevision                 | Git revision for release tasks                                            | Yes      | development-python                                               |
-| taisceCuanGitUrl                | Immutable deployment-supplied Git repository containing taisce-cuan tasks | No       | -                                                                |
-| taisceCuanGitRevision           | Immutable deployment-supplied taisce-cuan task revision                   | No       | -                                                                |
-| taisceCuanImage                 | Immutable deployment-supplied taisce-cuan task image, pinned by digest    | No       | -                                                                |
+| taisceCuanGitUrl                | Git repository containing taisce-cuan tasks                            | Yes      | https://github.com/konflux-lightwell/taisce-cuan.git             |
+| taisceCuanGitRevision            | Revision for taisce-cuan tasks                                         | Yes      | main                                                             |
 | ociStorage                      | OCI storage repository for Trusted Artifacts                              | Yes      | quay.io/konflux-ci/release-service-trusted-artifacts             |
