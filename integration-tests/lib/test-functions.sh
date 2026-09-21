@@ -1488,6 +1488,7 @@ check_container_images() {
 
         for arch in $PTSV_EXPECTED_ARCHES; do
             if skopeo inspect --authfile "${AUTH_FILE}" --override-arch "${arch}" --tls-verify=true --retry-times 3 \
+                    --no-tags \
                     "docker://${image_pullspec}" > /dev/null 2>&1; then
                 echo "✅️ skopeo inspect --override-arch ${arch} succeeded for ${image_pullspec}"
             else
