@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mock cosign3 for integration tests.
+#
+# Verify calls read exit codes from ${PARAMS_DATA_DIR}/mock_cosign_verify_exit_codes
+# Sign calls read exit codes from ${PARAMS_DATA_DIR}/mock_cosign_sign_exit_codes
+# Lines are consumed in order (0 = success, non-zero = failure).
+# Empty queue default: verify → 1 (emits "no signatures found" so the Python
+#   signer treats the image as unsigned and proceeds to sign),
+#   sign → 1 (simulated error).
+#
+# Normalizes --key <path> to --key temp_key_file in verify calls so assertions
+# remain compatible with the Python script which writes keys to real temp files.
+
+# Build a normalized argument string. For verify calls, replace the value of
+# --key with "temp_key_file" so assertions do not depend on the random path.
+NORMALIZED_ARGS=()
+REPLACE_NEXT=0
+for ARG in "$@"; do
+    if [ "${REPLACE_NEXT}" -eq 1 ]; then
+        NORMALIZED_ARGS+=("temp_key_file")
+        REPLACE_NEXT=0
+        continue
+    fi
+    if [ "${1}" = "verify" ] && [ "${ARG}" = "--key" ]; then
+        NORMALIZED_ARGS+=("--key")
+        REPLACE_NEXT=1
+        continue
+    fi
+    NORMALIZED_ARGS+=("${ARG}")
+done
+NORMALIZED="${NORMALIZED_ARGS[*]}"
+
+if [ "${1}" = "verify" ]; then
+    EXIT_CODE_FILE="${PARAMS_DATA_DIR}/mock_cosign_verify_exit_codes"
+    LOCK_FILE="${EXIT_CODE_FILE}.lock"
+    exit_code="$(
+        flock -x "${LOCK_FILE}" bash -c \
+            "sed -n '1p' '${EXIT_CODE_FILE}' 2>/dev/null && sed -i '1d' '${EXIT_CODE_FILE}' 2>/dev/null" \
+        || true
+    )"
+    exit_code="${exit_code:-1}"
+
+    echo "${NORMALIZED}" >> "${PARAMS_DATA_DIR}/mock_cosign_verify_calls"
+    if [ "${exit_code}" != "0" ]; then
+        echo "no signatures found" >&2
+        exit 1
+    fi
+    # Derive mock file name from the last argument (image reference), replacing / with -.
+    LAST_ARG="${*: -1}"
+    MOCK_FILE="${PARAMS_DATA_DIR}/$(echo "${LAST_ARG}" | tr '/' '-')"
+    if [ -f "${MOCK_FILE}" ]; then
+        cat "${MOCK_FILE}"
+    else
+        echo "[]"
+    fi
+else
+    EXIT_CODE_FILE="${PARAMS_DATA_DIR}/mock_cosign_sign_exit_codes"
+    LOCK_FILE="${EXIT_CODE_FILE}.lock"
+    exit_code="$(
+        flock -x "${LOCK_FILE}" bash -c \
+            "sed -n '1p' '${EXIT_CODE_FILE}' 2>/dev/null && sed -i '1d' '${EXIT_CODE_FILE}' 2>/dev/null" \
+        || true
+    )"
+    exit_code="${exit_code:-1}"
+
+    echo "running cosign: ${NORMALIZED}"
+    echo "${NORMALIZED}" >> "${PARAMS_DATA_DIR}/mock_cosign_sign_calls"
+    if [ "${exit_code}" != "0" ]; then
+        echo "- SIMULATED ERROR -" >&2
+        echo "- SIMULATED ERROR -" >> "${PARAMS_DATA_DIR}/mock_cosign_sign_calls"
+        exit 1
+    fi
+fi
