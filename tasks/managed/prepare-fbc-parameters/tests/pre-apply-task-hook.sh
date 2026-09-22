@@ -17,6 +17,7 @@ kubectl delete internalrequests \
 # so executable mocks cannot intercept the calls. This loop runs on the test
 # runner and patches each new IR with Succeeded + mock opt-in results.
 (
+  set +e
   while true; do
     kubectl get internalrequests --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null \
     | while read -r name; do
@@ -31,7 +32,7 @@ kubectl delete internalrequests \
         || opt_in='[{"containerImage":"mock","fbcOptIn":true}]'
       escaped=$(echo "${opt_in}" | jq -Rs .)
       kubectl patch internalrequest "${name}" --type=merge --subresource=status \
-        -p "{\"status\":{\"conditions\":[{\"type\":\"Succeeded\",\"status\":\"True\",\"reason\":\"Succeeded\",\"lastTransitionTime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}],\"results\":{\"optInResults\":${escaped}}}}" \
+        -p "{\"status\":{\"conditions\":[{\"type\":\"Succeeded\",\"status\":\"True\",\"reason\":\"Succeeded\",\"message\":\"mock\",\"lastTransitionTime\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}],\"results\":{\"optInResults\":${escaped}}}}" \
         2>/dev/null || true
     done
     sleep 1
