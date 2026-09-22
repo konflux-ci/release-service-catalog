@@ -22,8 +22,12 @@ The following integration test suites are available:
   - **Duration**: 4-8 hours
   - **⚠️ Hard Requirements**:
     - **Cluster**: `stg-rh01` staging cluster only
-    - **Namespace**: `rhtap-release-2-tenant` (PaC runs) or `dev-release-team-tenant` (local runs)
-    - **Required Secrets** (must exist in namespace): `vault-password-secret`, `github-token-secret`, `kubeconfig-secret`
+    - **Tenant / managed namespaces**: `dev-release-team-tenant` /
+      `managed-release-team-tenant` (test resources)
+    - **ITS PipelineRun namespace**: `konflux-release-service-tenant`
+      (in-cluster auth; no kubeconfig)
+    - **Required Secrets** (must exist in the ITS namespace): vault password and
+      GitHub token ExternalSecrets (see stage tenants-config)
     - Cannot run in arbitrary clusters/namespaces without infrastructure setup
 
 ## Common Setup
@@ -43,6 +47,7 @@ All integration tests require the following dependencies:
   - Tests use `stg-rh01` cluster
   - Tenant namespace: `dev-release-team-tenant`
   - Managed namespace: `managed-release-team-tenant`
+  - Konflux ITS run in `konflux-release-service-tenant` with in-cluster kubectl (no kubeconfig)
 
 ### Required Environment Variables
 
@@ -55,7 +60,7 @@ All tests require these environment variables:
 
 ### Optional Environment Variables
 
-- **`KUBECONFIG`** - The KUBECONFIG file used to login to the target cluster (provided when testing PRs)
+- **`KUBECONFIG`** - For local runs only. Konflux ITS use in-cluster auth and do not set this.
 
 ## Test Structure
 
@@ -233,7 +238,8 @@ Local `./run-test.sh` runs one suite at a time; only the periodic pipeline runs 
 ### Common Issues
 
 1. **Authentication Errors** - Verify GitHub token has correct permissions
-2. **Cluster Access** - Ensure KUBECONFIG is properly configured
+2. **Cluster Access** - For local runs, ensure kubectl/KUBECONFIG points at stg-rh01;
+   Konflux ITS use in-cluster auth
 3. **Secret Errors** - Check vault password file exists and is correct
 4. **Resource Conflicts** - Use cleanup scripts to remove stale resources
 5. **OOM or `kubectl create` exit 137 in periodic e2e** - Usually too many suites starting at once or insufficient step memory. The periodic pipeline caps parallelism and sets 6Gi; if failures persist, check Tekton step logs for `Killed` during tenant resource setup.

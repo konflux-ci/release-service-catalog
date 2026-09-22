@@ -23,8 +23,8 @@
   - This is provided when testing PRs
 ### Optional Environment Variables
 - KUBECONFIG
-  - The KUBECONFIG file to used to login to the target cluster
-  - This is provided when testing PRs 
+  - For local runs only; Konflux ITS use in-cluster auth
+
 ### Test Properties
 #### [test.env](test.env)
 - This file contains resource names and configuration values needed for testing.
