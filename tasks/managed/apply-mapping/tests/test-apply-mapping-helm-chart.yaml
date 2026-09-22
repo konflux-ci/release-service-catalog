@@ -2,11 +2,13 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-apply-mapping
+  name: test-apply-mapping-helm-chart
 spec:
   description: |
-    Run the apply-mapping task with a snapshot.spec json and a custom mapping provided in
-    the data json file and verify that the resulting json contains the expected values.
+    Run the apply-mapping task with a snapshot containing both container image components
+    and Helm chart components. Verify that oci_version expansion works using annotations.
+  workspaces:
+    - name: tests-workspace
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -29,10 +31,15 @@ spec:
       type: string
   tasks:
     - name: setup
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       taskSpec:
         results:
           - name: sourceDataArtifact
             type: string
+        workspaces:
+          - name: data
         volumes:
           - name: workdir
             emptyDir: {}
@@ -60,69 +67,63 @@ spec:
                 "mapping": {
                   "components": [
                     {
-                      "name": "comp1",
+                      "name": "web-app",
                       "repositories": [
                         {
-                          "url": "repo1"
+                          "url": "registry.redhat.io/myorg/web-app",
+                          "tags": [
+                            "{{ timestamp }}",
+                            "build-{{ digest_sha }}",
+                            "{{ git_short_sha }}"
+                          ]
                         }
                       ]
                     },
                     {
-                      "name": "comp2",
+                      "name": "helm-chart",
                       "repositories": [
                         {
-                          "url": "repo2"
+                          "url": "registry.redhat.io/myorg/helm-chart",
+                          "tags": [
+                            "{{ oci_version }}",
+                            "chart-{{ oci_version }}",
+                            "v{{ oci_version }}-stable"
+                          ]
                         }
                       ]
-                    },
-                    {
-                      "name": "comp3",
-                      "repositories": [
-                        {
-                          "url": "repo3a"
-                        },
-                        {
-                          "url": "repo3b"
-                        },
-                        {
-                          "url": "repo3c"
-                        }
-                      ]
-                    },
-                    {
-                      "name": "comp4",
-                      "customfield": "custom"
                     }
-                  ]
+                  ],
+                  "defaults": {
+                    "timestampFormat": "%Y.%m.%d",
+                    "tags": ["default"]
+                  }
                 }
               }
               EOF
 
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json" << EOF
               {
-                "application": "myapp",
+                "application": "mixed-app",
                 "components": [
                   {
-                    "name": "comp1",
-                    "containerImage": "imageurl1@sha256:123456",
+                    "name": "web-app",
+                    "containerImage": "quay.io/myorg/web-app@sha256:abcdef123456789",
                     "source": {
                       "git": {
-                        "revision": "myrev",
-                        "url": "myurl"
+                        "revision": "commit123abc",
+                        "url": "https://github.com/myorg/web-app.git"
                       }
                     }
                   },
                   {
-                    "name": "comp3",
-                    "containerImage": "imageurl3@sha256:123456"
-                  },
-                  {
-                    "name": "comp4",
-                    "containerImage": "imageurl4@sha256:123456"
-                  },
-                  {
-                    "name": "comp5",
-                    "containerImage": "imageurl5@sha256:123456"
+                    "name": "helm-chart",
+                    "containerImage": "quay.io/myorg/helm-chart@sha256:789abcdef123456",
+                    "source": {
+                      "git": {
+                        "revision": "commit789xyz",
+                        "url": "https://github.com/myorg/helm-chart.git"
+                      }
+                    }
                   }
                 ]
               }
@@ -162,6 +163,9 @@ spec:
       runAfter:
         - setup
     - name: check-result
+      workspaces:
+        - name: data
+          workspace: tests-workspace
       params:
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
@@ -170,6 +174,8 @@ spec:
       runAfter:
         - run-task
       taskSpec:
+        workspaces:
+          - name: data
         params:
           - name: sourceDataArtifact
             type: string
@@ -204,56 +210,66 @@ spec:
               #!/usr/bin/env bash
               set -eux
 
-              echo Test that SNAPSHOT contains component comp1
+              echo Test that SNAPSHOT contains web-app component with expected tags
               test "$(
-                jq -r '[ .components[] | select(.name=="comp1") ] | length' \
+                jq -r '[ .components[] | select(.name=="web-app") ] | length' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
               )" -eq 1
 
-              echo Test that SNAPSHOT contains comp1 repository from the mapping file
-              test "$(
-                jq -r '.components[] | select(.name=="comp1") | .repositories[0].url' \
+              web_app_tags="$(
+                jq -c '.components[] | select(.name=="web-app") | .repositories[0].tags' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo1
+              )"
+              echo "Web-app tags: $web_app_tags"
+              test "$web_app_tags" == '["build-abcdef123456789","default","commit1","2024.07.29"]'
 
-              echo Test that revision of comp1 is correct
+              echo Test that SNAPSHOT contains helm-chart component with oci_version tags
               test "$(
-                jq -r '.components[] | select(.name=="comp1") | .source.git.revision' \
+                jq -r '[ .components[] | select(.name=="helm-chart") ] | length' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == myrev
+              )" -eq 1
 
-              echo Test that SNAPSHOT does not contain component comp2
-              test "$(
-                jq -r '[ .components[] | select(.name=="comp2") ] | length' \
+              helm_tags="$(
+                jq -c '.components[] | select(.name=="helm-chart") | .repositories[0].tags' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+              )"
+              echo "Helm chart tags: $helm_tags"
+              test "$helm_tags" == '["chart-2.0.1_alpha","default","v2.0.1_alpha-stable","2.0.1_alpha"]'
 
-              echo Test that repository 1 of component comp3 is correct
+              echo Test that repositories were mapped correctly to Red Hat registry format
               test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[0].url' \
+                jq -r '.components[] | select(.name=="web-app") | .repositories[0].url' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3a
+              )" == "quay.io/redhat-prod/myorg----web-app"
 
-              echo Test that repository 2 of component comp3 is correct
               test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[1].url' \
+                jq -r '.components[] | select(.name=="helm-chart") | .repositories[0].url' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3b
+              )" == "quay.io/redhat-prod/myorg----helm-chart"
 
-              echo Test that repository 3 of component comp3 is correct
+              echo Test that rh-registry-repo fields were set correctly
               test "$(
-                jq -r '.components[] | select(.name=="comp3") | .repositories[2].url' \
+                jq -r '.components[] | select(.name=="web-app") | .repositories[0]."rh-registry-repo"' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == repo3c
+              )" == "registry.redhat.io/myorg/web-app"
 
-              echo Test that customfield of component comp4 was added to its snapshot entry
               test "$(
-                jq -r '.components[] | select(.name=="comp4") | .customfield' \
+                jq -r '.components[] | select(.name=="helm-chart") | .repositories[0]."rh-registry-repo"' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" == custom
+              )" == "registry.redhat.io/myorg/helm-chart"
 
-              echo Test that SNAPSHOT does not contain component comp5 as it was not included in the mapping file
+              echo Test that web-app has annotations from OCI manifest
               test "$(
-                jq -r '[ .components[] | select(.name=="comp5") ] | length' \
+                jq -c '.components[] | select(.name=="web-app") | .metadata.annotations' \
                 < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
-              )" -eq 0
+              )" == '[{"name":"org.opencontainers.image.version","value":"1.2.3-beta"},'\
+              '{"name":"org.opencontainers.image.created","value":"2024-07-29T02:17:29Z"}]'
+
+              echo Test that helm-chart has annotations from OCI manifest
+              test "$(
+                jq -c '.components[] | select(.name=="helm-chart") | .metadata.annotations' \
+                < "$(params.dataDir)/$(context.pipelineRun.uid)/test_snapshot_spec.json"
+              )" == '[{"name":"org.opencontainers.image.version","value":"2.0.1+alpha"},'\
+              '{"name":"org.opencontainers.image.created","value":"2024-07-29T02:17:29Z"}]'
+
+              echo All tests passed!
