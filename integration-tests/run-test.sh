@@ -57,7 +57,8 @@
 #       component_name                - AppStudio Component name.
 #       managed_sa_name               - ServiceAccount in managed namespace (for advisory fetching).
 #   Optional (globally recognized):
-#     KUBECONFIG                    - Path to the Kubernetes configuration file.
+#     KUBECONFIG                    - Optional path to kubeconfig for local runs.
+#                                     Konflux ITS use in-cluster auth (unset).
 #
 # Dependencies:
 #   External Commands:
