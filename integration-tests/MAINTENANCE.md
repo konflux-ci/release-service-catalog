@@ -1,40 +1,5 @@
 # Maintenance
 
-## Create the e2e service account k8s token and kubeconfig
-
-  * Since Secrets cannot be managed by argoCD and tenants-config, the e2e service account token must be manually created initially
-  * Apply integration-tests/setup/resources/tenant/service_account_token.yaml in the rhtap-release-2-tenant ns in rh01 prod
-
-```shell
-kubectl create -f integration-tests/setup/resources/tenant/service_account_token.yaml -n rhtap-release-2-tenant
-```
-  * You now have a long-lived token that can be used by the KRW tests.
-
-### Updating or creating the KUBECONFIG that is used to login to stg rh01 for KRW tests
-
-  * Login to stg rh01
-  * Generate the KUBECONFIG files using integration-tests/setup/scripts/get-kubeconfig-from-service-account.sh
-
-```shell
-cd integration-tests/setup/scripts/
-sh ./get-kubeconfig-from-service-account.sh
-```
-
-  * A kubeconfig file is created.
-
-```shell
-ls -l kubeconfig-sa
-```
-
-  * Copy the contents of that file and update the Vault at _stonesoup/staging/release/e2e/e2e-test-service-account-kubeconfig_ by creating a new version of the secret
-  * force refresh of ExternalSecret on rh01 prod
-
-```shell
-kubectl annotate es e2e-test-service-account-kubeconfig force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
-```
-
-  * At this point, the new KUBECONFIG is available which contains the new token
-
 ## Rotating the Github secret
 
 Some suites use dedicated bot accounts instead of the shared token:
