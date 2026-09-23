@@ -310,10 +310,20 @@ deploy_registry() {
     
     # Deploy cert-manager
     log "Installing cert-manager..."
-    if ! kubectl apply -k "${REPO_ROOT}/.github/resources/cert-manager"; then
+    _cert_manager_overlay="$(mktemp -d)"
+    trap 'rm -rf "${_cert_manager_overlay}"' EXIT
+    if ! curl --fail-with-body --location --retry 3 -sS \
+        -o "${_cert_manager_overlay}/cert-manager.yaml" \
+        "https://github.com/cert-manager/cert-manager/releases/download/v1.14.4/cert-manager.yaml"; then
+        error "Failed to download cert-manager manifest"
+        return 1
+    fi
+    cp "${REPO_ROOT}/.github/resources/cert-manager/kustomization.yml" "${_cert_manager_overlay}/kustomization.yml"
+    if ! kubectl apply -k "${_cert_manager_overlay}"; then
         error "Failed to install cert-manager"
         return 1
     fi
+    rm -rf "${_cert_manager_overlay}"
     
     log "Waiting for cert-manager to be ready..."
     if ! kubectl wait --for=condition=Ready --timeout=120s -l app.kubernetes.io/instance=cert-manager -n cert-manager pod; then
