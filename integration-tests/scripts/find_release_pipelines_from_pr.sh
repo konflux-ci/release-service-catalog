@@ -126,9 +126,6 @@ _emit_integration_testcase_string() {
     # remove leading spaces
     pipeline_name="${pipeline_name//[[:space:]]/}"
     case "$pipeline_name" in
-      "blob-signing-pipeline")
-        TEMP_MANAGED_PIPELINENAMES+=("release-to-github")
-        ;;
       "check-embargoed-cves")
         TEMP_MANAGED_PIPELINENAMES+=("push-artifacts-to-cdn" "push-disk-images-to-marketplaces" \
           "push-rpms-to-pulp" "release-to-github" "rh-advisories")
