@@ -4,7 +4,10 @@ kind: Pipeline
 metadata:
   name: test-add-fbc-contribution
 spec:
-  description: Test creating a internal request for the IIB pipeline
+  description: |
+    Happy-path smoke test for add-fbc-contribution. Verifies the task creates an
+    InternalRequest and writes results. Other scenarios are covered by pytest in
+    release-service-utils.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -53,32 +56,15 @@ spec:
               set -eux
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/results"
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
-              {
-                "application": "myapp",
-                "components": [
-                  {
-                    "name": "comp0",
-                    "containerImage": "registry.io/image0@sha256:0000",
-                    "repository": "prod-registry.io/prod-location0",
-                    "updatedFromIndex": "quay.io/scoheb/fbc-index-testing:latest",
-                    "updatedTargetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12"
-                  }
-                ]
-              }
-              EOF
-
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
               {
                 "fbc": {
-                  "fbcPublishingCredentials": "test-fbc-publishing-credentials",
                   "buildTimeoutSeconds": 420,
                   "requestTimeoutSeconds": 120
                 }
               }
               EOF
 
-              # Create snapshot with multi-OCP data (simulating prepare-fbc-snapshot output)
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
               {
                 "application": "myapp",
@@ -191,40 +177,36 @@ spec:
             image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
             script: |
               #!/usr/bin/env bash
-              #
               set -eux
 
               RESULTS_FILE="$(params.dataDir)/$(params.internalRequestResultsFile)"
-
-              # Use pipeline UID to find the correct InternalRequest for parallel execution safety
               PIPELINE_UID="$(params.pipelineRunUid)"
 
-              # First try to find by pipeline UID label, fallback to timestamp method
               internalRequest="$(kubectl get internalrequest \
                 -l "internal-services.appstudio.openshift.io/pipelinerun-uid=${PIPELINE_UID}" \
                 --no-headers -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp | tail -1)"
 
-              if [ -z "$internalRequest" ]; then
+              if [ -z "${internalRequest}" ]; then
                 echo "ERROR: No InternalRequest found"
-                echo "Available InternalRequests:"
                 kubectl get internalrequest --no-headers \
                   -o custom-columns=":metadata.name" --sort-by=.metadata.creationTimestamp
                 exit 1
               fi
 
-              internalRequest=$(echo "${internalRequest}" | xargs)
-              requestParams=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-              serviceAccount="$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.serviceAccount}")"
+              internalRequest="$(echo "${internalRequest}" | xargs)"
+              requestParams="$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")"
+              serviceAccount="$(kubectl get internalrequest "${internalRequest}" \
+                -o jsonpath="{.spec.serviceAccount}")"
 
               if [ "${serviceAccount}" != "release-service-account" ]; then
-                echo "service account does not match"
+                echo "service account does not match: ${serviceAccount}"
+                exit 1
               fi
 
-              # Check target_index in the enhanced component structure
-              component_target_index=$(jq -r '.components[0].target_index // empty' "$RESULTS_FILE")
-              if [ "$component_target_index" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
+              component_target_index="$(jq -r '.components[0].target_index // empty' "${RESULTS_FILE}")"
+              if [ "${component_target_index}" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
                 echo "targetIndex does not match. Expected: quay.io/scoheb/fbc-target-index-testing:v4.12," \
-                  "Got: $component_target_index"
+                  "Got: ${component_target_index}"
                 exit 1
               fi
 
@@ -233,26 +215,25 @@ spec:
                 exit 1
               fi
 
-              if [ "$(jq -r '.buildTimeoutSeconds' <<< "${requestParams}")" != "420" ]
-              then
+              if [ "$(jq -r '.buildTimeoutSeconds' <<< "${requestParams}")" != "420" ]; then
                 echo "buildTimeoutSeconds does not match"
                 exit 1
               fi
 
-              fragments=$(jq -r '.fbcFragments' <<< "${requestParams}" | jq -c .)
+              fragments="$(jq -r '.fbcFragments' <<< "${requestParams}" | jq -c .)"
               expected_fragments='["registry.io/image0@sha256:0000"]'
-              if [ "$(jq -c -S '.' <<< "$fragments")" != "$(jq -c -S '.' <<< "$expected_fragments")" ]; then
-                echo "fbcFragments does not match. Expected: $expected_fragments, Got: $fragments"
+              if [ "$(jq -c -S '.' <<< "${fragments}")" != "$(jq -c -S '.' <<< "${expected_fragments}")" ]; then
+                echo "fbcFragments does not match. Expected: ${expected_fragments}, Got: ${fragments}"
                 exit 1
               fi
 
               if [ "$(jq -r '.taskGitUrl' <<< "${requestParams}")" != "http://localhost" ]; then
-                echo "taskGitUrl image does not match"
+                echo "taskGitUrl does not match"
                 exit 1
               fi
 
               if [ "$(jq -r '.taskGitRevision' <<< "${requestParams}")" != "main" ]; then
-                echo "taskGitRevision image does not match"
+                echo "taskGitRevision does not match"
                 exit 1
               fi
       runAfter:

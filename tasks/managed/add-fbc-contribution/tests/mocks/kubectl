@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DATA_DIR="${DATA_DIR:-/workspace/data}"
+mkdir -p "${DATA_DIR}"
+MOCK_LOG="${DATA_DIR}/mock_kubectl.txt"
+
+echo "kubectl ${*}" >> "${MOCK_LOG}"
+
+# Intercept InternalRequest creation and patch a successful IIB result onto status.
+if [[ "${*}" == "create -f - -o json"* ]]; then
+    INPUT_JSON="$(cat)"
+    RESULT="$(/usr/bin/kubectl create -f - -o json <<< "${INPUT_JSON}")"
+    IR_NAME="$(echo "${RESULT}" | jq -r '.metadata.name')"
+
+    JSON_BUILD_INFO="$(jq -nc \
+        --arg updated "2024-03-06T16:39:11.314092Z" \
+        --arg index_image "redhat.com/rh-stage/iib:01" \
+        --arg internal_index_image_copy_resolved "redhat.com/rh-stage/iib@sha256:abcdefghijk" \
+        '{
+          updated: $updated,
+          index_image: $index_image,
+          internal_index_image_copy_resolved: $internal_index_image_copy_resolved
+        }' | gzip -c | base64 -w0)"
+    LAST_TRANSITION_TIME="$(/usr/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+    PATCH_FILE="${DATA_DIR}/${IR_NAME}-patch.json"
+    jq -n \
+        --arg jsonBuildInfo "${JSON_BUILD_INFO}" \
+        --arg lastTransitionTime "${LAST_TRANSITION_TIME}" \
+        '{
+          status: {
+            results: {
+              jsonBuildInfo: $jsonBuildInfo,
+              indexImageDigests: "quay.io/a quay.io/b",
+              iibLog: "Dummy IIB Log",
+              exitCode: "0"
+            },
+            conditions: [
+              {
+                type: "Succeeded",
+                status: "True",
+                reason: "Succeeded",
+                message: "",
+                lastTransitionTime: $lastTransitionTime
+              }
+            ]
+          }
+        }' > "${PATCH_FILE}"
+
+    sleep 1
+    MAX_PATCH_ATTEMPTS=5
+    PATCH_RETRY_DELAY_SECONDS=1
+    for ((attempt=1; attempt<=MAX_PATCH_ATTEMPTS; attempt++)); do
+        if /usr/bin/kubectl patch internalrequest "${IR_NAME}" --type=merge --subresource status \
+            --patch-file "${PATCH_FILE}" >> "${MOCK_LOG}" 2>&1; then
+            break
+        fi
+        if [ "${attempt}" -eq "${MAX_PATCH_ATTEMPTS}" ]; then
+            echo "ERROR: Failed to patch InternalRequest ${IR_NAME}" >&2
+            exit 1
+        fi
+        sleep "${PATCH_RETRY_DELAY_SECONDS}"
+    done
+
+    echo "${RESULT}"
+else
+    /usr/bin/kubectl "$@"
+fi
