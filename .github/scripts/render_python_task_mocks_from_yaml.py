@@ -49,6 +49,14 @@ mock instead of the real package. Use this when the task script imports a Python
 library that cannot work in the test environment (e.g. libraries that need live
 credentials).
 
+**Mock task modules:** add ``.py`` files under ``tests/mocks/`` matching the task
+name (e.g. ``tests/mocks/direct_sign_index_image.py`` for a task in
+``tasks/managed/direct-sign-index-image/``). These are placed in
+``release_service_utils.tasks.<category>.<task_name>`` on ``PYTHONPATH``, so
+``python -m release_service_utils.tasks.managed.direct_sign_index_image`` runs
+the mock instead of the real task. Task name hyphens are converted to underscores
+for the module name.
+
 ``http_json`` uses ``.github/scripts/mock_http_json.py`` (copied into the step
 at render time). At most one ``http_json`` service per file (v1). Extend this
 module for new ``type`` values.
@@ -268,7 +276,7 @@ def _render_mock_binaries_from_dir(tests_dir: Path) -> str:
     paths = sorted(
         p
         for p in mock_dir.iterdir()
-        if p.is_file() and not p.name.startswith(".")
+        if p.is_file() and not p.name.startswith(".") and p.suffix != ".py"
     )
     if not paths:
         return ""
@@ -321,6 +329,74 @@ def _render_python_module_mocks_from_dir(tests_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def _render_task_module_mocks_from_dir(tests_dir: Path) -> str:
+    """Turn ``tests/mocks/<task_name>.py`` into ``release_service_utils.tasks.<category>.<task_name>``."""
+    mock_dir = tests_dir / "mocks"
+    if not mock_dir.is_dir():
+        return ""
+
+    # Find .py files in tests/mocks/
+    py_files = sorted(
+        p
+        for p in mock_dir.iterdir()
+        if p.is_file() and p.suffix == ".py" and not p.name.startswith(".")
+    )
+    if not py_files:
+        return ""
+
+    # Infer module path from task directory structure
+    # tests_dir is like: tasks/managed/direct-sign-index-image/tests
+    # We want: release_service_utils.tasks.managed.direct_sign_index_image
+    task_dir = tests_dir.parent
+    try:
+        parts = task_dir.parts
+        # Find 'tasks' in the path
+        tasks_idx = parts.index("tasks")
+        category = parts[tasks_idx + 1]  # e.g., "managed", "internal", "collectors"
+        task_name = parts[tasks_idx + 2]  # e.g., "direct-sign-index-image"
+    except (ValueError, IndexError):
+        # Cannot infer structure, skip
+        return ""
+
+    # Convert task name to Python module name (hyphens to underscores)
+    module_name = task_name.replace("-", "_")
+
+    lines = []
+    # Reuse or create MOCK_PYMOD_ROOT
+    lines += [
+        'if [[ -z "${MOCK_PYMOD_ROOT}" ]]; then',
+        '  MOCK_PYMOD_ROOT="$(mktemp -d)"',
+        '  export PYTHONPATH="${MOCK_PYMOD_ROOT}:${PYTHONPATH:-}"',
+        'fi',
+        "",
+    ]
+
+    # Create package structure: release_service_utils/tasks/{category}/
+    package_path = f"release_service_utils/tasks/{category}"
+    lines += [
+        f'mkdir -p "${{MOCK_PYMOD_ROOT}}/{package_path}"',
+        f'touch "${{MOCK_PYMOD_ROOT}}/release_service_utils/__init__.py"',
+        f'touch "${{MOCK_PYMOD_ROOT}}/release_service_utils/tasks/__init__.py"',
+        f'touch "${{MOCK_PYMOD_ROOT}}/{package_path}/__init__.py"',
+        "",
+    ]
+
+    for path in py_files:
+        if not _NAME_SAFE.match(path.name):
+            _die(
+                f"mock task module filename must match "
+                f"^[a-zA-Z0-9._-]+$: {path.name!r} ({path})"
+            )
+        # Only process if filename matches expected module name
+        if path.stem == module_name:
+            body = path.read_text(encoding="utf-8")
+            dest = f'"${{MOCK_PYMOD_ROOT}}/{package_path}/{module_name}.py"'
+            lines += _heredoc_lines(dest, body, path.name)
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def render(tests_dir: Path) -> str:
     mocks_path = tests_dir / "mocks.yaml"
     if not mocks_path.is_file():
@@ -350,6 +426,7 @@ def render(tests_dir: Path) -> str:
         ) is None
     parts.append(_render_mock_binaries_from_dir(tests_dir))
     parts.append(_render_python_module_mocks_from_dir(tests_dir))
+    parts.append(_render_task_module_mocks_from_dir(tests_dir))
     if use_tls_entrypoint:
         parts.append(_render_tls_task_entrypoint_exec())
     else:
