@@ -17,6 +17,12 @@ spec:
       description: |
         The pipeline that is used by the test suite.
         If empty, use the PIPELINE_TEST_SUITE as the pipeline to be used
+    - name: MANUAL_RUN
+      type: string
+      default: 'false'
+      description: >-
+        Set to true for direct Pipelines-as-Code runs: always run the requested suite
+        and fail the PipelineRun when the suite fails. ITS runs report through TEST_OUTPUT instead.
     - name: VAULT_PASSWORD_SECRET_NAME
       default: 'vault-password-secret'
       type: string
@@ -64,6 +70,8 @@ spec:
           value: $(params.PIPELINE_TEST_SUITE)
         - name: PIPELINE_USED
           value: $(params.PIPELINE_USED)
+        - name: MANUAL_RUN
+          value: $(params.MANUAL_RUN)
         - name: STEP_IMAGE
           value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
         - name: PR_GIT_URL
@@ -81,6 +89,7 @@ spec:
         params:
           - name: PIPELINE_TEST_SUITE
           - name: PIPELINE_USED
+          - name: MANUAL_RUN
           - name: STEP_IMAGE
           - name: PR_GIT_URL
           - name: PR_GIT_REVISION
@@ -120,6 +129,10 @@ spec:
                 value: $(params.PIPELINE_TEST_SUITE_VARS)
             script: |
               #!/usr/bin/env bash
+
+              if [ "$(params.MANUAL_RUN)" = "true" ]; then
+                set -eo pipefail
+              fi
 
               # Function to check if a word exists in a string
               # Arguments:
@@ -171,9 +184,12 @@ spec:
                   --argjson successcount ${successcount} --argjson failurecount ${failurecount} --null-input \
                   '{result: $RESULT, timestamp: $date, failures: $failurecount, successes: $successcount, warnings: 0}')
                 echo -n "${TEST_OUTPUT}" | tee "$(results.TEST_OUTPUT.path)"
+                if [ "$(params.MANUAL_RUN)" = "true" ]; then
+                  exit "${err}"
+                fi
                 exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
               }
-              # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+              # ITS consumes TEST_OUTPUT; direct manual runs also propagate the exit status to PaC.
               trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
 
               echo "PR_GIT_URL: $(params.PR_GIT_URL)"
@@ -198,7 +214,10 @@ spec:
               export RELEASE_CATALOG_GIT_URL
               export RELEASE_CATALOG_GIT_REVISION
 
-              if [ -n "${PR_NUMBER}" ]; then
+              if [ "$(params.MANUAL_RUN)" = "true" ]; then
+                # An explicit comment requests the suite even when its pipeline is unaffected by the diff.
+                AFFECTED_PIPELINES="release-pipelines"
+              elif [ -n "${PR_NUMBER}" ]; then
                 AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
                   --repo "konflux-ci/release-service-catalog" --pull_request_number "${PR_NUMBER}")
               elif [ -n "${BRANCH_NAME}" ]; then
