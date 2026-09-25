@@ -1,4 +1,4 @@
-FROM quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+FROM quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:33f7c1faecc9a5958ee0207c094e5687b9afd2ffd63eea0fbf535617c38dff1f
 
 ARG TKN_VERSION=0.40.0
 ARG KUSTOMIZE_VERSION=5.6.0
@@ -32,6 +32,9 @@ RUN curl -L https://github.com/kubernetes-sigs/kustomize/releases/download/kusto
 RUN python3 -m pip install --no-cache-dir ansible  
 
 ADD integration-tests/ /home/e2e/tests/
+
+# Verify that the batch-count helper can import the signing implementation.
+RUN python3 /home/e2e/tests/rh-direct-sign-image-batch-concurrency/utils/compute_batch_tag_count.py --help > /dev/null
 
 # Configure non-root user (UID 1001) for security and compatibility (inherited 
 # from the release-service-utils base image). Ensure E2E tests can write under
