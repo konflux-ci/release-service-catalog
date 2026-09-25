@@ -9,6 +9,15 @@ metadata:
 spec:
   description: |-
     Tekton pipeline to release content to registry.redhat.io registry.
+
+    This pipeline is idempotent: components that have already been fully released are
+    automatically filtered out by verifying:
+    - Pyxis metadata: image record must have non-empty rpm_manifest.rpms. A digest-only
+      or partial record does not count as released, so reruns will still push RPM data if needed.
+    - fileUpdates completion (merged GitLab merge requests), checked via InternalRequest
+
+    When all components are filtered, downstream release tasks are skipped (skip_release=true).
+    This prevents redundant processing and allows safe re-runs of the same snapshot.
   params:
     - name: release
       type: string
@@ -301,8 +310,51 @@ spec:
           value: "$(params.taskGitRevision)"
       runAfter:
         - reduce-snapshot
+    - name: filter-already-released-by-pyxis-and-file-updates
+      taskRef:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: tasks/managed/filter-already-released-by-pyxis-and-file-updates/filter-already-released-by-pyxis-and-file-updates.yaml
+      params:
+        - name: snapshotPath
+          value: "$(tasks.collect-data.results.snapshotSpec)"
+        - name: dataPath
+          value: "$(tasks.collect-data.results.data)"
+        - name: pipelineRunUid
+          value: $(context.pipelineRun.uid)
+        - name: pyxisSecret
+          value: "$(tasks.collect-task-params.results.extractedValues[2])"
+        - name: pyxisServer
+          value: "$(tasks.collect-task-params.results.extractedValues[3])"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: sourceDataArtifact
+          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: orasOptions
+          value: "$(params.orasOptions)"
+        - name: trustedArtifactsDebug
+          value: "$(params.trustedArtifactsDebug)"
+        - name: taskGitUrl
+          value: "$(params.taskGitUrl)"
+        - name: taskGitRevision
+          value: "$(params.taskGitRevision)"
+      runAfter:
+        - apply-mapping
+        - reduce-snapshot
+        - collect-task-params
     - name: verify-conforma
       timeout: "4h00m0s"
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -329,7 +381,7 @@ spec:
         - name: WORKERS
           value: "$(tasks.collect-task-params.results.extractedValues[0])"
         - name: SOURCE_DATA_ARTIFACT
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.sourceDataArtifact)"
         - name: TRUSTED_ARTIFACTS_DEBUG
           value: "$(params.trustedArtifactsDebug)"
         - name: CERTIFICATE_IDENTITY
@@ -341,7 +393,7 @@ spec:
         - name: REKOR_HOST
           value: "$(tasks.collect-signing-params.results.rekorUrl)"
       runAfter:
-        - apply-mapping
+        - filter-already-released-by-pyxis-and-file-updates
         - collect-task-params
         - collect-signing-params
     - name: rh-sign-image-cosign
@@ -350,6 +402,9 @@ spec:
         - input: $(tasks.collect-task-params.results.extractedValues[1])
           operator: notin
           values: [""]
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -387,6 +442,9 @@ spec:
         - input: "$(tasks.apply-mapping.results.mapped)"
           operator: in
           values: ["true"]
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -406,7 +464,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -420,6 +478,10 @@ spec:
     - name: rh-direct-sign-image
       timeout: "6h00m0s"
       retries: 3
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -460,12 +522,16 @@ spec:
           value: "$(params.taskGitRevision)"
       runAfter:
         - verify-conforma
-        - apply-mapping
+        - filter-already-released-by-pyxis-and-file-updates
         - publish-pyxis-repository
         - extract-requester-from-release
         - collect-task-params
     - name: create-pyxis-image
       retries: 5
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -503,6 +569,10 @@ spec:
         - collect-task-params
     - name: publish-pyxis-repository
       retries: 5
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -526,7 +596,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -538,8 +608,13 @@ spec:
       runAfter:
         - collect-task-params
         - apply-mapping
+        - filter-already-released-by-pyxis-and-file-updates
     - name: push-rpm-data-to-pyxis
       retries: 5
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       taskRef:
         resolver: "git"
         params:
@@ -569,9 +644,13 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - create-pyxis-image
+        - update-cr-status
         - collect-task-params
     - name: run-file-updates
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: fileUpdatesPath
           value: $(tasks.collect-data.results.data)
@@ -586,7 +665,7 @@ spec:
         - name: ociStorage
           value: $(params.ociStorage)
         - name: sourceDataArtifact
-          value: "$(tasks.apply-mapping.results.sourceDataArtifact)"
+          value: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.sourceDataArtifact)"
         - name: dataDir
           value: $(params.dataDir)
         - name: trustedArtifactsDebug
@@ -596,7 +675,7 @@ spec:
         - name: taskGitRevision
           value: "$(params.taskGitRevision)"
       runAfter:
-        - push-rpm-data-to-pyxis
+        - publish-pyxis-repository
       taskRef:
         kind: Task
         params:
@@ -608,6 +687,10 @@ spec:
             value: tasks/managed/run-file-updates/run-file-updates.yaml
         resolver: git
     - name: update-cr-status
+      when:
+        - input: "$(tasks.filter-already-released-by-pyxis-and-file-updates.results.skip_release)"
+          operator: in
+          values: ["false"]
       params:
         - name: resource
           value: $(params.release)
