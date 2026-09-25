@@ -2,9 +2,9 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: test-sign-base64-blob
+  name: test-sign-checksum-blob
 spec:
-  description: Test creating a internal request to sign a blob
+  description: Test signing a checksum file via the generic-signing pipeline
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -47,10 +47,10 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:b13e35a8a62c1a81ca887f7e159ec016a53815a257d5846eda066a4f59e75f18
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -euxo pipefail
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
               cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
@@ -62,7 +62,7 @@ spec:
               EOF
 
               mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)/binaries"
-              touch "$(params.dataDir)/$(context.pipelineRun.uid)/binaries/foo_SHA256SUMS"
+              echo "dummy-checksum" > "$(params.dataDir)/$(context.pipelineRun.uid)/binaries/foo_SHA256SUMS"
           - name: create-trusted-artifact
             ref:
               name: create-trusted-artifact
@@ -75,12 +75,10 @@ spec:
                 value: $(results.sourceDataArtifact.path)
     - name: run-task
       taskRef:
-        name: sign-base64-blob
+        name: sign-checksum-blob
       params:
         - name: requester
           value: testuser
-        - name: blob
-          value: test-blob
         - name: binariesPath
           value: $(context.pipelineRun.uid)/binaries
         - name: pipelineRunUid
@@ -143,52 +141,43 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:b13e35a8a62c1a81ca887f7e159ec016a53815a257d5846eda066a4f59e75f18
             script: |
               #!/usr/bin/env bash
-              set -eux
-
-              internalRequest="$(kubectl get internalrequest --sort-by=.metadata.creationTimestamp --no-headers \
-                -o custom-columns=":metadata.name")"
-              params=$(kubectl get internalrequest "${internalRequest}" -o jsonpath="{.spec.params}")
-
-              if [ "$(jq -r '.blob' <<< "${params}")" != "test-blob" ]; then
-                echo "blob does not match"
-                exit 1
-              fi
-
-              if [ "$(jq -r '.config_map_name' <<< "${params}")" != "signing-config-map" ]
-              then
-                echo "config_map_name does not match"
-                exit 1
-              fi
-
-              if [ "$(jq -r '.requester' <<< "${params}")" != "testuser" ]
-              then
-                echo "requester does not match"
-                exit 1
-              fi
-
-              expected_pipeline_image="quay.io/redhat-isv/operator-pipelines-images:v1.15.0"
-              expected_pipeline_image="${expected_pipeline_image}@sha256:4da314c5ddb6ac58f1d84ee7874c89768ce89f6b719f6778348992512088026d"
-              if [ "$(jq -r '.pipeline_image' <<< "${params}")" != "${expected_pipeline_image}" ]
-              then
-                echo "pipeline_image does not match"
-                exit 1
-              fi
+              set -euxo pipefail
 
               binaries_path="$(params.dataDir)/$(params.binariesPath)"
-              created_file=$(find "$binaries_path" -maxdepth 1 -name '*sig*' -printf '%f\n')
-              if [ "$created_file" != "foo_SHA256SUMS.sig" ]
-              then
-                echo "Unexpected filename for the signed file"
+
+              sig_file="${binaries_path}/foo_SHA256SUMS.sig"
+              if [ ! -f "${sig_file}" ]; then
+                echo "Signature file was not created"
                 exit 1
               fi
 
-              file_content=$(cat "$binaries_path/foo_SHA256SUMS.sig")
-              if [ "$file_content" != "dummy-payload" ]
-              then
-                echo "Payload is not correct"
+              if [ "$(cat "${sig_file}")" != "dummy-signature" ]; then
+                echo "Signature payload is not correct"
+                exit 1
+              fi
+
+              create_payload="$(params.dataDir)/mock_kubectl_create.json"
+              if [ ! -f "${create_payload}" ]; then
+                echo "No InternalRequest was submitted"
+                exit 1
+              fi
+
+              if ! grep -q '"signMethod":"detachsign"' "${create_payload}" \
+                && ! grep -q '"signMethod": "detachsign"' "${create_payload}"; then
+                echo "signMethod is not detachsign"
+                exit 1
+              fi
+
+              if ! grep -q 'testuser' "${create_payload}"; then
+                echo "onbehalfof requester does not match"
+                exit 1
+              fi
+
+              if ! grep -q 'redhate2etesting' "${create_payload}"; then
+                echo "keyname does not match the ConfigMap SIG_KEY_NAME"
                 exit 1
               fi
       runAfter:
@@ -198,9 +187,9 @@ spec:
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:b13e35a8a62c1a81ca887f7e159ec016a53815a257d5846eda066a4f59e75f18
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -euxo pipefail
 
               kubectl delete internalrequests --all

@@ -11,7 +11,7 @@ snapshot is released a second time.
 2. **Second Release (Retrigger)** - A second Release CR is created manually using the **same snapshot**.
    The pipeline runs again but:
    - `create-github-release` detects the existing GitHub release at `v86.${uuid}` and skips creation
-   - `sign-base64-blob` re-signs the blob (its internal skip-if-sig-exists logic applies to
+   - `sign-checksum-blob` re-signs the checksum file (its internal skip-if-sig-exists logic applies to
      within-run retries only; each new pipeline run starts with a fresh Trusted Artifacts workspace
      so no `.sig` file is present at the start of the run)
 
