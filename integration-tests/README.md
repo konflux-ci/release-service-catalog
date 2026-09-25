@@ -9,6 +9,7 @@ The following integration test suites are available:
 - **[collectors](collectors/)** - Tests for advisory data collection and processing
 - **[collectors-no-cve](collectors-no-cve/)** - Tests for the no-CVE path of advisory data collection
 - **[rh-advisories-idempotent](rh-advisories-idempotent/)** - Tests idempotent re-release behavior for the rh-advisories pipeline: verifies that a second release with the same snapshot detects the existing advisory, skips all downstream tasks, and correctly populates `advisory.url` in the Release CR status
+- **[rh-direct-sign-image-batch-concurrency](rh-direct-sign-image-batch-concurrency/)** - Regression test forcing `rh-direct-sign-image` to submit multiple signing batches concurrently (via a precisely-computed tag count), verifying no batch's `InternalRequest` cleanup deletes a concurrently-running sibling batch's request
 - **[fbc-release](fbc-release/)** - Tests for File-Based Catalog (FBC) release pipeline
 - **[push-artifacts-to-cdn](push-artifacts-to-cdn/)** - Tests for the push-artifacts-to-cdn pipeline (binary artifact distribution to Pulp and CGW)
 - **[push-to-addons-registry](push-to-addons-registry/)** - Tests for pushing to addon registries
