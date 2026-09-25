@@ -1,4 +1,4 @@
-FROM quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+FROM quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils@sha256:470137b434168173463177858001766437d44861c508ab8d16fbd3fb4dbe5048
 
 ARG TKN_VERSION=0.40.0
 ARG KUSTOMIZE_VERSION=5.6.0
