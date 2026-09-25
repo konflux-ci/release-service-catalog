@@ -128,10 +128,11 @@ get_build_pipeline_run_url() { # args are ns, app, name
   local name=$3
   local console_url
 
-  # get console url from kubeconfig using the fact that the Konflux UI uses the same URL
-  # pattern as the api server URL.
-  console_url=$(kubectl config view --minify --output jsonpath="{.clusters[*].cluster.server}" \
-    | sed 's/api/konflux-ui.apps/g' | sed 's/:6443//g')
+  # Get the Konflux UI url from the pipelines-as-code configmap. Unlike deriving it from
+  # the kubeconfig api server url, this works under in-cluster auth too, where there is no
+  # kubeconfig current-context to read.
+  console_url="$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null \
+    | jq -r '.data."custom-console-url" // empty')"
   # get rid of trailing slash
   console_url=${console_url%/}
 
