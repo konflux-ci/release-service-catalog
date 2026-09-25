@@ -349,19 +349,15 @@ create_github_repositories() {
 # Relies on global variables: managed_namespace, tenant_namespace
 setup_namespaces() {
     echo "Setting up namespaces..."
-    set +eo pipefail # Temporarily disable exit on error for checks
     echo "Checking managed namespace: ${managed_namespace}"
-    kubectl get ns "${managed_namespace}" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      log_error "Managed namespace ${managed_namespace} does not exist." 2
+    if ! kubectl get ns "${managed_namespace}" > /dev/null; then
+      log_error "Could not access managed namespace ${managed_namespace}; see kubectl error above." 2
     fi
 
     echo "Checking tenant namespace: ${tenant_namespace}"
-    kubectl get ns "${tenant_namespace}" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      log_error "Tenant namespace ${tenant_namespace} does not exist." 2
+    if ! kubectl get ns "${tenant_namespace}" > /dev/null; then
+      log_error "Could not access tenant namespace ${tenant_namespace}; see kubectl error above." 2
     fi
-    set -eo pipefail # Re-enable exit on error
     # In-cluster auth has no kubeconfig current-context. Later kubectl calls pass -n.
     if [ -n "${KUBECONFIG:-}" ]; then
       kubectl config set-context --current --namespace="${tenant_namespace}"
