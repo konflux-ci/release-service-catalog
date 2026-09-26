@@ -148,13 +148,21 @@ get_build_pipeline_run_url() { # args are ns, app, name
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
 # Optional variables: component2_repo_name (for multi-component tests), uuid (from test.env), tenant_namespace
+# Optional suite hook: suite_exit_cleanup() in <suite>/test.sh (runs before resource cleanup; always invoked).
 cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
   local command=${3:-"N/A"}
+  local cleanup_log_file="/dev/stdout"
 
   if [ "$err" -ne 0 ] ; then
     echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
+  fi
+
+  if type suite_exit_cleanup &>/dev/null; then
+    if ! ( set +eo pipefail; suite_exit_cleanup ); then
+      echo "Warning: suite_exit_cleanup failed (temporary credential files may remain on disk; continuing with resource cleanup)" >&2
+    fi
   fi
 
   if [ "${CLEANUP}" == "true" ]; then
@@ -162,7 +170,6 @@ cleanup_resources() {
     # cleanup...so we can ignore errors
     set +eo pipefail
 
-    local cleanup_log_file
     cleanup_log_file=$(mktemp)
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
@@ -1012,13 +1019,30 @@ is_task_skipped() {
     local task_name=$2
 
     local pipelinerun_name
-    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
 
     local skipped_task
-    skipped_task=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
-        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")
+    skipped_task="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")"
 
     [[ -n "${skipped_task}" ]]
+}
+
+# Return 0 (true) if the named task appears in the PipelineRun's childReferences
+# (i.e., it actually executed), 1 (false) otherwise.
+did_task_run() {
+    local release_name="${1}"
+    local task_name="${2}"
+
+    local pipelinerun_name
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
+
+    local task_ref
+    task_ref="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" -o json \
+        | jq -r --arg task_name "${task_name}" \
+            '.status.childReferences[]? | select(.pipelineTaskName == $task_name) | .name // empty')"
+
+    [[ -n "${task_ref}" ]]
 }
 
 # Return the value of a named pipeline-level result from the managed PipelineRun

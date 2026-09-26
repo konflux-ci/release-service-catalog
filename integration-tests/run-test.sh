@@ -81,6 +81,15 @@
 #   - A trap is set to call the 'cleanup_resources' function on EXIT,
 #     regardless of success or failure (unless --skip-cleanup is used).
 #     The cleanup function receives the exit code, line number, and command.
+#   - Do not replace or clear the EXIT trap from suite test.sh. Use optional hooks below
+#     or subshell-scoped EXIT traps for temporary files.
+#
+# Optional functions in <suite_name>/test.sh (detected with `type ... &>/dev/null`):
+#   patch_managed_secrets_after_decrypt  - After decrypt_secrets; adjust managed secrets on disk.
+#   post_create_kubernetes_resources     - After create_kubernetes_resources.
+#   suite_exit_cleanup                   - First step inside cleanup_resources (e.g. temp cred files).
+#
+# Optional executable unit tests: <suite_name>/test-*.sh (run before e2e setup; see run-suite-unit-tests.sh).
 #
 
 
@@ -148,6 +157,14 @@ else
     exit 1
 fi
 
+# Run suite unit tests (test-*.sh) before cluster setup.
+if compgen -G "${SUITE_DIR}/test-*.sh" >/dev/null; then
+    for unit_test in "${SUITE_DIR}"/test-*.sh; do
+        echo "Running suite unit test: ${unit_test}"
+        bash "${unit_test}" || exit 1
+    done
+fi
+
 PTSV_BUILD_PIPELINE=""
 PTSV_BUILD_PIPELINE_BUNDLE="latest"
 if [ -z "$PTSV_COMPONENTS" ]; then
@@ -176,14 +193,17 @@ fi
 
 # --- Main Script Execution ---
 
-# Trap EXIT signal to call cleanup function
-# Pass error code, line number, and command to the cleanup function
+# Trap EXIT signal to call cleanup function (pass error code, line number, and command).
+# Optional suite_exit_cleanup() in <suite>/test.sh runs first inside cleanup_resources.
 trap 'cleanup_resources $? $LINENO "$BASH_COMMAND"' EXIT
 
 check_env_vars "${args[@]}" # Pass all args for consistency, though check_env_vars doesn't use them
 parse_options "${args[@]}" # Parses options and sets CLEANUP, NO_CVE, INTERACTIVE_MODE
 
 decrypt_secrets "${SUITE_DIR}"
+if type patch_managed_secrets_after_decrypt &>/dev/null; then
+    patch_managed_secrets_after_decrypt
+fi
 create_github_repositories
 patch_components_source
 setup_namespaces # Ensures correct context before resource creation
