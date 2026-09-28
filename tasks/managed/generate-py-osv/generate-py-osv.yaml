@@ -5,9 +5,10 @@ metadata:
   name: generate-py-osv
 spec:
   description: |
-    Generate OSV security metadata for remediated Python artifacts. Reads the
-    build-index.json OCI referrer from each component image and runs
-    `slan-cuan generate-security-metadata` (fath-cuan process_osv) with OSIDB
+    Generate OSV security metadata for remediated Python artifacts. Runs
+    `slan-cuan generate-security-metadata-from-snapshot`, which discovers and
+    pulls the build-index.json OCI referrer from each component image in the
+    snapshot and generates OSV records (fath-cuan process_osv) with OSIDB
     enrichment. OSV output is threaded onward on the trusted artifact.
   params:
     - name: SNAPSHOT_PATH
@@ -76,18 +77,6 @@ spec:
     securityContext:
       runAsUser: 1001
     env:
-      - name: SNAPSHOT_PATH
-        value: $(params.dataDir)/$(params.SNAPSHOT_PATH)
-      - name: SECURITY_METADATA_DIR
-        value: $(params.dataDir)/security_metadata
-      - name: BUILD_INDEX_MEDIA_TYPE
-        value: $(params.BUILD_INDEX_MEDIA_TYPE)
-      - name: OSIDB_API_URL
-        value: $(params.OSIDB_API_URL)
-      - name: OSIDB_KERBEROS_PRINCIPAL
-        value: $(params.OSIDB_KERBEROS_PRINCIPAL)
-      - name: OSIDB_KERBEROS_KEYTAB_PATH
-        value: $(params.OSIDB_KERBEROS_KEYTAB_PATH)
       - name: "ORAS_OPTIONS"
         value: "$(params.orasOptions)"
       - name: IMAGE_EXPIRES_AFTER
@@ -145,47 +134,29 @@ spec:
         requests:
           memory: 512Mi
           cpu: 250m
-      script: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-        mkdir -p "${SECURITY_METADATA_DIR}"
-        IDX_DIR="$(params.dataDir)/build-index"
-        mkdir -p "${IDX_DIR}"
-
-        # Pull the build-index referrer for each component image and generate OSV.
-        REFERRER_COUNT=0
-        while read -r IMG; do
-          echo "Discovering build-index referrer on ${IMG}"
-          DISCOVERED=$(oras discover ${ORAS_OPTIONS} \
-            --artifact-type "${BUILD_INDEX_MEDIA_TYPE}" \
-            --format go-template --template '{{range .referrers}}{{.reference}}{{"\n"}}{{end}}' \
-            "${IMG}")
-          DIGEST=$(printf '%s\n' "${DISCOVERED}" | head -n1)
-          if [ -z "${DIGEST}" ]; then
-            echo "No build-index referrer on ${IMG}; skipping."
-            continue
-          fi
-          REFERRER_COUNT=$((REFERRER_COUNT + 1))
-          oras pull ${ORAS_OPTIONS} -o "${IDX_DIR}" "${DIGEST}"
-
-          slan-cuan --verbose generate-security-metadata \
-            --index-basedir "build-index" \
-            --index-filename "build-index.json" \
-            --workdir "$(params.dataDir)" \
-            --output-dir "${SECURITY_METADATA_DIR}" \
-            --osidb-api-url "${OSIDB_API_URL}" \
-            --osidb-kerberos-principal "${OSIDB_KERBEROS_PRINCIPAL}" \
-            --osidb-keytab "${OSIDB_KERBEROS_KEYTAB_PATH}"
-        done < <(jq -r '.components[].containerImage' "${SNAPSHOT_PATH}")
-
-        if [ "${REFERRER_COUNT}" -eq 0 ]; then
-          echo "WARNING: no build-index referrer found on ANY component image." >&2
-          echo "WARNING: verify the build-side 'fath-cuan index create --attach-to' step ran" \
-            "and attached a referrer of type ${BUILD_INDEX_MEDIA_TYPE}." >&2
-        fi
-
-        echo "Generated OSV files:"
-        ls -la "${SECURITY_METADATA_DIR}" || true
+      command:
+        - slan-cuan
+      args:
+        - --verbose
+        - generate-security-metadata-from-snapshot
+        - --snapshot-path
+        - $(params.dataDir)/$(params.SNAPSHOT_PATH)
+        - --workdir
+        - $(params.dataDir)
+        - --output-dir
+        - $(params.dataDir)/security_metadata
+        - --build-index-media-type
+        - $(params.BUILD_INDEX_MEDIA_TYPE)
+        - --index-basedir
+        - build-index
+        - --index-filename
+        - build-index.json
+        - --osidb-api-url
+        - $(params.OSIDB_API_URL)
+        - --osidb-kerberos-principal
+        - $(params.OSIDB_KERBEROS_PRINCIPAL)
+        - --osidb-keytab
+        - $(params.OSIDB_KERBEROS_KEYTAB_PATH)
     - name: create-trusted-artifact
       computeResources:
         limits:

@@ -1,8 +1,9 @@
 # generate-py-osv
 
-Generate OSV security metadata for remediated Python artifacts. Reads the
-build-index.json OCI referrer from each component image and runs
-`slan-cuan generate-security-metadata` (fath-cuan process_osv) with OSIDB
+Generate OSV security metadata for remediated Python artifacts. Runs
+`slan-cuan generate-security-metadata-from-snapshot`, which discovers and
+pulls the build-index.json OCI referrer from each component image in the
+snapshot and generates OSV records (fath-cuan process_osv) with OSIDB
 enrichment. OSV output is threaded onward on the trusted artifact.
 
 ## Parameters
