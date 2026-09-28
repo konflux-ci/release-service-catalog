@@ -15,7 +15,7 @@ function unzip() {
 Archive:  $wheel
   Length      Date    Time    Name
 ---------  ---------- -----   ----
-     2048  2026-04-13 10:00   ${wheel_base}.dist-info/sboms/sbom.spdx.json
+     2048  2026-04-13 10:00   ${wheel_base}.dist-info/sboms/redhat.spdx.json
 ---------                     -------
      2048                     1 file
 LISTING

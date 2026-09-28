@@ -57,7 +57,8 @@
 #       component_name                - AppStudio Component name.
 #       managed_sa_name               - ServiceAccount in managed namespace (for advisory fetching).
 #   Optional (globally recognized):
-#     KUBECONFIG                    - Path to the Kubernetes configuration file.
+#     KUBECONFIG                    - Optional path to kubeconfig for local runs.
+#                                     Konflux ITS use in-cluster auth (unset).
 #
 # Dependencies:
 #   External Commands:
@@ -71,8 +72,8 @@
 #                                     (Resolved to: ${SCRIPT_DIR}/lib/test-functions.sh)
 #   Helper Scripts (typically called by functions in sourced scripts):
 #     - Located in `../scripts/` relative to this script's directory.
-#       (e.g., delete-single-branch.sh, create-branch-from-base.sh,
-#        wait-for-release.sh, get-advisory-content.sh, etc.).
+#       (e.g., delete-single-branch.sh, wait-for-release.sh,
+#        get-advisory-content.sh, etc.).
 #
 # Exit Behavior:
 #   - Exits 0 on successful completion of all steps and verifications.

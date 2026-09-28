@@ -69,18 +69,19 @@ patch_component_source_before_merge() {
         ".tekton/${component_name}-pull-request.yaml"
         ".tekton/${component_name}-push.yaml"
     )
+
+    local pr_response head_sha head_ref head_repo_full_name
+    pr_response=$(curl -sS --retry 3 --fail-with-body -H "Authorization: token ${github_token}" \
+        "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}")
+    validate_github_api_json "${pr_response}" "GitHub pull #${pr_number}"
+    head_sha=$(jq -er '.head.sha' <<< "${pr_response}")
+    head_ref=$(jq -er '.head.ref' <<< "${pr_response}")
+    head_repo_full_name=$(jq -er '.head.repo.full_name' <<< "${pr_response}")
+
     for file_name in "${file_names[@]}"; do
         echo "Patching ${file_name}..."
 
-        local pr_response head_sha contents_response
-        if ! pr_response=$(curl -sS --retry 3 --fail-with-body -H "Authorization: token ${github_token}" \
-            "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}"); then
-            [ -n "${pr_response}" ] && validate_github_api_json "${pr_response}" "GitHub pull #${pr_number}"
-            log_error "GitHub pull #${pr_number}: HTTP request failed"
-        fi
-        validate_github_api_json "${pr_response}" "GitHub pull #${pr_number}"
-        head_sha=$(jq -er '.head.sha' <<< "${pr_response}")
-
+        local contents_response
         if ! contents_response=$(curl -sS --retry 3 --fail-with-body -H "Authorization: token ${github_token}" \
             "https://api.github.com/repos/${component_repo_name}/contents/${file_name}?ref=${head_sha}"); then
             [ -n "${contents_response}" ] \
@@ -107,7 +108,9 @@ patch_component_source_before_merge() {
             "${pr_number}" \
             "${file_name}" \
             "Update component source before merge" \
-            "${encoded_contents}"
+            "${encoded_contents}" \
+            "${head_ref}" \
+            "${head_repo_full_name}"
     done
 
     echo "✅ Successfully patched component source!"

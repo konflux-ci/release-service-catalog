@@ -31,7 +31,7 @@ This outputs a JSON array. Each element has these fields:
 - `name` — the check name
 - `pipelinerun` — the PipelineRun name (e.g. `collector-e2e-test-rlx2d`)
 - `pipelinerun_url` — direct link to the Konflux UI
-- `namespace` — the namespace (e.g. `rhtap-release-2-tenant`)
+- `namespace` — the namespace (e.g. `konflux-release-service-tenant`)
 - `tasks[]` — array of tasks with `task`, `passed`, `duration`, `logs_url`
 
 ### 2. For each failed check, fetch the failing TaskRuns

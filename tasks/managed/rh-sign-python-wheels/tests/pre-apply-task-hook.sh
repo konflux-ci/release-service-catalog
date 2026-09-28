@@ -6,8 +6,7 @@ kubectl create secret generic test-aws-kms-secret \
   --from-literal=AWS_DEFAULT_REGION=us-east-1 \
   --from-literal=AWS_ACCESS_KEY_ID=test-access-key \
   --from-literal=AWS_SECRET_ACCESS_KEY=test-secret-key \
-  --from-literal=SIGN_KEY=awskms:///arn:aws:kms:us-east-1:123456789:key/test-key \
-  --from-literal=REKOR_URL=https://rekor.sigstore.dev
+  --from-literal=SIGN_KEY=awskms:///arn:aws:kms:us-east-1:123456789:key/test-key
 
 # Add mocks to the beginning of task step script
 TASK_PATH="$1"

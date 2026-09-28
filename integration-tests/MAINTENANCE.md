@@ -27,13 +27,13 @@ ansible-vault encrypt resources/tenant/secrets/tenant-secrets.yaml --output "vau
 ```
   * commit and create PR
   * update the corresponding vault secret
-  * force refresh the corresponding ExternalSecret on rh01 prod
+  * force refresh the corresponding ExternalSecret on stg-rh01
 ```shell
 # shared token
-kubectl annotate es e2e-test-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
+kubectl annotate es e2e-test-github-token force-sync=$(date +%s) --overwrite -n konflux-release-service-tenant
 # per-suite tokens
-kubectl annotate es rhtap-service-push-e2e-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
-kubectl annotate es fbc-release-e2e-github-token force-sync=$(date +%s) --overwrite -n rhtap-release-2-tenant
+kubectl annotate es rhtap-service-push-e2e-github-token force-sync=$(date +%s) --overwrite -n konflux-release-service-tenant
+kubectl annotate es fbc-release-e2e-github-token force-sync=$(date +%s) --overwrite -n konflux-release-service-tenant
 ```
   * Remove any old pipelines-as-code-secret- secrets
 ```

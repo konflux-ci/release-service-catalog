@@ -21,8 +21,10 @@ This test validates idempotent re-release behavior for the `rh-advisories` pipel
   want to run this test suite.)
 * Access to the target cluster and tenant and managed namespaces
   * **Cluster:** stg-rh01 (staging cluster)
-  * **Tenant Namespace:** `dev-release-team-tenant` (local) or `rhtap-release-2-tenant` (PaC)
+  * **Tenant Namespace:** `dev-release-team-tenant` (local and ITS runs)
   * **Managed Namespace:** `managed-release-team-tenant`
+  * Konflux ITS PipelineRuns execute from `konflux-release-service-tenant`
+    using in-cluster authentication
 
 ### Required Environment Variables
 - `GITHUB_TOKEN` - GitHub personal access token
@@ -31,7 +33,7 @@ This test validates idempotent re-release behavior for the `rh-advisories` pipel
 - `RELEASE_CATALOG_GIT_REVISION` - Release service catalog revision for the RPA
 
 ### Optional Environment Variables
-- `KUBECONFIG` - Kubeconfig file for cluster access
+- `KUBECONFIG` - For local runs only; Konflux ITS use in-cluster auth
 - `LARGE_SNAPSHOT_COMPONENT_COUNT` - Number of components in snapshot (default: 1)
 - `LARGE_SNAPSHOT_TIMEOUT` - Pipeline timeout (default: 2h0m0s)
 

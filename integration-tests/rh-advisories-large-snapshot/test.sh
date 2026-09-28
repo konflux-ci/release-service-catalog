@@ -59,9 +59,14 @@ SNAPSHOT_READY_POLL_INTERVAL="${SNAPSHOT_READY_POLL_INTERVAL:-2}"
 RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"  # 10 minutes
 RELEASE_START_POLL_INTERVAL="${RELEASE_START_POLL_INTERVAL:-5}"
 
-CONSOLE_URL=$(kubectl config view --minify --output jsonpath="{.clusters[*].cluster.server}" \
-    | sed 's/api/konflux-ui.apps/g' | sed 's/:6443//g')
-CONSOLE_URL="${CONSOLE_URL%/}/"
+# Get the Konflux UI url from the pipelines-as-code configmap. Unlike deriving it from
+# the kubeconfig api server url, this works under in-cluster auth too, where there is no
+# kubeconfig current-context to read. CONSOLE_URL is optional (see usages below), so a
+# lookup failure must not abort the whole test under set -e/pipefail.
+CONSOLE_URL=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson 2>/dev/null \
+    | jq -r '.data."custom-console-url" // empty') || true
+# Strip trailing slash; usages below join with an explicit "/".
+CONSOLE_URL="${CONSOLE_URL%/}"
 
 # Explicit allowlist for envsubst — prevents corrupting Ansible vault markers ($ANSIBLE_VAULT...).
 # Add new template variables here.
@@ -340,7 +345,7 @@ verify_release_contents() {
     if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
         echo "  PipelineRun: ${pipelinerun}" >&2
         [[ -n "${CONSOLE_URL:-}" ]] && \
-            echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
+            echo "  PipelineRun URL: ${CONSOLE_URL}/ns/${managed_namespace}/applications/${application_name}/pipelineruns/${pipelinerun_name}" >&2
     fi
 
     echo "" >&2
@@ -617,7 +622,7 @@ verify_release_contents() {
         echo "  2. Run the suggested debug commands to investigate" >&2
         echo "  3. Check PipelineRun logs for detailed error messages:" >&2
         if [[ -n "${CONSOLE_URL:-}" ]]; then
-            echo "     ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
+            echo "     ${CONSOLE_URL}/ns/${managed_namespace}/applications/${application_name}/pipelineruns/${pipelinerun_name}" >&2
         else
             echo "     kubectl logs -n ${managed_namespace} -l tekton.dev/pipelineRun=${pipelinerun_name}" >&2
         fi
@@ -718,7 +723,7 @@ wait_for_release_to_start() {
     if [ -n "$pipelinerun" ] && [ "$pipelinerun" != "null" ]; then
         echo "  PipelineRun: ${pipelinerun}" >&2
         [[ -n "${CONSOLE_URL:-}" ]] && \
-            echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
+            echo "  PipelineRun URL: ${CONSOLE_URL}/ns/${managed_namespace}/applications/${application_name}/pipelineruns/${pipelinerun_name}" >&2
 
         export RELEASE_PIPELINERUN="${pipelinerun}"
     fi

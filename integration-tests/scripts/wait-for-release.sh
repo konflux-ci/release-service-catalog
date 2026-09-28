@@ -61,10 +61,10 @@ function describeFailedPipelineRun() {
 # Function to diagnose a failed Tekton PipelineRun
 # Arguments:
 #   $1: PipelineRun name
-#   $2: Namespace (optional, defaults to current namespace)
+#   $2: Namespace
 function diagnoseFailedPLR() {
     local plr_name="$1"
-    local namespace="${2:-$(kubectl config view --minify -o jsonpath='{..namespace}')}"
+    local namespace="$2"
 
     echo "🔍 Diagnosing PipelineRun: ${plr_name} in namespace: ${namespace}"
 
@@ -128,7 +128,7 @@ function getConsoleLogForRelease() { # args are application, ns, name
   app=$1
   ns=$2
   name=$3
-  releaseUrl="${CONSOLEURL}ns/${ns}/applications/${app}/releases/${name}"
+  releaseUrl="${CONSOLEURL}/ns/${ns}/applications/${app}/releases/${name}"
   echo "${releaseUrl}"
 }
 
@@ -143,7 +143,7 @@ function getConsoleLogFromPLR() { # args are json, statusSection
   if [ -z "${PLR_NAME}" ] || [ -z "${PLR_NS}" ]; then
     return
   fi
-  prLogUrl="${CONSOLEURL}ns/${PLR_NS}/applications/${APPLICATION}/pipelineruns/${PLR_NAME}"
+  prLogUrl="${CONSOLEURL}/ns/${PLR_NS}/applications/${APPLICATION}/pipelineruns/${PLR_NAME}"
   echo "${prLogUrl}"
 }
 
@@ -178,12 +178,7 @@ function getLogs() { # args are json, statusSection
   echo ""
   /usr/bin/tkn pr logs "${PLR_NAME}" -f --timestamps -n "${PLR_NS}"
 
-  # get console url from kubeconfig using the fact that the Konflux UI uses the same URL
-  # pattern as the api service URL.
-  consoleUrl=$(kubectl config view --minify --output jsonpath="{.clusters[*].cluster.server}" | sed 's/api/konflux-ui.apps/g' | sed 's/:6443//g')
-  # get rid of trailing slash
-  consoleUrl=${consoleUrl%/}
-  prLogUrl="${consoleUrl}/ns/${PLR_NS}/applications/${APPLICATION}/pipelineruns/${PLR_NAME}"
+  prLogUrl="${CONSOLEURL}/ns/${PLR_NS}/applications/${APPLICATION}/pipelineruns/${PLR_NAME}"
 
   echo ""
   echo "Console log url: ${prLogUrl}"
@@ -201,6 +196,8 @@ if [ -z "$RELEASE_NAMESPACE" ]; then
 fi
 
 CONSOLEURL=$(kubectl get cm/pipelines-as-code -n openshift-pipelines -ojson | jq -r '.data."custom-console-url"')
+# Strip any trailing slash; callers join with an explicit "/", e.g. "${CONSOLEURL}/ns/...".
+CONSOLEURL="${CONSOLEURL%/}"
 
 echo "======================================="
 echo "Release           : ${RELEASE_NAME}"
