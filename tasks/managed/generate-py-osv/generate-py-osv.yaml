@@ -125,6 +125,52 @@ spec:
           value: $(params.dataDir)
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
+    - name: prepare-oci-auth
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 64Mi
+          cpu: 100m
+        requests:
+          memory: 64Mi
+          cpu: 100m
+      env:
+        # Tekton's creds-init copies the pipeline service account's registry
+        # credentials into $HOME/.docker/config.json. Without a writable HOME
+        # (UID 1001 has no /etc/passwd entry, so $HOME resolves to "/"),
+        # select-oci-auth silently falls back to anonymous auth and the oras
+        # discover/pull of private component images fails with 401 Unauthorized.
+        - name: HOME
+          value: /tekton/home
+        - name: DATA_DIR
+          value: $(params.dataDir)
+        - name: SNAPSHOT_PATH
+          value: $(params.SNAPSHOT_PATH)
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        SNAPSHOT="${DATA_DIR}/${SNAPSHOT_PATH}"
+        AUTH_OUT="${DATA_DIR}/oci-auth.json"
+        IMAGES_TXT="${DATA_DIR}/osv-images.txt"
+        PER_IMAGE_AUTH="${DATA_DIR}/per-image-auth.json"
+
+        jq -r '.components[].containerImage' "${SNAPSHOT}" | sort -u > "${IMAGES_TXT}"
+
+        # Build one docker-config auth file covering every component image by
+        # merging the per-image credentials select-oci-auth resolves. The
+        # generate step's oras discover/pull reads it via --registry-config.
+        echo '{"auths":{}}' > "${AUTH_OUT}"
+        while read -r IMAGE; do
+          [ -n "${IMAGE}" ] || continue
+          echo "Selecting registry auth for ${IMAGE}"
+          select-oci-auth "${IMAGE}" > "${PER_IMAGE_AUTH}"
+          jq -s '.[0] * .[1]' "${AUTH_OUT}" "${PER_IMAGE_AUTH}" > "${AUTH_OUT}.tmp"
+          mv "${AUTH_OUT}.tmp" "${AUTH_OUT}"
+        done < "${IMAGES_TXT}"
+        rm -f "${PER_IMAGE_AUTH}"
+
+        echo "Wrote registry auth for $(wc -l < "${IMAGES_TXT}") image(s) to ${AUTH_OUT}"
     - name: generate
       image: quay.io/light-castle/slan-cuan:latest
       computeResources:
@@ -151,6 +197,8 @@ spec:
         - build-index
         - --index-filename
         - build-index.json
+        - --registry-config
+        - $(params.dataDir)/oci-auth.json
         - --osidb-api-url
         - $(params.OSIDB_API_URL)
         - --osidb-kerberos-principal
