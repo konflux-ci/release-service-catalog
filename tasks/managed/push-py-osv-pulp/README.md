@@ -13,6 +13,7 @@ files go to a separate Pulp file repository.
 |-----------------------------|-------------------------------------------------------------------------------------------------------|----------|------------------------------|
 | SERVICE_ACCOUNT_SECRET_NAME | The name of the secret containing the terms-based registry service account credentials                | Yes      | rhtl-pulp-credentials-secret |
 | PULP_URL                    | The base URL of the Pulp server                                                                       | No       | -                            |
+| PULP_API_ROOT               | The API root path of the Pulp server                                                                  | Yes      | /api/                        |
 | PULP_DOMAIN                 | The domain to use for Pulp operations                                                                 | No       | -                            |
 | PULP_FILE_REPOSITORY        | The Pulp file repository to publish OSV security metadata to                                          | No       | -                            |
 | securityMetadataDir         | The relative path within dataDir where OSV security metadata files are located                        | Yes      | security_metadata            |

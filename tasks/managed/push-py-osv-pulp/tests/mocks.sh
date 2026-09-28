@@ -49,6 +49,16 @@ pulp() {
     exit 1
   fi
 
+  # pulp-cli defaults api_root to /pulp/, but this Pulp instance serves its API
+  # under /api/. Without api_root in the config, the OpenAPI spec fetch hits the
+  # wrong path and pulp_glue dies with a JSONDecodeError. Assert it is written so
+  # a regression back to the api_root-less config is caught here.
+  if ! grep -q '^api_root = "/api/"$' "${config}"; then
+    echo "ERROR: --config file does not set api_root; pulp-cli would default to /pulp/"
+    cat "${config}"
+    exit 1
+  fi
+
   echo "osv_uploaded" > "${SECURITY_METADATA_DIR}/.osv_upload_marker"
 }
 export -f pulp
