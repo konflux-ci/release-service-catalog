@@ -49,12 +49,13 @@ pulp() {
     exit 1
   fi
 
-  # pulp-cli defaults api_root to /pulp/, but this Pulp instance serves its API
-  # under /api/. Without api_root in the config, the OpenAPI spec fetch hits the
-  # wrong path and pulp_glue dies with a JSONDecodeError. Assert it is written so
-  # a regression back to the api_root-less config is caught here.
-  if ! grep -q '^api_root = "/api/"$' "${config}"; then
-    echo "ERROR: --config file does not set api_root; pulp-cli would default to /pulp/"
+  # pulp-cli builds URLs as {api_root}api/v3/..., and Red Hat's hosted Pulp
+  # serves its API under /api/pulp/. With the wrong api_root (pulp-cli's /pulp/
+  # default, or /api/) the OpenAPI-spec fetch lands on the catch-all HTML page
+  # and pulp_glue dies with JSONDecodeError parsing "<!DOCTYPE html>...". Assert
+  # the full /api/pulp/ is written so a regression to a wrong root is caught.
+  if ! grep -q '^api_root = "/api/pulp/"$' "${config}"; then
+    echo "ERROR: --config file does not set api_root to /api/pulp/"
     cat "${config}"
     exit 1
   fi
