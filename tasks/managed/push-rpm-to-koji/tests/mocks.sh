@@ -57,11 +57,18 @@ function koji() {
         echo '{"build_id": 111, "token": "mock-token"}'
     elif [[ "$*" == *CGInitBuild*\"test-bar\"* ]]; then
         echo '{"build_id": 222, "token": "mock-token"}'
-    elif [[ "$*" == *CGInitBuild*\"test-baz\"* ]]; then
-        echo '{"build_id": 333, "token": "mock-token"}'
     elif [[ "$*" == *getTag*-sidetag* ]]; then
         echo '{"extra": {"sidetag": true}}'
     elif [[ "$*" == *getTag* ]]; then
         echo '{"extra": {"sidetag": false}}'
+    elif [[ "$*" == *getBuild\ * ]]; then
+        # Simulate that the build for the 3rd component (test-baz) was already
+        # imported into Brew by a previous, partially-failed task run.
+        getbuild_calls=$(grep -c "getBuild " "$(params.dataDir)/koji_calls.txt")
+        if [[ "$getbuild_calls" == "3" ]]; then
+            echo '{"id": 999}'
+        else
+            echo 'null'
+        fi
     fi
 }

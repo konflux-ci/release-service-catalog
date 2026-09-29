@@ -251,12 +251,13 @@ spec:
           SRPM=$(ls ./*.src.rpm)
           PACKAGE_NVR=$(basename "$SRPM" .src.rpm)
 
+          skip_import="false"
           if [[ "$KOJI_IMPORT_DRAFT" == "false" ]]; then
-              if koji-cmd buildinfo "$PACKAGE_NVR" >/dev/null 2>&1;  then
-                  printf "Skip import %s into BREW as it's exist ...\n" "$PACKAGE_NVR"
-                  popd > /dev/null
-                  rm -rf "$RPM_DOWNLOAD_DIR"
-                  continue
+              existing_build=$(koji-cmd --noauth call --json-output getBuild "$PACKAGE_NVR")
+              if [[ "$existing_build" != "null" ]]; then
+                  build_id=$(jq --exit-status -r '.id' <<< "$existing_build")
+                  printf "Build %s already exists in BREW (ID %s), skipping import ...\n" "$PACKAGE_NVR" "$build_id"
+                  skip_import="true"
               fi
               draft="false"
               draft_flag=""
@@ -287,36 +288,41 @@ spec:
           fi
           KOJI_TAGS="$koji_tag $KOJI_TAGS"
 
-          printf "Import rpm %s with tags %s ...\n" "$PACKAGE_NVR" "$KOJI_TAGS"
-
-          # Reserve build ID and import build (as draft by default)
           build_name=$(jq -r '.build.name' cg_import.json)
-          build_version=$(jq -r '.build.version' cg_import.json)
-          build_release=$(jq -r '.build.release' cg_import.json)
-          build_epoch=$(jq '.build.epoch' cg_import.json)
-          import_build_data=$(jq --compact-output <<EOD
-              {
-                "name": "$build_name",
-                "version": "$build_version",
-                "release": "$build_release",
-                "epoch": $build_epoch,
-                "draft": $draft
-              }
+
+          if [[ "$skip_import" == "true" ]]; then
+              printf "Tag existing build %s (ID %s) with tags %s ...\n" "$PACKAGE_NVR" "$build_id" "$KOJI_TAGS"
+          else
+              printf "Import rpm %s with tags %s ...\n" "$PACKAGE_NVR" "$KOJI_TAGS"
+
+              # Reserve build ID and import build (as draft by default)
+              build_version=$(jq -r '.build.version' cg_import.json)
+              build_release=$(jq -r '.build.release' cg_import.json)
+              build_epoch=$(jq '.build.epoch' cg_import.json)
+              import_build_data=$(jq --compact-output <<EOD
+                  {
+                    "name": "$build_name",
+                    "version": "$build_version",
+                    "release": "$build_release",
+                    "epoch": $build_epoch,
+                    "draft": $draft
+                  }
         EOD
-          )
-          set +x  # Avoid leaking the token
-          buildinfo=$(koji-cmd call --json CGInitBuild '"konflux"' "$import_build_data")
-          build_id=$(jq --exit-status -r '.build_id' <<< "$buildinfo")
-          token=$(jq --exit-status -r '.token' <<< "$buildinfo")
+              )
+              set +x  # Avoid leaking the token
+              buildinfo=$(koji-cmd call --json CGInitBuild '"konflux"' "$import_build_data")
+              build_id=$(jq --exit-status -r '.build_id' <<< "$buildinfo")
+              token=$(jq --exit-status -r '.token' <<< "$buildinfo")
 
-          echo "Importing build $build_id"
-          if ! koji-cmd import-cg $draft_flag cg_import.json --token="$token" --build-id="$build_id" .; then
-              echo "ERROR: Import failed"
-              koji-cmd call --json CGRefundBuild '"konflux"' "$build_id" "\"$token\""
-              exit 1
+              echo "Importing build $build_id"
+              if ! koji-cmd import-cg $draft_flag cg_import.json --token="$token" --build-id="$build_id" .; then
+                  echo "ERROR: Import failed"
+                  koji-cmd call --json CGRefundBuild '"konflux"' "$build_id" "\"$token\""
+                  exit 1
+              fi
+
+              set -x
           fi
-
-          set -x
 
           for tag in $KOJI_TAGS; do
               if ! koji-cmd list-pkgs --tag "$tag" --package "$build_name" >/dev/null 2>&1;  then
