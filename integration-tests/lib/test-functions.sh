@@ -152,6 +152,9 @@ cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
   local command=${3:-"N/A"}
+  local cleanup_log_file=""
+  local cleanup_status=0
+  local pkill_output_file="/dev/null"
 
   if [ "$err" -ne 0 ] ; then
     echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
@@ -162,7 +165,6 @@ cleanup_resources() {
     # cleanup...so we can ignore errors
     set +eo pipefail
 
-    local cleanup_log_file
     cleanup_log_file=$(mktemp)
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
@@ -263,12 +265,19 @@ cleanup_resources() {
     echo "Skipping cleanup as per --skip-cleanup flag."
   fi
 
-  echo "Killing any child processes..." >> "${cleanup_log_file}"
-  pkill -e  -P $$
-
-  if [ "$err" -ne 0 ]; then
-    exit "$err"
+  if [ -n "${cleanup_log_file}" ]; then
+    pkill_output_file="${cleanup_log_file}"
   fi
+
+  echo "Killing any child processes..." | tee -a "${pkill_output_file}" >/dev/null
+  pkill -e -P $$ >> "${pkill_output_file}" 2>&1 || {
+    local pkill_status=$?
+    if [ "${pkill_status}" -ne 1 ]; then
+      cleanup_status="${pkill_status}"
+    fi
+  }
+
+  return "${cleanup_status}"
 }
 
 # Function to decrypt secrets if they don't exist
@@ -310,11 +319,28 @@ create_github_repositories() {
         local _component_base_repo_name="${!_v}"
         _v="${component}_base_branch"
         local _component_base_branch="${!_v}"
+        local create_repo_output_file
+        local create_repo_status
+        local create_repo_message
 
         echo "Creating component repository ${_component_repo_name} branch ${_component_branch} from ${_component_base_repo_name} branch ${_component_base_branch}"
-        "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+        create_repo_output_file=$(mktemp)
+        if ! "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
           "${_component_base_repo_name}" "${_component_base_branch}" \
-          "${_component_repo_name}" "${_component_branch}"
+          "${_component_repo_name}" "${_component_branch}" 2>&1 | tee "${create_repo_output_file}"; then
+            create_repo_status=${PIPESTATUS[0]}
+            create_repo_message=$(sed -n \
+                -e 's/^Error message: //p' \
+                -e 's/^🔴 error: //p' \
+                "${create_repo_output_file}" | tail -1)
+            if [ -n "${create_repo_message}" ]; then
+                export RUN_TEST_FAILURE_MESSAGE="${create_repo_message}"
+            fi
+            rm -f "${create_repo_output_file}"
+            return "${create_repo_status}"
+        fi
+
+        rm -f "${create_repo_output_file}"
     done
 }
 
@@ -1130,14 +1156,17 @@ wait_for_single_component_snapshot() {
 get_pipelinerun_console_url() {
     local namespace="$1"
     local pipelinerun_name="$2"
+    local default_application_name="${application_name:-}"
     local application_name
 
     # Get application name from pipelinerun labels
     application_name=$(kubectl get pipelinerun/"${pipelinerun_name}" -n "${namespace}" \
         -ojsonpath='{.metadata.labels.appstudio\.openshift\.io/application}' 2>/dev/null || true)
 
-    if [ -n "$application_name" ]; then
+    if [ -n "${application_name}" ]; then
         get_build_pipeline_run_url "${namespace}" "${application_name}" "${pipelinerun_name}"
+    elif [ -n "${default_application_name}" ]; then
+        get_build_pipeline_run_url "${namespace}" "${default_application_name}" "${pipelinerun_name}"
     else
         echo "N/A (no application label found)"
     fi

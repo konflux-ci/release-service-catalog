@@ -27,6 +27,8 @@ verify_atlas_url() {
 verify_sboms() {
     local sboms_json="$1"
     local any_failures=0
+    local sbom_failure_messages=()
+    local failure_message=""
 
     local product_sboms
     product_sboms=$(jq -r '.product[]? // empty' <<< "$sboms_json" 2>/dev/null)
@@ -40,13 +42,17 @@ verify_sboms() {
                 if verify_atlas_url "$atlas_url"; then
                     echo "✅️ Valid product SBOM Atlas URL: $atlas_url"
                 else
+                    failure_message="Invalid product SBOM Atlas URL: ${atlas_url}"
+                    sbom_failure_messages+=("${failure_message}")
                     any_failures=1
                 fi
             fi
         done <<< "$product_sboms"
     else
-        echo "🔴 Incorrect number of product SBOMs. Expected 1, found: $product_count"
+        failure_message="Incorrect number of product SBOMs. Expected 1, found: ${product_count}"
+        echo "🔴 ${failure_message}"
         any_failures=1
+        sbom_failure_messages+=("${failure_message}")
     fi
 
     local component_sboms
@@ -61,16 +67,24 @@ verify_sboms() {
                 if verify_atlas_url "$atlas_url"; then
                     echo "✅️ Valid component SBOM Atlas URL: $atlas_url"
                 else
+                    failure_message="Invalid component SBOM Atlas URL: ${atlas_url}"
+                    sbom_failure_messages+=("${failure_message}")
                     any_failures=1
                 fi
             fi
         done <<< "$component_sboms"
     else
-        echo "🔴 Incorrect number of component SBOMs. Expected 3, found: $component_count"
+        failure_message="Incorrect number of component SBOMs. Expected 3, found: ${component_count}"
+        echo "🔴 ${failure_message}"
         any_failures=1
+        sbom_failure_messages+=("${failure_message}")
     fi
 
     if [ "$any_failures" -eq 1 ]; then
+        if [ -z "${RUN_TEST_FAILURE_MESSAGE:-}" ] && [ "${#sbom_failure_messages[@]}" -gt 0 ]; then
+            RUN_TEST_FAILURE_MESSAGE=$(printf '%s; ' "${sbom_failure_messages[@]}")
+            RUN_TEST_FAILURE_MESSAGE=${RUN_TEST_FAILURE_MESSAGE%; }
+        fi
         failures=$((failures+1))
     fi
 }

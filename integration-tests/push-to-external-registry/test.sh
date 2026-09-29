@@ -61,8 +61,10 @@ verify_release_contents() {
     # Verify both repositories received the same {{ component-incrementer }} tag
     echo "Verifying uniform {{ component-incrementer }} tag across both repositories..."
     local auth_file
+    local previous_exit_trap
     auth_file=$(mktemp)
     chmod 600 "${auth_file}"
+    previous_exit_trap=$(trap -p EXIT || true)
     trap 'rm -f "${auth_file}"' EXIT
     yq '. | select(.metadata.name | contains("push-")) | .data.".dockerconfigjson"' \
         "${SUITE_DIR}/resources/managed/secrets/managed-secrets.yaml" \
@@ -77,7 +79,7 @@ verify_release_contents() {
         2>/dev/null | jq -r '.Tags[]' 2>/dev/null | grep -E '^v1\.0\.0-[0-9]+$' | sort -t- -k2 -rn | head -1 || true)
 
     rm -f "${auth_file}"
-    trap - EXIT
+    eval "${previous_exit_trap:-trap - EXIT}"
 
     echo "Repository A (${component_name}) got component-incrementer tag: ${repo_a_tag:-<not found>}"
     echo "Repository B (${component_name}-b) got component-incrementer tag: ${repo_b_tag:-<not found>}"
