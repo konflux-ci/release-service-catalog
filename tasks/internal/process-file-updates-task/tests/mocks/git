@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# Mock git for process-file-updates Tekton tests.
+set -euo pipefail
+
+REAL_GIT=/usr/bin/git
+
+if [[ "${1:-}" == "version" ]]; then
+  "${REAL_GIT}" "$@"
+  exit 0
+fi
+
+git_clone_mock_parse_args() {
+  local -a positional=()
+  local branch="main"
+
+  shift
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch=*)
+        branch="${1#--branch=}"
+        shift
+        ;;
+      --branch|-b)
+        if [[ $# -lt 2 ]]; then
+          echo "fatal: --branch requires a value" >&2
+          return 128
+        fi
+        branch="$2"
+        shift 2
+        ;;
+      --depth=*|--filter=*|--shallow-exclude=*|--jobs=*)
+        shift
+        ;;
+      --depth|--shallow-exclude|--jobs|-j)
+        if [[ $# -lt 2 ]]; then
+          echo "fatal: $1 requires a value" >&2
+          return 128
+        fi
+        shift 2
+        ;;
+      --single-branch|--no-checkout|--no-tags|--bare|--mirror|--dissociate|--quiet|-q|-v|--verbose|--progress|--no-progress|--no-hardlinks|--no-local|--recursive|--no-recursive|--recurse-submodules|--shallow-submodules|--remote-submodules|--sparse|--no-sparse)
+        shift
+        ;;
+      -?)
+        if [[ $# -ge 2 && "$2" != -* ]]; then
+          shift 2
+        else
+          shift
+        fi
+        ;;
+      --)
+        shift
+        positional+=("$@")
+        break
+        ;;
+      --*)
+        if [[ $# -ge 2 && "$2" != -* ]]; then
+          shift 2
+        else
+          shift
+        fi
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  local dest url
+  if [[ "${#positional[@]}" -ge 2 ]]; then
+    dest="${positional[-1]}"
+  elif [[ "${#positional[@]}" -eq 1 ]]; then
+    url="${positional[0]}"
+    dest="$(basename "${url%.git}")"
+  else
+    echo "fatal: could not determine clone destination" >&2
+    return 128
+  fi
+
+  printf '%s\n' "${branch}"
+  printf '%s' "${dest}"
+}
+
+if [[ "${1:-}" == "clone" ]]; then
+  _clone_parsed="$(git_clone_mock_parse_args "$@")"
+  _parse_rc=$?
+  if [[ "${_parse_rc}" -ne 0 ]]; then
+    exit "${_parse_rc}"
+  fi
+  branch="${_clone_parsed%%$'\n'*}"
+  dest="${_clone_parsed#*$'\n'}"
+  if [[ -z "${branch}" || -z "${dest}" || "${_clone_parsed}" != *$'\n'* ]]; then
+    echo "fatal: could not parse clone args" >&2
+    exit 128
+  fi
+  parent="$(dirname "${dest}")"
+  mkdir -p "${parent}"
+  if [[ -e "${dest}" ]]; then
+    echo "fatal: destination path '${dest}' already exists" >&2
+    exit 128
+  fi
+  mkdir -p "${dest}"
+  "${REAL_GIT}" -C "${dest}" init -b "${branch}"
+  "${REAL_GIT}" -C "${dest}" config user.email "tester@tester"
+  "${REAL_GIT}" -C "${dest}" config user.name "tester"
+  exit 0
+fi
+
+if [[ "${1:-}" == "sparse-checkout" && "${2:-}" == "set" ]]; then
+  shift 2
+  if "${REAL_GIT}" sparse-checkout set "$@" 2>/dev/null; then
+    exit 0
+  fi
+  for d in "$@"; do
+    mkdir -p "${d}"
+  done
+  exit 0
+fi
+
+if [[ "${1:-}" == "fetch" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "rebase" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "push" ]]; then
+  exit 0
+fi
+
+if [[ "${1:-}" == "checkout" ]]; then
+  if "${REAL_GIT}" "$@"; then
+    exit 0
+  fi
+  if [[ $# -eq 2 && "${2}" == "main" ]]; then
+    exit 0
+  fi
+  exit 1
+fi
+
+if [[ "$*" == "diff --cached mr_"* ]]; then
+  echo -n ''
+  exit 0
+fi
+
+"${REAL_GIT}" "$@"

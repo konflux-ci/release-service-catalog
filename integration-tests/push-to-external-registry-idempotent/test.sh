@@ -13,6 +13,52 @@
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
 
+
+patch_component_source_before_merge() {
+    if [[ "${PTSV_BUILD_PIPELINE}" != "docker-build-multi-platform-oci-ta" ]] \
+        || [[ " ${PTSV_EXPECTED_ARCHES} " != *" arm64 "* ]]; then
+        echo "Not a multi-arch run, skipping build-platforms patch"
+        return 0
+    fi
+
+    set +x
+    secret_value=$(yq '. | select(.metadata.name | contains("pipelines-as-code-secret-")) | .stringData.password' \
+        "${SUITE_DIR}/resources/tenant/secrets/tenant-secrets.yaml")
+    export GH_TOKEN="${secret_value}"
+
+    local pr_response
+    pr_response=$(curl -sS --retry 3 --fail-with-body -H "Authorization: token ${GH_TOKEN}" \
+        "https://api.github.com/repos/${component_repo_name}/pulls/${pr_number}")
+    head_sha=$(jq -r '.head.sha' <<< "${pr_response}")
+    head_ref=$(jq -r '.head.ref' <<< "${pr_response}")
+    head_repo_full_name=$(jq -r '.head.repo.full_name' <<< "${pr_response}")
+
+    local file_names=".tekton/${component_name}-pull-request.yaml .tekton/${component_name}-push.yaml "
+    for file_name in ${file_names}; do
+        local work_dir
+        work_dir=$(mktemp -d)
+        nopath_file_name=$(basename "${file_name}")
+
+        curl -s -H "Authorization: token ${GH_TOKEN}" \
+            "https://api.github.com/repos/${component_repo_name}/contents/${file_name}?ref=${head_sha}" | \
+            jq -r '.content' | base64 -d > "${work_dir}/${nopath_file_name}"
+
+        yq -i '(.spec.params[] | select(.name == "build-platforms") | .value) += ["linux/arm64"]' \
+            "${work_dir}/${nopath_file_name}"
+        encoded_contents=$(base64 -w 0 "${work_dir}/${nopath_file_name}")
+        rm -rf "${work_dir}"
+
+        "${SCRIPT_DIR}/scripts/update-file-in-pull-request.sh" \
+            "${component_repo_name}" \
+            "${pr_number}" \
+            "${file_name}" \
+            "Update component source before merge" \
+            "${encoded_contents}" \
+            "${head_ref}" \
+            "${head_repo_full_name}"
+    done
+}
+
 # Check if all components were filtered (idempotency validation)
 # Returns 0 (true) if push-snapshot task was skipped, 1 (false) otherwise
 were_all_components_filtered() {

@@ -9,6 +9,8 @@
 #   $3: file_name    - The desired name for the new file within the repository.
 #   $4: commit_msg   - The commit message to use.
 #   $5: encoded_contents - The encoded contents of the file to update.
+#   $6: head_branch      - (Optional) PR head branch name. Skips API call if both $6 and $7 are provided.
+#   $7: head_repo        - (Optional) PR head repo full name (e.g., "owner/repo").
 #
 # Environment Variables:
 #   GH_TOKEN   - A GitHub personal access token with permissions to write to
@@ -49,22 +51,26 @@ if [ -z "${encoded_contents}" ]; then
   echo "🔴 error: missing parameter encoded_contents"
   exit 1
 fi
+head_branch=${6:-}
+head_repo=${7:-}
 
 echo "Updating an existing file ${file_name} in PR ${pr_number}"
 
-if ! pr_info=$(curl -sS --retry 3 --retry-all-errors --fail-with-body \
-    -H "Authorization: token ${GH_TOKEN}" \
-    "https://api.github.com/repos/${repo_name}/pulls/${pr_number}"); then
-  echo "🔴 error: GitHub API request failed when fetching PR ${pr_number} in ${repo_name}" >&2
-  [ -n "${pr_info}" ] && echo "${pr_info}" >&2
-  exit 1
+if [ -z "${head_branch}" ] || [ -z "${head_repo}" ]; then
+  if ! pr_info=$(curl -sS --retry 3 --retry-all-errors --fail-with-body \
+      -H "Authorization: token ${GH_TOKEN}" \
+      "https://api.github.com/repos/${repo_name}/pulls/${pr_number}"); then
+    echo "🔴 error: GitHub API request failed when fetching PR ${pr_number} in ${repo_name}" >&2
+    [ -n "${pr_info}" ] && echo "${pr_info}" >&2
+    exit 1
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<< "${pr_info}"; then
+    echo "🔴 error: non-JSON response when fetching PR ${pr_number}: ${pr_info}" >&2
+    exit 1
+  fi
+  head_branch=$(jq -r '.head.ref' <<< "${pr_info}")
+  head_repo=$(jq -r '.head.repo.full_name' <<< "${pr_info}")
 fi
-if ! jq -e . >/dev/null 2>&1 <<< "${pr_info}"; then
-  echo "🔴 error: non-JSON response when fetching PR ${pr_number}: ${pr_info}" >&2
-  exit 1
-fi
-head_branch=$(jq -r '.head.ref' <<< "${pr_info}")
-head_repo=$(jq -r '.head.repo.full_name' <<< "${pr_info}")
 
 if ! contents_response=$(curl -sS --retry 3 --retry-all-errors --fail-with-body \
     -H "Authorization: token ${GH_TOKEN}" \

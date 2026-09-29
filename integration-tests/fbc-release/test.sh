@@ -55,7 +55,7 @@ get_changed_files() {
     if [[ -n "${PR_NUMBER:-}" ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
         echo "🔍 Detecting changed task directories from PR #${PR_NUMBER}..."
         curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/konflux-ci/release-service-catalog/pulls/${PR_NUMBER}/files" | \
+            "https://api.github.com/repos/konflux-ci/release-service-catalog/pulls/${PR_NUMBER}/files?per_page=100" | \
             jq -r '.[].filename' | \
             grep '^tasks/' | \
             cut -d'/' -f1-3 | \
@@ -96,9 +96,7 @@ configure_test_matrix() {
     # These conditions are additive - multiple patterns can match and enable their respective tests
     
     if [[ "$changed_files" =~ tasks/managed/direct-sign-index-image ]] || \
-       [[ "$changed_files" =~ tasks/managed/rh-sign-image-cosign ]] || \
-       [[ "$changed_files" =~ pipelines/internal/simple-signing-pipeline ]] || \
-       [[ "$changed_files" =~ tasks/internal/request-and-upload-signature ]]; then
+       [[ "$changed_files" =~ tasks/managed/rh-sign-image-cosign ]]; then
         echo "🎯 Detected signing task changes - enabling core scenarios"
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"

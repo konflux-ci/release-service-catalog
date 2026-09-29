@@ -59,8 +59,7 @@ contribute no additional signing load.
 
 ### Optional Environment Variables
 
-- `KUBECONFIG` — kubeconfig file for the target cluster (provided
-  automatically when testing PRs)
+- `KUBECONFIG` — for local runs only; Konflux ITS use in-cluster auth
 - `FRESH_BUILDS_FILE` — path to an alternative image list file (default: the
   bundled `resources/static-image-pool-stable.txt`)
 

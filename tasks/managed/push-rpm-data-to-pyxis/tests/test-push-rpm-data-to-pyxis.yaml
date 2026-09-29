@@ -1,0 +1,191 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-rpm-data-to-pyxis
+spec:
+  description: |
+    Smoke test for push-rpm-data-to-pyxis covering deduplicated, single-arch,
+    and multi-arch SBOM downloads and per-entry RPM data uploads.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+            - name: DEBUG
+              value: $(params.trustedArtifactsDebug)
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:265f125c17ba430619b2ffd16a5ebee648a739c16e1644e56c92a660f6c82b15
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              mkdir -p "$(params.dataDir)"
+              cat > "$(params.dataDir)/pyxis.json" <<'EOF'
+              {
+                "components": [
+                  {
+                    "containerImage": "single-image",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "aaa111",
+                        "digest": "sha256:single",
+                        "arch_digest": "sha256:single",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "duplicate-image",
+                    "pyxisImages": [
+                      {
+                        "arch": "amd64",
+                        "imageId": "aaa111",
+                        "digest": "sha256:duplicate",
+                        "arch_digest": "sha256:duplicate",
+                        "os": "linux"
+                      }
+                    ]
+                  },
+                  {
+                    "containerImage": "multi-image",
+                    "pyxisImages": [
+                      {
+                        "arch": "arm64",
+                        "imageId": "bbb222",
+                        "digest": "sha256:index",
+                        "arch_digest": "sha256:arch",
+                        "os": "linux"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: push-rpm-data-to-pyxis
+      params:
+        - name: pyxisJsonPath
+          value: pyxis.json
+        - name: pyxisSecret
+          value: test-push-rpm-data-to-pyxis-cert
+        - name: server
+          value: stage
+        - name: concurrentLimit
+          value: "2"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: http://localhost
+        - name: taskGitRevision
+          value: main
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: ORAS_OPTIONS
+              value: $(params.orasOptions)
+            - name: DEBUG
+              value: $(params.trustedArtifactsDebug)
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:265f125c17ba430619b2ffd16a5ebee648a739c16e1644e56c92a660f6c82b15
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              test "$(wc -l < "$(params.dataDir)/mock_cosign.txt")" -eq 2
+              test "$(wc -l < "$(params.dataDir)/mock_select_oci_auth.txt")" -eq 2
+              test "$(wc -l < "$(params.dataDir)/mock_upload_rpm_data.txt")" -eq 3
+
+              grep -E "download sbom --output-file .*/aaa111.json single-image$" \
+                "$(params.dataDir)/mock_cosign.txt"
+              grep -E "download sbom --output-file .*/bbb222.json --platform linux/arm64 multi-image$" \
+                "$(params.dataDir)/mock_cosign.txt"
+
+              test "$(grep -c -- '--image-id aaa111 ' "$(params.dataDir)/mock_upload_rpm_data.txt")" -eq 2
+              test "$(grep -c -- '--image-id bbb222 ' "$(params.dataDir)/mock_upload_rpm_data.txt")" -eq 1
+      runAfter:
+        - run-task
