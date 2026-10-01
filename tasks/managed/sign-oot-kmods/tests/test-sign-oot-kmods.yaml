@@ -5,7 +5,9 @@ metadata:
   name: test-sign-oot-kmods
 spec:
   description: |
-    Run the sign-oot-kmods task and verify the results
+    Happy-path smoke test for sign-oot-kmods. Signs one architecture and checks
+    signed-kmods.tar.gz, signed module content, and mock ssh/scp calls.
+    Other scenarios are covered by pytest in release-service-utils.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -74,19 +76,11 @@ spec:
     - name: check-result
       taskSpec:
         params:
-          - name: signedKmodsPath
-            type: string
           - name: dataDir
-            type: string
-          - name: ociStorage
             type: string
           - name: sourceDataArtifact
             type: string
             default: ""
-          - name: taskGitUrl
-            type: string
-          - name: taskGitRevision
-            type: string
         volumes:
           - name: workdir
             emptyDir: {}
@@ -109,215 +103,23 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/lgallovi-test/release-service-utils@sha256:1e92136d6ec405d71f6172089de4ec82e7609c3eb22fd2aa6ce3973c73d2dac6
             script: |
               #!/usr/bin/env bash
               set -eux
 
               cd "$(params.dataDir)"
-
-              # Extract signed-kmods.tar.gz if it exists (new tarball format)
-              if [ -f signed-kmods.tar.gz ]; then
-                echo "Extracting signed-kmods.tar.gz for verification"
-                tar -xzf signed-kmods.tar.gz
-
-                # Verify extraction
-                ko_count=$(find "$(params.signedKmodsPath)" -name "*.ko" -type f | wc -l)
-                echo "Extracted $ko_count .ko files for verification"
-
-                if [ "$ko_count" -eq 0 ]; then
-                  echo "WARNING: No .ko files found after extraction"
-                fi
-              else
-                echo "No signed-kmods.tar.gz found, assuming files are already extracted"
-              fi
-
-              # Check for mocked signing operations in different locations depending on trusted artifacts mode
-              echo "INFO: ociStorage provided, checking dataDir for mock files"
-              SCP_FILE="$(params.dataDir)/mock_scp.txt"
-              RM_FILE="$(params.dataDir)/mock_rm.txt"
-
-              # Verify that the signed kmods exist in the dataDir with architecture subdirectory
-              ARCH_SUBDIR="x86_64"
-              if [ -d "$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}" ]; then
-                echo "SUCCESS: signed-kmods architecture subdirectory found in dataDir"
-                ls -la "$(params.dataDir)/$(params.signedKmodsPath)" || true
-                ls -la "$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}" || true
-              else
-                echo "ERROR: signed-kmods architecture subdirectory not found in dataDir"
-                echo "Available directories in dataDir:"
-                ls -la "$(params.dataDir)" || echo "dataDir does not exist"
-                if [ -d "$(params.dataDir)/$(params.signedKmodsPath)" ]; then
-                  ls -la "$(params.dataDir)/$(params.signedKmodsPath)" || true
-                fi
-                exit 1
-              fi
-
-              # Check that rm command was called for cleanup (tarball and temp files)
-              if [ -f "$RM_FILE" ]; then
-                echo "Mock rm file found: $RM_FILE"
-                echo "Contents:"
-                cat "$RM_FILE"
-                echo "SUCCESS: Found rm commands for cleanup operations"
-              else
-                echo "ERROR: Mock rm file not found - rm command was not called"
-                exit 1
-              fi
-
-              # Check that scp command was called to copy signed files
-              if [ -f "$SCP_FILE" ]; then
-                echo "Mock scp file found: $SCP_FILE"
-                echo "Contents:"
-                cat "$SCP_FILE"
-
-                # Check for tarball-based file transfers (new recursive implementation)
-                if grep -q 'kmods.tar.gz' "$SCP_FILE" && grep -q 'signed_single.tar.gz' "$SCP_FILE"; then
-                  echo "SUCCESS: Found tarball upload and download operations in $SCP_FILE"
-                else
-                  echo "ERROR: Expected tarball upload (kmods.tar.gz) and download" \
-                       "(signed_single.tar.gz) not found in $SCP_FILE"
-                  exit 1
-                fi
-              else
-                echo "ERROR: Mock scp file not found - scp command was not called"
-                exit 1
-              fi
-
-              # Verify that the signed files now contain "SIGNED" content to confirm replacement
-              if [ -f "$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}/mod1.ko" ]; then
-                content=$(cat "$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}/mod1.ko")
-                if [[ "$content" == "SIGNED_MODULE1" ]]; then
-                  echo "SUCCESS: mod1.ko contains signed content"
-                else
-                  echo "ERROR: mod1.ko does not contain expected signed content, found: $content"
-                  exit 1
-                fi
-              else
-                echo "ERROR: mod1.ko not found after signing process in ${ARCH_SUBDIR}"
-                exit 1
-              fi
-
-              # Verify that subdirectory .ko files are also signed (testing recursive signing)
-              echo "Checking recursive directory structure and signed files..."
-              arch_dir="$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}"
-              signed_files_count=$(find "$arch_dir" -name "*.ko" -type f | wc -l)
-              echo "Total signed .ko files found: $signed_files_count"
-
-              if [ "$signed_files_count" -ge 6 ]; then
-                echo "SUCCESS: Expected number of .ko files found (at least 6 for recursive structure)"
-
-                # Check specific subdirectory files
-                subdir_files=(
-                  "driversA/driverA-mod1.ko"
-                  "driversA/driverA-mod2.ko"
-                  "driversB/driverB-mod1.ko"
-                  "driversB/submodule/submodule.ko"
-                )
-
-                for subdir_file in "${subdir_files[@]}"; do
-                  subdir_file_path="$arch_dir/$subdir_file"
-                  if [ -f "$subdir_file_path" ]; then
-                    content=$(cat "$subdir_file_path")
-                    if [[ "$content" == SIGNED_* ]]; then
-                      echo "SUCCESS: Subdirectory file $subdir_file contains signed content: $content"
-                    else
-                      echo "ERROR: Subdirectory file $subdir_file does not contain signed content, found: $content"
-                      exit 1
-                    fi
-                  else
-                    echo "ERROR: Expected subdirectory file not found: $subdir_file"
-                    exit 1
-                  fi
-                done
-
-                echo "SUCCESS: All subdirectory .ko files are properly signed - recursive signing working!"
-              else
-                echo "ERROR: Expected at least 6 .ko files but found only $signed_files_count"
-                echo "Found .ko files:"
-                find "$arch_dir" -name "*.ko" -type f
-                exit 1
-              fi
-
-              # Verify that checksums file was generated with architecture suffix
-              CHECKSUMS_FILE="$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}/signed_kmods_checksums_${ARCH_SUBDIR}.txt"
-              if [ -f "$CHECKSUMS_FILE" ]; then
-                echo "SUCCESS: Checksums file found: $CHECKSUMS_FILE"
-                echo "Checksums file contents:"
-                cat "$CHECKSUMS_FILE"
-
-                # Verify both .ko files are in the checksums
-                if grep -q "mod1.ko" "$CHECKSUMS_FILE" && grep -q "mod2.ko" "$CHECKSUMS_FILE"; then
-                  echo "SUCCESS: Both mod1.ko and mod2.ko found in checksums file"
-                else
-                  echo "ERROR: One or both .ko files not found in checksums file"
-                  exit 1
-                fi
-
-                # Verify checksums can be validated
-                cd "$(params.dataDir)/$(params.signedKmodsPath)/${ARCH_SUBDIR}"
-                if sha256sum -c "signed_kmods_checksums_${ARCH_SUBDIR}.txt"; then
-                  echo "SUCCESS: Checksum validation passed"
-                else
-                  echo "ERROR: Checksum validation failed"
-                  exit 1
-                fi
-              else
-                echo "ERROR: Checksums file not found - should be generated after signing"
-                echo "Expected: $CHECKSUMS_FILE"
-                exit 1
-              fi
-
-              # Check for TaskRun UID usage in SSH commands
-              SSH_FILE="$(params.dataDir)/mock_ssh.txt"
-              if [ -f "$SSH_FILE" ]; then
-                echo "Mock ssh file found: $SSH_FILE"
-                echo "SSH commands:"
-                cat "$SSH_FILE"
-
-                # Check for unique directory creation with TaskRun UID pattern
-                if grep -E "mkdir -p ~/[a-f0-9\-]{8,}/kmods" "$SSH_FILE"; then
-                  echo "SUCCESS: Found unique TaskRun UID directory creation in SSH commands"
-                else
-                  echo "ERROR: Unique TaskRun UID directory creation not found in SSH commands"
-                  exit 1
-                fi
-
-                # Check for cleanup with TaskRun UID pattern
-                if grep -E "rm -rf ~/[a-f0-9\-]{8,}" "$SSH_FILE"; then
-                  echo "SUCCESS: Found TaskRun UID directory cleanup in SSH commands"
-                else
-                  echo "ERROR: TaskRun UID directory cleanup not found in SSH commands"
-                  exit 1
-                fi
-              else
-                echo "ERROR: Mock ssh file not found - ssh commands were not logged"
-                exit 1
-              fi
-
-              # Check for TaskRun UID usage in SCP commands
-              if [ -f "$SCP_FILE" ]; then
-                echo "Checking SCP commands for TaskRun UID usage:"
-                cat "$SCP_FILE"
-
-                # Check for TaskRun UID pattern in SCP paths
-                if grep -E "/[a-f0-9\-]{8,}/kmods/" "$SCP_FILE"; then
-                  echo "SUCCESS: Found TaskRun UID usage in SCP commands"
-                else
-                  echo "WARNING: TaskRun UID pattern not found in SCP commands (may use individual file transfer)"
-                fi
-              fi
+              test -f signed-kmods.tar.gz
+              tar -xzf signed-kmods.tar.gz
+              test -f signed-kmods/x86_64/mod1.ko
+              grep -q SIGNED_MODULE1 signed-kmods/x86_64/mod1.ko
+              grep -q "kmods_x86_64.tar.gz" mock_scp.txt
+              grep -q "signed_x86_64.tar.gz" mock_scp.txt
+              test -f mock_ssh.txt
       params:
-        - name: signedKmodsPath
-          value: signed-kmods
         - name: dataDir
           value: $(params.dataDir)
-        - name: ociStorage
-          value: $(params.ociStorage)
         - name: sourceDataArtifact
           value: $(tasks.run-task.results.sourceDataArtifact)
-        - name: taskGitUrl
-          value: $(params.taskGitUrl)
-        - name: taskGitRevision
-          value: $(params.taskGitRevision)
       runAfter:
         - run-task
