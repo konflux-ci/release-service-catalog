@@ -7,7 +7,9 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 
 echo "Injecting test setup step and PATH override into Task: $TASK_PATH"
 
-MOCK_ORAS_SCRIPT=$(cat "$SCRIPT_DIR/mocks.sh")
+# Named oras.sh, not mocks.sh: test_tekton_tasks.sh would merge mocks.sh into the
+# Python select-artifact step. This mock is only for trusted-artifact oras calls.
+MOCK_ORAS_SCRIPT=$(cat "$SCRIPT_DIR/oras.sh")
 cat > /tmp/setup-script.sh <<EOF
 #!/usr/bin/env sh
 set -eux
