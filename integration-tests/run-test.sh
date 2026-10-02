@@ -13,6 +13,9 @@
 #   The script is designed to be generic, with suite-specific configurations
 #   and test logic loaded from a specified suite directory.
 #
+#   CI: changes to this file select the full release-pipelines e2e matrix
+#   (see integration-tests/scripts/find_release_pipelines_from_pr.sh).
+#
 # Usage:
 #   ./run-test.sh <suite_name> [options]
 #
