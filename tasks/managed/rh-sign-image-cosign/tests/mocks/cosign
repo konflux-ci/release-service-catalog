@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Mock cosign executable for integration tests.
+# Reads success/failure from ${PARAMS_DATA_DIR}/mock_cosign_success_calls (one "1" or "0"
+# per line, consumed in order). Writes call records to mock_cosign_verify_calls and
+# mock_cosign_sign_calls for assertions in the check-result step.
+#
+# Normalizes --key <path> to --key temp_key_file so existing test assertions remain
+# compatible with the Python script which writes keys to real temp files.
+
+SUCCESS_FILE="${PARAMS_DATA_DIR}/mock_cosign_success_calls"
+LOCK_FILE="${PARAMS_DATA_DIR}/mock_cosign_success_calls.lock"
+
+successfull_run=$(
+    flock -x "${LOCK_FILE}" bash -c \
+        "sed -n '1p' '${SUCCESS_FILE}' 2>/dev/null && sed -i '1d' '${SUCCESS_FILE}' 2>/dev/null" \
+    || echo "1"
+)
+successfull_run="${successfull_run:-1}"
+
+# Build a normalized argument string: replace the value of --key with "temp_key_file"
+# so test assertions do not depend on the random temp file path.
+NORMALIZED_ARGS=()
+REPLACE_NEXT=0
+for ARG in "$@"; do
+    if [ "${REPLACE_NEXT}" -eq 1 ]; then
+        NORMALIZED_ARGS+=("temp_key_file")
+        REPLACE_NEXT=0
+        continue
+    fi
+    if [ "${ARG}" = "--key" ]; then
+        NORMALIZED_ARGS+=("--key")
+        REPLACE_NEXT=1
+        continue
+    fi
+    NORMALIZED_ARGS+=("${ARG}")
+done
+NORMALIZED="${NORMALIZED_ARGS[*]}"
+
+if [ "${1}" = "verify" ]; then
+    echo "${NORMALIZED}" >> "${PARAMS_DATA_DIR}/mock_cosign_verify_calls"
+    if [ "${successfull_run}" != "1" ]; then
+        exit 1
+    fi
+    # Derive mock file name from the last argument (image reference), replacing / with -.
+    LAST_ARG="${*: -1}"
+    MOCK_FILE="${PARAMS_DATA_DIR}/$(echo "${LAST_ARG}" | tr '/' '-')"
+    if [ -f "${MOCK_FILE}" ]; then
+        cat "${MOCK_FILE}"
+    else
+        echo "[]"
+    fi
+else
+    echo "running cosign: ${NORMALIZED}"
+    echo "${NORMALIZED}" >> "${PARAMS_DATA_DIR}/mock_cosign_sign_calls"
+    if [ "${successfull_run}" != "1" ]; then
+        echo "- SIMULATED ERROR -" >&2
+        echo "- SIMULATED ERROR -" >> "${PARAMS_DATA_DIR}/mock_cosign_sign_calls"
+        exit 1
+    fi
+fi
