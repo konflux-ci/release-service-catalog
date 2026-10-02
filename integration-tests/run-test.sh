@@ -190,6 +190,27 @@ reset_failure_context() {
     DETECTED_PLR_URL=""
 }
 
+run_test_metadata_key() {
+    local metadata_key="${RUN_TEST_METADATA_KEY:-${suite}}"
+    local metadata_vars metadata_hash
+
+    # Distinguish ITS variants that reuse the same suite but carry different vars.
+    if [ -n "${RUN_TEST_METADATA_KEY:-}" ]; then
+        printf '%s' "${metadata_key}"
+        return 0
+    fi
+
+    if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIPELINE_TEST_SUITE_VARS}"; then
+        metadata_vars="$(jq -cS . <<<"${PIPELINE_TEST_SUITE_VARS}")"
+        if [ "${metadata_vars}" != "{}" ] && [ "${metadata_vars}" != "null" ]; then
+            metadata_hash="$(printf '%s' "${metadata_vars}" | sha256sum | cut -d' ' -f1)"
+            metadata_key="${suite}:${metadata_hash}"
+        fi
+    fi
+
+    printf '%s' "${metadata_key}"
+}
+
 set_current_step() {
     CURRENT_STAGE="$1"
     CURRENT_TASK="$2"
@@ -245,12 +266,14 @@ write_run_test_metadata() {
     local result="$1"
 
     jq -nc \
+        --arg its_key "$(run_test_metadata_key)" \
         --arg its_name "${suite}" \
         --arg result "${result}" \
         --arg failure_label "${DETECTED_TASK}" \
         --arg details_url "${DETECTED_PLR_URL}" \
         --arg details_text "${DETECTED_MESSAGE}" \
         '{
+            its_key: $its_key,
             its_name: $its_name,
             result: $result,
             failure_label: $failure_label,

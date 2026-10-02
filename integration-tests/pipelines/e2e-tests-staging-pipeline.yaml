@@ -90,6 +90,8 @@ spec:
         results:
           - name: TEST_OUTPUT
             description: Test output
+          - name: RUN_TEST_METADATA
+            description: Structured run-test metadata for PR comment updates
         steps:
           - name: run-test
             image: $(params.STEP_IMAGE)
@@ -120,6 +122,31 @@ spec:
                 value: $(params.PIPELINE_TEST_SUITE_VARS)
             script: |
               #!/usr/bin/env bash
+
+              RUN_TEST_METADATA_KEY="$(params.PIPELINE_TEST_SUITE)"
+              if jq -e . >/dev/null 2>&1 <<< "${PIPELINE_TEST_SUITE_VARS}"; then
+                metadata_vars=$(jq -cS . <<< "${PIPELINE_TEST_SUITE_VARS}")
+                if [ "${metadata_vars}" != "{}" ] && [ "${metadata_vars}" != "null" ]; then
+                  metadata_hash=$(printf '%s' "${metadata_vars}" | sha256sum | cut -d' ' -f1)
+                  RUN_TEST_METADATA_KEY="${RUN_TEST_METADATA_KEY}:${metadata_hash}"
+                fi
+              fi
+              export RUN_TEST_METADATA_KEY
+
+              RUN_TEST_METADATA_FILE="$(results.RUN_TEST_METADATA.path)"
+              export RUN_TEST_METADATA_FILE
+              jq -nc \
+                --arg its_key "${RUN_TEST_METADATA_KEY}" \
+                --arg its_name "$(params.PIPELINE_TEST_SUITE)" \
+                --arg result "SKIPPED" '
+                {
+                  its_key: $its_key,
+                  its_name: $its_name,
+                  result: $result,
+                  failure_label: "",
+                  details_url: "",
+                  details_text: ""
+                }' > "${RUN_TEST_METADATA_FILE}"
 
               # Function to check if a word exists in a string
               # Arguments:
@@ -243,6 +270,45 @@ spec:
       runAfter:
         - get-snapshot-data
   finally:
+    - name: update-pr-results-comment
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: RUN_TEST_METADATA
+          value: $(tasks.run-test.results.RUN_TEST_METADATA)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: RUN_TEST_METADATA
+        steps:
+          - name: update-pr-results-comment
+            image: $(params.STEP_IMAGE)
+            env:
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: e2e-test-github-token
+                    key: token
+              - name: PR_NUMBER
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['pac.test.appstudio.openshift.io/pull-request']
+              - name: RUN_TEST_METADATA_JSON
+                value: $(params.RUN_TEST_METADATA)
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              if [ -z "${PR_NUMBER}" ]; then
+                echo "No PR_NUMBER found; skipping PR results comment update."
+                exit 0
+              fi
+
+              if ! bash /home/e2e/tests/scripts/update-pr-results-comment.sh \
+                "konflux-ci/release-service-catalog" \
+                "${PR_NUMBER}"; then
+                echo "Warning: ITS results comment update failed; preserving test result."
+              fi
     - name: cleanup-resources
       params:
         - name: STEP_IMAGE
