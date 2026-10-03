@@ -172,11 +172,13 @@ if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIP
     )
 fi
 
-# If custom pipeline is specified, set annotation variable for later use in component patching
+# If custom pipeline is specified, set annotation variable for later use in component patching.
+# Wrap the JSON in YAML single quotes: kustomize emits this annotation unquoted, so an unquoted
+# object would fail kubectl with "cannot unmarshal object into ... annotations of type string".
 if [[ -n "${PTSV_BUILD_PIPELINE}" ]]; then
-    export PTSV_BUILD_PIPELINE_VALUE=$(
-        printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}"
-    )
+    _ptsv_json=$(printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}")
+    export PTSV_BUILD_PIPELINE_VALUE="'${_ptsv_json}'"
+    unset _ptsv_json
 fi
 
 if [ -z "$PTSV_EXPECTED_ARCHES" ]; then
