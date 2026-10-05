@@ -172,11 +172,14 @@ if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIP
     )
 fi
 
-# If custom pipeline is specified, set annotation variable for later use in component patching
+# If custom pipeline is specified, set annotation variable for later use in component patching.
+# Kustomize strips the quotes around ${PTSV_BUILD_PIPELINE_VALUE}. Include YAML single quotes in
+# the value so the annotation remains a string after envsubst.
 if [[ -n "${PTSV_BUILD_PIPELINE}" ]]; then
-    export PTSV_BUILD_PIPELINE_VALUE=$(
-        printf '{"name": "%s", "bundle": "%s"}' "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}"
-    )
+    export PTSV_BUILD_PIPELINE_VALUE="$(
+        printf "'{\"name\": \"%s\", \"bundle\": \"%s\"}'" \
+            "${PTSV_BUILD_PIPELINE}" "${PTSV_BUILD_PIPELINE_BUNDLE}"
+    )"
 fi
 
 if [ -z "$PTSV_EXPECTED_ARCHES" ]; then
@@ -654,6 +657,16 @@ check_env_vars "${args[@]}" # Pass all args for consistency, though check_env_va
 parse_options "${args[@]}" # Parses options and sets CLEANUP, NO_CVE, INTERACTIVE_MODE
 
 decrypt_secrets "${SUITE_DIR}"
+
+# Call patch_managed_secrets_after_decrypt hook if defined (for merging additional credentials)
+if type patch_managed_secrets_after_decrypt &>/dev/null; then
+    echo "Invoking patch_managed_secrets_after_decrypt hook..."
+    if ! patch_managed_secrets_after_decrypt; then
+        echo "🔴 patch_managed_secrets_after_decrypt hook failed" >&2
+        exit 1
+    fi
+fi
+
 FAILURE_METADATA_ENABLED="true"
 write_run_test_metadata "RUNNING"
 

@@ -32,10 +32,17 @@
 ### Test Functions
 #### [lib/test-functions.sh](../lib/test-functions.sh)
 - This file contains re-usable functions for tests
+#### [test.sh](test.sh)
+- Defines `suite_exit_cleanup` (Pyxis temp cert/key removal via `cleanup_resources`) and
+  `patch_managed_secrets_after_decrypt` (merge hacbs Quay auth into managed secrets)
 ### Secrets
 - Secrets needed for testing are stored in ansible vault files.
-  - [vault/collector-managed-secrets.yaml](vault/collector-managed-secrets.yaml)
-  - [vault/collector-tenant-secrets.yaml](vault/collector-tenant-secrets.yaml)
+  - [vault/managed-secrets.yaml](vault/managed-secrets.yaml) (Pyxis cert/key and other managed secrets)
+  - [vault/tenant-secrets.yaml](vault/tenant-secrets.yaml)
+- The RPA pushes to `quay.io/hacbs-release-tests/rh-push-to-external-registry-test`. After decrypt,
+  `test.sh` merges `quay.io/hacbs-release-tests` registry credentials from the
+  [push-to-external-registry](../push-to-external-registry/vault/managed-secrets.yaml) vault into
+  `push-${component_name}` (that suite vault only carries `redhat-pending` Quay auth).
 - Most secrets required are contained in the files above.
 - Some tests have their secret name hardcoded and therefore must exist prior to running this test:
   - konflux-advisory-jira-secret
