@@ -59,6 +59,66 @@ patch_component_source_before_merge() {
     done
 }
 
+# Pick the release whose snapshot contains the most components.
+# Konflux emits a snapshot (and release) per component build. The earliest
+# release only contains the first component; a later one contains all of them.
+# Diagnostics go to stderr so command substitution captures only the name.
+# Arguments: $1 = expected component count
+select_release_for_verification() {
+    local expected_count="${1}"
+    local -a release_names=()
+    local release_name best_release="" best_count=0
+
+    read -r -a release_names <<< "${RELEASE_NAMES}"
+    if [ "${#release_names[@]}" -eq 0 ]; then
+        echo "🔴 RELEASE_NAMES is empty" >&2
+        return 1
+    fi
+
+    if [ "${expected_count}" -le 1 ]; then
+        printf '%s' "${release_names[0]}"
+        return 0
+    fi
+
+    echo "Multi-component test: looking for a release with ${expected_count} components..." >&2
+    for release_name in "${release_names[@]}"; do
+        local rel_json snap_name snap_json comp_count
+        if ! rel_json="$(kubectl get release "${release_name}" -n "${tenant_namespace}" -o json 2>/dev/null)"; then
+            echo "  Warning: failed to fetch release ${release_name}" >&2
+            continue
+        fi
+        snap_name="$(jq -r '.spec.snapshot // ""' <<< "${rel_json}")"
+        if [ -z "${snap_name}" ] || [ "${snap_name}" = "null" ]; then
+            echo "  Warning: release ${release_name} has no snapshot" >&2
+            continue
+        fi
+        if ! snap_json="$(kubectl get snapshot "${snap_name}" -n "${tenant_namespace}" -o json 2>/dev/null)"; then
+            echo "  Warning: failed to fetch snapshot ${snap_name}" >&2
+            continue
+        fi
+        if ! comp_count="$(jq -r '(.spec.components // []) | length' <<< "${snap_json}")"; then
+            echo "  Warning: failed to count components in snapshot ${snap_name}" >&2
+            continue
+        fi
+        echo "  Release ${release_name} -> snapshot ${snap_name} has ${comp_count} component(s)" >&2
+        if [ -z "${best_release}" ] || [ "${comp_count}" -gt "${best_count}" ]; then
+            best_count="${comp_count}"
+            best_release="${release_name}"
+        fi
+    done
+
+    if [ -z "${best_release}" ]; then
+        echo "🔴 Could not read component counts for any release" >&2
+        return 1
+    fi
+    if [ "${best_count}" -lt "${expected_count}" ]; then
+        echo "🔴 Fullest release ${best_release} has ${best_count} component(s), expected ${expected_count}" >&2
+        return 1
+    fi
+    echo "Selected release with the most components: ${best_release} (${best_count} components)" >&2
+    printf '%s' "${best_release}"
+}
+
 # Check if all components were filtered (idempotency validation)
 # Returns 0 (true) if push-snapshot task was skipped, 1 (false) otherwise
 were_all_components_filtered() {
@@ -109,9 +169,13 @@ verify_release_contents() {
     echo "  Idempotent Release Test - Phase 1: First Release Verification"
     echo "════════════════════════════════════════════════════════════════════"
 
-    # RELEASE_NAMES is set by wait_for_releases in run-test.sh
-    local first_release_name
-    first_release_name=$(echo "${RELEASE_NAMES}" | awk '{print $1}')
+    # RELEASE_NAMES is set by wait_for_releases in run-test.sh.
+    # For multi-component runs it includes the partial first-component release.
+    local expected_component_count first_release_name
+    expected_component_count="$(echo "${PTSV_COMPONENTS}" | wc -w | tr -d '[:space:]')"
+    if ! first_release_name="$(select_release_for_verification "${expected_component_count}")"; then
+        log_error "Could not select a release covering ${expected_component_count} component(s)"
+    fi
 
     echo "First release: ${first_release_name}"
 
