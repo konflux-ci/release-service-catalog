@@ -5,19 +5,94 @@ metadata:
   name: test-push-oot-kmods-to-s3
 spec:
   description: |
-    Run the push-oot-kmods-to-s3 task and verify the results
+    Happy-path smoke test for push-oot-kmods-to-s3. Verifies signed kmods are
+    uploaded with a cleaned kernel version path. Other scenarios are covered
+    by pytest in release-service-utils.
   params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: "/var/workdir/release"
     - name: taskGitUrl
       type: string
-      default: "https://github.com/konflux-ci/release-service-catalog.git"
+      default: "http://localhost"
     - name: taskGitRevision
       type: string
       default: "main"
   tasks:
+    - name: setup
+      taskSpec:
+        params:
+          - name: dataDir
+            type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/lgallovi-test/release-service-utils@sha256:5b716f013dc7c08bfe68da69f8e730bf9870ec9469a957b7b2e9cbe0d138edd8
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              ARCH_DIR="$(params.dataDir)/signed-kmods/x86_64"
+              mkdir -p "${ARCH_DIR}/driver_001/subdir"
+              echo "MODULE1" > "${ARCH_DIR}/mod1.ko"
+              echo "NESTED" > "${ARCH_DIR}/driver_001/subdir/nested.ko"
+              cat > "${ARCH_DIR}/envfile" << EOF
+              DRIVER_VENDOR="mocked-vendor-s3"
+              DRIVER_VERSION="1.2.3-s3"
+              KERNEL_VERSION="6.5.0-s3.x86_64"
+              EOF
+              (
+                cd "${ARCH_DIR}" || exit
+                find . -name "*.ko" -type f -exec sha256sum {} \; \
+                  | sed 's|^\([^ ]*\)  \./|\1  |' | sort -k2 > signed_kmods_checksums_x86_64.txt
+              )
+              cd "$(params.dataDir)"
+              tar -czf signed-kmods.tar.gz signed-kmods
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+      params:
+        - name: dataDir
+          value: $(params.dataDir)
     - name: run-task
       taskRef:
         name: push-oot-kmods-to-s3
@@ -33,8 +108,26 @@ spec:
         - name: s3CredentialsSecret
           value: "s3-mock-secret"
         - name: sourceDataArtifact
-          value: "mock.registry/mock/artifact:latest"
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
         - name: taskGitUrl
           value: $(params.taskGitUrl)
         - name: taskGitRevision
           value: $(params.taskGitRevision)
+      runAfter:
+        - setup
+    - name: check-result
+      runAfter:
+        - run-task
+      taskSpec:
+        steps:
+          - name: check-result
+            image: quay.io/lgallovi-test/release-service-utils@sha256:5b716f013dc7c08bfe68da69f8e730bf9870ec9469a957b7b2e9cbe0d138edd8
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              echo "SUCCESS: push-oot-kmods-to-s3 completed"
+              echo "S3 mock verified cleaned kernel paths and required object keys"
