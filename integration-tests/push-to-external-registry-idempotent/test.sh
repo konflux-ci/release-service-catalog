@@ -110,8 +110,37 @@ verify_release_contents() {
     echo "════════════════════════════════════════════════════════════════════"
 
     # RELEASE_NAMES is set by wait_for_releases in run-test.sh
-    local first_release_name
-    first_release_name=$(echo "${RELEASE_NAMES}" | awk '{print $1}')
+    # For multi-component tests, we need to find the release that has ALL expected components.
+    # When multiple components are built close together, Konflux creates a snapshot for each
+    # component build. The LAST snapshot (and release) contains all components.
+    local expected_component_count first_release_name
+    expected_component_count=$(echo "${PTSV_COMPONENTS}" | wc -w)
+
+    if [ "${expected_component_count}" -gt 1 ]; then
+        echo "Multi-component test: looking for release with ${expected_component_count} components..."
+        # Find the release with the most components (multi-component snapshot)
+        local best_release="" best_count=0
+        for release_name in ${RELEASE_NAMES}; do
+            local rel_json comp_count
+            rel_json=$(kubectl get release "${release_name}" -n "${tenant_namespace}" -o json 2>/dev/null)
+            # Get the snapshot and count its components
+            local snap_name
+            snap_name=$(jq -r '.spec.snapshot // ""' <<< "${rel_json}")
+            if [ -n "${snap_name}" ] && [ "${snap_name}" != "null" ]; then
+                comp_count=$(kubectl get snapshot "${snap_name}" -n "${tenant_namespace}" \
+                    -o jsonpath='{.spec.components}' 2>/dev/null | jq 'length')
+                echo "  Release ${release_name} -> snapshot ${snap_name} has ${comp_count} component(s)"
+                if [ "${comp_count}" -gt "${best_count}" ]; then
+                    best_count="${comp_count}"
+                    best_release="${release_name}"
+                fi
+            fi
+        done
+        first_release_name="${best_release}"
+        echo "Selected release with most components: ${first_release_name} (${best_count} components)"
+    else
+        first_release_name=$(echo "${RELEASE_NAMES}" | awk '{print $1}')
+    fi
 
     echo "First release: ${first_release_name}"
 
