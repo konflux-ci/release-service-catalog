@@ -155,6 +155,7 @@ metadata:
   namespace: ${tenant_namespace}
   labels:
     originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
     test-type: "idempotent-second-release"
 spec:
   snapshot: ${snapshot_name}
