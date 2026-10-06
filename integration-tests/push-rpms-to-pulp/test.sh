@@ -566,6 +566,8 @@ metadata:
   name: ${retrigger_name}
   namespace: ${RELEASE_NAMESPACE}
   labels:
+    originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
     release.appstudio.openshift.io/automated: "false"
     release.appstudio.openshift.io/author: "${prev_author}"
 spec:

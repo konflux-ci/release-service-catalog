@@ -145,6 +145,26 @@ get_build_pipeline_run_url() { # args are ns, app, name
   fi
 }
 
+# Delete Releases after removing the test's ReleasePlan to stop new automated releases.
+cleanup_test_releases() {
+    if [ -z "${uuid:-}" ] || [ -z "${tenant_namespace:-}" ] || [ -z "${originating_tool:-}" ]; then
+        echo "Skipping Release CR cleanup: test identity or namespace not set"
+        return 0
+    fi
+
+    # Automated Releases may exist before the harness gets to patch their cleanup labels.
+    # Each suite's ReleasePlan name includes its run UUID, so parallel runs stay isolated.
+    if [ -n "${release_plan_name:-}" ]; then
+        kubectl delete release -n "${tenant_namespace}" \
+            -l "release.appstudio.openshift.io/releasePlan=${release_plan_name}" \
+            --ignore-not-found || echo "Warning: Failed to delete Releases for ${release_plan_name}"
+    fi
+
+    kubectl delete release -n "${tenant_namespace}" \
+        -l "test-run-uuid=${uuid},originating-tool=${originating_tool}" \
+        --ignore-not-found || echo "Warning: Failed to delete labeled test Releases"
+}
+
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
 # Optional variables: component2_repo_name (for multi-component tests), uuid (from test.env), tenant_namespace
@@ -212,18 +232,7 @@ cleanup_resources() {
         echo "tmpDir not set or not a directory, skipping k8s resource cleanup." | tee -a "${cleanup_log_file}"
     fi
 
-    # Clean up Release CRs created by this specific test suite
-    # Use both uuid and originating-tool labels to avoid deleting Release CRs
-    # belonging to other parallel test suites that share the same uuid
-    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ] && [ -n "$originating_tool" ]; then
-        echo "Deleting Release CRs with test-run-uuid=${uuid},originating-tool=${originating_tool} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
-        kubectl delete release -n "${tenant_namespace}" \
-            -l "test-run-uuid=${uuid},originating-tool=${originating_tool}" \
-            --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
-            echo "Warning: Failed to delete some Release CRs" | tee -a "${cleanup_log_file}"
-    else
-        echo "Skipping Release CR cleanup: uuid or tenant_namespace not set" | tee -a "${cleanup_log_file}"
-    fi
+    cleanup_test_releases >> "${cleanup_log_file}" 2>&1
 
     # Clean up ImageRepository objects created by the image controller for test components.
     # These may have no ownerReferences, so they may not be cascade-deleted with the Component.
@@ -990,6 +999,11 @@ cleanup_old_resources() {
                 close(cmd)
                 if (created_at < cutoff_time) {
                     print "kubectl delete " kind "/" $2 " -n " $1
+                    # Releases can lack cleanup labels if their test exited before discovery.
+                    if (kind == "rp") {
+                        print "kubectl delete release -n " $1 \
+                            " -l release.appstudio.openshift.io/releasePlan=" $2 " --ignore-not-found"
+                    }
                 }
             }
             ' | tee -a "${old_resources_file}"
@@ -1271,6 +1285,7 @@ metadata:
   labels:
     release.appstudio.openshift.io/automated: "false"
     release.appstudio.openshift.io/author: "${author}"
+    originating-tool: "${originating_tool}"
     test-run-uuid: "${uuid}"
 spec:
   releasePlan: ${release_plan_name}
