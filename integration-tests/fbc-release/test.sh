@@ -295,6 +295,9 @@ kind: Release
 metadata:
   name: $release_name
   namespace: $tenant_namespace
+  labels:
+    originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
 spec:
   snapshot: $snapshot_name
   releasePlan: $release_plan
