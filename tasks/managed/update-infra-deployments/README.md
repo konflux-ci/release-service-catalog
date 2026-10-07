@@ -2,8 +2,8 @@
 
 * This task clones a GitHub repository specified in the 'targetGHRepo' key of the input data file.
 * If 'targetGHRepo' is not provided, it defaults to 'defaultTargetGHRepo: redhat-appstudio/infra-deployments'.
-* It then runs a script obtained from the 'infra-deployment-update-script' key in the data file,
-  which can modify text files.
+* It runs a sandboxed Python script from the 'infraDeploymentUpdates' key in the data file,
+  which can modify text files using read/write/replace/tag functions.
 * Finally, it generates a pull request for the specified repository using the modified files.
 
 ## Parameters
