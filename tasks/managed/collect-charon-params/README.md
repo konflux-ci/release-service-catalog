@@ -1,6 +1,6 @@
 # collect-charon-params
 
-Tekton task that collects charon configuration options from the data file. 
+Tekton task that collects charon configuration options from the data file.
 Charon is a tool to publish maven or npm artifacts of RedHat products the following
 services:
 * MRRC(maven.repository.redhat.com), which is used to host maven artifacts
