@@ -256,12 +256,40 @@ spec:
         ADVISORY_SET_FILE=/tmp/advisory_set.json
 
         jq --slurpfile map "$PURL_TO_ADVISORY_MAP_FILE" '
+          # The candidate epoch comes from its RPM header. Older task images
+          # omit it from the PURL, so try the verified identity first.
+          def epoch_purl($e):
+            ($e.epoch // "0" | tostring) as $epoch |
+            if $epoch == "0" or ($e.purl | test("[?&]epoch=")) then
+              $e.purl
+            else
+              $e.purl | sub("(?<arch>\\?arch=[^&]+)"; "\(.arch)&epoch=\($epoch)")
+            end;
+          def legacy_purl($purl): $purl | sub("&epoch=[^&]+"; "");
+          # The producer represents epoch zero without a qualifier. A
+          # nonzero or unknown candidate epoch needs historical verification.
+          def unresolved_legacy($e; $purl):
+            ($purl | test("[?&]epoch=") | not) and
+            (($e.epoch == null) or (($e.epoch | tostring) != "0"));
+          def match_purl($m; $e):
+            (epoch_purl($e)) as $qualified |
+            if $m[$qualified] then
+              {purl: $qualified, legacy: unresolved_legacy($e; $qualified)}
+            elif $m[$e.purl] then
+              {purl: $e.purl, legacy: unresolved_legacy($e; $e.purl)}
+            elif ($e.purl | test("[?&]epoch=")) and $m[legacy_purl($e.purl)] then
+              {purl: legacy_purl($e.purl),
+               legacy: unresolved_legacy($e; legacy_purl($e.purl))}
+            else
+              null
+            end;
           . as $entries | $map[0] as $m |
           reduce $entries[] as $e (
             {unreleased: [], in_advisory: [], advisories: {}};
-            if $m[$e.purl] then
-              .in_advisory += [$e]
-              | .advisories[$m[$e.purl]] = true
+            (match_purl($m; $e)) as $match |
+            if $match then
+              .in_advisory += [$e + {legacy_advisory_purl: $match.legacy}]
+              | .advisories[$m[$match.purl]] = true
             else
               .unreleased += [$e]
             end
