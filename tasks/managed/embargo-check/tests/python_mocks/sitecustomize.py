@@ -1,17 +1,23 @@
-"""Redirect Jira API requests to the local mock server for Tekton tests.
+"""Mock embargo-check's Jira requests and InternalRequest creation for Tekton tests.
 
 Loaded automatically by the Python interpreter from PYTHONPATH before the task
-script runs.  Patches requests.adapters.HTTPAdapter.send to rewrite URLs for
-known Jira hosts to the local mock.
-
-Activated only when JIRA_BASE_URL is set (by mock_server_for_env_var in
-mocks.yaml).
+script runs. Patches requests.adapters.HTTPAdapter.send to rewrite URLs for
+known Jira hosts to the local mock (only when JIRA_BASE_URL is set, by
+mock_server_for_env_var in mocks.yaml) and patches internal_request.create
+since it waits on a real InternalRequest's status.
 """
 
 from __future__ import annotations
 
 import os
-import sys
+from unittest.mock import patch
+
+from release_service_utils.helpers import internal_request
+
+# create() has sync=True so it waits on a real InternalRequest's status, so we
+# fake the create. The later kubectl get internalrequest ... -o=jsonpath call is
+# a separate subprocess call that is handled by the bash mock.
+patch.object(internal_request, "create", autospec=True, return_value="success-ir").start()
 
 _MOCK_URL = os.environ.get("JIRA_BASE_URL", "")
 if _MOCK_URL:
