@@ -9,7 +9,7 @@ Tekton task to push konflux builds to artifact storage.
 | snapshotPath            | Path to the JSON file of the mapped Snapshot spec in the data workspace                                                    | No       | -                    |
 | snapshotNamespace       | Namespace that tha snapshot originated from                                                                                | No       | -                    |
 | snapshotBuildId         | Build Id that tha snapshot originated from                                                                                 | No       | -                    |
-| pipelineImage           | Currently unused. Preserving due to to backwards compatibility with existing  pipelines that use this task                 | No       | -                    |
+| pipelineImage           | Currently unused. Preserving due to to backwards compatibility with existing pipelines that use this task                  | No       | -                    |
 | sourceDataArtifact      | Location of trusted artifacts to be used to populate data directory                                                        | Yes      | ""                   |
 | taskGitUrl              | The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored                      | No       | -                    |
 | taskGitRevision         | The revision in the taskGitUrl repo to be used                                                                             | No       | -                    |
