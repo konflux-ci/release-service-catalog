@@ -30,7 +30,11 @@ spec:
       description: Secret containing keytab file for the Kerberos user / server
     - name: signing-secret
       type: string
-      description: Secret containing the fields signHost, SignKey and SignUser
+      description: >-
+        Secret containing the fields signHost, signKey and signUser. It may also
+        contain the optional field bastionHost to route SSH to the signing host
+        through an SSH ProxyJump bastion, and an optional bastionUser to override
+        the bastion jump user (defaults to signUser)
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored
       type: string
@@ -156,6 +160,9 @@ spec:
         signKey="$(cat /etc/secrets/signKey)"
         signHost="$(cat /etc/secrets/signHost)"
         signUser="$(cat /etc/secrets/signUser)"
+        # Optional bastion/ProxyJump settings. Absent keys are not mounted as files
+        bastionHost="$(cat /etc/secrets/bastionHost 2>/dev/null || true)"
+        bastionUser="$(cat /etc/secrets/bastionUser 2>/dev/null || true)"
 
         set -x
 
@@ -164,6 +171,8 @@ spec:
         # Remove newline in signing variables
         signUser="${signUser//$'\n'/}"
         signHost="${signHost//$'\n'/}"
+        bastionHost="${bastionHost//$'\n'/}"
+        bastionUser="${bastionUser//$'\n'/}"
 
         echo "Signing OOT modules from $(params.dataDir)/$signedKmodsPath.."
         SIGNED_KMODS_PATH="$(params.dataDir)/$signedKmodsPath"
@@ -172,6 +181,12 @@ spec:
           -o GSSAPIAuthentication=yes
           -o GSSAPIDelegateCredentials=yes
         )
+        # Route through an SSH bastion only when one is configured in the secret.
+        # The jump user defaults to signUser unless bastionUser overrides it
+        if [ -n "${bastionHost}" ]; then
+            jumpUser="${bastionUser:-$signUser}"
+            SSH_OPTS+=(-o "ProxyJump=${jumpUser}@${bastionHost}")
+        fi
 
         # Function to sign kernel modules for a specific architecture
         sign_kmods_for_arch() {
