@@ -1,0 +1,292 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-marketplacesvm-push-disk-images-layered-fallback
+spec:
+  description: |
+    Run the marketplacesvm-push-disk-images task with a nested mapped source path
+    (releases/test-disk-image.raw). oras pull unpacks that relative path and the
+    wrapper stages an AmiPushItem.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: >-
+        Flag to enable debug logging in trusted artifacts.
+        Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  results:
+    - name: status
+      type: string
+      value: $(tasks.check-result.results.status)
+    - name: message
+      type: string
+      value: $(tasks.check-result.results.message)
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          computeResources:
+            limits:
+              cpu: 250m
+              memory: 128Mi
+            requests:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup
+            image: quay.io/konflux-ci/release-service-utils@sha256:441db22666c241ce1f3030615af90cb72d39626b74faa1a42fe5a302531b7259
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              mkdir -p "$(params.dataDir)/results"
+              RNOTES="Launch the product via 1-Click or the "
+              RNOTES+="marketplace listing.\n2. Access your "
+              RNOTES+="instance using ssh\n    * Open an SSH client\n"
+              SNAPSHOT="$(params.dataDir)/snapshot_spec.json"
+              cat > "${SNAPSHOT}" << 'EOF'
+              {
+                "application": "amd-bootc-1-3-raw-disk-image",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/workload/tenant/test-product/layered-e2e@sha256:123456",
+                    "name": "amd-bootc-1-3-raw-disk-image",
+                    "source": {
+                      "git": {
+                        "context": ".",
+                        "dockerfileUrl": "Dockerfile",
+                        "revision": "1abbfcdbc1c5e8b7aba07673297237ed192b50e2",
+                        "url": "https://gitlab.com/konflux/test-product/disk-images/amd-bootc"
+                      }
+                    },
+                    "contentType": "disk-image",
+                    "productInfo": {
+                      "filePrefix": "test-product-amd-1.3",
+                      "productCode": "TESTPRDOCUT",
+                      "productName": "Test Product",
+                      "productVersionName": "1.3"
+                    },
+                    "pushSourceContainer": false,
+                    "staged": {
+                      "destination": "test-product-1_DOT_3-x86_64-isos",
+                      "files": [
+                        {
+                          "filename": "test-product-amd-1.3-1732045201-x86_64.raw",
+                          "source": "releases/test-disk-image.raw"
+                        }
+                      ],
+                      "version": "1.3"
+                    },
+                    "starmap": [
+                      {
+                        "cloud": "aws",
+                        "mappings": {
+                          "aws-na": {
+                            "destinations": [
+                              {
+                                "architecture": "x86_64",
+                                "destination": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                                "overwrite": false,
+                                "restrict_version": true
+                              }
+                            ],
+                            "provider": null
+                          }
+                        },
+                        "meta": {
+                          "ena_support": true,
+                          "marketplace_entity_type": "AmiProduct",
+                          "root_device": "/dev/sda1",
+                          "user_name": "cloud-user",
+                          "virtualization": "hvm",
+                          "volume": "gp3"
+                        },
+                        "name": "test-product-amd",
+                        "workflow": "stratosphere"
+                      }
+                    ]
+                  }
+                ]
+              }
+              EOF
+              jq --arg rnotes "${RNOTES}" \
+                  '.components[0].starmap[0].meta.release_notes = $rnotes' \
+                  "${SNAPSHOT}" > "${SNAPSHOT}.tmp"
+              mv "${SNAPSHOT}.tmp" "${SNAPSHOT}"
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: marketplacesvm-push-disk-images
+      params:
+        - name: snapshotPath
+          value: "snapshot_spec.json"
+        - name: cloudMarketplacesSecret
+          value: marketplacesvm-test-secret
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        results:
+          - name: status
+            type: string
+            description: Success if assertions pass, Failure otherwise
+          - name: message
+            type: string
+            description: Success if assertions pass, otherwise the error that occurred
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          computeResources:
+            limits:
+              cpu: 250m
+              memory: 128Mi
+            requests:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:441db22666c241ce1f3030615af90cb72d39626b74faa1a42fe5a302531b7259
+            workingDir: $(params.dataDir)
+            script: |
+              #!/usr/bin/env bash
+              set -euxo pipefail
+
+              set_task_result() {
+                  echo -n "${1}" > "$(results.status.path)"
+                  echo -n "${2}" > "$(results.message.path)"
+              }
+
+              # shellcheck disable=SC2317,SC2329 # invoked from EXIT trap
+              exitfunc() {
+                  local err="${1}"
+                  local line="${2}"
+                  local command="${3}"
+                  if [ "${err}" -eq 0 ]; then
+                      if [[ ! -s "$(results.status.path)" ]]; then
+                          set_task_result "Success" "Success"
+                      fi
+                  else
+                      if [[ ! -s "$(results.status.path)" ]] || \
+                          [[ "$(cat "$(results.status.path)")" != "Failure" ]]; then
+                          set_task_result "Failure" \
+                              "ERROR '${command}' failed at line ${line} - exited with status ${err}"
+                      fi
+                  fi
+                  exit 0
+              }
+              trap 'exitfunc "${?}" "${LINENO}" "${BASH_COMMAND}"' EXIT
+
+              expected_pullspec="quay.io/workload/tenant/test-product/layered-e2e@sha256:123456"
+              ORAS_ARGS="$(<"$(params.dataDir)/mock_oras.txt")"
+              if [[ "${ORAS_ARGS}" != *"${expected_pullspec}" ]]; then
+                  echo "Error: oras pull was not called with ${expected_pullspec}"
+                  cat "$(params.dataDir)/mock_oras.txt"
+                  exit 1
+              fi
+              if [[ "$(wc -l < "$(params.dataDir)/mock_wrapper.txt")" != 1 ]]; then
+                  echo "Error: wrapper was expected to be called 1 time"
+                  cat "$(params.dataDir)/mock_wrapper.txt"
+                  exit 1
+              fi
+
+              PUSHSOURCE_OUTPUT="$(params.dataDir)/mock_pushsource_ls.txt"
+              if ! grep -q "AmiPushItem" "${PUSHSOURCE_OUTPUT}"; then
+                  echo "Error: fallback did not stage an AmiPushItem"
+                  cat "${PUSHSOURCE_OUTPUT}"
+                  exit 1
+              fi
+              if ! grep -q "test-product-amd-1.3-1732045201-x86_64.raw" "${PUSHSOURCE_OUTPUT}"; then
+                  echo "Error: staged filename missing from pushsource-ls"
+                  cat "${PUSHSOURCE_OUTPUT}"
+                  exit 1
+              fi
+              set_task_result "Success" "Success"
