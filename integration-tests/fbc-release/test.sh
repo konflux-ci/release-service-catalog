@@ -252,7 +252,7 @@ trigger_configured_releases() {
     else
         echo "🔧 Test matrix already configured, skipping configuration"
     fi
-    
+
     echo "🚀 Triggering releases based on optimized test matrix..."
     
     for test_key in "${!GLOBAL_TEST_MATRIX[@]}"; do
