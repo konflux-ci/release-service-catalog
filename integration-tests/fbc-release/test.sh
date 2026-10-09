@@ -25,8 +25,6 @@ declare -gA GLOBAL_TEST_MATRIX=(
     ["multi-optin"]="disabled"
     ["multi-happy"]="disabled"
     ["multi-staged"]="disabled"
-    # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
-    # ["multi-hotfix"]="disabled"  # this test incurs additional IIB requests for no value
 )
 
 # Global tracking for releases to verify
@@ -82,8 +80,6 @@ configure_test_matrix() {
         ["single-optin"]="disabled"
         ["multi-happy"]="disabled"
         ["multi-staged"]="disabled"
-        # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
-        # ["multi-hotfix"]="disabled"  # this test incurs additional IIB requests for no value
     )
     
     local tests_enabled=false
@@ -252,7 +248,7 @@ trigger_configured_releases() {
     else
         echo "🔧 Test matrix already configured, skipping configuration"
     fi
-    
+
     echo "🚀 Triggering releases based on optimized test matrix..."
     
     for test_key in "${!GLOBAL_TEST_MATRIX[@]}"; do
