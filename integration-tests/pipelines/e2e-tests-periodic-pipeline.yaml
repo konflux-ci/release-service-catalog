@@ -14,10 +14,26 @@ spec:
     - name: GITHUB_TOKEN_SECRET_NAME
       default: 'github-token-secret'
       type: string
-    - name: MAX_PARALLEL
-      default: '9'
-      type: string
-      description: Maximum integration test suites to run concurrently in the periodic run-test step
+    - name: TEST_CASES
+      type: array
+      default:
+        - "collectors"
+        - "collectors-no-cve"
+        - "e2e"
+        - "fbc-release"
+        - "push-rpms-to-pulp"
+        - "push-to-addons-registry"
+        - "push-to-external-registry-idempotent"
+        - "rh-advisories-idempotent"
+        - "push-to-external-registry"
+        - "release-to-github"
+        - "rh-push-helm-chart-to-registry-redhat-io"
+        - "rh-push-to-external-registry"
+        - "rh-push-to-external-registry-multi-component"
+        - "rh-push-to-registry-redhat-io"
+        - "rhtap-service-push"
+        - "rh-advisories-large-snapshot"
+      description: Integration test suites to run, one dedicated task per test case
   tasks:
     - name: get-snapshot-data
       params:
@@ -42,6 +58,10 @@ spec:
               echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
     - name: run-test
       timeout: 3h
+      matrix:
+        params:
+          - name: TEST_CASE
+            value: $(params.TEST_CASES)
       params:
         - name: STEP_IMAGE
           value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
@@ -49,8 +69,6 @@ spec:
           value: $(params.VAULT_PASSWORD_SECRET_NAME)
         - name: GITHUB_TOKEN_SECRET_NAME
           value: $(params.GITHUB_TOKEN_SECRET_NAME)
-        - name: MAX_PARALLEL
-          value: $(params.MAX_PARALLEL)
       taskSpec:
         params:
           - name: STEP_IMAGE
@@ -62,7 +80,7 @@ spec:
             default: 'staging'
           - name: VAULT_PASSWORD_SECRET_NAME
           - name: GITHUB_TOKEN_SECRET_NAME
-          - name: MAX_PARALLEL
+          - name: TEST_CASE
             type: string
         results:
           - name: TEST_OUTPUT
@@ -72,9 +90,9 @@ spec:
             image: $(params.STEP_IMAGE)
             computeResources:
               limits:
-                memory: 6Gi
+                memory: 3Gi
               requests:
-                memory: 6Gi
+                memory: 3Gi
             env:
               - name: VAULT_PASSWORD
                 valueFrom:
@@ -92,26 +110,14 @@ spec:
               #!/usr/bin/env bash
               set -euo pipefail
 
-              failed_test_count=0
-              success_test_count=0
-              failed_test_cases=()
-              success_test_cases=()
-
-              ALL_TESTCASES=("collectors" "collectors-no-cve" "e2e" "fbc-release" "push-rpms-to-pulp" \
-                "push-to-addons-registry" "push-to-external-registry-idempotent" "rh-advisories-idempotent" \
-                "push-to-external-registry" "release-to-github" \
-                "rh-push-helm-chart-to-registry-redhat-io" "rh-push-to-external-registry" \
-                "rh-push-to-external-registry-multi-component" "rh-push-to-registry-redhat-io" \
-                "rhtap-service-push" "rh-advisories-large-snapshot")
-              overall_test_count=${#ALL_TESTCASES[@]}
+              TESTCASE="$(params.TEST_CASE)"
 
               exitfunc() {
                 local err=$1
                 local line=$2
                 local command="$3"
 
-                skipped_test_count=$((overall_test_count - success_test_count - failed_test_count))
-                # After the tests finish, record the overall result in the RESULT variable
+                # After the test finishes, record the result in the RESULT variable
                 if [ "$err" -eq 0 ] ; then
                   RESULT="SUCCESS"
                 else
@@ -119,28 +125,15 @@ spec:
                   RESULT="FAILURE"
                 fi
 
-                # Prepare the failure and success arrays as proper JSON arrays
-                FAILED_CASES_JSON=$(jq -c -n '$ARGS.positional' --args "${failed_test_cases[@]}")
-                SUCCESS_CASES_JSON=$(jq -c -n '$ARGS.positional' --args "${success_test_cases[@]}")
-
                 # Output the standardized TEST_OUTPUT result in JSON form
-                TEST_OUTPUT=$(jq -rc \
+                TEST_OUTPUT=$(jq -rc -n \
                     --arg date "$(date -u --iso-8601=seconds)" \
                     --arg RESULT "${RESULT}" \
-                    --argjson successcount "${success_test_count}" \
-                    --argjson failurecount "${failed_test_count}" \
-                    --argjson skippedcount "${skipped_test_count}" \
-                    --argjson failed_cases "${FAILED_CASES_JSON}" \
-                    --argjson success_cases "${SUCCESS_CASES_JSON}" \
-                    --null-input \
+                    --arg testcase "${TESTCASE}" \
                     '{
                         result: $RESULT,
                         timestamp: $date,
-                        failures: $failurecount,
-                        successes: $successcount,
-                        skipped: $skippedcount,
-                        failed_test_cases: $failed_cases,
-                        success_test_cases: $success_cases
+                        testcase: $testcase
                     }'
                 )
 
@@ -165,82 +158,39 @@ spec:
               export RELEASE_CATALOG_GIT_URL
               export RELEASE_CATALOG_GIT_REVISION
 
-              # Cap parallel suites to limit kubectl/API and memory spikes (step memory: 6Gi).
-              MAX_PARALLEL="$(params.MAX_PARALLEL)"
-              declare -A pids=()
-              testcase_index=0
-
-              reap_finished_test_jobs() {
-                local pid testcase wait_status
-                for pid in "${!pids[@]}"; do
-                  if kill -0 "${pid}" 2>/dev/null; then
-                    continue
-                  fi
-                  testcase="${pids[$pid]}"
-                  set +e
-                  wait "${pid}"
-                  wait_status=$?
-                  set -e
-                  if [ "${wait_status}" -eq 0 ]; then
-                    success_test_cases+=("${testcase}")
-                    success_test_count=$((success_test_count + 1))
-                    echo "Test case ${testcase} succeeded"
-                  else
-                    failed_test_cases+=("${testcase}")
-                    failed_test_count=$((failed_test_count + 1))
-                    echo "Test case ${testcase} failed"
-                  fi
-                  unset 'pids[$pid]'
-                done
-              }
-
-              while [ "${testcase_index}" -lt "${overall_test_count}" ] || [ "${#pids[@]}" -gt 0 ]; do
-                while [ "${testcase_index}" -lt "${overall_test_count}" ] && [ "${#pids[@]}" -lt "${MAX_PARALLEL}" ]; do
-                  testcase="${ALL_TESTCASES[$testcase_index]}"
-                  testcase_index=$((testcase_index + 1))
-                  suite_secret="${testcase}-e2e-github-token"
-                  set +x
-                  suite_token=$(kubectl get secret "${suite_secret}" \
-                      -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
-                  if [ -z "${suite_token}" ]; then
-                    suite_secret="$(params.GITHUB_TOKEN_SECRET_NAME)"
-                    suite_token="${GITHUB_TOKEN}"
-                  fi
-                  GITHUB_TOKEN="${suite_token}" "/home/e2e/tests/run-test.sh" "${testcase}" &
-                  unset suite_token
-                  set -x
-                  echo "Running test case: ${testcase} (${testcase_index}/${overall_test_count}," \
-                    "max ${MAX_PARALLEL} concurrent, token: ${suite_secret})"
-                  pids[$!]="${testcase}"
-                done
-
-                if [ "${#pids[@]}" -eq 0 ]; then
-                  continue
-                fi
-
-                set +e
-                wait -n 2>/dev/null
-                set -e
-                reap_finished_test_jobs
-              done
-              if [[ "$failed_test_count" -gt  0 ]]; then
-                 exit 1
+              suite_secret="${TESTCASE}-e2e-github-token"
+              set +x
+              suite_token=$(kubectl get secret "${suite_secret}" \
+                  -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+              if [ -z "${suite_token}" ]; then
+                suite_secret="$(params.GITHUB_TOKEN_SECRET_NAME)"
+                suite_token="${GITHUB_TOKEN}"
               fi
+              set -x
+              echo "Running test case: ${TESTCASE} (token: ${suite_secret})"
+
+              GITHUB_TOKEN="${suite_token}" "/home/e2e/tests/run-test.sh" "${TESTCASE}"
       runAfter:
         - get-snapshot-data
-    - name: notify-slack
+  finally:
+    - name: notify-slack-results
+      when:
+        - input: "$(tasks.status)"
+          operator: in
+          values: ["Succeeded", "Completed"]
       params:
         - name: secretName
           value: "release-team-slack-notification-secret"
         - name: secretKeyName
           value: "release"
-        - name: TEST_RESULT
+        - name: TEST_OUTPUTS
           value: $(tasks.run-test.results.TEST_OUTPUT)
       taskSpec:
         params:
           - name: secretName
           - name: secretKeyName
-          - name: TEST_RESULT
+          - name: TEST_OUTPUTS
+            type: array
         volumes:
           - name: slack-token
             secret:
@@ -256,8 +206,8 @@ spec:
             env:
               - name: KEYNAME
                 value: $(params.secretKeyName)
-              - name: TEST_RESULT
-                value: $(params.TEST_RESULT)
+            args:
+              - "$(params.TEST_OUTPUTS[*])"
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -278,6 +228,49 @@ spec:
                 exit 1
               fi
 
+              failed_test_cases=()
+              success_test_cases=()
+
+              for output in "$@"; do
+                result=$(jq -r '.result' <<<"${output}")
+                testcase=$(jq -r '.testcase' <<<"${output}")
+                if [ "${result}" = "SUCCESS" ]; then
+                  success_test_cases+=("${testcase}")
+                else
+                  failed_test_cases+=("${testcase}")
+                fi
+              done
+
+              failed_test_count=${#failed_test_cases[@]}
+              success_test_count=${#success_test_cases[@]}
+
+              if [ "${failed_test_count}" -eq 0 ]; then
+                RESULT="SUCCESS"
+              else
+                RESULT="FAILURE"
+              fi
+
+              FAILED_CASES_JSON=$(jq -c -n '$ARGS.positional' --args "${failed_test_cases[@]}")
+              SUCCESS_CASES_JSON=$(jq -c -n '$ARGS.positional' --args "${success_test_cases[@]}")
+
+              TEST_RESULT=$(jq -rc \
+                  --arg date "$(date -u --iso-8601=seconds)" \
+                  --arg RESULT "${RESULT}" \
+                  --argjson successcount "${success_test_count}" \
+                  --argjson failurecount "${failed_test_count}" \
+                  --argjson failed_cases "${FAILED_CASES_JSON}" \
+                  --argjson success_cases "${SUCCESS_CASES_JSON}" \
+                  --null-input \
+                  '{
+                      result: $RESULT,
+                      timestamp: $date,
+                      failures: $failurecount,
+                      successes: $successcount,
+                      failed_test_cases: $failed_cases,
+                      success_test_cases: $success_cases
+                  }'
+              )
+
               MESSAGE=$(jq -r '.' <<< "${TEST_RESULT}" | awk NF)
 
               # need 3 back-ticks around message for code-block
@@ -294,9 +287,75 @@ spec:
               curl -H "Content-type: application/json" --data-binary "@/tmp/payload.json"  \
                 "${WEBHOOK_URL}"
               set -x
-      runAfter:
-        - run-test
-  finally:
+    - name: notify-slack-failure
+      when:
+        - input: "$(tasks.status)"
+          operator: notin
+          values: ["Succeeded", "Completed"]
+      params:
+        - name: secretName
+          value: "release-team-slack-notification-secret"
+        - name: secretKeyName
+          value: "release"
+        - name: TASKS_STATUS
+          value: "$(tasks.status)"
+      taskSpec:
+        params:
+          - name: secretName
+          - name: secretKeyName
+          - name: TASKS_STATUS
+        volumes:
+          - name: slack-token
+            secret:
+              secretName: $(params.secretName)
+              optional: true
+        steps:
+          - name: send-failure-to-slack
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            volumeMounts:
+              - name: slack-token
+                mountPath: "/tmp/secrets"
+                readOnly: true
+            env:
+              - name: KEYNAME
+                value: $(params.secretKeyName)
+              - name: TASKS_STATUS
+                value: $(params.TASKS_STATUS)
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ -z "${KEYNAME}" ] ; then
+                echo "No secret key name provided via the 'secretKeyName' pipeline parameter"
+                echo "No message will be sent to Slack"
+                exit 0
+              fi
+
+              if [ -f "/tmp/secrets/${KEYNAME}" ]; then
+                echo "Setting WEBHOOK_URL from secret"
+                set +x
+                WEBHOOK_URL=$(cat "/tmp/secrets/${KEYNAME}")
+                set -x
+              else
+                echo "Error: Secret not defined properly. The key to use (${KEYNAME}) is defined in the 'secretKeyName'"
+                exit 1
+              fi
+
+              # need 3 back-ticks around message for code-block
+              # ping @ic-konflux-release group
+              MESSAGE=$(echo -n "<!subteam^S09N535GS4E>" \
+                " Catalog Nightly Staging pipeline failed before test results were available" \
+                " (tasks status: ${TASKS_STATUS}). Check the PipelineRun logs." | jq -Rsa)
+
+              cat > /tmp/payload.json << EOF
+              {"text": $MESSAGE}
+              EOF
+
+              echo "Calling Slack API with curl...."
+              set +x
+              curl -H "Content-type: application/json" --data-binary "@/tmp/payload.json"  \
+                "${WEBHOOK_URL}"
+              set -x
     - name: cleanup-resources
       params:
         - name: STEP_IMAGE
@@ -305,14 +364,15 @@ spec:
           value: $(params.GITHUB_TOKEN_SECRET_NAME)
         - name: VAULT_PASSWORD_SECRET_NAME
           value: $(params.VAULT_PASSWORD_SECRET_NAME)
-        - name: TEST_RESULT
+        - name: TEST_OUTPUTS
           value: $(tasks.run-test.results.TEST_OUTPUT)
       taskSpec:
         params:
           - name: STEP_IMAGE
           - name: GITHUB_TOKEN_SECRET_NAME
           - name: VAULT_PASSWORD_SECRET_NAME
-          - name: TEST_RESULT
+          - name: TEST_OUTPUTS
+            type: array
         steps:
           - name: cleanup-resources
             image: $(params.STEP_IMAGE)
@@ -329,8 +389,8 @@ spec:
                   secretKeyRef:
                     name: $(params.VAULT_PASSWORD_SECRET_NAME)
                     key: password
-              - name: TEST_RESULT
-                value: $(params.TEST_RESULT)
+            args:
+              - "$(params.TEST_OUTPUTS[*])"
             script: |
               #!/usr/bin/env bash
               set -eu
@@ -345,12 +405,10 @@ spec:
               echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
               set -x
 
-              # The following fix corrects the jq filter to handle empty arrays and ensure the order.
-              # This prevents "bad array subscript" errors on empty success_test_cases/failed_test_cases arrays.
               RUN_TESTCASES=()
-              mapfile -t RUN_TESTCASES < <(jq -r '
-                (.success_test_cases // [])[]?,
-                (.failed_test_cases // [])[]?' <<<"${TEST_RESULT}" || true)
+              for output in "$@"; do
+                RUN_TESTCASES+=("$(jq -r '.testcase' <<<"${output}")")
+              done
 
               for testcase in "${RUN_TESTCASES[@]}"; do
                 # shellcheck disable=SC1090
