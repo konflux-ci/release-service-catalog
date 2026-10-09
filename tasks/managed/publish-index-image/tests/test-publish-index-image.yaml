@@ -47,7 +47,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:8051dfd826d8d5528b048404b7ec73b51a5df107db789bee4bf8c21d22799d93
             script: |
               #!/usr/bin/env sh
               set -eux
@@ -159,7 +159,7 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:8051dfd826d8d5528b048404b7ec73b51a5df107db789bee4bf8c21d22799d93
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -172,13 +172,23 @@ spec:
                   echo "Too many internalrequests found. Should be 2"
                   exit 1
               fi
+
+              # Define expected (sourceIndex, targetIndex) pairs as JSON
+              expected_pairs=$(cat <<'EOF'
+              [
+                {"sourceIndex": "redhat.com/rh-stage/iib:01", "targetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12"},
+                {"sourceIndex": "redhat.com/rh-stage/iib@sha256:abcdefghijk", "targetIndex": "quay.io/scoheb/fbc-target-index-testing:v4.12-1678118351"}
+              ]
+              EOF
+              )
+
+              # Extract actual pairs from InternalRequests
+              declare -a actual_pairs=()
               for((i=0; i<irIndex; i++)); do
-
                   pipeline=$(jq -r ".[$i] | .spec.pipeline.pipelineRef.params[2].value" <<< "${internalRequests}")
-                  params=$(jq -r ".[$i] | .spec.params" <<< "${internalRequests}")
+                  params=$(jq ".[$i] | .spec.params" <<< "${internalRequests}")
 
-                  if [ "${pipeline}" != \
-                    "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
+                  if [ "${pipeline}" != "pipelines/internal/publish-index-image-pipeline/publish-index-image-pipeline.yaml" ]; then
                     echo "pipeline does not match"
                     exit 1
                   fi
@@ -188,62 +198,59 @@ spec:
                     exit 1
                   fi
 
-                  sourceIndex=$(jq -r '.sourceIndex' <<< "${params}")
-                  if [ "${i}" = 0 ]; then
-                    # Floating tag uses index_image (tag)
-                    if [ "${sourceIndex}" != "redhat.com/rh-stage/iib:01" ]; then
-                      echo "sourceIndex image does not match for IR ${i}"
-                      echo "Expected: redhat.com/rh-stage/iib:01"
-                      echo "Got: ${sourceIndex}"
-                      exit 1
-                    fi
-                  else
-                    # Timestamped tag uses index_image_resolved (digest)
-                    if [ "${sourceIndex}" != "redhat.com/rh-stage/iib@sha256:abcdefghijk" ]; then
-                      echo "sourceIndex image does not match for IR ${i}"
-                      echo "Expected: redhat.com/rh-stage/iib@sha256:abcdefghijk"
-                      echo "Got: ${sourceIndex}"
-                      exit 1
-                    fi
-                  fi
-
-                  targetIndex=$(jq -r '.targetIndex' <<< "${params}")
-                  if [ "${i}" = 0 ]; then
-                      if [ "${targetIndex}" != "quay.io/scoheb/fbc-target-index-testing:v4.12" ]; then
-                        echo "targetIndex image does not match"
-                        exit 1
-                      fi
-                  else
-                      expectedTargetIndex="quay.io/scoheb/fbc-target-index-testing:v4.12-1678118351"
-                      if [ "${targetIndex}" != "${expectedTargetIndex}" ]; then
-                        echo "targetIndex image does not match"
-                        echo "Expected: ${expectedTargetIndex}"
-                        echo "Got: ${targetIndex}"
-                        exit 1
-                      fi
-                  fi
-
                   if [ "$(jq -r '.targetOcpVersion' <<< "${params}")" != "v4.12" ]; then
                     echo "targetOcpVersion does not match"
                     exit 1
                   fi
 
                   if [ "$(jq -r '.taskGitUrl' <<< "${params}")" != "http://localhost" ]; then
-                    echo "taskGitUrl image does not match"
+                    echo "taskGitUrl does not match"
                     exit 1
                   fi
 
                   if [ "$(jq -r '.taskGitRevision' <<< "${params}")" != "main" ]; then
-                    echo "taskGitRevision image does not match"
+                    echo "taskGitRevision does not match"
                     exit 1
                   fi
+
+                  # Extract sourceIndex and targetIndex as compact sorted JSON
+                  pair=$(jq -c -S '{sourceIndex: .sourceIndex, targetIndex: .targetIndex}' <<< "${params}")
+                  actual_pairs+=("${pair}")
               done
+
+              # Compare each actual pair against expected pairs
+              for actual in "${actual_pairs[@]}"; do
+                  found=0
+                  for i in $(seq 0 $(($(jq '. | length' <<< "${expected_pairs}") - 1))); do
+                      expected=$(jq -c -S ".[$i]" <<< "${expected_pairs}")
+                      if [ "${actual}" == "${expected}" ]; then
+                          echo "Matched: ${actual}"
+                          found=1
+                          # Remove matched pair from expected to avoid duplicate matches
+                          expected_pairs=$(jq -c "del(.[$i])" <<< "${expected_pairs}")
+                          break
+                      fi
+                  done
+                  if [ "${found}" -eq 0 ]; then
+                      echo "Actual pair not found in expected: ${actual}"
+                      exit 1
+                  fi
+              done
+
+              # Verify all expected pairs were matched
+              remaining=$(jq '. | length' <<< "${expected_pairs}")
+              if [ "${remaining}" -ne 0 ]; then
+                  echo "Not all expected pairs were matched. Remaining: ${expected_pairs}"
+                  exit 1
+              fi
+
+              echo "All pairs matched successfully"
   finally:
     - name: cleanup
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            image: quay.io/konflux-ci/release-service-utils@sha256:8051dfd826d8d5528b048404b7ec73b51a5df107db789bee4bf8c21d22799d93
             script: |
               #!/usr/bin/env sh
               set -eux
