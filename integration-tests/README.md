@@ -9,6 +9,8 @@ The following integration test suites are available:
 - **[collectors](collectors/)** - Tests for advisory data collection and processing
 - **[collectors-no-cve](collectors-no-cve/)** - Tests for the no-CVE path of advisory data collection
 - **[rh-advisories-idempotent](rh-advisories-idempotent/)** - Tests idempotent re-release behavior for the rh-advisories pipeline: verifies that a second release with the same snapshot detects the existing advisory, skips all downstream tasks, and correctly populates `advisory.url` in the Release CR status
+- **[rh-direct-sign-image-batch-concurrency](rh-direct-sign-image-batch-concurrency/)** - Real signing integration test checking multiple batches succeed without retries, with cleanup enabled.
+  - **Manual trigger**: After the PR's staging catalog image builds, comment `/test-batch-concurrency` on a PR targeting `development`.
 - **[fbc-release](fbc-release/)** - Tests for File-Based Catalog (FBC) release pipeline
 - **[push-artifacts-to-cdn](push-artifacts-to-cdn/)** - Tests for the push-artifacts-to-cdn pipeline (binary artifact distribution to Pulp and CGW)
 - **[push-to-addons-registry](push-to-addons-registry/)** - Tests for pushing to addon registries
@@ -47,7 +49,8 @@ All integration tests require the following dependencies:
   - Tests use `stg-rh01` cluster
   - Tenant namespace: `dev-release-team-tenant`
   - Managed namespace: `managed-release-team-tenant`
-  - Konflux ITS run in `konflux-release-service-tenant` with in-cluster kubectl (no kubeconfig)
+  - Konflux ITS run in `konflux-release-service-tenant` using the
+    `konflux-integration-runner` service account and in-cluster authentication.
 
 ### Required Environment Variables
 
@@ -239,7 +242,7 @@ Local `./run-test.sh` runs one suite at a time; only the periodic pipeline runs 
 
 1. **Authentication Errors** - Verify GitHub token has correct permissions
 2. **Cluster Access** - For local runs, ensure kubectl/KUBECONFIG points at stg-rh01;
-   Konflux ITS use in-cluster auth
+   CI uses the `konflux-integration-runner` service account, which needs access to both test namespaces.
 3. **Secret Errors** - Check vault password file exists and is correct
 4. **Resource Conflicts** - Use cleanup scripts to remove stale resources
 5. **OOM or `kubectl create` exit 137 in periodic e2e** - Usually too many suites starting at once or insufficient step memory. The periodic pipeline caps parallelism and sets 6Gi; if failures persist, check Tekton step logs for `Killed` during tenant resource setup.
