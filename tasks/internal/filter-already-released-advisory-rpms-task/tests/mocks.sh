@@ -9,6 +9,12 @@ function oras() {
   echo "Mock oras called with: $*" >&2
 
   if [[ "$1" == "push" ]]; then
+    # The all-released fixture has two epoch-0 RPMs. They must remain
+    # ordinary exact advisory matches when the managed filter consumes them.
+    if [[ "$TRANSFORMED_SNAPSHOT_JSON" == *"all-released-a"* ]]; then
+      jq -e 'length == 2 and all(.[]; .legacy_advisory_purl == false)' \
+        "$IN_ADVISORY_FILE" >/dev/null
+    fi
     return 0
   elif [[ "$1" == "manifest" && "$2" == "fetch" ]]; then
     echo '{"digest": "sha256:mockdigest123"}'
@@ -63,7 +69,14 @@ function yq() {
 
     case "$advisory_num" in
       1601)
-        echo '["pkg:rpm/redhat/released-rpm@1.0-1.fc44?arch=x86_64", "pkg:rpm/redhat/all-released-a@1.0-1.fc44?arch=x86_64", "pkg:rpm/redhat/all-released-b@2.0-1.fc44?arch=x86_64"]'
+        cat <<'JSON'
+[
+  "pkg:rpm/redhat/released-rpm@1.0-1.fc44?arch=x86_64",
+  "pkg:rpm/redhat/all-released-a@1.0-1.fc44?arch=x86_64",
+  "pkg:rpm/redhat/all-released-b@2.0-1.fc44?arch=x86_64",
+  "pkg:rpm/redhat/bind@9.20.27-0.1.hum1?arch=x86_64&epoch=32&distro=hb&repository_id=repo"
+]
+JSON
         ;;
       *)
         echo '[]'
@@ -89,4 +102,3 @@ function yq() {
     exit 1
   fi
 }
-
