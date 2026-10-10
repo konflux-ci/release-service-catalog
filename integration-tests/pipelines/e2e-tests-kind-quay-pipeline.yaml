@@ -104,9 +104,75 @@ spec:
           value: $(params.pipeline-used)
         - name: component-image
           value: $(tasks.test-metadata.results.container-image)
-    - name: provision-kind-cluster
+    # mapt names the IBM resource group "kind-<id>" and IBM rejects names longer than 40 characters.
+    # The PipelineRun name (push-to-external-registry-self-hosted-quay-e2e-test-xxxxx) exceeds that.
+    - name: short-cluster-id
       runAfter:
         - check-if-related-test
+      taskSpec:
+        results:
+          - name: id
+            description: IBM-safe cluster id. mapt prefixes it with "kind-" (40 character limit).
+          - name: status
+            description: Success when the IBM-safe cluster id was written; Failed otherwise.
+        steps:
+          - name: shorten
+            image: "quay.io/konflux-ci/release-service-utils@sha256:\
+              0b35e861c83b9c1141e3a8d7a8924cc9c4ae0b09dc87938971eee66ee9b9aaaf"
+            computeResources:
+              requests:
+                cpu: 50m
+                memory: 64Mi
+              limits:
+                cpu: 50m
+                memory: 64Mi
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              # mapt prefixes this id with "kind-"; IBM resource group names allow 40 characters.
+              MAX_CLUSTER_ID_LENGTH=20
+
+              # Valid id only. The trap writes this when generation succeeded, including when a later write fails.
+              short_id=""
+
+              record_results() {
+                local exit_code=$?
+                local id_write_status=0
+                local status="Failed"
+                set +e
+                if [ -n "${short_id}" ]; then
+                  printf '%s' "${short_id}" > "$(results.id.path)"
+                  id_write_status=$?
+                fi
+                if [ "${exit_code}" -eq 0 ] && [ -n "${short_id}" ] && [ "${id_write_status}" -eq 0 ]; then
+                  status="Success"
+                fi
+                if ! printf '%s' "${status}" > "$(results.status.path)"; then
+                  echo "Failed to write status result" >&2
+                  if [ "${exit_code}" -eq 0 ]; then
+                    exit_code=1
+                  fi
+                fi
+                # ID generation or the ID-result write failed. Exit nonzero so the PipelineRun
+                # fails instead of skipping provision through the status when-condition alone.
+                if [ "${id_write_status}" -ne 0 ] && [ "${exit_code}" -eq 0 ]; then
+                  exit_code=1
+                fi
+                exit "${exit_code}"
+              }
+              trap record_results EXIT
+
+              pipeline_uid="$(context.pipelineRun.uid)"
+              generated="$(printf '%s' "${pipeline_uid}" | tr -d '-' | cut -c1-"${MAX_CLUSTER_ID_LENGTH}")"
+              if [ "${#generated}" -ne "${MAX_CLUSTER_ID_LENGTH}" ]; then
+                echo "Cluster id must be ${MAX_CLUSTER_ID_LENGTH} characters, got '${generated}'" >&2
+                exit 1
+              fi
+              short_id="${generated}"
+    - name: provision-kind-cluster
+      runAfter:
+        - short-cluster-id
       when:
         - input: "$(tasks.test-metadata.results.pull-request-author)"
           operator: notin
@@ -114,6 +180,9 @@ spec:
         - input: "$(tasks.check-if-related-test.results.result)"
           operator: in
           values: ["true"]
+        - input: "$(tasks.short-cluster-id.results.status)"
+          operator: in
+          values: ["Success"]
       taskRef:
         resolver: git
         params:
@@ -129,9 +198,9 @@ spec:
         - name: cluster-access-secret-name
           value: kfg-$(context.pipelineRun.name)
         - name: id
-          value: $(context.pipelineRun.name)
+          value: $(tasks.short-cluster-id.results.id)
         - name: backed-url
-          value: s3://konflux-mapt-state/mapt/kind/$(context.pipelineRun.name)
+          value: s3://konflux-mapt-state/mapt/kind/$(tasks.short-cluster-id.results.id)
         - name: tags
           value: 'owner=konflux-devprod,project=Konflux,created-by=integration-pipeline,component=release-service-catalog'
         - name: debug
@@ -313,6 +382,9 @@ spec:
         - input: "$(tasks.check-if-related-test.results.result)"
           operator: in
           values: ["true"]
+        - input: "$(tasks.short-cluster-id.results.status)"
+          operator: in
+          values: ["Success"]
       taskRef:
         resolver: git
         params:
@@ -326,9 +398,9 @@ spec:
         - name: secret-ibmcloud-credentials
           value: mapt-kind-secret-ibm
         - name: id
-          value: $(context.pipelineRun.name)
+          value: $(tasks.short-cluster-id.results.id)
         - name: backed-url
-          value: s3://konflux-mapt-state/mapt/kind/$(context.pipelineRun.name)
+          value: s3://konflux-mapt-state/mapt/kind/$(tasks.short-cluster-id.results.id)
         - name: cluster-access-secret
           value: kfg-$(context.pipelineRun.name)
         - name: oci-container
