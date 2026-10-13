@@ -1,0 +1,81 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-filter-epoch-qualified
+spec:
+  description: |
+    An older candidate PURL must match the advisory for its RPM header epoch,
+    while an otherwise identical RPM with a different epoch stays unreleased.
+  params:
+    - name: ociStorage
+      type: string
+    - name: orasOptions
+      type: string
+      default: "--insecure"
+  tasks:
+    - name: match-epoch-32
+      taskRef:
+        name: filter-already-released-advisory-rpms-task
+      params:
+        - name: transformedSnapshot
+          # bind epoch 32 with a legacy, epochless candidate PURL.
+          value: |-
+            H4sIAAAAAAAC/12PXQuCMBSG/8suvNKpq6wEqf8RIdONNnIfbDOK6L93lgrSzeA8PHvfcy5vpKni
+            qEad1CxTVGqUIju6AZC932pnVe44EzTk0TgfMSkw2WcFLrEYVXmirhfN81C11TZh0gdnGtEljlvj
+            ZTDu1UrWxAli4e0F5G4IDCtj3mC2oHFZ578MTz04KinygpJdBW7gPkwfV7cAeHDnpdEA5qBf7cCp
+            j9ISCjDeAGRKR5/rFwGtm+wWAQAA
+        - name: origin
+          value: test-origin
+        - name: advisory_secret_name
+          value: filter-advisory-rpms-secret
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+    - name: reject-epoch-33
+      taskRef:
+        name: filter-already-released-advisory-rpms-task
+      params:
+        - name: transformedSnapshot
+          # Same name/version/release/repo, but header epoch 33.
+          value: |-
+            H4sIAAAAAAAC/12PywrCMBBF/yWLrtr0pVULRf9DpKRtMMHmwSQVRfx3J7ZCcROYw8m9M+cX0Uxx
+            UpNO6iFRTGoSEzvBiMjerjVYlQIfBPNpME4HWmS02CUZzamYVH5k0Ivmsa/aahMN0nkwjegi4NY4
+            6Q08Wzk0YcJYfHuBuWWJw8pYNlgsbPyt819G5x4alJg4wYptha7nzs8fV7cguHNw0mgES9C3duTM
+            BekXijDcgGROJ+/LB+GWzw8WAQAA
+        - name: origin
+          value: test-origin
+        - name: advisory_secret_name
+          value: filter-advisory-rpms-secret
+        - name: internalRequestPipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+    - name: validate
+      runAfter:
+        - match-epoch-32
+        - reject-epoch-33
+      params:
+        - name: matched
+          value: $(tasks.match-epoch-32.results.advisory_url)
+        - name: unmatched
+          value: $(tasks.reject-epoch-33.results.advisory_url)
+      taskSpec:
+        params:
+          - name: matched
+            type: string
+          - name: unmatched
+            type: string
+        steps:
+          - name: assert-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+              [[ -n "$(params.matched)" ]]
+              [[ -z "$(params.unmatched)" ]]
