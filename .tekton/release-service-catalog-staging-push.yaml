@@ -47,6 +47,82 @@ spec:
         - name: kind
           value: task
         resolver: bundles
+    - name: notify-slack-on-failure
+      when:
+      - input: $(tasks.status)
+        operator: in
+        values:
+        - "Failed"
+      params:
+      - name: secretName
+        value: "release-team-slack-notification-secret"
+      - name: secretKeyName
+        value: "release"
+      taskSpec:
+        params:
+        - name: secretName
+        - name: secretKeyName
+        volumes:
+        - name: slack-token
+          secret:
+            secretName: $(params.secretName)
+            optional: true
+        steps:
+        - name: send-failure-to-slack
+          image: quay.io/konflux-ci/release-service-utils@sha256:3bf363d58d13d88da6fa77425a765ee6c0da61cd89f39a0052983337b97d4f88
+          computeResources:
+            limits:
+              memory: 128Mi
+            requests:
+              cpu: 10m
+              memory: 128Mi
+          volumeMounts:
+          - name: slack-token
+            mountPath: "/tmp/secrets"
+            readOnly: true
+          env:
+          - name: KEYNAME
+            value: $(params.secretKeyName)
+          - name: PIPELINERUN_NAME
+            value: $(context.pipelineRun.name)
+          - name: NAMESPACE
+            value: $(context.pipelineRun.namespace)
+          script: |
+            #!/usr/bin/env bash
+            set -eux
+
+            if [ -z "${KEYNAME}" ] ; then
+              echo "No secret key name provided via the 'secretKeyName' param"
+              echo "No message will be sent to Slack"
+              exit 0
+            fi
+
+            if [ -f "/tmp/secrets/${KEYNAME}" ]; then
+              echo "Setting WEBHOOK_URL from secret"
+              set +x
+              WEBHOOK_URL="$(cat "/tmp/secrets/${KEYNAME}")"
+              set -x
+            else
+              echo "Error: Secret not defined properly. The key to use (${KEYNAME}) is defined in 'secretKeyName'"
+              exit 1
+            fi
+
+            # Read the Konflux UI URL that Pipelines-as-Code set on this PipelineRun.
+            PLR_URL="$(kubectl get pipelinerun "${PIPELINERUN_NAME}" -n "${NAMESPACE}" \
+              -o jsonpath='{.metadata.annotations.pipelinesascode\.tekton\.dev/log-url}' 2>/dev/null || true)"
+            if [ -z "${PLR_URL}" ]; then
+              PLR_URL="PipelineRun ${PIPELINERUN_NAME} in namespace ${NAMESPACE} (could not resolve console URL)"
+            fi
+
+            # ping @ic-konflux-release group
+            MESSAGE="<!subteam^S09N535GS4E> :red_circle: Catalog Staging Build FAILED: ${PLR_URL}"
+            jq -n --arg text "${MESSAGE}" '{text: $text}' > /tmp/payload.json
+
+            echo "Calling Slack API with curl...."
+            set +x
+            curl -s -H "Content-type: application/json" --data-binary "@/tmp/payload.json" \
+              --retry 3 --fail-with-body "${WEBHOOK_URL}"
+            set -x
     params:
     - description: Source Repository URL
       name: git-url
