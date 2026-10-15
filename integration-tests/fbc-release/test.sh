@@ -260,6 +260,10 @@ trigger_configured_releases() {
             if [ "$mode" = "single" ]; then
                 if [ "$scenario" = "optin" ]; then
                     snapshot_name=$(wait_for_single_component_snapshot $optin_application_name)
+                elif [ "$scenario" = "happy" ]; then
+                    # happy uses overwrite_from_index, so it has its own component/
+                    # application/snapshot to avoid reusing the non-overwrite builds
+                    snapshot_name=$(wait_for_single_component_snapshot $happy_application_name)
                 else
                     snapshot_name=$(wait_for_single_component_snapshot)
                 fi
