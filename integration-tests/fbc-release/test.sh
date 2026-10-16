@@ -735,74 +735,106 @@ wait_for_release() {
 }
 
 # Override main framework function to use our release verification
+# Wait for and verify a single release end to end. Returns 0 if every check
+# passed, 1 otherwise. Safe to run in a background subshell: it only touches
+# per-release state and the exported RELEASE_NAME/RELEASE_NAMESPACE, which stay
+# isolated to the subshell.
+verify_single_release() {
+    local release_name=$1
+    local mode_scenario="${RELEASES_TO_VERIFY[$release_name]}"
+    local mode="${mode_scenario%-*}"
+    local scenario="${mode_scenario#*-}"
+
+    echo "  Verifying $release_name ($mode-$scenario)..."
+
+    # Wait for release completion
+    wait_for_release "$release_name"
+
+    # Mode-specific verification
+    local mode_result=0
+    if [ "$mode" = "single" ]; then
+        verify_single_component_release "$release_name"
+        mode_result=$?
+    elif [ "$mode" = "multi" ]; then
+        verify_multi_component_release "$release_name"
+        mode_result=$?
+    fi
+
+    # Pipeline results validation (always runs for all releases)
+    echo "  📋 Validating pipeline results for $release_name..."
+    validate_pipeline_results "$release_name"
+    local pipeline_result=$?
+
+    # Scenario-specific verification
+    local scenario_result=0
+    case "$scenario" in
+        "staged")
+            verify_staged "$release_name"
+            scenario_result=$?
+            ;;
+        "prega")
+            verify_prega "$release_name"
+            scenario_result=$?
+            ;;
+        "hotfix")
+            verify_hotfix "$release_name"
+            scenario_result=$?
+            ;;
+        "optin")
+            verify_optin "$release_name" "$mode"
+            scenario_result=$?
+            ;;
+    esac
+
+    # Index content verification (non-staged only — staged builds don't publish to a pullable target)
+    local content_result=0
+    if [ "$scenario" != "staged" ]; then
+        verify_index_image_content "$release_name"
+        content_result=$?
+    else
+        echo "  ⏭️  Skipping index content verification for staged release"
+    fi
+
+    if [ $mode_result -eq 0 ] && [ $scenario_result -eq 0 ] && [ $pipeline_result -eq 0 ] && [ $content_result -eq 0 ]; then
+        echo "  ✅ $release_name verification passed"
+        return 0
+    fi
+    echo "  🔴 $release_name verification failed"
+    return 1
+}
+
+# Wait for and verify all releases in parallel. trigger_configured_releases
+# already creates every Release up front, so their managed pipelines run
+# concurrently; verifying each in its own background subshell matches that
+# parallelism (a slow release no longer blocks verification of the others).
+# Per-release output is captured and replayed grouped so parallel logs stay
+# readable.
 verify_release_contents() {
     local failed_releases=()
-    
-    echo "🔍 Verifying all releases..."
-    
-    for release_name in "${!RELEASES_TO_VERIFY[@]}"; do
-        local mode_scenario="${RELEASES_TO_VERIFY[$release_name]}"
-        local mode="${mode_scenario%-*}"
-        local scenario="${mode_scenario#*-}"
-        
-        echo "  Verifying $release_name ($mode-$scenario)..."
-        
-        # Wait for release completion
-        wait_for_release "$release_name"
-        
-        # Mode-specific verification
-        local mode_result=0
-        if [ "$mode" = "single" ]; then
-            verify_single_component_release "$release_name"
-            mode_result=$?
-        elif [ "$mode" = "multi" ]; then
-            verify_multi_component_release "$release_name"
-            mode_result=$?
-        fi
-        
-        # Pipeline results validation (always runs for all releases)
-        echo "  📋 Validating pipeline results for $release_name..."
-        validate_pipeline_results "$release_name"
-        local pipeline_result=$?
-        
-        # Scenario-specific verification
-        local scenario_result=0
-        case "$scenario" in
-            "staged") 
-                verify_staged "$release_name"
-                scenario_result=$?
-                ;;
-            "prega") 
-                verify_prega "$release_name"
-                scenario_result=$?
-                ;;  
-            "hotfix") 
-                verify_hotfix "$release_name"
-                scenario_result=$?
-                ;;
-            "optin")
-                verify_optin "$release_name" "$mode"
-                scenario_result=$?
-                ;;
-        esac
-        
-        # Index content verification (non-staged only — staged builds don't publish to a pullable target)
-        local content_result=0
-        if [ "$scenario" != "staged" ]; then
-            verify_index_image_content "$release_name"
-            content_result=$?
-        else
-            echo "  ⏭️  Skipping index content verification for staged release"
-        fi
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local -A pid_of=()
 
-        if [ $mode_result -eq 0 ] && [ $scenario_result -eq 0 ] && [ $pipeline_result -eq 0 ] && [ $content_result -eq 0 ]; then
-            echo "  ✅ $release_name verification passed"
-        else
-            echo "  🔴 $release_name verification failed"
+    echo "🔍 Verifying all releases (parallel)..."
+
+    for release_name in "${!RELEASES_TO_VERIFY[@]}"; do
+        verify_single_release "$release_name" >"${tmpdir}/${release_name}.log" 2>&1 &
+        pid_of["$release_name"]=$!
+    done
+
+    for release_name in "${!pid_of[@]}"; do
+        if ! wait "${pid_of[$release_name]}"; then
             failed_releases+=("$release_name")
         fi
     done
-    
+
+    # Replay each release's captured output grouped, in a stable order
+    for release_name in "${!RELEASES_TO_VERIFY[@]}"; do
+        echo "----- ${release_name} (${RELEASES_TO_VERIFY[$release_name]}) -----"
+        cat "${tmpdir}/${release_name}.log"
+    done
+    rm -rf "${tmpdir}"
+
     if [ ${#failed_releases[@]} -gt 0 ]; then
         export FAILED_RELEASE_NAMES="${failed_releases[*]}"
         echo "🔴 ${#failed_releases[@]} release(s) failed verification: ${failed_releases[*]}"
