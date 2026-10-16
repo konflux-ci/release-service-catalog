@@ -418,6 +418,24 @@ verify_release_contents() {
         fi
     fi
 
+    # RPM releases upload one product SBOM to Atlas. Component SBOMs stay on the
+    # advisory/Pulp metadata, so status.artifacts.sboms.component is an empty array.
+    # URLs may use staging Atlas or the cluster Trustify endpoint; path + UUID are required.
+    echo "Checking SBOMs uploaded to Atlas..."
+    local sboms
+    sboms="$(jq -r '.status.artifacts.sboms // ""' <<< "${release_json}")"
+
+    if [ -z "${sboms}" ] || [ "${sboms}" = "null" ]; then
+      echo '🔴 The release artifact does NOT contain the "sboms" field.'
+      if [ -z "${RUN_TEST_FAILURE_MESSAGE:-}" ]; then
+        RUN_TEST_FAILURE_MESSAGE='The release artifact does NOT contain the "sboms" field.'
+      fi
+      failures=$((failures+1))
+    else
+      # Expect 1 product SBOM and no component Atlas URLs
+      verify_sboms "${sboms}" 1 0
+    fi
+
     # Verify the managed PipelineRun executed the RPM filtering task (this is a key pipeline behavior).
     managed_plr_full=$(jq -r '.status.managedProcessing.pipelineRun // ""' <<< "${release_json}")
     if [ -z "${managed_plr_full}" ]; then
