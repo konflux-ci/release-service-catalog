@@ -59,90 +59,37 @@ spec:
       - name: trusted-ca
         mountPath: /mnt/trusted-ca
         readOnly: true
-
+    securityContext:
+      runAsUser: 1001
   steps:
     - name: create-advisory-oci-artifact
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/lgallovi-test/release-service-utils@sha256:65d4aa5bdba579063dbe50d9ba0a1752042c6913022864c9bedc6a0b3f0bfdfa
       computeResources:
         limits:
-          memory: 256Mi
+          memory: 512Mi
         requests:
-          memory: 256Mi
-          cpu: 150m
-      securityContext:
-        runAsUser: 1001
+          memory: 512Mi
+          cpu: 250m
       volumeMounts:
         - name: trusted-artifacts-dockerconfig-secret
           mountPath: /mnt/trusted_artifacts_dockerconfig
-      script: |
-        #!/usr/bin/env bash
-        set -eo pipefail
-
-        TA_DOCKERCONFIG_JSON_PATH="/mnt/trusted_artifacts_dockerconfig/.dockerconfigjson"
-        if [ -f "${TA_DOCKERCONFIG_JSON_PATH}" ] && [ -s "${TA_DOCKERCONFIG_JSON_PATH}" ]; then
-          TRUSTED_ARTIFACTS_DOCKERCONFIG_JSON="$(cat "${TA_DOCKERCONFIG_JSON_PATH}")"
-        fi
-
-        STDERR_FILE=/tmp/stderr.txt
-        echo -n "$(params.internalRequestPipelineRunName)" > "$(results.internalRequestPipelineRunName.path)"
-        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
-
-        exitfunc() {
-            local err=$1
-            local line=$2
-            local command="$3"
-            if [ "$err" -eq 0 ] ; then
-                echo -n "Success" > "$(results.result.path)"
-            else
-                echo -n \
-                  "$0: ERROR '$command' failed at line $line - exited with status $err" > "$(results.result.path)"
-                if [ -f "$STDERR_FILE" ] ; then
-                    tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
-                fi
-            fi
-            echo -n "${ADVISORY_OCI_ARTIFACT}" > "$(results.advisory_oci_artifact.path)"
-            exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
-        }
-        # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
-        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
-
-        ## AppSRE clusters do not enable credentials-init in Tekton
-        ## therefore, we need to do it ourselves.
-        ## This will be used later in create-trusted-artifact
-        if [ -n "${TRUSTED_ARTIFACTS_DOCKERCONFIG_JSON}" ]; then
-          mkdir -p ~/.docker/
-          echo -n "${TRUSTED_ARTIFACTS_DOCKERCONFIG_JSON}" > ~/.docker/config.json
-        fi
-        ##
-
-        set -x
-        echo "advisory_url: $(params.advisory_url)"
-        yamlFile=$(mktemp -d)/advisory.yaml
-        if ! curl -sL --fail-with-body "$(params.advisory_url)" -o "${yamlFile}" ; then
-          echo "Failed to download advisory yaml file: $(params.advisory_url)"
-          exit 1
-        fi
-        cat "${yamlFile}"
-        path="$(dirname "${yamlFile}")"
-
-        archive_dir="$(mktemp -d)"
-        archive="${archive_dir}/advisory"
-
-        tar_opts=(--create --use-compress-program='gzip -n' --file)
-        tar_opts=(--verbose "${tar_opts[@]}")
-        set -o xtrace
-
-        tar "${tar_opts[@]}" "${archive}" --directory="${path}" .
-
-        sha256sum_output="$(sha256sum "${archive}")"
-        digest="${sha256sum_output/ */}"
-        echo Prepared artifact from "${path} (sha256:${digest})"
-
-        store="quay.io/konflux-ci/release-service-trusted-artifacts"
-        repo="$(echo -n $store | sed 's_/\(.*\):\(.*\)_/\1_g')"
-
-        oras_opts="--annotation=quay:expires-after=1d"
-        pushd "${archive_dir}" > /dev/null
-        oras push "${oras_opts}" --registry-config <(select-oci-auth "${repo}") "${store}" advisory
-        ADVISORY_OCI_ARTIFACT="oci:${repo}@sha256:${digest}"
-        popd > /dev/null
+      env:
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+        - name: RESULT_ADVISORY_OCI_ARTIFACT
+          value: $(results.advisory_oci_artifact.path)
+        - name: RESULT_INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: $(results.internalRequestPipelineRunName.path)
+        - name: RESULT_INTERNAL_REQUEST_TASK_RUN_NAME
+          value: $(results.internalRequestTaskRunName.path)
+        - name: CA_CERT_PATH
+          value: /mnt/trusted-ca/ca-bundle.crt
+        - name: REQUESTS_CA_BUNDLE
+          value: /etc/pki/tls/certs/ca-bundle.crt
+        - name: PARAM_ADVISORY_URL
+          value: $(params.advisory_url)
+        - name: INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: $(params.internalRequestPipelineRunName)
+        - name: INTERNAL_REQUEST_TASK_RUN_NAME
+          value: $(context.taskRun.name)
+      command: ["python3", "-m", "release_service_utils.tasks.internal.create_advisory_oci_artifact"]
