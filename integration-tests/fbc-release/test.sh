@@ -270,6 +270,10 @@ trigger_configured_releases() {
             elif [ "$mode" = "multi" ]; then
                 if [ "$scenario" = "optin" ]; then
                     snapshot_name=$(wait_for_multi_component_snapshot $multi_optin_application_name)
+                elif [ "$scenario" = "happy" ]; then
+                    # happy uses overwrite_from_index, so it has its own
+                    # application/snapshot to avoid reusing multi-staged's builds
+                    snapshot_name=$(wait_for_multi_component_snapshot $multi_happy_application_name)
                 else
                     snapshot_name=$(wait_for_multi_component_snapshot)
                 fi
@@ -283,8 +287,10 @@ trigger_configured_releases() {
             # Create manual release
             local release_name="fbc-${mode}-${scenario}-${uuid}"
             local release_plan="fbc-release-${scenario}-rp-${uuid}"
-            if [ "$mode" = "multi" ] && [ "$scenario" = "optin" ]; then
-            	echo "⏭️ Multi Opt-In ReleasePlan chosen"
+            # multi-optin and multi-happy have isolated apps, so they use a
+            # dedicated multi-<scenario> ReleasePlan targeting that app
+            if [ "$mode" = "multi" ] && { [ "$scenario" = "optin" ] || [ "$scenario" = "happy" ]; }; then
+            	echo "⏭️ Multi ${scenario} ReleasePlan chosen"
             	local release_plan="fbc-release-${mode}-${scenario}-rp-${uuid}"
             fi
 
