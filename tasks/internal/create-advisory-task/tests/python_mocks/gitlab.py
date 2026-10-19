@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 
 class GitlabError(Exception):
-    pass
+    def __init__(self, message: str, response_code: int | None = None) -> None:
+        super().__init__(message)
+        self.response_code = response_code
 
 
 class GitlabConnectionError(GitlabError):
@@ -20,6 +22,16 @@ _exceptions.GitlabError = GitlabError
 _exceptions.GitlabConnectionError = GitlabConnectionError
 sys.modules["gitlab.exceptions"] = _exceptions
 exceptions = _exceptions
+
+
+class _Approvals:
+    def __init__(self, merge_request: "_MergeRequest") -> None:
+        self._merge_request = merge_request
+
+    def get(self, **_kwargs: Any) -> SimpleNamespace:
+        merge_request = self._merge_request
+        stored = merge_request.manager._by_iid[merge_request.iid]
+        return SimpleNamespace(user_has_approved=stored.user_has_approved)
 
 
 class _MergeRequest:
@@ -35,7 +47,11 @@ class _MergeRequest:
         self.web_url = web_url
         self.source_branch = source_branch
         self.state = "opened"
-        self.merge_status = "can_be_merged"
+        self.sha = "mockheadsha"
+        self.user_has_approved = False
+        self.approvals = _Approvals(self)
+        self.merge_status = "cannot_be_merged"
+        self.detailed_merge_status = "not_approved"
         self.merge_commit_sha: str | None = None
         self.manager = manager
         self._attrs = self._current_attrs()
@@ -46,17 +62,38 @@ class _MergeRequest:
             "web_url": self.web_url,
             "source_branch": self.source_branch,
             "state": self.state,
+            "sha": self.sha,
+            "user_has_approved": self.user_has_approved,
             "merge_status": self.merge_status,
+            "detailed_merge_status": self.detailed_merge_status,
             "merge_commit_sha": self.merge_commit_sha,
         }
 
     def get_id(self) -> int:
         return self.iid
 
+    def approve(self, sha: str | None = None, **_kwargs: Any) -> dict[str, Any]:
+        stored = self.manager._by_iid[self.iid]
+        if sha != stored.sha:
+            raise GitlabError("HEAD SHA does not match", response_code=409)
+        # Apply only this operation's changes; the caller may hold a stale snapshot.
+        stored._update_attrs({
+            "user_has_approved": True,
+            "merge_status": "can_be_merged",
+            "detailed_merge_status": "mergeable",
+        })
+        self._update_attrs(stored._current_attrs())
+        return {"user_has_approved": True}
+
     def merge(self, **_kwargs: Any) -> dict[str, Any]:
-        self.state = "merged"
-        self.merge_commit_sha = "mockmergecommitsha"
-        self._attrs = self._current_attrs()
+        stored = self.manager._by_iid[self.iid]
+        if not stored.user_has_approved:
+            raise GitlabError("Approval required", response_code=405)
+        stored._update_attrs({
+            "state": "merged",
+            "merge_commit_sha": "mockmergecommitsha",
+        })
+        self._update_attrs(stored._current_attrs())
         return dict(self._attrs)
 
     def _update_attrs(self, attrs: dict[str, Any]) -> None:
@@ -107,10 +144,7 @@ class _MergeRequestManager:
             source_branch=stored.source_branch,
             manager=self,
         )
-        fresh.state = stored.state
-        fresh.merge_status = stored.merge_status
-        fresh.merge_commit_sha = stored.merge_commit_sha
-        fresh._attrs = fresh._current_attrs()
+        fresh._update_attrs(stored._current_attrs())
         return fresh
 
 
