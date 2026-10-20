@@ -82,13 +82,13 @@ spec:
       runAsUser: 1001
   steps:
     - name: filter-rpms
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/lgallovi-test/release-service-utils@sha256:8de8a4cd4113d32619301352ed0ee4835a293fd47f2b9f6d973178b89ed2a65c
       computeResources:
         limits:
-          memory: 512Mi
+          memory: 768Mi
           cpu: '1'
         requests:
-          memory: 512Mi
+          memory: 768Mi
           cpu: '1'
       volumeMounts:
         - name: advisory-secret
@@ -98,265 +98,29 @@ spec:
       env:
         - name: TRANSFORMED_SNAPSHOT
           value: "$(params.transformedSnapshot)"
+        - name: ORIGIN
+          value: "$(params.origin)"
+        - name: OCI_STORAGE
+          value: "$(params.ociStorage)"
+        - name: INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: "$(params.internalRequestPipelineRunName)"
+        - name: TASK_RUN_NAME
+          value: "$(context.taskRun.name)"
         - name: ORAS_OPTIONS
           value: "$(params.orasOptions)"
-      script: |
-        #!/usr/bin/env bash
-        set -eo pipefail
-
-        # Setup OCI registry credentials for trusted artifacts
-        # AppSRE clusters do not enable credentials-init in Tekton
-        TA_DOCKERCONFIG_JSON_PATH="/mnt/trusted_artifacts_dockerconfig/.dockerconfigjson"
-        if [ -f "${TA_DOCKERCONFIG_JSON_PATH}" ] && [ -s "${TA_DOCKERCONFIG_JSON_PATH}" ]; then
-          mkdir -p ~/.docker/
-          cat "${TA_DOCKERCONFIG_JSON_PATH}" > ~/.docker/config.json
-        fi
-
-        GITLAB_HOST="$(cat /mnt/advisory_secret/gitlab_host)"
-        ACCESS_TOKEN="$(cat /mnt/advisory_secret/gitlab_access_token)"
-        GIT_AUTHOR_NAME="$(cat /mnt/advisory_secret/git_author_name)"
-        GIT_AUTHOR_EMAIL="$(cat /mnt/advisory_secret/git_author_email)"
-        GIT_REPO="$(cat /mnt/advisory_secret/git_repo)"
-
-        export GITLAB_HOST ACCESS_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
-
-        STDERR_FILE=/tmp/stderr.txt
-        echo -n "$(params.internalRequestPipelineRunName)" \
-          > "$(results.internalRequestPipelineRunName.path)"
-        echo -n "$(context.taskRun.name)" > "$(results.internalRequestTaskRunName.path)"
-
-        exitfunc() {
-          local err=$1
-          local line=$2
-          local cmd=$3
-          if [ "$err" -eq 0 ]; then
-            echo -n "Success" > "$(results.result.path)"
-          else
-            echo -n "$0: ERROR '$cmd' failed at line $line - exited with status $err" \
-              > "$(results.result.path)"
-            if [ -f "$STDERR_FILE" ]; then
-              tail -n 20 "$STDERR_FILE" >> "$(results.result.path)"
-            fi
-          fi
-          exit 0
-        }
-        trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
-
-        push_results_to_oci() {
-          local results_dir="$1"
-          local oci_storage
-          oci_storage="$(params.ociStorage)"
-          local oci_tag
-          oci_tag="filter-results-$(date +%s)"
-          local oci_ref="${oci_storage}:${oci_tag}"
-
-          echo "Pushing filter results to OCI storage: ${oci_ref}" >&2
-          local oras_opts="--annotation=quay.expires-after=1d"
-          # Intentionally unquoted: empty quoted string breaks oras positional args
-          # shellcheck disable=SC2086
-          (cd "${results_dir}" && oras push ${ORAS_OPTIONS:-} ${oras_opts} \
-            --registry-config <(select-oci-auth "${oci_storage}") \
-            "${oci_ref}" "filter-results.tar.gz:application/gzip") >&2
-
-          local digest
-          # Intentionally unquoted: empty quoted string breaks oras positional args
-          # shellcheck disable=SC2086
-          digest=$(oras manifest fetch ${ORAS_OPTIONS:-} "${oci_ref}" \
-            --registry-config <(select-oci-auth "${oci_storage}") \
-            --descriptor | jq -r '.digest')
-          echo "oci:${oci_storage}@${digest}"
-        }
-
-        # === Phase 1: Decode transformed snapshot ===
-        TRANSFORMED_SNAPSHOT_JSON=$(base64 -d <<< "$TRANSFORMED_SNAPSHOT" | gunzip)
-        echo "Transformed Snapshot JSON: $TRANSFORMED_SNAPSHOT_JSON"
-
-        ORIGIN="$(params.origin)"
-        ADVISORY_BASE_DIR="data/advisories/${ORIGIN}"
-
-        cd /tmp
-
-        # === Phase 2: Clone advisory repo (sparse checkout for performance) ===
-        echo "Cloning $GIT_REPO..."
-        git clone --depth=1 --filter=blob:none --no-checkout "$GIT_REPO" repo
-        cd repo
-        git sparse-checkout set "$ADVISORY_BASE_DIR"
-        git checkout
-
-        # === Phase 3: Find existing advisories (newest first) ===
-        echo "Checking existing advisories in ${ADVISORY_BASE_DIR}..."
-        EXISTING_ADVISORIES=""
-        if [ -d "${ADVISORY_BASE_DIR}" ]; then
-          EXISTING_ADVISORIES=$(
-            find "${ADVISORY_BASE_DIR}" -mindepth 2 -type d -printf "%T@ %p\n" |
-            sort -nr | cut -d' ' -f2- | sed "s|^${ADVISORY_BASE_DIR}/||"
-          )
-        fi
-
-        if [[ -z "$EXISTING_ADVISORIES" ]]; then
-          echo "No existing advisories found. All RPMs are unreleased."
-
-          # Create output directory for OCI artifact
-          RESULTS_DIR=/tmp/filter-results
-          mkdir -p "$RESULTS_DIR"
-
-          # All RPMs are unreleased
-          echo "$TRANSFORMED_SNAPSHOT_JSON" | jq -c '.' > "$RESULTS_DIR/unreleased_rpms.json"
-          echo "[]" > "$RESULTS_DIR/in_advisory_rpms.json"
-
-          # Create tarball
-          RESULTS_TAR="$RESULTS_DIR/filter-results.tar.gz"
-          tar -czf "$RESULTS_TAR" -C "$RESULTS_DIR" unreleased_rpms.json in_advisory_rpms.json
-
-          ARTIFACT_REF=$(push_results_to_oci "$RESULTS_DIR")
-          echo "Filter results artifact: ${ARTIFACT_REF}"
-          echo -n "${ARTIFACT_REF}" > "$(results.filter_results_artifact.path)"
-          echo -n "" > "$(results.advisory_url.path)"
-          echo -n "" > "$(results.advisory_internal_url.path)"
-          echo -n "Success" > "$(results.result.path)"
-          exit 0
-        fi
-
-        # === Phase 4: Extract all purls from all advisories ===
-        echo "Extracting purls from advisories..."
-        PURL_MAPS_FILE=/tmp/purl_advisory_maps.jsonl
-        : > "$PURL_MAPS_FILE"
-
-        for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
-          ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
-          if [[ -f "$ADVISORY_FILE" ]]; then
-            yq -o=json \
-              '.spec.content.artifacts // [] | [.[].purl] | map(select(. != null))' \
-              "$ADVISORY_FILE" \
-              | jq -c --arg adv "$ADVISORY_FILE" \
-                'reduce .[] as $p ({}; .[$p] = $adv)' \
-              >> "$PURL_MAPS_FILE"
-          fi
-        done
-
-        PURL_TO_ADVISORY_MAP_FILE=/tmp/purl_to_advisory_map.json
-        if [[ -s "$PURL_MAPS_FILE" ]]; then
-          jq -s 'reduce .[] as $m ({}; . * $m)' \
-            "$PURL_MAPS_FILE" > "$PURL_TO_ADVISORY_MAP_FILE"
-        else
-          echo "{}" > "$PURL_TO_ADVISORY_MAP_FILE"
-        fi
-        rm -f "$PURL_MAPS_FILE"
-
-        echo "Total unique purls from advisories: $(jq 'keys | length' "$PURL_TO_ADVISORY_MAP_FILE")"
-
-        # === Phase 5: Categorize RPMs and track source advisories ===
-        echo "Categorizing RPMs by advisory presence..."
-
-        SNAPSHOT_FILE=/tmp/snapshot.json
-        echo "$TRANSFORMED_SNAPSHOT_JSON" > "$SNAPSHOT_FILE"
-
-        UNRELEASED_FILE=/tmp/unreleased.json
-        IN_ADVISORY_FILE=/tmp/in_advisory.json
-        ADVISORY_SET_FILE=/tmp/advisory_set.json
-
-        jq --slurpfile map "$PURL_TO_ADVISORY_MAP_FILE" '
-          # The candidate epoch comes from its RPM header. Older task images
-          # omit it from the PURL, so try the verified identity first.
-          def epoch_purl($e):
-            ($e.epoch // "0" | tostring) as $epoch |
-            if $epoch == "0" or ($e.purl | test("[?&]epoch=")) then
-              $e.purl
-            else
-              $e.purl | sub("(?<arch>\\?arch=[^&]+)"; "\(.arch)&epoch=\($epoch)")
-            end;
-          def legacy_purl($purl): $purl | sub("&epoch=[^&]+"; "");
-          # The producer represents epoch zero without a qualifier. A
-          # nonzero or unknown candidate epoch needs historical verification.
-          def unresolved_legacy($e; $purl):
-            ($purl | test("[?&]epoch=") | not) and
-            (($e.epoch == null) or (($e.epoch | tostring) != "0"));
-          def match_purl($m; $e):
-            (epoch_purl($e)) as $qualified |
-            if $m[$qualified] then
-              {purl: $qualified, legacy: unresolved_legacy($e; $qualified)}
-            elif $m[$e.purl] then
-              {purl: $e.purl, legacy: unresolved_legacy($e; $e.purl)}
-            elif ($e.purl | test("[?&]epoch=")) and $m[legacy_purl($e.purl)] then
-              {purl: legacy_purl($e.purl),
-               legacy: unresolved_legacy($e; legacy_purl($e.purl))}
-            else
-              null
-            end;
-          . as $entries | $map[0] as $m |
-          reduce $entries[] as $e (
-            {unreleased: [], in_advisory: [], advisories: {}};
-            (match_purl($m; $e)) as $match |
-            if $match then
-              .in_advisory += [$e + {legacy_advisory_purl: $match.legacy}]
-              | .advisories[$m[$match.purl]] = true
-            else
-              .unreleased += [$e]
-            end
-          ) | {
-            unreleased,
-            in_advisory,
-            advisories: (.advisories | keys)
-          }
-        ' "$SNAPSHOT_FILE" > /tmp/categorized.json
-
-        jq '.unreleased' /tmp/categorized.json > "$UNRELEASED_FILE"
-        jq '.in_advisory' /tmp/categorized.json > "$IN_ADVISORY_FILE"
-        jq '.advisories' /tmp/categorized.json > "$ADVISORY_SET_FILE"
-        rm -f /tmp/categorized.json
-
-        # === Phase 6: Output results ===
-        UNRELEASED_COUNT=$(jq 'length' "$UNRELEASED_FILE")
-        IN_ADVISORY_COUNT=$(jq 'length' "$IN_ADVISORY_FILE")
-        ADVISORY_SET_COUNT=$(jq 'length' "$ADVISORY_SET_FILE")
-
-        echo "Unreleased RPMs: $UNRELEASED_COUNT"
-        echo "In-advisory RPMs (need digest validation): $IN_ADVISORY_COUNT"
-        echo "Unique advisories containing in-advisory RPMs: $ADVISORY_SET_COUNT"
-
-        # Create output directory for OCI artifact
-        RESULTS_DIR=/tmp/filter-results
-        mkdir -p "$RESULTS_DIR"
-
-        # Write JSON files (compact format to save space)
-        jq -c '.' "$UNRELEASED_FILE" > "$RESULTS_DIR/unreleased_rpms.json"
-        jq -c '.' "$IN_ADVISORY_FILE" > "$RESULTS_DIR/in_advisory_rpms.json"
-
-        # Create tarball
-        RESULTS_TAR="$RESULTS_DIR/filter-results.tar.gz"
-        tar -czf "$RESULTS_TAR" -C "$RESULTS_DIR" unreleased_rpms.json in_advisory_rpms.json
-
-        ARTIFACT_REF=$(push_results_to_oci "$RESULTS_DIR")
-        echo "Filter results artifact: ${ARTIFACT_REF}"
-        echo -n "${ARTIFACT_REF}" > "$(results.filter_results_artifact.path)"
-
-        # Set advisory URL only if ALL RPMs are in advisories AND they all came from the SAME SINGLE advisory
-        if [[ "$UNRELEASED_COUNT" -eq 0 ]] && [[ "$ADVISORY_SET_COUNT" -eq 1 ]]; then
-          SINGLE_ADVISORY_FILE=$(jq -r '.[0]' "$ADVISORY_SET_FILE")
-          echo "All RPMs found in the same single advisory: ${SINGLE_ADVISORY_FILE}"
-
-          ADVISORY_TYPE=$(yq -r '.spec.type' "$SINGLE_ADVISORY_FILE")
-          ADVISORY_NAME=$(yq -r '.metadata.name' "$SINGLE_ADVISORY_FILE")
-
-          if [[ "${GIT_REPO}" == *"/rhtap-release/"* ]]; then
-            ADVISORY_URL_PREFIX="https://access.stage.redhat.com/errata"
-          else
-            ADVISORY_URL_PREFIX="https://access.redhat.com/errata"
-          fi
-
-          LATEST_ADVISORY_URL="${ADVISORY_URL_PREFIX}/${ADVISORY_TYPE}-${ADVISORY_NAME}"
-          LATEST_ADVISORY_INTERNAL_URL="${GIT_REPO//\.git/}/-/raw/main/${SINGLE_ADVISORY_FILE}"
-
-          echo -n "$LATEST_ADVISORY_URL" > "$(results.advisory_url.path)"
-          echo -n "$LATEST_ADVISORY_INTERNAL_URL" > "$(results.advisory_internal_url.path)"
-        else
-          if [[ "$ADVISORY_SET_COUNT" -gt 1 ]]; then
-            echo "RPMs found in multiple advisories ($ADVISORY_SET_COUNT). Not setting advisory_url."
-            echo "Advisories:"
-            jq -r '.[]' "$ADVISORY_SET_FILE"
-          fi
-          echo -n "" > "$(results.advisory_url.path)"
-          echo -n "" > "$(results.advisory_internal_url.path)"
-        fi
-
-        echo -n "Success" > "$(results.result.path)"
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+        - name: RESULT_INTERNAL_REQUEST_PIPELINE_RUN_NAME
+          value: $(results.internalRequestPipelineRunName.path)
+        - name: RESULT_INTERNAL_REQUEST_TASK_RUN_NAME
+          value: $(results.internalRequestTaskRunName.path)
+        - name: RESULT_FILTER_RESULTS_ARTIFACT
+          value: $(results.filter_results_artifact.path)
+        - name: RESULT_ADVISORY_URL
+          value: $(results.advisory_url.path)
+        - name: RESULT_ADVISORY_INTERNAL_URL
+          value: $(results.advisory_internal_url.path)
+      command:
+        - python3
+        - -m
+        - release_service_utils.tasks.internal.filter_already_released_advisory_rpms
