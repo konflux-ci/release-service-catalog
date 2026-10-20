@@ -114,15 +114,26 @@ This allows MintMaker to automatically manage and update image digests.
 
 When adding a new task, its logic should be implemented as a standalone script (usually Python) defined in the
 [release-service-utils repo](https://github.com/konflux-ci/release-service-utils), rather than written inline in
-the task's `script` field. The task step should then reference the script via `command`, for example:
+the task's `script` field. Prefer a single work step that calls that script via `command` from the utils image
+(keep the usual trusted-artifact wrap steps). Extra steps are acceptable when they are justified — for example a
+distinct tool that needs its own image or resources — but this is a best-effort guideline, not a hard rule.
+All step containers in a TaskRun start together, so their memory requests add up.
 
 ```yaml
-command: ["/home/scripts/python/tasks/managed/my_new_script.py"]
+command: ["python3", "-m", "release_service_utils.tasks.managed.my_new_script"]
 ```
 
-This makes the logic easier to unit test, reuse, and maintain outside of the Tekton YAML. This is part of an
-ongoing effort to convert existing tasks as well, tracked in
+Do not put large inline scripts in the task YAML, even in Python. They are hard to unit-test and lint, and they
+are stored multiple times in etcd (TaskRun spec/status and pods), which adds cluster load.
+
+This is part of an ongoing effort to convert existing tasks as well, tracked in
 [RELEASE-2455](https://redhat.atlassian.net/browse/RELEASE-2455).
+
+When renaming, splitting, or collapsing steps (including during those conversions), search
+[konflux-release-data](https://gitlab.cee.redhat.com/releng/konflux-release-data) for RPA `taskRunSpecs` /
+`stepSpecs` that still use the old names. Tenant compute overrides match the **current step name**; a stale name
+is a silent no-op and can OOM or stall a release. `pipelineTaskName` is the name of the task in the pipeline,
+which is not always the same as the Task `metadata.name` or any step name.
 
 ### Compute Resources
 
@@ -141,6 +152,10 @@ Here is an example
       memory: 256Mi
       cpu: 250m
 ```
+
+Tenants may further override these values in a ReleasePlanAdmission via
+`spec.pipeline.taskRunSpecs[].stepSpecs`. Those overrides key off **step** names. Changing a step name without
+updating matching RPAs drops the override with no error.
 
 ### Keeping Documentation Up to Date
 

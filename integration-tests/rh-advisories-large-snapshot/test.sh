@@ -270,6 +270,7 @@ metadata:
   namespace: ${tenant_namespace}
   labels:
     originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
     test.appstudio.openshift.io/large-snapshot: "true"
   annotations:
     # Skip idempotency check to allow re-running test with same snapshot

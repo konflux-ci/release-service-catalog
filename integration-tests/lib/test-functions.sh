@@ -145,16 +145,47 @@ get_build_pipeline_run_url() { # args are ns, app, name
   fi
 }
 
+# Delete Releases after removing the test's ReleasePlan to stop new automated releases.
+cleanup_test_releases() {
+    if [ -z "${uuid:-}" ] || [ -z "${tenant_namespace:-}" ] || [ -z "${originating_tool:-}" ]; then
+        echo "Skipping Release CR cleanup: test identity or namespace not set"
+        return 0
+    fi
+
+    # Automated Releases may exist before the harness gets to patch their cleanup labels.
+    # Each suite's ReleasePlan name includes its run UUID, so parallel runs stay isolated.
+    if [ -n "${release_plan_name:-}" ]; then
+        kubectl delete release -n "${tenant_namespace}" \
+            -l "release.appstudio.openshift.io/releasePlan=${release_plan_name}" \
+            --ignore-not-found || echo "Warning: Failed to delete Releases for ${release_plan_name}"
+    fi
+
+    kubectl delete release -n "${tenant_namespace}" \
+        -l "test-run-uuid=${uuid},originating-tool=${originating_tool}" \
+        --ignore-not-found || echo "Warning: Failed to delete labeled test Releases"
+}
+
 # Function for cleaning up resources
 # Relies on global variables: CLEANUP, SUITE_DIR, component_repo_name, component_branch, tmpDir, advisory_yaml_dir
 # Optional variables: component2_repo_name (for multi-component tests), uuid (from test.env), tenant_namespace
+# Optional suite hook: suite_exit_cleanup() in <suite>/test.sh (runs before resource cleanup; always invoked).
+# Suites that patch decrypt_secrets output in place should delete those files here so the next run decrypts fresh.
 cleanup_resources() {
   local err=${1:-0} # Default to 0 if no error code passed
   local line=${2:-"N/A"}
   local command=${3:-"N/A"}
+  local cleanup_log_file=""
+  local cleanup_status=0
+  local pkill_output_file="/dev/null"
 
   if [ "$err" -ne 0 ] ; then
     echo "$0: ERROR: Command '$command' failed at line $line - exited with status $err"
+  fi
+
+  if type suite_exit_cleanup &>/dev/null; then
+    if ! ( set +eo pipefail; suite_exit_cleanup ); then
+      echo "Warning: suite_exit_cleanup failed (temporary credential files may remain on disk; continuing with resource cleanup)" >&2
+    fi
   fi
 
   if [ "${CLEANUP}" == "true" ]; then
@@ -162,7 +193,6 @@ cleanup_resources() {
     # cleanup...so we can ignore errors
     set +eo pipefail
 
-    local cleanup_log_file
     cleanup_log_file=$(mktemp)
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
@@ -210,18 +240,7 @@ cleanup_resources() {
         echo "tmpDir not set or not a directory, skipping k8s resource cleanup." | tee -a "${cleanup_log_file}"
     fi
 
-    # Clean up Release CRs created by this specific test suite
-    # Use both uuid and originating-tool labels to avoid deleting Release CRs
-    # belonging to other parallel test suites that share the same uuid
-    if [ -n "$uuid" ] && [ -n "$tenant_namespace" ] && [ -n "$originating_tool" ]; then
-        echo "Deleting Release CRs with test-run-uuid=${uuid},originating-tool=${originating_tool} in namespace ${tenant_namespace}..." | tee -a "${cleanup_log_file}"
-        kubectl delete release -n "${tenant_namespace}" \
-            -l "test-run-uuid=${uuid},originating-tool=${originating_tool}" \
-            --ignore-not-found >> "${cleanup_log_file}" 2>&1 || \
-            echo "Warning: Failed to delete some Release CRs" | tee -a "${cleanup_log_file}"
-    else
-        echo "Skipping Release CR cleanup: uuid or tenant_namespace not set" | tee -a "${cleanup_log_file}"
-    fi
+    cleanup_test_releases >> "${cleanup_log_file}" 2>&1
 
     # Clean up ImageRepository objects created by the image controller for test components.
     # These may have no ownerReferences, so they may not be cascade-deleted with the Component.
@@ -263,12 +282,19 @@ cleanup_resources() {
     echo "Skipping cleanup as per --skip-cleanup flag."
   fi
 
-  echo "Killing any child processes..." >> "${cleanup_log_file}"
-  pkill -e  -P $$
-
-  if [ "$err" -ne 0 ]; then
-    exit "$err"
+  if [ -n "${cleanup_log_file}" ]; then
+    pkill_output_file="${cleanup_log_file}"
   fi
+
+  echo "Killing any child processes..." | tee -a "${pkill_output_file}" >/dev/null
+  pkill -e -P $$ >> "${pkill_output_file}" 2>&1 || {
+    local pkill_status=$?
+    if [ "${pkill_status}" -ne 1 ]; then
+      cleanup_status="${pkill_status}"
+    fi
+  }
+
+  return "${cleanup_status}"
 }
 
 # Function to decrypt secrets if they don't exist
@@ -310,11 +336,28 @@ create_github_repositories() {
         local _component_base_repo_name="${!_v}"
         _v="${component}_base_branch"
         local _component_base_branch="${!_v}"
+        local create_repo_output_file
+        local create_repo_status
+        local create_repo_message
 
         echo "Creating component repository ${_component_repo_name} branch ${_component_branch} from ${_component_base_repo_name} branch ${_component_base_branch}"
-        "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+        create_repo_output_file=$(mktemp)
+        if ! "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
           "${_component_base_repo_name}" "${_component_base_branch}" \
-          "${_component_repo_name}" "${_component_branch}"
+          "${_component_repo_name}" "${_component_branch}" 2>&1 | tee "${create_repo_output_file}"; then
+            create_repo_status=${PIPESTATUS[0]}
+            create_repo_message=$(sed -n \
+                -e 's/^Error message: //p' \
+                -e 's/^🔴 error: //p' \
+                "${create_repo_output_file}" | tail -1)
+            if [ -n "${create_repo_message}" ]; then
+                export RUN_TEST_FAILURE_MESSAGE="${create_repo_message}"
+            fi
+            rm -f "${create_repo_output_file}"
+            return "${create_repo_status}"
+        fi
+
+        rm -f "${create_repo_output_file}"
     done
 }
 
@@ -964,6 +1007,11 @@ cleanup_old_resources() {
                 close(cmd)
                 if (created_at < cutoff_time) {
                     print "kubectl delete " kind "/" $2 " -n " $1
+                    # Releases can lack cleanup labels if their test exited before discovery.
+                    if (kind == "rp") {
+                        print "kubectl delete release -n " $1 \
+                            " -l release.appstudio.openshift.io/releasePlan=" $2 " --ignore-not-found"
+                    }
                 }
             }
             ' | tee -a "${old_resources_file}"
@@ -1012,13 +1060,30 @@ is_task_skipped() {
     local task_name=$2
 
     local pipelinerun_name
-    pipelinerun_name=$(get_pipelinerun_name_from_release "${release_name}") || return 1
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
 
     local skipped_task
-    skipped_task=$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
-        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")
+    skipped_task="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" \
+        -o jsonpath="{.status.skippedTasks[?(@.name=='${task_name}')].name}")"
 
     [[ -n "${skipped_task}" ]]
+}
+
+# Return 0 (true) if the named task appears in the PipelineRun's childReferences
+# (i.e., it actually executed), 1 (false) otherwise.
+did_task_run() {
+    local release_name="${1}"
+    local task_name="${2}"
+
+    local pipelinerun_name
+    pipelinerun_name="$(get_pipelinerun_name_from_release "${release_name}")" || return 1
+
+    local task_ref
+    task_ref="$(kubectl get pipelinerun "${pipelinerun_name}" -n "${managed_namespace}" -o json \
+        | jq -r --arg task_name "${task_name}" \
+            '.status.childReferences[]? | select(.pipelineTaskName == $task_name) | .name // empty')"
+
+    [[ -n "${task_ref}" ]]
 }
 
 # Return the value of a named pipeline-level result from the managed PipelineRun
@@ -1130,14 +1195,17 @@ wait_for_single_component_snapshot() {
 get_pipelinerun_console_url() {
     local namespace="$1"
     local pipelinerun_name="$2"
+    local default_application_name="${application_name:-}"
     local application_name
 
     # Get application name from pipelinerun labels
     application_name=$(kubectl get pipelinerun/"${pipelinerun_name}" -n "${namespace}" \
         -ojsonpath='{.metadata.labels.appstudio\.openshift\.io/application}' 2>/dev/null || true)
 
-    if [ -n "$application_name" ]; then
+    if [ -n "${application_name}" ]; then
         get_build_pipeline_run_url "${namespace}" "${application_name}" "${pipelinerun_name}"
+    elif [ -n "${default_application_name}" ]; then
+        get_build_pipeline_run_url "${namespace}" "${default_application_name}" "${pipelinerun_name}"
     else
         echo "N/A (no application label found)"
     fi
@@ -1242,6 +1310,7 @@ metadata:
   labels:
     release.appstudio.openshift.io/automated: "false"
     release.appstudio.openshift.io/author: "${author}"
+    originating-tool: "${originating_tool}"
     test-run-uuid: "${uuid}"
 spec:
   releasePlan: ${release_plan_name}
@@ -1430,6 +1499,49 @@ wait_for_multi_component_snapshot() {
     echo "$snapshot_name"
 }
 
+# Validate URL, shasum, and arches on each image entry in release status JSON.
+# Arguments: $1=release JSON, $2=optional context label for messages
+# Returns 0 when all image entries are valid (or there are no images), 1 otherwise.
+# Uses PTSV_EXPECTED_ARCHES (defaults to amd64).
+validate_release_image_artifact_fields() {
+    local release_json="${1}"
+    local context_label="${2:-Release}"
+    local image_count failure_count=0 i
+    local expected_arches="${PTSV_EXPECTED_ARCHES:-amd64}"
+
+    image_count="$(jq -r '(.status.artifacts.images // []) | length' <<< "${release_json}")"
+    if [ "${image_count}" -eq 0 ]; then
+        return 0
+    fi
+
+    echo "Validating ${image_count} image artifact(s) for ${context_label}..."
+    for ((i = 0; i < image_count; i++)); do
+        local image_url image_shasum str_image_arches
+        image_url="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")"
+        image_shasum="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")"
+        str_image_arches="$(jq -r --argjson idx "${i}" \
+            '[.status.artifacts.images[$idx].arches[]?] | sort | unique | join(" ")' <<< "${release_json}")"
+
+        if [ -z "${image_url}" ]; then
+            echo "🔴 ${context_label} image[${i}]: image_url was empty"
+            failure_count=$((failure_count + 1))
+        fi
+        if [ -z "${image_shasum}" ]; then
+            echo "🔴 ${context_label} image[${i}]: image_shasum was empty"
+            failure_count=$((failure_count + 1))
+        fi
+        if [ "${str_image_arches}" != "${expected_arches}" ]; then
+            echo "🔴 ${context_label} image[${i}]: expected arches '${expected_arches}', found '${str_image_arches}'"
+            failure_count=$((failure_count + 1))
+        fi
+    done
+
+    if [ "${failure_count}" -eq 0 ]; then
+        echo "✅ ${context_label}: all image artifacts have valid URL, shasum, and arches"
+    fi
+    return $((failure_count > 0 ? 1 : 0))
+}
+
 check_container_images() {
     local expected_count image_count
 
@@ -1444,7 +1556,11 @@ check_container_images() {
         failures=$((failures+1))
     fi
 
-    echo "Verifying each image artifact..."
+    if ! validate_release_image_artifact_fields "${release_json}" "Release"; then
+        failures=$((failures + 1))
+    fi
+
+    echo "Verifying each image artifact (pullability and signatures)..."
 
     local rpa_json
     rpa_json=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
@@ -1473,34 +1589,13 @@ check_container_images() {
 
     for ((i = 0; i < image_count; i++)); do
         local failures=0
-        local image_url image_arch image_shasum
-        image_url=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")
-        image_arches=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.arches // ""' <<< "${release_json}")
-        image_shasum=$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")
+        local image_url image_shasum
+        image_url="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.urls[0] // ""' <<< "${release_json}")"
+        image_shasum="$(jq -r --argjson idx "${i}" '.status.artifacts.images[$idx]?.shasum // ""' <<< "${release_json}")"
 
-        echo "Checking Image URL..."
-        if [ -n "${image_url}" ]; then
-            echo "✅️ image_url: ${image_url}"
-        else
-            echo "🔴 image_url was empty"
-            failures=$((failures+1))
-        fi
-
-        str_image_arches=$(echo "${image_arches}" |  jq -r '. | sort | unique | join(" ")')
-        echo "Checking image arches..."
-        if [ "${str_image_arches}" = "$PTSV_EXPECTED_ARCHES" ]; then
-            echo "✅️ Found required image arches: $PTSV_EXPECTED_ARCHES"
-        else
-            echo "🔴 Expected image arches: '$PTSV_EXPECTED_ARCHES', found: '${image_arches}'"
-            failures=$((failures+1))
-        fi
-
-        echo "Checking Image Shasum..."
-        if [ -n "${image_shasum}" ]; then
-            echo "✅️ image_shasum: ${image_shasum}"
-        else
-            echo "🔴 image_shasum was empty"
-            failures=$((failures+1))
+        if [ -z "${image_url}" ] || [ -z "${image_shasum}" ]; then
+            echo "Skipping skopeo/cosign checks for image[${i}] (missing URL or shasum)"
+            continue
         fi
 
         # Use digest instead of tag, tag can be overwritten by concurrent tests

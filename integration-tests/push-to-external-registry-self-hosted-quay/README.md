@@ -39,7 +39,7 @@ The test (`test-kind.sh`) performs the following steps:
 This test is run by `integration-tests/pipelines/e2e-tests-kind-quay-pipeline.yaml`,
 which orchestrates:
 
-1. Provision a Kind cluster on AWS
+1. Provision a Kind cluster on IBM
 2. Deploy Konflux via the operator-based `deploy-konflux` task
 3. Deploy Quay via the separate `deploy-quay` task
 4. Run this test (which initializes Quay and triggers the release)

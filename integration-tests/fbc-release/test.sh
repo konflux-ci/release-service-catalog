@@ -295,6 +295,9 @@ kind: Release
 metadata:
   name: $release_name
   namespace: $tenant_namespace
+  labels:
+    originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
 spec:
   snapshot: $snapshot_name
   releasePlan: $release_plan
@@ -798,9 +801,11 @@ verify_release_contents() {
     done
     
     if [ ${#failed_releases[@]} -gt 0 ]; then
+        export FAILED_RELEASE_NAMES="${failed_releases[*]}"
         echo "🔴 ${#failed_releases[@]} release(s) failed verification: ${failed_releases[*]}"
         exit 1
     else
+        unset FAILED_RELEASE_NAMES
         echo "✅ All ${#RELEASES_TO_VERIFY[@]} releases verified successfully"
     fi
 }
