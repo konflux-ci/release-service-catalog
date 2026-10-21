@@ -219,31 +219,48 @@ spec:
 
         # === Phase 4: Extract all purls from all advisories ===
         echo "Extracting purls from advisories..."
-        PURL_MAPS_FILE=/tmp/purl_advisory_maps.jsonl
-        : > "$PURL_MAPS_FILE"
-
-        for ADVISORY_SUBDIR in $EXISTING_ADVISORIES; do
-          ADVISORY_FILE="${ADVISORY_BASE_DIR}/${ADVISORY_SUBDIR}/advisory.yaml"
-          if [[ -f "$ADVISORY_FILE" ]]; then
-            yq -o=json \
-              '.spec.content.artifacts // [] | [.[].purl] | map(select(. != null))' \
-              "$ADVISORY_FILE" \
-              | jq -c --arg adv "$ADVISORY_FILE" \
-                'reduce .[] as $p ({}; .[$p] = $adv)' \
-              >> "$PURL_MAPS_FILE"
-          fi
-        done
-
+        ADVISORY_PATHS_FILE=/tmp/advisory_paths.txt
+        printf '%s\n' "$EXISTING_ADVISORIES" > "$ADVISORY_PATHS_FILE"
         PURL_TO_ADVISORY_MAP_FILE=/tmp/purl_to_advisory_map.json
-        if [[ -s "$PURL_MAPS_FILE" ]]; then
-          jq -s 'reduce .[] as $m ({}; . * $m)' \
-            "$PURL_MAPS_FILE" > "$PURL_TO_ADVISORY_MAP_FILE"
-        else
-          echo "{}" > "$PURL_TO_ADVISORY_MAP_FILE"
-        fi
-        rm -f "$PURL_MAPS_FILE"
+        python3 - "$ADVISORY_BASE_DIR" "$ADVISORY_PATHS_FILE" "$PURL_TO_ADVISORY_MAP_FILE" <<'PY'
+        import json
+        import sys
+        import time
+        from pathlib import Path
 
-        echo "Total unique purls from advisories: $(jq 'keys | length' "$PURL_TO_ADVISORY_MAP_FILE")"
+        import yaml
+
+        loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+        base_dir = Path(sys.argv[1])
+        advisory_paths = Path(sys.argv[2])
+        output_path = Path(sys.argv[3])
+        purl_to_advisory = {}
+        scanned = 0
+        start = time.monotonic()
+
+        # Preserve the existing newest-first traversal and last-match behavior.
+        # Parsing in one process avoids launching yq and jq for every advisory.
+        for subdir in advisory_paths.read_text(encoding="utf-8").splitlines():
+            advisory_file = base_dir / subdir / "advisory.yaml"
+            if not advisory_file.is_file():
+                continue
+            scanned += 1
+            with advisory_file.open(encoding="utf-8") as stream:
+                advisory = yaml.load(stream, Loader=loader) or {}
+            artifacts = ((advisory.get("spec") or {}).get("content") or {}).get("artifacts") or []
+            for artifact in artifacts:
+                purl = artifact.get("purl")
+                if purl is not None:
+                    purl_to_advisory[purl] = str(advisory_file)
+
+        output_path.write_text(
+            json.dumps(purl_to_advisory, separators=(",", ":")), encoding="utf-8"
+        )
+        print(
+            f"Scanned {scanned} advisories and found {len(purl_to_advisory)} "
+            f"unique purls in {time.monotonic() - start:.1f}s"
+        )
+        PY
 
         # === Phase 5: Categorize RPMs and track source advisories ===
         echo "Categorizing RPMs by advisory presence..."
