@@ -31,7 +31,7 @@ apply_python_command_mocks_merge() {
 
   _tt_scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-  step_count=$(yq '.spec.steps | length' "$task_copy")
+  step_count="$(yq '.spec.steps | length' "$task_copy")"
 
   for ((i = 0; i < step_count; i++)); do
     command_from_task=()
@@ -239,14 +239,14 @@ done
 # install step actions
 echo "Installing StepActions"
 SCRIPT_DIR=$(cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd)
-STEPACTION_ROOT=${SCRIPT_DIR}/../../stepactions
-stepActionFiles=$(find $STEPACTION_ROOT -maxdepth 2 -name "*.yaml")
+STEPACTION_ROOT="${SCRIPT_DIR}/../../stepactions"
+mapfile -t step_action_files < <(find "$STEPACTION_ROOT" -maxdepth 2 -name "*.yaml")
 
-for stepAction in ${stepActionFiles};
+for stepAction in "${step_action_files[@]}";
 do
-  name=$(yq ".metadata.name" "${stepAction}")
+  name="$(yq ".metadata.name" "${stepAction}")"
   echo "  Installing StepAction $name"
-  kubectl apply -f $stepAction
+  kubectl apply -f "$stepAction"
 done
 
 # Clean up leftover resources from previous test runs to prevent cluster exhaustion
@@ -338,14 +338,26 @@ do
     ${TESTS_DIR}/pre-apply-task-hook.sh "$TASK_COPY"
   fi
 
-  # Update stepaction resolvers
-  # - we want to remove the git resolver params so we can use the StepAction on cluster
+  # Update StepAction resolvers to use the versions installed on the cluster.
+  # Match by pathInRepo because task step names can differ from StepAction names.
   echo "Updating StepAction resolvers"
-  for stepAction in ${stepActionFiles};
+  for stepAction in "${step_action_files[@]}";
   do
-    name=$(yq ".metadata.name" "${stepAction}")
-    echo "  Update resolver for $name"
-    yq -i "(.spec.steps[] | select(.name == \"$name\") | .ref) = {\"name\": \"$name\"}" $TASK_COPY
+    name="$(yq ".metadata.name" "${stepAction}")"
+    pathInRepo="stepactions/$(basename "$(dirname "${stepAction}")")/$(basename "${stepAction}")"
+    step_count="$(yq '.spec.steps | length' "$TASK_COPY")"
+    for ((step_index = 0; step_index < step_count; step_index++)); do
+      resolver="$(yq -r ".spec.steps[${step_index}].ref.resolver // \"\"" "$TASK_COPY")"
+      [[ "$resolver" == "git" ]] || continue
+
+      step_path="$(yq -r \
+        ".spec.steps[${step_index}].ref.params // [] | .[] | select(.name == \"pathInRepo\") | .value" \
+        "$TASK_COPY")"
+      [[ "$step_path" == "$pathInRepo" ]] || continue
+
+      echo "  Update resolver for ${name} at step ${step_index}"
+      yq -i ".spec.steps[${step_index}].ref = {\"name\": \"${name}\"}" "$TASK_COPY"
+    done
   done
 
   if [[ "$REMOVE_COMPUTE_RESOURCES" == "true" ]]; then
