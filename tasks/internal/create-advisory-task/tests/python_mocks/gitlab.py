@@ -53,6 +53,8 @@ class _MergeRequest:
         self.merge_status = "cannot_be_merged"
         self.detailed_merge_status = "not_approved"
         self.merge_commit_sha: str | None = None
+        self.is_on_merge_train = False
+        self.was_merge_train_entry_read = False
         self.manager = manager
         self._attrs = self._current_attrs()
 
@@ -67,6 +69,8 @@ class _MergeRequest:
             "merge_status": self.merge_status,
             "detailed_merge_status": self.detailed_merge_status,
             "merge_commit_sha": self.merge_commit_sha,
+            "is_on_merge_train": self.is_on_merge_train,
+            "was_merge_train_entry_read": self.was_merge_train_entry_read,
         }
 
     def get_id(self) -> int:
@@ -95,6 +99,21 @@ class _MergeRequest:
         })
         self._update_attrs(stored._current_attrs())
         return dict(self._attrs)
+
+    def merge_train_entry(self) -> dict[str, Any]:
+        status = "merged" if self.state == "merged" else "idle"
+        return {
+            "id": self.iid,
+            "project_id": self.manager._project.id,
+            "merge_request_iid": self.iid,
+            "state": status,
+            "status": status,
+            "merge_request": {
+                "iid": self.iid,
+                "state": self.state,
+                "web_url": self.web_url,
+            },
+        }
 
     def _update_attrs(self, attrs: dict[str, Any]) -> None:
         for key, value in attrs.items():
@@ -138,6 +157,8 @@ class _MergeRequestManager:
 
     def get(self, iid: int, **_kwargs: Any) -> _MergeRequest:
         stored = self._by_iid[int(iid)]
+        if stored.is_on_merge_train and stored.was_merge_train_entry_read:
+            stored.merge()
         fresh = _MergeRequest(
             stored.iid,
             stored.web_url,
@@ -149,7 +170,8 @@ class _MergeRequestManager:
 
 
 class _Project:
-    def __init__(self, path: str) -> None:
+    def __init__(self, project_id: int, path: str) -> None:
+        self.id = project_id
         self.path = path
         self.mergerequests = _MergeRequestManager(self)
 
@@ -157,12 +179,20 @@ class _Project:
 class _ProjectsManager:
     def __init__(self) -> None:
         self._by_path: dict[str, _Project] = {}
+        self._by_id: dict[int, _Project] = {}
+        self._next_id = 1
 
     def get(self, project_path: str, **_kwargs: Any) -> _Project:
         path = str(project_path)
         if path not in self._by_path:
-            self._by_path[path] = _Project(path)
+            project = _Project(self._next_id, path)
+            self._next_id += 1
+            self._by_path[path] = project
+            self._by_id[project.id] = project
         return self._by_path[path]
+
+    def get_by_id(self, project_id: int) -> _Project:
+        return self._by_id[int(project_id)]
 
 
 class Gitlab:
@@ -177,6 +207,34 @@ class Gitlab:
         self.private_token = private_token
         self.timeout = timeout
         self.projects = _ProjectsManager()
+
+    def _merge_train_merge_request(self, path: str) -> _MergeRequest | None:
+        parts = [part for part in path.strip("/").split("/") if part]
+        if (
+            len(parts) == 5
+            and parts[0] == "projects"
+            and parts[2] == "merge_trains"
+            and parts[3] == "merge_requests"
+        ):
+            project = self.projects.get_by_id(int(parts[1]))
+            return project.mergerequests._by_iid[int(parts[4])]
+        return None
+
+    def http_post(self, path: str, **_kwargs: Any) -> dict[str, Any]:
+        merge_request = self._merge_train_merge_request(path)
+        if merge_request is not None:
+            stored = merge_request.manager._by_iid[merge_request.iid]
+            stored._update_attrs({"is_on_merge_train": True})
+            return stored.merge_train_entry()
+        raise GitlabError(f"unexpected POST {path}", response_code=404)
+
+    def http_get(self, path: str, **_kwargs: Any) -> dict[str, Any]:
+        merge_request = self._merge_train_merge_request(path)
+        if merge_request is not None:
+            stored = merge_request.manager._by_iid[merge_request.iid]
+            stored._update_attrs({"was_merge_train_entry_read": True})
+            return stored.merge_train_entry()
+        raise GitlabError(f"unexpected GET {path}", response_code=404)
 
 
 __all__ = ["Gitlab", "GitlabError", "GitlabConnectionError", "exceptions"]
