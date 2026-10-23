@@ -164,97 +164,43 @@ spec:
       computeResources:
         limits:
           memory: 512Mi
-          cpu: 250m
         requests:
           memory: 512Mi
           cpu: 250m
       env:
-        - name: DATA_FILE
-          value: $(params.dataDir)/$(params.dataPath)
-        - name: ARTIFACTS_JSON_FILE
-          value: $(params.dataDir)/$(params.artifactsJsonPath)
-        - name: HOME
-          value: /tmp
-      script: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        if [ ! -f "${DATA_FILE}" ] ; then
-            echo "No data JSON was provided."
-            exit 1
-        fi
-
-        if [ -z "$(params.artifactsJsonPath)" ] || [ ! -f "${ARTIFACTS_JSON_FILE}" ]; then
-            echo "No valid artifacts.json file was provided."
-            exit 1
-        fi
-
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
-        IR_FILE="$(params.dataDir)/ir-output.txt"
-
-        # Extract signing configuration from data file
-        KERBEROS_PRINCIPAL=$(jq --exit-status -r '.signOptions.signKeytab.principal' "${DATA_FILE}")
-        KERBEROS_KEYTAB=$(jq --exit-status -r '.signOptions.signKeytab.name // "keytab"' "${DATA_FILE}")
-        KERBEROS_KEYTAB_SECRET=$(jq --exit-status -r '.signOptions.signKeytab.secret' "${DATA_FILE}")
-        SIGNING_ALIAS=$(jq --exit-status -r '.signOptions.signKeyAlias.key' "${DATA_FILE}")
-        SKIP_UPLOAD_TO_PULP=$(jq --exit-status -r '.signOptions.skipUploadToPulp // "false"' "${DATA_FILE}")
-        SERVICE_ACCOUNT=$(jq --exit-status -r \
-            '.signOptions.signPipelineServiceAccount // "release-service-account"' "${DATA_FILE}")
-        ARTIFACT_STORAGE_SECRET=$(jq --exit-status -r \
-            '.signOptions.artifactStorageSecret // "signing-artifact-storage-preprod"' "${DATA_FILE}")
-
-        SIGNING_PIPELINE_GIT_URL="$(params.signingRepo)"
-        SIGNING_PIPELINE_GIT_REVISION="$(params.signingRevision)"
-
-        # Prepare artifacts.json for signing pipeline
-        echo "Preparing artifacts.json for signing pipeline..."
-        # Use gzip compression to avoid ARG_MAX limit for large artifact lists
-        ARTIFACT_JSON="$(gzip -c "${ARTIFACTS_JSON_FILE}" | base64 -w0)"
-        echo "Artifact JSON size (compressed): $(echo -n "${ARTIFACT_JSON}" | wc -c) bytes"
-
-        internal-request \
-          --pipeline direct-rpm-signing \
-          -p artifact_json="${ARTIFACT_JSON}" \
-          -p oci_storage="$(params.ociStorage)" \
-          -p kerberos_principal="${KERBEROS_PRINCIPAL}" \
-          -p kerberos_keytab="${KERBEROS_KEYTAB}" \
-          -p kerberos_keytab_secret="${KERBEROS_KEYTAB_SECRET}" \
-          -p signing_alias="${SIGNING_ALIAS}" \
-          -p artifact_storage_secret="${ARTIFACT_STORAGE_SECRET}" \
-          -p destination_artifact_storage_domain="$(params.destinationArtifactStorageDomain)" \
-          -p use_target_arch_repo="$(params.useTargetArchRepo)" \
-          -p skip_upload_to_pulp="${SKIP_UPLOAD_TO_PULP}" \
-          -p create_oci_artifact="$(params.createOciArtifact)" \
-          -p oci_artifact_expires_after="$(params.ociArtifactExpiresAfter)" \
-          -p requester="$(params.requester)" \
-          -p force="false" \
-          -p taskGitUrl="${SIGNING_PIPELINE_GIT_URL}" \
-          -p taskGitRevision="${SIGNING_PIPELINE_GIT_REVISION}" \
-          -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)" \
-          -t "$(params.requestTimeout)" \
-          --service-account "${SERVICE_ACCOUNT}" \
-          --pipeline-timeout "$(params.pipelineTimeout)" \
-          --task-timeout "$(params.taskTimeout)" \
-          -s true | tee "${IR_FILE}"
-
-        # Get the InternalRequest name and extract signed RPMs artifact
-        internalRequest=$(awk -F\' '/created/ { print $2 }' "${IR_FILE}")
-        echo "Internal request created: ${internalRequest}"
-
-        results=$(kubectl get internalrequest "${internalRequest}" -o=jsonpath='{.status.results}')
-        echo "Internal request results: ${results}"
-
-        signedRpmsOciArtifact=$(jq -r '.signed_rpms_oci_artifact // ""' <<< "${results}")
-        if [ -z "${signedRpmsOciArtifact}" ]; then
-            echo "Error: signed_rpms_oci_artifact not found in InternalRequest results"
-            exit 1
-        fi
-        echo "Signed RPMs OCI artifact: ${signedRpmsOciArtifact}"
-
-        # Write signed RPMs OCI artifact to result
-        echo -n "${signedRpmsOciArtifact}" > "$(results.signedRpmsOciArtifacts.path)"
-
-        echo "RPM signing request completed"
+        - name: "PARAM_DATA_DIR"
+          value: "$(params.dataDir)"
+        - name: "PARAM_DATA_PATH"
+          value: "$(params.dataPath)"
+        - name: "PARAM_ARTIFACTS_JSON_PATH"
+          value: "$(params.artifactsJsonPath)"
+        - name: "PARAM_REQUESTER"
+          value: "$(params.requester)"
+        - name: "PARAM_REQUEST_TIMEOUT"
+          value: "$(params.requestTimeout)"
+        - name: "PARAM_PIPELINE_TIMEOUT"
+          value: "$(params.pipelineTimeout)"
+        - name: "PARAM_TASK_TIMEOUT"
+          value: "$(params.taskTimeout)"
+        - name: "PARAM_PIPELINE_RUN_UID"
+          value: "$(params.pipelineRunUid)"
+        - name: "PARAM_OCI_STORAGE"
+          value: "$(params.ociStorage)"
+        - name: "PARAM_DESTINATION_ARTIFACT_STORAGE_DOMAIN"
+          value: "$(params.destinationArtifactStorageDomain)"
+        - name: "PARAM_USE_TARGET_ARCH_REPO"
+          value: "$(params.useTargetArchRepo)"
+        - name: "PARAM_CREATE_OCI_ARTIFACT"
+          value: "$(params.createOciArtifact)"
+        - name: "PARAM_OCI_ARTIFACT_EXPIRES_AFTER"
+          value: "$(params.ociArtifactExpiresAfter)"
+        - name: "PARAM_SIGNING_REPO"
+          value: "$(params.signingRepo)"
+        - name: "PARAM_SIGNING_REVISION"
+          value: "$(params.signingRevision)"
+        - name: "RESULT_SIGNED_RPMS_OCI_ARTIFACTS"
+          value: "$(results.signedRpmsOciArtifacts.path)"
+      command: ["python3", "-m", "release_service_utils.tasks.managed.rh_sign_rpm"]
     - name: create-trusted-artifact
       computeResources:
         limits:
