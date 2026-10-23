@@ -20,7 +20,10 @@ spec:
         - "collectors"
         - "collectors-no-cve"
         - "e2e"
-        - "fbc-release"
+        - "fbc-release-happy"
+        - "fbc-release-optin"
+        - "fbc-release-staged"
+        - "fbc-release-prega-hotfix"
         - "push-rpms-to-pulp"
         - "push-to-addons-registry"
         - "push-to-external-registry-idempotent"
@@ -115,6 +118,22 @@ spec:
               # shellcheck disable=SC2153
               TESTCASE="${TEST_CASE}"
 
+              # fbc-release runs as grouped scenario checks: a TEST_CASE of
+              # "fbc-release-<group>" runs the fbc-release suite with that group's
+              # scenarios (PTSV_FBC_SCENARIO_GROUP; group map lives in the suite's
+              # test.sh). Each group gets a distinct uuid derived from the shared
+              # pipelineRun uid so the parallel fbc matrix instances don't collide
+              # on resource names; the cleanup finally derives it the same way.
+              # TESTCASE stays the group name (for reporting); SUITE is the dir.
+              SUITE="${TESTCASE}"
+              if [[ "${TESTCASE}" == fbc-release-* ]]; then
+                  export PTSV_FBC_SCENARIO_GROUP="${TESTCASE#fbc-release-}"
+                  uuid="$(printf '%s-%s' "${uuid}" "${PTSV_FBC_SCENARIO_GROUP}" \
+                      | sha256sum | cut -c1-8)"
+                  export uuid
+                  SUITE="fbc-release"
+              fi
+
               exitfunc() {
                 local err=$1
                 local line=$2
@@ -176,7 +195,7 @@ spec:
               export RELEASE_CATALOG_GIT_URL
               export RELEASE_CATALOG_GIT_REVISION
 
-              suite_secret="${TESTCASE}-e2e-github-token"
+              suite_secret="${SUITE}-e2e-github-token"
               set +x
               suite_token="$(kubectl get secret "${suite_secret}" \
                   -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
@@ -185,8 +204,8 @@ spec:
                 suite_token="${GITHUB_TOKEN}"
               fi
 
-              echo "Running test case: ${TESTCASE} (token: ${suite_secret})"
-              GITHUB_TOKEN="${suite_token}" "/home/e2e/tests/run-test.sh" "${TESTCASE}"
+              echo "Running test case: ${TESTCASE} (suite: ${SUITE}, token: ${suite_secret})"
+              GITHUB_TOKEN="${suite_token}" "/home/e2e/tests/run-test.sh" "${SUITE}"
               unset suite_token
               set -x
       runAfter:
@@ -455,29 +474,58 @@ spec:
 
               # Clean up all test cases that were attempted (passed via args)
               # This handles both successful runs and crashed instances
+              # Base uuid (shared pipelineRun uid); fbc groups derive a per-group
+              # uuid from it below, matching what the run-test step computed.
+              base_uuid="${uuid:-}"
               for testcase in "$@"; do
                 echo "Cleaning up test case: ${testcase}"
                 # Some suites create multiple manual ReleasePlans instead of defining this variable.
                 unset release_plan_name
+                unset PTSV_FBC_SCENARIO_GROUP
+                # fbc-release groups: map "fbc-release-<group>" to the fbc-release
+                # suite dir, set the group, and recompute the same per-group uuid as
+                # run-test so the right resources are reconstructed for deletion.
+                suite_dir="${testcase}"
+                uuid="${base_uuid}"
+                if [[ "${testcase}" == fbc-release-* ]]; then
+                  export PTSV_FBC_SCENARIO_GROUP="${testcase#fbc-release-}"
+                  uuid="$(printf '%s-%s' "${base_uuid}" "${PTSV_FBC_SCENARIO_GROUP}" \
+                      | sha256sum | cut -c1-8)"
+                  suite_dir="fbc-release"
+                fi
+                export uuid
                 # shellcheck disable=SC1090
-                if ! . "/home/e2e/tests/${testcase}/test.env" 2>/dev/null; then
+                if ! . "/home/e2e/tests/${suite_dir}/test.env" 2>/dev/null; then
                   echo "Warning: Could not source test.env for ${testcase}, skipping cleanup"
                   continue
                 fi
 
                 # decrypt the secrets since they are part of the resources to be deleted
-                decrypt_secrets "/home/e2e/tests/${testcase}" \
+                decrypt_secrets "/home/e2e/tests/${suite_dir}" \
                   || echo "Warning: Failed to decrypt secrets for ${testcase}"
 
-                # delete GH repo (ignore failure if repo was never created)
-                "/home/e2e/tests/scripts/delete-repository.sh" "${component_repo_name:?}" \
-                  || echo "Warning: Failed to delete repository for ${testcase}"
+                # delete every component's GH repo (ignore failure if a repo was
+                # never created). Iterate PTSV_COMPONENTS so multi-component suites
+                # and fbc groups (happy/optin/multi-staged/...) are fully cleaned
+                # up, not just the first component. Deduplicate, since some
+                # components share a repo (e.g. multi_*_component_2 reuses _1's).
+                _deleted_repos=" "
+                for _c in ${PTSV_COMPONENTS:-component}; do
+                  _rv="${_c}_repo_name"
+                  _repo="${!_rv:-}"
+                  if [ -n "${_repo}" ] && [[ "${_deleted_repos}" != *" ${_repo} "* ]]; then
+                    echo "Deleting GH repository ${_repo} ..."
+                    "/home/e2e/tests/scripts/delete-repository.sh" "${_repo}" \
+                      || echo "Warning: Failed to delete repository ${_repo} for ${testcase}"
+                    _deleted_repos="${_deleted_repos}${_repo} "
+                  fi
+                done
 
                 tmpDir="$(mktemp -d)"
                 # we need to rebuild the resources (without applying them)
                 # so that we can use their names to delete them
                 echo "Building tenant resources to prepare for deletion..."
-                if kustomize build "/home/e2e/tests/${testcase}/resources/tenant" 2>/dev/null \
+                if kustomize build "/home/e2e/tests/${suite_dir}/resources/tenant" 2>/dev/null \
                     | envsubst > "$tmpDir/tenant-resources.yaml"; then
                   echo "Deleting tenant resources..."
                   kubectl delete -f "$tmpDir/tenant-resources.yaml" --ignore-not-found \
@@ -487,7 +535,7 @@ spec:
                 fi
 
                 echo "Building managed resources to prepare for deletion..."
-                if kustomize build "/home/e2e/tests/${testcase}/resources/managed" 2>/dev/null \
+                if kustomize build "/home/e2e/tests/${suite_dir}/resources/managed" 2>/dev/null \
                     | envsubst > "$tmpDir/managed-resources.yaml"; then
                   echo "Deleting managed resources..."
                   kubectl delete -f "$tmpDir/managed-resources.yaml" --ignore-not-found \
