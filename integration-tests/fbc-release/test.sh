@@ -38,8 +38,19 @@ declare -gA SCENARIO_COMPONENTS=(
     ["single-hotfix"]="component"
     ["single-optin"]="optin_component"
     ["multi-happy"]="multi_happy_component_1 multi_happy_component_2"
-    ["multi-staged"]="component component2"
+    ["multi-staged"]="multi_staged_component_1 multi_staged_component_2"
     ["multi-optin"]="optin_component_1 optin_component_2"
+)
+
+# Map each release-mode group to its scenarios. A caller (an ITS, or the periodic
+# pipeline) can select a whole group with PTSV_FBC_SCENARIO_GROUP instead of
+# listing scenarios, so the group definition lives in one place (here) rather
+# than being duplicated across callers/repos.
+declare -gA FBC_SCENARIO_GROUPS=(
+    ["happy"]="single-happy multi-happy"
+    ["optin"]="single-optin multi-optin"
+    ["staged"]="single-staged multi-staged"
+    ["prega-hotfix"]="single-prega single-hotfix"
 )
 
 # Map each component var-name to its tenant resource file (names are not 1:1, so
@@ -47,10 +58,11 @@ declare -gA SCENARIO_COMPONENTS=(
 # Component CRs of components not selected for this run.
 declare -gA COMPONENT_FILES=(
     ["component"]="component.yaml"
-    ["component2"]="component2.yaml"
     ["happy_component"]="happy-component.yaml"
     ["multi_happy_component_1"]="multi-happy-component-1.yaml"
     ["multi_happy_component_2"]="multi-happy-component-2.yaml"
+    ["multi_staged_component_1"]="multi-staged-component-1.yaml"
+    ["multi_staged_component_2"]="multi-staged-component-2.yaml"
     ["optin_component"]="optin-component.yaml"
     ["optin_component_1"]="multi-optin-component-1.yaml"
     ["optin_component_2"]="multi-optin-component-2.yaml"
@@ -114,20 +126,50 @@ configure_test_matrix() {
 
     local tests_enabled=false
 
+    # Group selector: PTSV_FBC_SCENARIO_GROUP (space/comma list of group names from
+    # FBC_SCENARIO_GROUPS) expands into PTSV_FBC_SCENARIOS, so a caller can pick a
+    # whole group by name. Takes precedence over an explicit PTSV_FBC_SCENARIOS.
+    if [ -n "${PTSV_FBC_SCENARIO_GROUP:-}" ]; then
+        local _group _group_scenarios=""
+        for _group in ${PTSV_FBC_SCENARIO_GROUP//,/ }; do
+            if [ -n "${FBC_SCENARIO_GROUPS[$_group]+x}" ]; then
+                _group_scenarios+=" ${FBC_SCENARIO_GROUPS[$_group]}"
+            else
+                echo "⚠️  Unknown scenario group in PTSV_FBC_SCENARIO_GROUP: '${_group}' (ignored)"
+            fi
+        done
+        PTSV_FBC_SCENARIOS="${_group_scenarios# }"
+        # Fail loudly rather than fall through to change-detection: a requested
+        # grouped check with no valid group is a misconfiguration, not a reason to
+        # silently run a different (change-detection) set and pass green.
+        if [ -z "${PTSV_FBC_SCENARIOS}" ]; then
+            echo "🔴 ERROR: PTSV_FBC_SCENARIO_GROUP='${PTSV_FBC_SCENARIO_GROUP}' resolved to no valid scenario groups" >&2
+            exit 1
+        fi
+        echo "🎯 PTSV_FBC_SCENARIO_GROUP=${PTSV_FBC_SCENARIO_GROUP} -> scenarios: ${PTSV_FBC_SCENARIOS}"
+    fi
+
     # Explicit override: if PTSV_FBC_SCENARIOS is set (space- or comma-separated
     # scenario keys, e.g. "single-happy single-staged"), enable exactly those and
     # skip change detection. Lets test.env (or the ITS PIPELINE_TEST_SUITE_VARS)
     # pick the scenarios. Unknown keys are warned about and ignored.
     if [ -n "${PTSV_FBC_SCENARIOS:-}" ]; then
         echo "🎯 PTSV_FBC_SCENARIOS set - enabling only: ${PTSV_FBC_SCENARIOS}"
-        local scenario
+        local scenario _enabled_any=false
         for scenario in ${PTSV_FBC_SCENARIOS//,/ }; do
             if [ -n "${GLOBAL_TEST_MATRIX[$scenario]+x}" ]; then
                 GLOBAL_TEST_MATRIX["$scenario"]="enabled"
+                _enabled_any=true
             else
                 echo "⚠️  Unknown scenario in PTSV_FBC_SCENARIOS: '${scenario}' (ignored)"
             fi
         done
+        # Fail loudly if the requested selection enabled nothing, rather than
+        # running zero scenarios and passing vacuously.
+        if [ "${_enabled_any}" = false ]; then
+            echo "🔴 ERROR: PTSV_FBC_SCENARIOS='${PTSV_FBC_SCENARIOS}' enabled no known scenarios" >&2
+            exit 1
+        fi
         show_enabled_scenarios "PTSV_FBC_SCENARIOS enabled" GLOBAL_TEST_MATRIX
         return
     fi
@@ -322,6 +364,10 @@ trigger_configured_releases() {
                     # happy uses overwrite_from_index, so it has its own
                     # application/snapshot to avoid reusing multi-staged's builds
                     snapshot_name=$(wait_for_multi_component_snapshot "$multi_happy_application_name")
+                elif [ "$scenario" = "staged" ]; then
+                    # multi-staged has its own isolated app/pair so single-staged
+                    # keeps `component` alone in the default application
+                    snapshot_name=$(wait_for_multi_component_snapshot "$multi_staged_application_name")
                 else
                     snapshot_name=$(wait_for_multi_component_snapshot)
                 fi
@@ -335,9 +381,10 @@ trigger_configured_releases() {
             # Create manual release
             local release_name="fbc-${mode}-${scenario}-${uuid}"
             local release_plan="fbc-release-${scenario}-rp-${uuid}"
-            # multi-optin and multi-happy have isolated apps, so they use a
-            # dedicated multi-<scenario> ReleasePlan targeting that app
-            if [ "$mode" = "multi" ] && { [ "$scenario" = "optin" ] || [ "$scenario" = "happy" ]; }; then
+            # multi-optin, multi-happy and multi-staged have isolated apps, so
+            # they use a dedicated multi-<scenario> ReleasePlan targeting that app
+            if [ "$mode" = "multi" ] && \
+               { [ "$scenario" = "optin" ] || [ "$scenario" = "happy" ] || [ "$scenario" = "staged" ]; }; then
             	echo "⏭️ Multi ${scenario} ReleasePlan chosen"
             	local release_plan="fbc-release-${mode}-${scenario}-rp-${uuid}"
             fi
@@ -491,7 +538,7 @@ verify_multi_component_release() {
     local failures=0
     
     # One release component per unique OCP version (target_index) after dedup.
-    # The non-opt-in multi pairs (component/component2, multi-happy-1/2) build at
+    # The non-opt-in multi pairs (multi-staged-1/2, multi-happy-1/2) build at
     # two distinct OCP versions, so a correct multi release has >= 2 components
     # (one per OCP group). A missing group would drop this below 2. (A future
     # same-OCP batching scenario would yield 1 -- see the README coverage note --

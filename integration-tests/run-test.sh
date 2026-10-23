@@ -149,6 +149,28 @@ else
     exit 1
 fi
 
+# Apply PTSV_* overrides from PIPELINE_TEST_SUITE_VARS (typically supplied by an
+# IntegrationTestScenario). Only PTSV_* keys are allowed from the JSON object.
+apply_ptsv_overrides() {
+    if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIPELINE_TEST_SUITE_VARS}"; then
+        source <(
+            jq -r 'to_entries[]
+                   | select(.key | startswith("PTSV_"))
+                   | "export \(.key)=\(.value|@sh)"' <<<"${PIPELINE_TEST_SUITE_VARS}"
+        )
+    fi
+}
+
+PTSV_BUILD_PIPELINE=""
+PTSV_BUILD_PIPELINE_BUNDLE="latest"
+if [ -z "$PTSV_COMPONENTS" ]; then
+    PTSV_COMPONENTS="component"
+fi
+
+# Apply the overrides BEFORE sourcing test.sh so suites that read PTSV_* at source
+# time (e.g. fbc-release scenario/component selection) see the override.
+apply_ptsv_overrides
+
 # Source test script (ensure this file exists and is correctly populated)
 if [ -f "${SUITE_DIR}/test.sh" ]; then
     . "${SUITE_DIR}/test.sh"
@@ -157,19 +179,17 @@ else
     exit 1
 fi
 
-PTSV_BUILD_PIPELINE=""
-PTSV_BUILD_PIPELINE_BUNDLE="latest"
-if [ -z "$PTSV_COMPONENTS" ]; then
-    PTSV_COMPONENTS="component"
-fi
+# Re-apply AFTER sourcing so an ITS-supplied PTSV_* still wins over any
+# unconditional assignment a suite's test.sh makes at source time.
+apply_ptsv_overrides
 
-if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIPELINE_TEST_SUITE_VARS}"; then
-    # Only allow PTSV_* keys from the JSON object
-    source <(
-        jq -r 'to_entries[]
-               | select(.key | startswith("PTSV_"))
-               | "export \(.key)=\(.value|@sh)"' <<<"${PIPELINE_TEST_SUITE_VARS}"
-    )
+# Let a suite re-derive its component selection AFTER the override. A suite that
+# computes PTSV_COMPONENTS from other inputs (e.g. fbc-release derives it from the
+# selected scenarios) must stay authoritative over an ITS-supplied PTSV_COMPONENTS,
+# otherwise the re-applied override above could leave PTSV_COMPONENTS inconsistent
+# with the enabled scenarios. No-op for suites without this hook.
+if type select_components_for_matrix &>/dev/null; then
+    select_components_for_matrix
 fi
 
 # If custom pipeline is specified, set annotation variable for later use in component patching.
