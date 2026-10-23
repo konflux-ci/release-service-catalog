@@ -197,33 +197,21 @@ cleanup_resources() {
     echo "Cleanup log file: ${cleanup_log_file}"
     echo -e "\n--- Cleanup Log ---" > "${cleanup_log_file}"
 
-    # Clean up component repository
-    echo "Deleting Github repository ${component_repo_name} ..." >> "${cleanup_log_file}"
-    "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}"
-
-    # Clean up component2 repository if it exists and is different from component repo
-    if [ -n "${component2_repo_name}" ] && [ "${component2_repo_name}" != "${component_repo_name}" ]; then
-      echo "Deleting Github repository ${component2_repo_name} ..." >> "${cleanup_log_file}"
-      "${SUITE_DIR}/../scripts/delete-repository.sh" "${component2_repo_name}"
-    fi
-
-    # Clean up optin repository if it exists and is different from component repo
-    if [ -n "${optin_component_repo_name}" ] && [ "${optin_component_repo_name}" != "${component_repo_name}" ]; then
-      echo "Deleting Github repository ${optin_component_repo_name} ..." >> "${cleanup_log_file}"
-      "${SUITE_DIR}/../scripts/delete-repository.sh" "${optin_component_repo_name}"
-    fi
-
-    # Clean up optin component 1 repository
-    if [ -n "${optin_component_1_repo_name}" ]; then
-      echo "Deleting Github repository ${optin_component_1_repo_name} ..." >> "${cleanup_log_file}"
-      "${SUITE_DIR}/../scripts/delete-repository.sh" "${optin_component_1_repo_name}"
-    fi
-
-    # Clean up optin component 2 repository if it exists and is different from component repo
-    if [ -n "${optin_component_2_repo_name}" ] && [ "${optin_component_2_repo_name}" != "${component_repo_name}" ]; then
-      echo "Deleting Github repository ${optin_component_2_repo_name} ..." >> "${cleanup_log_file}"
-      "${SUITE_DIR}/../scripts/delete-repository.sh" "${optin_component_2_repo_name}"
-    fi
+    # Clean up the component GitHub repositories. Iterate PTSV_COMPONENTS so any
+    # component a suite adds is covered automatically (matches how they are
+    # created). Deduplicate, since some components share one repo (e.g.
+    # component2 reuses the component repo, multi_happy_component_2 reuses
+    # multi_happy_component_1's) so each repo is deleted only once.
+    local _deleted_repos=" "
+    for component in ${PTSV_COMPONENTS}; do
+      local _rv="${component}_repo_name"
+      local _repo="${!_rv}"
+      if [ -n "${_repo}" ] && [[ "${_deleted_repos}" != *" ${_repo} "* ]]; then
+        echo "Deleting Github repository ${_repo} ..." >> "${cleanup_log_file}"
+        "${SUITE_DIR}/../scripts/delete-repository.sh" "${_repo}"
+        _deleted_repos="${_deleted_repos}${_repo} "
+      fi
+    done
 
     if [ -n "$tmpDir" ] && [ -d "$tmpDir" ]; then
         echo "Deleting test resources..." | tee -a "${cleanup_log_file}"
@@ -418,6 +406,13 @@ create_kubernetes_resources() {
     echo "Resolving symlinks in resources directories..."
     resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/tenant" "$tmpDir/tenant"
     resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/managed" "$tmpDir/managed"
+
+    # Optional suite hook: adjust the copied tenant kustomization before building
+    # (e.g. drop Component files for scenarios not enabled this run). Operates on
+    # the tmpDir copy, so the source resources are untouched. No-op if undefined.
+    if type filter_tenant_kustomization &>/dev/null; then
+        filter_tenant_kustomization "$tmpDir/tenant"
+    fi
 
     # Apply infrastructure secrets first (if they exist) - these persist across test runs
     local managed_infra_secrets_file="$tmpDir/managed/secrets/managed-infra-secrets.yaml"

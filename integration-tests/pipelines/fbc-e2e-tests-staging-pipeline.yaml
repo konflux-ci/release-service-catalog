@@ -1,0 +1,413 @@
+---
+kind: Pipeline
+apiVersion: tekton.dev/v1beta1
+metadata:
+  name: fbc-e2e-tests-staging-pipeline
+spec:
+  params:
+    - name: SNAPSHOT
+      default: '{"application":"e2eapp-2eb54d79","artifacts":{},"components":[{"containerImage":"registry.redhat.io/openshift4/ose-cli:latest","name":"collector-2eb54d79","source":{"git":{"revision":"4b7d4677ca75a0db09a414df6e4a1fd9cb64208c","url":"https://github.com/scoheb/e2e-base"}}}]}'
+      type: string
+    - name: PIPELINE_TEST_SUITE
+      type: string
+      description: 'The name of the test corresponding to a defined Konflux integration test.'
+    - name: PIPELINE_USED
+      default: ''
+      type: string
+      description: |
+        The pipeline that is used by the test suite.
+        If empty, use the PIPELINE_TEST_SUITE as the pipeline to be used
+    - name: VAULT_PASSWORD_SECRET_NAME
+      default: 'vault-password-secret'
+      type: string
+    - name: GITHUB_TOKEN_SECRET_NAME
+      default: 'github-token-secret'
+      type: string
+    - name: PIPELINE_TEST_SUITE_VARS
+      default: '{}'
+      type: string
+      description: |
+        A JSON object containing key-value pairs of variables to be passed to the test suite.
+        These will be available as environment variables in the test task.
+  tasks:
+    - name: get-snapshot-data
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+      taskSpec:
+        params:
+          - name: SNAPSHOT
+        results:
+          - name: CONTAINER_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+        steps:
+          - name: get-container-image
+            image: quay.io/konflux-ci/release-service-utils@sha256:0b35e861c83b9c1141e3a8d7a8924cc9c4ae0b09dc87938971eee66ee9b9aaaf
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+            script: |
+              #!/usr/bin/env bash
+              set -eo pipefail
+
+              containerImage=""
+              gitUrl=""
+              gitRevision=""
+
+              # Write all three results via an EXIT trap so that even if SNAPSHOT
+              # parsing (or an earlier command) fails, downstream tasks never
+              # block on an unwritten result. Exit 0 so run-test still runs and
+              # fails cleanly with a TEST_OUTPUT, instead of the pipeline erroring
+              # on an unresolved result from a failed task.
+              exitfunc() {
+                echo -n "${containerImage}" | tee "$(results.CONTAINER_IMAGE.path)"
+                echo -n "${gitUrl}" | tee "$(results.PR_GIT_URL.path)"
+                echo -n "${gitRevision}" | tee "$(results.PR_GIT_REVISION.path)"
+                exit 0
+              }
+              trap exitfunc EXIT
+
+              echo "${SNAPSHOT}"
+              containerImage=$(jq -r '.components[0].containerImage // ""' <<< "${SNAPSHOT}")
+              gitUrl=$(jq -r '.components[0].source.git.url // ""' <<< "${SNAPSHOT}")
+              gitRevision=$(jq -r '.components[0].source.git.revision // ""' <<< "${SNAPSHOT}")
+
+    - name: run-test
+      params:
+        - name: PIPELINE_TEST_SUITE
+          value: $(params.PIPELINE_TEST_SUITE)
+        - name: PIPELINE_USED
+          value: $(params.PIPELINE_USED)
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: PR_GIT_URL
+          value: $(tasks.get-snapshot-data.results.PR_GIT_URL)
+        - name: PR_GIT_REVISION
+          value: $(tasks.get-snapshot-data.results.PR_GIT_REVISION)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: PIPELINE_TEST_SUITE_VARS
+          value: $(params.PIPELINE_TEST_SUITE_VARS)
+
+      taskSpec:
+        params:
+          - name: PIPELINE_TEST_SUITE
+          - name: PIPELINE_USED
+          - name: STEP_IMAGE
+          - name: PR_GIT_URL
+          - name: PR_GIT_REVISION
+          - name: VAULT_PASSWORD_SECRET_NAME
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: PIPELINE_TEST_SUITE_VARS
+        results:
+          - name: TEST_OUTPUT
+            description: Test output
+        steps:
+          - name: run-test
+            image: $(params.STEP_IMAGE)
+            # fbc-release runs many components/scenarios in one step; the default
+            # memory OOMs it (exit 137). Dedicated fbc pipeline so only this test
+            # gets the higher budget. NOTE: this pipeline is tekton.dev/v1beta1,
+            # whose step resource field is `resources` (NOT `computeResources`,
+            # which is v1-only and fails the git resolver's strict decoding).
+            resources:
+              limits:
+                memory: 6Gi
+              requests:
+                memory: 6Gi
+            env:
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: PR_NUMBER
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.labels['pac.test.appstudio.openshift.io/pull-request']
+              - name: BRANCH_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['pac.test.appstudio.openshift.io/branch']
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+              - name: PIPELINE_TEST_SUITE_VARS
+                value: $(params.PIPELINE_TEST_SUITE_VARS)
+            script: |
+              #!/usr/bin/env bash
+
+              # Function to check if a word exists in a string
+              # Arguments:
+              #   $1: The word to search for
+              #   $2: The string to search in
+              # Returns:
+              #   0 if word is found, 1 if not found
+              # Example:
+              #   if string_has_word "hello" "say hello world"; then
+              #     echo "Found word"
+              #   fi
+              string_has_word() {
+                  local search_word="$1"
+                  local search_string="$2"
+
+                  # Add spaces around both strings to ensure word boundaries
+                  search_string=" ${search_string} "
+                  search_word=" ${search_word} "
+
+                  if [[ "${search_string}" == *"${search_word}"* ]]; then
+                      return 0  # Word found
+                  else
+                      return 1  # Word not found
+                  fi
+              }
+
+              exitfunc() {
+                local err=$1
+                local line=$2
+                local command="$3"
+
+                successcount=0
+                failurecount=0
+                # After the tests finish, record the overall result in the RESULT variable
+                if [ "$err" -eq 0 ] ; then
+                  RESULT="SUCCESS"
+                  successcount=1
+                elif [ "$err" -eq 99 ] ; then
+                  # exit code 99 means we have skipped the tests
+                  RESULT="SKIPPED"
+                  successcount=0
+                else
+                  echo "$0: ERROR $command failed at line $line - exited with status $err"
+                  RESULT="FAILURE"
+                  failurecount=1
+                fi
+                # Output the standardized TEST_OUTPUT result in JSON form
+                TEST_OUTPUT=$(jq -rc --arg date "$(date -u --iso-8601=seconds)" --arg RESULT "${RESULT}" \
+                  --argjson successcount "${successcount}" --argjson failurecount "${failurecount}" --null-input \
+                  '{result: $RESULT, timestamp: $date, failures: $failurecount, successes: $successcount, warnings: 0}')
+                echo -n "${TEST_OUTPUT}" | tee "$(results.TEST_OUTPUT.path)"
+                exit 0 # exit the script cleanly as there is no point in proceeding past an error or exit call
+              }
+              # due to set -e, this catches all EXIT and ERR calls and the task should never fail with nonzero exit code
+              trap 'exitfunc $? $LINENO "$BASH_COMMAND"' EXIT
+
+              echo "PR_GIT_URL: $(params.PR_GIT_URL)"
+              echo "PR_GIT_REVISION: $(params.PR_GIT_REVISION)"
+              if [ -n "${PR_NUMBER}" ]; then
+                echo "PR_NUMBER: ${PR_NUMBER}"
+              elif [ -n "${BRANCH_NAME}" ]; then
+                echo "This is not a PR, but a merge queue branch"
+                echo "BRANCH_NAME: ${BRANCH_NAME}"
+              else
+                echo "No PR_NUMBER or BRANCH_NAME; using SNAPSHOT git URL and revision (e.g. utils-e2e temp fork)"
+              fi
+
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+
+              RELEASE_CATALOG_GIT_URL="$(params.PR_GIT_URL)"
+              RELEASE_CATALOG_GIT_REVISION="$(params.PR_GIT_REVISION)"
+              export RELEASE_CATALOG_GIT_URL
+              export RELEASE_CATALOG_GIT_REVISION
+
+              if [ -n "${PR_NUMBER}" ]; then
+                AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
+                  --repo "konflux-ci/release-service-catalog" --pull_request_number "${PR_NUMBER}")
+              elif [ -n "${BRANCH_NAME}" ]; then
+                AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
+                  --repo "konflux-ci/release-service-catalog" --branch "${BRANCH_NAME}")
+              else
+                # utils-e2e: PR_GIT_URL is https://github.com/OWNER/REPO from clone-push
+                # PR_GIT_REVISION is the patched branch.
+                CATALOG_REPO_SLUG="$(params.PR_GIT_URL)"
+                CATALOG_REPO_SLUG="${CATALOG_REPO_SLUG#https://github.com/}"
+                CATALOG_REPO_SLUG="${CATALOG_REPO_SLUG%.git}"
+                AFFECTED_PIPELINES=$("/home/e2e/tests/scripts/find_release_pipelines_from_pr.sh" \
+                  --repo "${CATALOG_REPO_SLUG}" --branch "$(params.PR_GIT_REVISION)")
+              fi
+
+              # if PIPELINE_USED is set, use it, otherwise use PIPELINE_TEST_SUITE
+              PIPELINE=""
+              if [ -n "$(params.PIPELINE_USED)" ]; then
+                PIPELINE="$(params.PIPELINE_USED)"
+              else
+                PIPELINE="$(params.PIPELINE_TEST_SUITE)"
+              fi
+
+              # check if PIPELINE is found as an affected pipeline
+              if string_has_word "${PIPELINE}" "${AFFECTED_PIPELINES}" || \
+                [[ "${AFFECTED_PIPELINES}" == "release-pipelines" ]]; then
+                if [ -n "${PR_NUMBER}" ]; then
+                  echo "This Test Suite is affected by changes in PR ${PR_NUMBER}"
+                else
+                  echo "This Test Suite is in the affected set for this catalog revision (${AFFECTED_PIPELINES})"
+                fi
+                "/home/e2e/tests/run-test.sh" "$(params.PIPELINE_TEST_SUITE)"
+              else
+                if [ -n "${PR_NUMBER}" ]; then
+                  echo "This Test Suite is not affected by changes in PR ${PR_NUMBER}"
+                else
+                  echo "This Test Suite is not in the affected set (${AFFECTED_PIPELINES})"
+                fi
+                exit 99
+              fi
+
+      runAfter:
+        - get-snapshot-data
+  finally:
+    - name: cleanup-resources
+      params:
+        - name: STEP_IMAGE
+          value: $(tasks.get-snapshot-data.results.CONTAINER_IMAGE)
+        - name: GITHUB_TOKEN_SECRET_NAME
+          value: $(params.GITHUB_TOKEN_SECRET_NAME)
+        - name: VAULT_PASSWORD_SECRET_NAME
+          value: $(params.VAULT_PASSWORD_SECRET_NAME)
+      taskSpec:
+        params:
+          - name: STEP_IMAGE
+          - name: GITHUB_TOKEN_SECRET_NAME
+          - name: VAULT_PASSWORD_SECRET_NAME
+        steps:
+          - name: cleanup-resources
+            image: $(params.STEP_IMAGE)
+            env:
+              - name: GITHUB_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.GITHUB_TOKEN_SECRET_NAME)
+                    key: token
+              - name: uuid
+                value: $(context.pipelineRun.uid)
+              - name: VAULT_PASSWORD
+                valueFrom:
+                  secretKeyRef:
+                    name: $(params.VAULT_PASSWORD_SECRET_NAME)
+                    key: password
+            script: |
+              #!/usr/bin/env bash
+              # Why are we doing this?
+              # - When pushing new changes to a PR, the integration-service
+              #   will attempt to cancel any in-flight PR checks.
+              # - The trap catches the EXIT signal but sometimes the cleanup
+              #   function has not completed yet before the pod is killed.
+              # - This leaves many orphaned GH repos and k8s resources.
+              #
+              # Plan of attack
+              # - First, we need to know what the resources are.
+              # - The KRW tests are designed to be self-contained and therefore
+              #   there is uniqueness in resource names. We need to either store
+              #   the unique names generated in run-test or control how the uniqueness
+              #   is generated so we can accurately delete the resources.
+              #
+              # What other avenues were explored?
+              # - storing the resource names in a result created in run-test
+              #   (X) does not work since Tekton will not allow access to results
+              #       coming from a cancelled task.
+              # - using a workspace to store names in a file
+              #   (X) does not work since the integration service does not allow
+              #       a workspace to be passed to a pipeline.
+
+              # The solution involves:
+              # 1-) re-generating the variables needed by injecting
+              #     the uuid using a pipelinerun.uuid from tekton since that guarantees that
+              #     the same uuid is available in all tasks.
+              # 2-) re-generating the k8s resource files on disk (without applying)
+              #     and using those resources to perform a delete operation.
+
+              # source the test suite env file to get variables needed for resource deletion
+              #
+              # shellcheck source=/dev/null
+              . "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/test.env"
+
+              # source the lib functions
+              #
+              # shellcheck source=/dev/null
+              . "/home/e2e/tests/lib/test-functions.sh"
+
+              # delete every component's GH repo (which also removes its PaC
+              # webhook), iterating PTSV_COMPONENTS so all repos are cleaned up
+              # even when the EXIT-trap cleanup was killed mid-run. Deduplicate,
+              # since some components share a repo (e.g. component2 reuses
+              # component's, multi_happy_component_2 reuses _1's).
+              _deleted_repos=" "
+              for _c in ${PTSV_COMPONENTS:?}; do
+                _rv="${_c}_repo_name"
+                _repo="${!_rv}"
+                if [ -n "${_repo}" ] && [[ "${_deleted_repos}" != *" ${_repo} "* ]]; then
+                  echo "Deleting Github repository ${_repo} ..."
+                  "/home/e2e/tests/scripts/delete-repository.sh" "${_repo}"
+                  _deleted_repos="${_deleted_repos}${_repo} "
+                fi
+              done
+
+              # prepare what's needed to delete k8s resources
+              VAULT_PASSWORD_FILE=$(mktemp)
+              export VAULT_PASSWORD_FILE
+              set +x
+              echo "${VAULT_PASSWORD:?}" > "${VAULT_PASSWORD_FILE}"
+              set -x
+
+              # decrypt the secrets since they are part of the resources to be deleted
+              #
+              decrypt_secrets "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)"
+
+              tmpDir=$(mktemp -d)
+              # we need to rebuild the resources (without applying them)
+              # so that we can use their names to delete them
+              #
+              echo "Building tenant resources to prepare for deletion..."
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/tenant" \
+                | envsubst > "$tmpDir/tenant-resources.yaml"
+
+              echo "Building managed resources to prepare for deletion..."
+              kustomize build "/home/e2e/tests/$(params.PIPELINE_TEST_SUITE)/resources/managed" \
+                | envsubst > "$tmpDir/managed-resources.yaml"
+
+              # actually delete the k8s resources and ignore failures since
+              # they might be already deleted from the cleanup trap
+              #
+              echo "Deleting resources..."
+              # shellcheck disable=SC2154 # tenant_namespace and managed_namespace come from test.env
+              kubectl delete -f "$tmpDir/tenant-resources.yaml" -n "${tenant_namespace}" \
+                --ignore-not-found
+              # shellcheck disable=SC2154
+              kubectl delete -f "$tmpDir/managed-resources.yaml" -n "${managed_namespace}" \
+                --ignore-not-found
+
+              # Delete Release CRs created by this test run using uuid label
+              if [ -n "$uuid" ] && [ -n "$tenant_namespace" ]; then
+                echo "Deleting Release CRs with test-run-uuid=${uuid} in namespace ${tenant_namespace}..."
+                kubectl delete release -n "${tenant_namespace}" \
+                  -l test-run-uuid="${uuid}" \
+                  --ignore-not-found || echo "Warning: Failed to delete some Release CRs"
+              fi
+
+              # ImageRepository objects created by the image controller may have
+              # no ownerReferences, so deleting the Components above does not
+              # cascade-delete them. Remove them per PTSV component.
+              if [ -n "$tenant_namespace" ]; then
+                for _c in ${PTSV_COMPONENTS:?}; do
+                  _nv="${_c}_name"
+                  _comp="${!_nv}"
+                  if [ -n "${_comp}" ]; then
+                    echo "Deleting ImageRepository for component ${_comp}..."
+                    kubectl delete imagerepository -n "${tenant_namespace}" \
+                      -l "appstudio.redhat.com/component=${_comp}" \
+                      --ignore-not-found || echo "Warning: Failed to delete ImageRepository for ${_comp}"
+                  fi
+                done
+              fi
