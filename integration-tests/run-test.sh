@@ -149,14 +149,11 @@ else
     exit 1
 fi
 
-# Source test script (ensure this file exists and is correctly populated)
-if [ -f "${SUITE_DIR}/test.sh" ]; then
-    . "${SUITE_DIR}/test.sh"
-else
-    echo "error: test.sh not found in ${SUITE_DIR}"
-    exit 1
-fi
-
+# Resolve PTSV_* variables BEFORE sourcing test.sh. A suite's test.sh may run
+# source-time configuration (e.g. fbc-release selects scenarios/components from
+# PTSV_FBC_SCENARIOS), so any PTSV_* override supplied via PIPELINE_TEST_SUITE_VARS
+# (typically from an IntegrationTestScenario) must already be in the environment.
+# Defaults are set first, then overridden by test.env values and the ITS override.
 PTSV_BUILD_PIPELINE=""
 PTSV_BUILD_PIPELINE_BUNDLE="latest"
 if [ -z "$PTSV_COMPONENTS" ]; then
@@ -170,6 +167,14 @@ if [[ -n "${PIPELINE_TEST_SUITE_VARS:-}" ]] && jq -e . >/dev/null 2>&1 <<<"${PIP
                | select(.key | startswith("PTSV_"))
                | "export \(.key)=\(.value|@sh)"' <<<"${PIPELINE_TEST_SUITE_VARS}"
     )
+fi
+
+# Source test script (ensure this file exists and is correctly populated)
+if [ -f "${SUITE_DIR}/test.sh" ]; then
+    . "${SUITE_DIR}/test.sh"
+else
+    echo "error: test.sh not found in ${SUITE_DIR}"
+    exit 1
 fi
 
 # If custom pipeline is specified, set annotation variable for later use in component patching.
