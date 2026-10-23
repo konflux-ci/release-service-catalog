@@ -50,9 +50,9 @@ Only the components used by the **enabled** scenarios are built each run:
 `select_components_for_matrix()` in `test.sh` narrows `PTSV_COMPONENTS` to that
 set (via the `SCENARIO_COMPONENTS` map), and `filter_tenant_kustomization()`
 drops the other components' files from the tenant kustomization before it is
-applied. So, e.g., with only the single scenarios enabled, `component2` is not
-built and `component` is alone in the default application (which guarantees a
-clean single-component snapshot for `single-staged`/`prega`/`hotfix`).
+applied. `component` is always alone in the default application (the multi
+scenarios use their own isolated applications/components), which guarantees a
+clean single-component snapshot for `single-staged`/`prega`/`hotfix`.
 
 The full component set is listed in `resources/tenant/kustomization.yaml`.
 Which component each scenario uses:
@@ -61,7 +61,7 @@ Which component each scenario uses:
 |----------|-------------|--------------|
 | `single-staged`, `single-prega`, `single-hotfix` | default | `component` |
 | `single-happy` | isolated (happy) | `happy-component` |
-| `multi-staged` | default | `component` + `component2` |
+| `multi-staged` | isolated (multi-staged) | `multi-staged-component-1` + `multi-staged-component-2` |
 | `multi-happy` | isolated (multi-happy) | `multi-happy-component-1` + `multi-happy-component-2` |
 | `single-optin` | optin | `optin-component` |
 | `multi-optin` | multi-optin | `multi-optin-component-1` + `multi-optin-component-2` |

@@ -38,7 +38,7 @@ declare -gA SCENARIO_COMPONENTS=(
     ["single-hotfix"]="component"
     ["single-optin"]="optin_component"
     ["multi-happy"]="multi_happy_component_1 multi_happy_component_2"
-    ["multi-staged"]="component component2"
+    ["multi-staged"]="multi_staged_component_1 multi_staged_component_2"
     ["multi-optin"]="optin_component_1 optin_component_2"
 )
 
@@ -47,10 +47,11 @@ declare -gA SCENARIO_COMPONENTS=(
 # Component CRs of components not selected for this run.
 declare -gA COMPONENT_FILES=(
     ["component"]="component.yaml"
-    ["component2"]="component2.yaml"
     ["happy_component"]="happy-component.yaml"
     ["multi_happy_component_1"]="multi-happy-component-1.yaml"
     ["multi_happy_component_2"]="multi-happy-component-2.yaml"
+    ["multi_staged_component_1"]="multi-staged-component-1.yaml"
+    ["multi_staged_component_2"]="multi-staged-component-2.yaml"
     ["optin_component"]="optin-component.yaml"
     ["optin_component_1"]="multi-optin-component-1.yaml"
     ["optin_component_2"]="multi-optin-component-2.yaml"
@@ -322,6 +323,10 @@ trigger_configured_releases() {
                     # happy uses overwrite_from_index, so it has its own
                     # application/snapshot to avoid reusing multi-staged's builds
                     snapshot_name=$(wait_for_multi_component_snapshot "$multi_happy_application_name")
+                elif [ "$scenario" = "staged" ]; then
+                    # multi-staged has its own isolated app/pair so single-staged
+                    # keeps `component` alone in the default application
+                    snapshot_name=$(wait_for_multi_component_snapshot "$multi_staged_application_name")
                 else
                     snapshot_name=$(wait_for_multi_component_snapshot)
                 fi
@@ -335,9 +340,10 @@ trigger_configured_releases() {
             # Create manual release
             local release_name="fbc-${mode}-${scenario}-${uuid}"
             local release_plan="fbc-release-${scenario}-rp-${uuid}"
-            # multi-optin and multi-happy have isolated apps, so they use a
-            # dedicated multi-<scenario> ReleasePlan targeting that app
-            if [ "$mode" = "multi" ] && { [ "$scenario" = "optin" ] || [ "$scenario" = "happy" ]; }; then
+            # multi-optin, multi-happy and multi-staged have isolated apps, so
+            # they use a dedicated multi-<scenario> ReleasePlan targeting that app
+            if [ "$mode" = "multi" ] && \
+               { [ "$scenario" = "optin" ] || [ "$scenario" = "happy" ] || [ "$scenario" = "staged" ]; }; then
             	echo "⏭️ Multi ${scenario} ReleasePlan chosen"
             	local release_plan="fbc-release-${mode}-${scenario}-rp-${uuid}"
             fi
@@ -491,7 +497,7 @@ verify_multi_component_release() {
     local failures=0
     
     # One release component per unique OCP version (target_index) after dedup.
-    # The non-opt-in multi pairs (component/component2, multi-happy-1/2) build at
+    # The non-opt-in multi pairs (multi-staged-1/2, multi-happy-1/2) build at
     # two distinct OCP versions, so a correct multi release has >= 2 components
     # (one per OCP group). A missing group would drop this below 2. (A future
     # same-OCP batching scenario would yield 1 -- see the README coverage note --
