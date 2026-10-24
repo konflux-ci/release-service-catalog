@@ -35,7 +35,15 @@ function git() {
   elif [[ "$1" == "checkout" ]]; then
     mkdir -p data/advisories/test-origin/2025/1601
     mkdir -p data/advisories/test-origin/2025/1602
-    touch data/advisories/test-origin/2025/1601/advisory.yaml
+    cat > data/advisories/test-origin/2025/1601/advisory.yaml <<'YAML'
+spec:
+  content:
+    artifacts:
+      - purl: pkg:rpm/redhat/released-rpm@1.0-1.fc44?arch=x86_64
+      - purl: pkg:rpm/redhat/all-released-a@1.0-1.fc44?arch=x86_64
+      - purl: pkg:rpm/redhat/all-released-b@2.0-1.fc44?arch=x86_64
+      - purl: pkg:rpm/redhat/bind@9.20.27-0.1.hum1?arch=x86_64&epoch=32&distro=hb&repository_id=repo
+YAML
     touch data/advisories/test-origin/2025/1602/advisory.yaml
   else
     echo "Error: Unexpected git command: $*" >&2
@@ -62,27 +70,7 @@ function find() {
 function yq() {
   echo "Mock yq called with: $*" >&2
 
-  if [[ "$1" == "-o=json" ]]; then
-    local advisory_path="$3"
-    local advisory_num
-    advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
-
-    case "$advisory_num" in
-      1601)
-        cat <<'JSON'
-[
-  "pkg:rpm/redhat/released-rpm@1.0-1.fc44?arch=x86_64",
-  "pkg:rpm/redhat/all-released-a@1.0-1.fc44?arch=x86_64",
-  "pkg:rpm/redhat/all-released-b@2.0-1.fc44?arch=x86_64",
-  "pkg:rpm/redhat/bind@9.20.27-0.1.hum1?arch=x86_64&epoch=32&distro=hb&repository_id=repo"
-]
-JSON
-        ;;
-      *)
-        echo '[]'
-        ;;
-    esac
-  elif [[ "$1" == "-r" ]]; then
+  if [[ "$1" == "-r" ]]; then
     local advisory_path="$3"
     local advisory_num
     advisory_num=$(echo "$advisory_path" | awk -F'/' '{print $(NF-1)}')
