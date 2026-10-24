@@ -122,235 +122,29 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: attest-blob
-      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      image: quay.io/konflux-ci/release-service-utils@sha256:61c8b1869748a4a808bc8f5ed45dedc980a0a08a64834fd8ae8610ca9ee084c4
       computeResources:
         limits:
-          memory: 2.5Gi
+          memory: 3Gi
         requests:
-          memory: 2.5Gi
+          memory: 3Gi
           cpu: "2"
       volumeMounts:
         - name: secret-vol
           mountPath: "/etc/secrets"
-      script: |
-        #!/usr/bin/env bash
-        set -euo pipefail
-
-        # Load AWS KMS credentials
-        AWS_DEFAULT_REGION="$(cat /etc/secrets/AWS_DEFAULT_REGION)"
-        AWS_ACCESS_KEY_ID="$(cat /etc/secrets/AWS_ACCESS_KEY_ID)"
-        AWS_SECRET_ACCESS_KEY="$(cat /etc/secrets/AWS_SECRET_ACCESS_KEY)"
-        export AWS_DEFAULT_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
-
-        SIGN_KEY="$(cat /etc/secrets/SIGN_KEY)"
-        REKOR_URL_PATH="/etc/secrets/REKOR_URL"
-        if [ -f "${REKOR_URL_PATH}" ] && [ -s "${REKOR_URL_PATH}" ]; then
-          REKOR_URL="$(cat /etc/secrets/REKOR_URL)"
-        fi
-
-        set -x
-
-        FILES_DIR=$(params.dataDir)/$(params.filesDir)
-        PROVENANCE_DIR="${FILES_DIR}/chains-provenance"
-
-        # Get release timestamp
-        RELEASE_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-        echo "=== Attestation Generation and Signing Step ==="
-        echo "Release timestamp: ${RELEASE_TIME}"
-        echo "Files directory: ${FILES_DIR}"
-
-        if [ ! -d "${FILES_DIR}" ]; then
-            echo "ERROR: Files directory does not exist: ${FILES_DIR}"
-            exit 1
-        fi
-
-        # Load the first Chains provenance predicate into a temp file.
-        # All wheels in a release come from the same build pipeline, so
-        # one is sufficient. Storing in a file avoids shell-expansion
-        # problems (xtrace verbosity and ARG_MAX limits) when the
-        # predicate is large.
-        CHAINS_PREDICATE_FILE=/tmp/chains_predicate.json
-        HAS_CHAINS_PREDICATE=false
-        if [ -d "${PROVENANCE_DIR}" ]; then
-            shopt -s nullglob
-            for prov_file in "${PROVENANCE_DIR}"/sha256:*.json; do
-                jq '.predicate' "${prov_file}" > "${CHAINS_PREDICATE_FILE}"
-                if [ -s "${CHAINS_PREDICATE_FILE}" ] && \
-                   [ "$(jq -r 'type' "${CHAINS_PREDICATE_FILE}" 2>/dev/null)" = "object" ]; then
-                    HAS_CHAINS_PREDICATE=true
-                    echo "Loaded Chains provenance from ${prov_file}"
-                fi
-                break
-            done
-            shopt -u nullglob
-        fi
-
-        if [ "${HAS_CHAINS_PREDICATE}" = "false" ]; then
-            echo "WARNING: No Chains provenance found, falling back to minimal predicate"
-        fi
-
-        # Function to run cosign with retries
-        run_cosign() {
-            local attempt=0
-            local backoff1=2
-            local backoff2=3
-            until [ "$attempt" -gt "$(params.retries)" ]; do
-                if cosign "$@"; then
-                    return 0
-                fi
-                sleep $backoff2
-                local old_backoff1=$backoff1
-                backoff1=$backoff2
-                backoff2=$((old_backoff1 + backoff2))
-                attempt=$((attempt+1))
-            done
-            echo "Max retries exceeded for cosign command"
-            return 1
-        }
-
-        ATT_COUNT=0
-        SIGNED_COUNT=0
-
-        cd "${FILES_DIR}"
-
-        echo ""
-        echo "Files in directory:"
-        ls -lah
-
-        echo ""
-        echo "Processing wheel and sdist files..."
-
-        # Configure Rekor arguments
-        declare -a REKOR_ARGS=()
-        if [ -v REKOR_URL ]; then
-            REKOR_ARGS+=("-y" "--rekor-url=$REKOR_URL")
-        else
-            REKOR_ARGS+=("--tlog-upload=false")
-        fi
-
-        # Process .whl and .tar.gz files
-        shopt -s nullglob
-        for WHEEL in *.whl *.tar.gz; do
-          # Skip if no files match
-          if [ ! -f "${WHEEL}" ]; then
-            echo "Skipping non-existent file: ${WHEEL}"
-            continue
-          fi
-
-          echo ""
-          echo "Processing: ${WHEEL}"
-
-          # Calculate wheel hash
-          WHEEL_SHA256=$(sha256sum "${WHEEL}" | cut -d' ' -f1)
-          echo "  SHA256: ${WHEEL_SHA256}"
-
-          # Create SLSA provenance predicate
-          PREDICATE_FILE="/tmp/${WHEEL}.predicate.json"
-
-          if [ "${HAS_CHAINS_PREDICATE}" = "true" ]; then
-            jq -n \
-              --arg release_time "${RELEASE_TIME}" \
-              --slurpfile chains_predicate "${CHAINS_PREDICATE_FILE}" \
-            '{
-              buildDefinition: (
-                if $chains_predicate[0].buildDefinition then
-                  $chains_predicate[0].buildDefinition
-                else {
-                  buildType: ($chains_predicate[0].buildType // "https://konflux-ci.dev/PythonWheelBuild@v1"),
-                  externalParameters: ($chains_predicate[0].invocation.parameters // {}),
-                  internalParameters: ($chains_predicate[0].invocation.environment // {}),
-                  resolvedDependencies: ($chains_predicate[0].materials // [])
-                }
-                end
-              ),
-              runDetails: (
-                if $chains_predicate[0].runDetails then
-                  $chains_predicate[0].runDetails
-                else {
-                  builder: {
-                    id: ($chains_predicate[0].builder.id // "https://konflux-ci.dev/calunga")
-                  },
-                  metadata: {
-                    invocationId: ($chains_predicate[0].metadata.buildInvocationId // null),
-                    startedOn: ($chains_predicate[0].metadata.buildStartedOn // null),
-                    finishedOn: ($chains_predicate[0].metadata.buildFinishedOn // $release_time)
-                  }
-                }
-                end
-              )
-            }' > "${PREDICATE_FILE}"
-          else
-            # Fallback: minimal v1 predicate when Chains provenance is unavailable
-            jq -n \
-              --arg release_time "${RELEASE_TIME}" \
-            '{
-              buildDefinition: {
-                buildType: "https://konflux-ci.dev/PythonWheelBuild@v1",
-                externalParameters: {},
-                resolvedDependencies: []
-              },
-              runDetails: {
-                builder: {
-                  id: "https://konflux-ci.dev/calunga"
-                },
-                metadata: {
-                  finishedOn: $release_time
-                }
-              }
-            }' > "${PREDICATE_FILE}"
-          fi
-
-          ATT_FILE="${WHEEL}.attestation"
-          DSSE_FILE="/tmp/${WHEEL}.dsse.json"
-
-          echo "Signing attestation with cosign (AWS KMS)"
-          if run_cosign attest-blob "${WHEEL}" \
-            --predicate="${PREDICATE_FILE}" \
-            --type=https://slsa.dev/provenance/v1 \
-            --key "$SIGN_KEY" \
-            --yes \
-            "${REKOR_ARGS[@]}" \
-            --output-file="${DSSE_FILE}" 2>&1; then
-            echo "Signed DSSE attestation created"
-
-            # Convert DSSE to PEP 740 format using jq
-            echo "Converting to PEP 740 format..."
-            jq '{
-              version: 1,
-              verification_material: null,
-              envelope: {
-                statement: .payload,
-                signature: .signatures[0].sig
-              }
-            }' "${DSSE_FILE}" > "${ATT_FILE}"
-            echo "Created PEP 740 attestation: ${ATT_FILE}"
-            SIGNED_COUNT=$((SIGNED_COUNT + 1))
-            rm -f "${DSSE_FILE}"
-          else
-            echo "ERROR: Failed to sign attestation for ${WHEEL}"
-            exit 1
-          fi
-
-          ATT_COUNT=$((ATT_COUNT + 1))
-          rm -f "${PREDICATE_FILE}"
-        done
-
-        # Clean up the chains-provenance directory so it's not uploaded to Pulp
-        rm -rf "${PROVENANCE_DIR}"
-
-        echo ""
-        echo "=========================================="
-        echo "Attestation Generation Summary:"
-        echo "  Total attestations: ${ATT_COUNT}"
-        echo "  Signed (PEP 740): ${SIGNED_COUNT}"
-        echo "=========================================="
-
-        echo -n "${ATT_COUNT}" > "$(results.attestationCount.path)"
-
-        echo ""
-        echo "Final files in directory (wheels, signatures, and attestations):"
-        ls -lah
+      env:
+        - name: RESULT_ATTESTATION_COUNT
+          value: "$(results.attestationCount.path)"
+      command: ["python3", "-m", "release_service_utils.tasks.managed.rh_sign_python_wheels"]
+      args:
+        - "--data-dir"
+        - "$(params.dataDir)"
+        - "--files-dir"
+        - "$(params.filesDir)"
+        - "--secrets-dir"
+        - "/etc/secrets"
+        - "--retries"
+        - "$(params.retries)"
     - name: create-trusted-artifact
       computeResources:
         limits:
