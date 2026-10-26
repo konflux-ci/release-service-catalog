@@ -16,7 +16,9 @@ spec:
     - Transforms RPM metadata into purls for advisory matching
     - Triggers an internal task via InternalRequest to check advisories
     - Validates Pulp digests for RPMs in advisories (rebuild detection)
-    - Writes the RPMs that still need publishing under `.components[].rpmsToPublish`
+    - Keeps all RPMs for each component with at least one RPM missing from advisories
+    - When signedPulpDomain is set, stops before signing if any retained RPM is already in signed Pulp
+      (including partial releases, which need a separate resume path)
     - Removes components with an empty `.rpmsToPublish` list
     - Overwrites the snapshot file in-place
   params:
@@ -32,6 +34,12 @@ spec:
     - name: PULP_DOMAIN
       type: string
       description: The domain to use for Pulp operations
+    - name: signedPulpDomain
+      type: string
+      description: >-
+        When set, stop if an RPM in a component needing an advisory already exists in this signed Pulp domain.
+        Check both published and latest repository versions before a new release attempt can re-sign the RPM
+      default: ""
     - name: PULP_SECRET_NAME
       type: string
       description: >-
@@ -210,6 +218,100 @@ spec:
         - name: RESULT_LATEST_ADVISORY_INTERNAL_URL
           value: "$(results.latest_advisory_internal_url.path)"
       command: ["python3", "-m", "filter_already_released_advisory_rpms"]
+    - name: guard-signed-rpms
+      image: >-
+        quay.io/konflux-ci/release-service-utils@sha256:e30436d3473f792353ba75724328c9b2f3b7c482e234ab6e7b8a46a5e3ef52ff
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      volumeMounts:
+        - name: pulp-secret-name-vol
+          mountPath: /etc/secrets
+      env:
+        - name: SNAPSHOT_FILE
+          value: "$(params.dataDir)/$(params.snapshotPath)"
+        - name: PULP_CONFIG_FILE
+          value: /etc/secrets/cli.toml
+        - name: SIGNED_PULP_DOMAIN
+          value: $(params.signedPulpDomain)
+        - name: RESULT_SKIP_RELEASE
+          value: $(results.skip_release.path)
+      script: |
+        #!/usr/bin/env python3
+        import json
+        import os
+        from pathlib import Path
+        from urllib.parse import quote, urlencode
+
+        from release_service_utils.helpers import http_client
+        from release_service_utils.helpers.pulp_client import (
+            PulpAuth,
+            PulpClient,
+            PulpDigestStatus,
+            parse_pulp_config,
+        )
+
+        domain = os.environ["SIGNED_PULP_DOMAIN"]
+        if domain and Path(os.environ["RESULT_SKIP_RELEASE"]).read_text().strip() == "false":
+            snapshot = json.loads(Path(os.environ["SNAPSHOT_FILE"]).read_text())
+            config = parse_pulp_config(Path(os.environ["PULP_CONFIG_FILE"]))
+            session = http_client.get_retry_session(
+                total=3, connect=3, read=3, status=2, allowed_methods=frozenset({"GET"})
+            )
+            session.auth = PulpAuth(config)
+            pulp = PulpClient(session, config["base_url"], domain)
+
+            def exists_in_latest_version(repo_name, rpm):
+                repo_url = (
+                    f"{config['base_url']}/api/pulp/{quote(domain, safe='')}"
+                    f"/api/v3/repositories/rpm/rpm/?name={quote(repo_name, safe='')}"
+                )
+                repos = pulp.get_json(repo_url).get("results", [])
+                if len(repos) != 1 or repos[0].get("name") != repo_name:
+                    raise RuntimeError(f"Cannot identify signed Pulp repository {domain}/{repo_name}")
+                repo_href = repos[0].get("pulp_href")
+                if not repo_href:
+                    raise RuntimeError(f"Missing Pulp href for signed repository {domain}/{repo_name}")
+                version = pulp.get_json(f"{config['base_url']}{repo_href}").get("latest_version_href")
+                if not version:
+                    return False
+                query = urlencode({
+                    "repository_version": version,
+                    "name": rpm["rpmname"],
+                    "epoch": str(rpm["epoch"]),
+                    "version": rpm["version"],
+                    "release": rpm["release"],
+                    "arch": rpm["arch"],
+                })
+                content_url = (
+                    f"{config['base_url']}/api/pulp/{quote(domain, safe='')}"
+                    f"/api/v3/content/rpm/packages/?{query}"
+                )
+                count = pulp.get_json(content_url).get("count")
+                if not isinstance(count, int):
+                    raise RuntimeError(f"Invalid signed Pulp package response for {rpm['rpm']}")
+                return count > 0
+
+            for component in snapshot["components"]:
+                for rpm in component.get("rpmsToPublish", []):
+                    for repo in rpm["targetRepos"]:
+                        repo_name = repo["repository_name"]
+                        # Signed RPMs have a different SHA from the unsigned snapshot RPMs.
+                        # Any match in either the published or latest version must stop a new signing run.
+                        status = pulp.check_digest(
+                            repo_name, rpm["rpmname"], str(rpm["epoch"]),
+                            rpm["version"], rpm["release"], rpm["arch"], rpm["sha256"],
+                        )
+                        if status != PulpDigestStatus.NOT_FOUND or exists_in_latest_version(repo_name, rpm):
+                            raise RuntimeError(
+                                f"{rpm['rpm']} is already in signed Pulp domain {domain}/{repo_name} "
+                                "while this release still needs an advisory. Stop before re-signing. "
+                                "Use the original signed RPMs to finish missing advisories; "
+                                "this pipeline cannot resume a partial release."
+                            )
     - name: create-trusted-artifact
       computeResources:
         limits:

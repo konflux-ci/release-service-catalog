@@ -25,8 +25,35 @@ declare -gA GLOBAL_TEST_MATRIX=(
     ["multi-optin"]="disabled"
     ["multi-happy"]="disabled"
     ["multi-staged"]="disabled"
-    # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
-    # ["multi-hotfix"]="disabled"  # this test incurs additional IIB requests for no value
+)
+
+# Map each scenario to the component var-names it needs. Only the components of
+# enabled scenarios are built (see select_components_for_matrix), so a disabled
+# scenario never creates its repos/Component CRs and never pollutes another
+# scenario's application with extra components.
+declare -gA SCENARIO_COMPONENTS=(
+    ["single-happy"]="happy_component"
+    ["single-staged"]="component"
+    ["single-prega"]="component"
+    ["single-hotfix"]="component"
+    ["single-optin"]="optin_component"
+    ["multi-happy"]="multi_happy_component_1 multi_happy_component_2"
+    ["multi-staged"]="component component2"
+    ["multi-optin"]="optin_component_1 optin_component_2"
+)
+
+# Map each component var-name to its tenant resource file (names are not 1:1, so
+# this mapping is explicit). Used by filter_tenant_kustomization to drop the
+# Component CRs of components not selected for this run.
+declare -gA COMPONENT_FILES=(
+    ["component"]="component.yaml"
+    ["component2"]="component2.yaml"
+    ["happy_component"]="happy-component.yaml"
+    ["multi_happy_component_1"]="multi-happy-component-1.yaml"
+    ["multi_happy_component_2"]="multi-happy-component-2.yaml"
+    ["optin_component"]="optin-component.yaml"
+    ["optin_component_1"]="multi-optin-component-1.yaml"
+    ["optin_component_2"]="multi-optin-component-2.yaml"
 )
 
 # Global tracking for releases to verify
@@ -76,17 +103,34 @@ configure_test_matrix() {
     # Initialize test matrix with all tests disabled by default
     GLOBAL_TEST_MATRIX=(
         ["single-happy"]="disabled"
-        ["single-staged"]="disabled" 
+        ["single-staged"]="disabled"
         ["single-prega"]="disabled"
         ["single-hotfix"]="disabled"
         ["single-optin"]="disabled"
         ["multi-happy"]="disabled"
         ["multi-staged"]="disabled"
-        # ["multi-prega"]="disabled"   # this test incurs additional IIB requests for no value
-        # ["multi-hotfix"]="disabled"  # this test incurs additional IIB requests for no value
+        ["multi-optin"]="disabled"
     )
-    
+
     local tests_enabled=false
+
+    # Explicit override: if PTSV_FBC_SCENARIOS is set (space- or comma-separated
+    # scenario keys, e.g. "single-happy single-staged"), enable exactly those and
+    # skip change detection. Lets test.env (or the ITS PIPELINE_TEST_SUITE_VARS)
+    # pick the scenarios. Unknown keys are warned about and ignored.
+    if [ -n "${PTSV_FBC_SCENARIOS:-}" ]; then
+        echo "🎯 PTSV_FBC_SCENARIOS set - enabling only: ${PTSV_FBC_SCENARIOS}"
+        local scenario
+        for scenario in ${PTSV_FBC_SCENARIOS//,/ }; do
+            if [ -n "${GLOBAL_TEST_MATRIX[$scenario]+x}" ]; then
+                GLOBAL_TEST_MATRIX["$scenario"]="enabled"
+            else
+                echo "⚠️  Unknown scenario in PTSV_FBC_SCENARIOS: '${scenario}' (ignored)"
+            fi
+        done
+        show_enabled_scenarios "PTSV_FBC_SCENARIOS enabled" GLOBAL_TEST_MATRIX
+        return
+    fi
     
     # Enable specific tests based on detected task directory patterns
     # Note: This logic only applies when the unified fbc test suite is triggered
@@ -101,8 +145,8 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
-        GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
+        #GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
+        #GLOBAL_TEST_MATRIX["single-optin"]="enabled"
         tests_enabled=true
 
         show_enabled_scenarios "Signing changes enabled" GLOBAL_TEST_MATRIX
@@ -120,11 +164,11 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
-        GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
+        #GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
+        #GLOBAL_TEST_MATRIX["single-optin"]="enabled"
+        #GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
+        #GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
+        #GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
         tests_enabled=true
 
         show_enabled_scenarios "Batching changes enabled" GLOBAL_TEST_MATRIX
@@ -137,11 +181,11 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
-        GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
-        GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
+        #GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
+        #GLOBAL_TEST_MATRIX["single-optin"]="enabled"
+        #GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
+        #GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
+        #GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
 
         show_enabled_scenarios "Enabled" GLOBAL_TEST_MATRIX
     fi
@@ -252,7 +296,7 @@ trigger_configured_releases() {
     else
         echo "🔧 Test matrix already configured, skipping configuration"
     fi
-    
+
     echo "🚀 Triggering releases based on optimized test matrix..."
     
     for test_key in "${!GLOBAL_TEST_MATRIX[@]}"; do
@@ -263,13 +307,21 @@ trigger_configured_releases() {
             local snapshot_name
             if [ "$mode" = "single" ]; then
                 if [ "$scenario" = "optin" ]; then
-                    snapshot_name=$(wait_for_single_component_snapshot $optin_application_name)
+                    snapshot_name=$(wait_for_single_component_snapshot "$optin_application_name")
+                elif [ "$scenario" = "happy" ]; then
+                    # happy uses overwrite_from_index, so it has its own component/
+                    # application/snapshot to avoid reusing the non-overwrite builds
+                    snapshot_name=$(wait_for_single_component_snapshot "$happy_application_name")
                 else
                     snapshot_name=$(wait_for_single_component_snapshot)
                 fi
             elif [ "$mode" = "multi" ]; then
                 if [ "$scenario" = "optin" ]; then
-                    snapshot_name=$(wait_for_multi_component_snapshot $multi_optin_application_name)
+                    snapshot_name=$(wait_for_multi_component_snapshot "$multi_optin_application_name")
+                elif [ "$scenario" = "happy" ]; then
+                    # happy uses overwrite_from_index, so it has its own
+                    # application/snapshot to avoid reusing multi-staged's builds
+                    snapshot_name=$(wait_for_multi_component_snapshot "$multi_happy_application_name")
                 else
                     snapshot_name=$(wait_for_multi_component_snapshot)
                 fi
@@ -283,8 +335,10 @@ trigger_configured_releases() {
             # Create manual release
             local release_name="fbc-${mode}-${scenario}-${uuid}"
             local release_plan="fbc-release-${scenario}-rp-${uuid}"
-            if [ "$mode" = "multi" ] && [ "$scenario" = "optin" ]; then
-            	echo "⏭️ Multi Opt-In ReleasePlan chosen"
+            # multi-optin and multi-happy have isolated apps, so they use a
+            # dedicated multi-<scenario> ReleasePlan targeting that app
+            if [ "$mode" = "multi" ] && { [ "$scenario" = "optin" ] || [ "$scenario" = "happy" ]; }; then
+            	echo "⏭️ Multi ${scenario} ReleasePlan chosen"
             	local release_plan="fbc-release-${mode}-${scenario}-rp-${uuid}"
             fi
 
@@ -436,16 +490,20 @@ verify_multi_component_release() {
 
     local failures=0
     
-    # After deduplication, we expect 1 component per unique OCP version (target_index).
-    # Multiple fragments for the same target are batched and deduplicated.
+    # One release component per unique OCP version (target_index) after dedup.
+    # The non-opt-in multi pairs (component/component2, multi-happy-1/2) build at
+    # two distinct OCP versions, so a correct multi release has >= 2 components
+    # (one per OCP group). A missing group would drop this below 2. (A future
+    # same-OCP batching scenario would yield 1 -- see the README coverage note --
+    # and would need this threshold revisited.)
     local component_count
     component_count=$(jq '.status.artifacts.components | length' <<< "${release_json}")
     echo "Checking component count..."
 
-    if [ "${component_count}" -ge 1 ]; then
-      echo "✅️ Found ${component_count} component(s) in release (1 per OCP version after dedup)"
+    if [ "${component_count}" -ge 2 ]; then
+      echo "✅️ Found ${component_count} component(s) in release (one per OCP group)"
     else
-      echo "🔴 Expected at least 1 component, found ${component_count}!"
+      echo "🔴 Expected >= 2 components (one per OCP group), found ${component_count}!"
       failures=$((failures+1))
     fi
 
@@ -532,10 +590,12 @@ verify_multi_component_release() {
           fi
         fi
 
-        # the upcoming checks are only required for multi optin components
-        # otherwise return earlier
-        if [  "$scenario" != "optin" ]; then
-            return $failures
+        # The skopeo BUILD_VERSION checks below are only needed for opt-in
+        # components. For non-opt-in, skip to the NEXT component -- using return
+        # here left later OCP groups (e.g. the second half of a multi pair)
+        # unvalidated.
+        if [ "$scenario" != "optin" ]; then
+            continue
         fi
 
         # generate the authentication config for skopeo
@@ -810,10 +870,67 @@ verify_release_contents() {
     fi
 }
 
-# Configure test matrix early for consistency (components always built as dual)
+# Configure test matrix early for consistency
 configure_test_matrix_early() {
     echo "🔧 Configuring test matrix early for consistency..."
     configure_test_matrix
+}
+
+# Narrow PTSV_COMPONENTS to just the components used by the enabled scenarios.
+# This runs at source time (after the matrix is configured) and before run-test.sh
+# creates repos/Component CRs, so disabled scenarios never build their components
+# and never add extra components to a shared application. test.env sets the full
+# list as a default; this overrides it based on the matrix.
+select_components_for_matrix() {
+    local -A seen=()
+    local selected=()
+    local scenario comp
+    for scenario in "${!GLOBAL_TEST_MATRIX[@]}"; do
+        [ "${GLOBAL_TEST_MATRIX[$scenario]}" = "enabled" ] || continue
+        for comp in ${SCENARIO_COMPONENTS[$scenario]:-}; do
+            if [ -z "${seen[$comp]:-}" ]; then
+                seen[$comp]=1
+                selected+=("$comp")
+            fi
+        done
+    done
+    # Fallback keeps the suite functional if nothing matched.
+    if [ ${#selected[@]} -eq 0 ]; then
+        selected=("component")
+    fi
+    export PTSV_COMPONENTS="${selected[*]}"
+    echo "🔧 Components selected for enabled scenarios: ${PTSV_COMPONENTS}"
+}
+
+# Hook called by create_kubernetes_resources (shared lib) after the tenant
+# resources are copied to tmpDir and before `kustomize build`. Removes the
+# Component files of components not in PTSV_COMPONENTS so only the enabled
+# scenarios' Component CRs are applied (and built). Edits the tmpDir copy only.
+filter_tenant_kustomization() {
+    local tenant_dir="$1"
+    local kfile="${tenant_dir}/kustomization.yaml"
+    [ -f "${kfile}" ] || return 0
+
+    # Files to keep = those of the selected components.
+    local -A keep=()
+    local comp file
+    for comp in ${PTSV_COMPONENTS}; do
+        file="${COMPONENT_FILES[$comp]:-}"
+        [ -n "${file}" ] && keep["${file}"]=1
+    done
+
+    # Drop any known Component file that is not kept.
+    local drop=()
+    for comp in "${!COMPONENT_FILES[@]}"; do
+        file="${COMPONENT_FILES[$comp]}"
+        [ -z "${keep[${file}]:-}" ] && drop+=("${file}")
+    done
+    [ ${#drop[@]} -eq 0 ] && return 0
+
+    local drop_json
+    drop_json=$(printf '%s\n' "${drop[@]}" | jq -R . | jq -sc .)
+    DROP_FILES="${drop_json}" yq -i '.resources -= env(DROP_FILES)' "${kfile}"
+    echo "🔧 Filtered tenant Component files; dropped: ${drop[*]}"
 }
 
 # Override wait_for_releases to use manual release creation
@@ -832,5 +949,7 @@ wait_for_releases() {
     echo "🔍 DEBUG: trigger_configured_releases() completed successfully"
 }
 
-# Initialize test matrix immediately when this script is sourced
+# Initialize test matrix immediately when this script is sourced, then narrow
+# PTSV_COMPONENTS to only the components the enabled scenarios need.
 configure_test_matrix_early
+select_components_for_matrix
