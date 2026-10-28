@@ -11,14 +11,21 @@ class GitlabError(Exception):
     pass
 
 
+class GitlabConnectionError(GitlabError):
+    pass
+
+
 _exceptions = ModuleType("gitlab.exceptions")
 _exceptions.GitlabError = GitlabError
+_exceptions.GitlabConnectionError = GitlabConnectionError
 sys.modules["gitlab.exceptions"] = _exceptions
 exceptions = _exceptions
 
 
 class Gitlab:
-    def __init__(self, url: str, private_token: str | None = None) -> None:
+    def __init__(
+        self, url: str, private_token: str | None = None, timeout: float | None = None
+    ) -> None:
         self.projects = _ProjectsManager()
 
 
@@ -65,4 +72,4 @@ class _MergeRequest:
         self.web_url = web_url
 
 
-__all__ = ["Gitlab", "GitlabError"]
+__all__ = ["Gitlab", "GitlabError", "GitlabConnectionError"]
