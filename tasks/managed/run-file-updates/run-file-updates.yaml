@@ -95,6 +95,8 @@ spec:
             path: ca-bundle.crt
         optional: true
   stepTemplate:
+    securityContext:
+      runAsUser: 1001
     volumeMounts:
       - mountPath: /var/workdir
         name: workdir
@@ -134,107 +136,41 @@ spec:
       image: quay.io/konflux-ci/release-service-utils@sha256:da48275d90ecd65e2aec9c71f74b86314ce6ceb81dc3045d5c7546c9548273e8
       computeResources:
         limits:
-          memory: 512Mi
+          memory: 768Mi
         requests:
-          memory: 512Mi
+          memory: 768Mi
           cpu: 650m
-      script: |
-        #!/bin/bash
-        set -exo pipefail
-
-        # Obtain componentGroup from snapshot
-        componentGroup=$(jq -rc .componentGroup "$(params.dataDir)/$(params.snapshotPath)")
-
-        # Extract the key from the JSON file
-        fileUpdates=$(jq -rc "$(params.jsonKey)" "$(params.dataDir)/$(params.fileUpdatesPath)")
-
-        TASK_LABEL="internal-services.appstudio.openshift.io/group-id"
-        REQUEST_LABEL="internal-services.appstudio.openshift.io/request-id"
-        TASK_ID=$(context.taskRun.uid)
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        RESULTS_FILE="$(params.dataDir)/$(params.resultsDirPath)/file-updates-results.json"
-        RESULTS_JSON='{"merge_requests":[]}'
-
-        # empty result to start so result is available
-        touch "$(results.mergeRequestUrl.path)"
-
-        # Iterate over the extracted array and call the script
-        fileUpdatesLength=$(jq '. | length' <<< "${fileUpdates}")
-        for((i=0; i<fileUpdatesLength; i++)); do
-          item=$(jq -cr ".[$i]" <<< "${fileUpdates}")
-
-          repo=$(jq -r '.repo' <<< "${item}")
-          upstream_repo=$(jq -r '.upstream_repo' <<< "${item}")
-          ref=$(jq -r '.ref // "main"' <<< "${item}")
-          paths=$(jq -cr '.paths // "[]"' <<< "${item}")
-          file_updates_secret=$(jq -r '.file_updates_secret // "file-updates-secret"' <<< "${item}")
-
-          echo "=== Updates for repo: ${repo} ==="
-
-          echo -en "  Evaluating '{{ }}' expressions..."
-          updatedPaths=$(update-paths -p "${paths}" -f "$(params.dataDir)/$(params.snapshotPath)")
-          echo "done"
-
-          requestTimeout=$(params.requestTimeout)
-          pipelineTimeoutSeconds=$((requestTimeout+300))
-          pipelineTimeout=$(date -u -d @"${pipelineTimeoutSeconds}" +"%Hh%Mm%Ss")
-          taskTimeout=$(date -u -d @"${requestTimeout}" +"%Hh%Mm%Ss")
-
-          echo -en "  Creating InternalRequest to produce file-updates..."
-          requestId="$(openssl rand -hex 12)"
-          internal-request --pipeline "$(params.request)" \
-                           -p upstream_repo="${upstream_repo}" \
-                           -p repo="${repo}" \
-                           -p ref="${ref}" \
-                           -p paths="${updatedPaths}" \
-                           -p componentGroup="${componentGroup}" \
-                           -p file_updates_secret="${file_updates_secret}" \
-                           -p taskGitUrl="$(params.taskGitUrl)" \
-                           -p taskGitRevision="$(params.taskGitRevision)" \
-                           -s "$(params.synchronously)" \
-                           -t "$(params.requestTimeout)" \
-                           --pipeline-timeout "$pipelineTimeout" \
-                           --task-timeout "$taskTimeout" \
-                           -l ${TASK_LABEL}="${TASK_ID}" \
-                           -l ${REQUEST_LABEL}="${requestId}" \
-                           -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid)"
-
-          IRjson=$(kubectl get internalrequest \
-            -l "${PIPELINERUN_LABEL}=$(params.pipelineRunUid),${TASK_LABEL}=${TASK_ID},${REQUEST_LABEL}=${requestId}" \
-            -o jsonpath='{.items[0]}' --sort-by=.metadata.creationTimestamp )
-
-          results=$(jq -r '.status.results' <<< "${IRjson}")
-          if [ -z "${results}" ] || [ "${results}" = "null" ]; then
-            echo "ERROR: InternalRequest returned empty results"
-            echo "${IRjson}"
-            exit 1
-          fi
-          internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
-          internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
-
-          echo "** internalRequestPipelineRunName: ${internalRequestPipelineRunName}"
-          echo "** internalRequestTaskRunName: ${internalRequestTaskRunName}"
-
-          buildState="$(jq -jr '.buildState // empty' <<< "${results}")"
-          if [ "${buildState}" != "Success" ] && [ "${buildState}" != "Succeeded" ]; then
-            echo -en "  FileUpdates Error (buildState=${buildState}): "
-            jq -r '.jsonBuildInfo | fromjson | .error // empty' <<< "${results}" || true
-            echo -e "  Diff (content might be truncated): "
-            jq -r '.jsonBuildInfo | fromjson | .str | tostring' <<< "${results}" 2>/dev/null \
-              | awk '{ print "\t"$0 }' || true
-            echo -e "=== Finished ===\n"
-            exit 1
-          else
-            MR=$(jq -r '.jsonBuildInfo | fromjson | .merge_request // "unknown"' <<< "${results}")
-            echo "MR Created: ${MR}"
-            echo "${MR}" >> "$(results.mergeRequestUrl.path)"
-            RESULTS_JSON=$(jq --arg i "$i" --arg MR "${MR}" '.merge_requests[$i|tonumber] += {"url": $MR}' \
-                <<< "$RESULTS_JSON")
-            echo -n "${RESULTS_JSON}" | tee "$RESULTS_FILE"
-          fi
-          echo -e "=== Finished ===\n"
-        done
+      env:
+        - name: PARAM_DATA_DIR
+          value: $(params.dataDir)
+        - name: PARAM_FILE_UPDATES_PATH
+          value: $(params.fileUpdatesPath)
+        - name: PARAM_SNAPSHOT_PATH
+          value: $(params.snapshotPath)
+        - name: PARAM_JSON_KEY
+          value: $(params.jsonKey)
+        - name: PARAM_RESULTS_DIR_PATH
+          value: $(params.resultsDirPath)
+        - name: PARAM_REQUEST_TIMEOUT
+          value: $(params.requestTimeout)
+        - name: PARAM_TASK_GIT_URL
+          value: $(params.taskGitUrl)
+        - name: PARAM_TASK_GIT_REVISION
+          value: $(params.taskGitRevision)
+        - name: PARAM_PIPELINE_RUN_UID
+          value: $(params.pipelineRunUid)
+        - name: PARAM_TASK_RUN_UID
+          value: $(context.taskRun.uid)
+        - name: PARAM_REQUEST
+          value: $(params.request)
+        - name: PARAM_SYNCHRONOUSLY
+          value: $(params.synchronously)
+        - name: RESULT_MERGE_REQUEST_URL
+          value: $(results.mergeRequestUrl.path)
+      command: ["python3"]
+      args:
+        - -m
+        - release_service_utils.tasks.managed.run_file_updates
     - name: create-trusted-artifact
       computeResources:
         limits:
