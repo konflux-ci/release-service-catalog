@@ -1,0 +1,152 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: check-jira-project-component
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |-
+    Tekton task to validate that the security-tracker labels of every container image in the snapshot refer to a
+    valid Jira project and component.
+
+    For each image component the task reads the `com.redhat.security-tracker-project` label (via `skopeo inspect`),
+    which holds a Jira project key (e.g. `OCPBUGS`). The Jira server is fixed (redhat.atlassian.net), so the label
+    carries only the project key rather than a full URL. The task confirms the project exists in Jira, then resolves
+    a Jira component using a fallback chain: `name`, `com.redhat.component`, and finally
+    `com.redhat.security-tracker-component`. The first label whose value matches a component of the Jira project
+    wins. Images without a `com.redhat.security-tracker-project` label are skipped (label presence is enforced
+    separately by the release policy).
+
+    With `enforce` set to true (the default), any validation failure (missing project, or no label value matching a
+    component of the project) causes the task to fail. With `enforce` set to false, failures are logged as warnings
+    and the task completes successfully. A failure to reach or authenticate to Jira always fails the task, regardless
+    of the `enforce` setting.
+  params:
+    - name: snapshotPath
+      description: Path to the JSON string of the mapped Snapshot spec in the data workspace
+      type: string
+    - name: jiraSecret
+      description: |-
+        The kubernetes secret used to authenticate to Jira. It must contain two keys: 'email' and 'token' for
+        Jira basic authentication.
+      type: string
+      default: konflux-advisory-jira-secret
+    - name: enforce
+      description: |-
+        If set to true (the default), validation failures will be logged as errors, causing the task to fail.
+        If set to false, validation failures will be logged as warnings instead, allowing the task to
+        complete successfully. A failure to connect to Jira always fails the task regardless of this setting.
+      type: string
+      default: "true"
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored
+      type: string
+      default: "empty"
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire
+      type: string
+      default: "1d"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable
+      type: string
+      default: ""
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: ""
+    - name: sourceDataArtifact
+      type: string
+      description: Location of trusted artifacts to be used to populate data directory
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/release
+    - name: taskGitUrl
+      type: string
+      description: The url to the git repo where the release-service-catalog tasks and stepactions to be used are stored
+    - name: taskGitRevision
+      type: string
+      description: The revision in the taskGitUrl repo to be used
+    - name: caTrustConfigMapName
+      type: string
+      description: The name of the ConfigMap to read CA bundle data from
+      default: trusted-ca
+    - name: caTrustConfigMapKey
+      type: string
+      description: The name of the key in the ConfigMap that contains the CA bundle data
+      default: ca-bundle.crt
+  volumes:
+    - name: workdir
+      emptyDir: {}
+    - name: jira-secret-vol
+      secret:
+        secretName: $(params.jiraSecret)
+        defaultMode: 0444
+    - name: trusted-ca
+      configMap:
+        name: $(params.caTrustConfigMapName)
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        optional: true
+  stepTemplate:
+    volumeMounts:
+      - mountPath: /var/workdir
+        name: workdir
+      - name: trusted-ca
+        mountPath: /mnt/trusted-ca
+        readOnly: true
+    env:
+      - name: IMAGE_EXPIRES_AFTER
+        value: $(params.ociArtifactExpiresAfter)
+      - name: "ORAS_OPTIONS"
+        value: "$(params.orasOptions)"
+      - name: "DEBUG"
+        value: "$(params.trustedArtifactsDebug)"
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: use-trusted-artifact
+      computeResources:
+        limits:
+          memory: 64Mi
+        requests:
+          memory: 64Mi
+          cpu: 30m
+      ref:
+        resolver: "git"
+        params:
+          - name: url
+            value: $(params.taskGitUrl)
+          - name: revision
+            value: $(params.taskGitRevision)
+          - name: pathInRepo
+            value: stepactions/use-trusted-artifact/use-trusted-artifact.yaml
+      params:
+        - name: workDir
+          value: $(params.dataDir)
+        - name: sourceDataArtifact
+          value: $(params.sourceDataArtifact)
+    - name: check-jira-project-component
+      image: quay.io/konflux-ci/release-service-utils@sha256:5546fa78d3c88d7b6a2e8cff8902f7757f00541d0bbaf113b9f293133894afa3
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          memory: 256Mi
+          cpu: 100m
+      volumeMounts:
+        - name: jira-secret-vol
+          mountPath: "/etc/secrets"
+      command: ["/home/scripts/python/tasks/managed/check_jira_project_component.py"]
+      args:
+        - --snapshot-file
+        - $(params.dataDir)/$(params.snapshotPath)
+        - --jira-secret-path
+        - /etc/secrets
+        - --enforce
+        - $(params.enforce)
