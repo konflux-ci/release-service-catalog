@@ -66,36 +66,6 @@ spec:
                   "signKeyAlias": {
                     "key": "devkey1"
                   }
-                },
-                "sign": {
-                  "request": "rpm-signing-pipeline"
-                }
-              }
-              EOF
-
-              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/release_plan_admission.json" << EOF
-              {
-                "spec": {
-                  "pipeline": {
-                    "pipelineRef": {
-                      "resolver": "git",
-                      "params": [
-                        {
-                          "name": "url",
-                          "value": "https://localhost.git"
-                        },
-                        {
-                          "name": "revision",
-                          "value": "main"
-                        },
-                        {
-                          "name": "pathInRepo",
-                          "value": "pipelines/rpm-signing/rpm-signing.yaml"
-                        }
-                      ]
-                    },
-                    "serviceAccountName": "release-service-account"
-                  }
                 }
               }
               EOF
@@ -136,8 +106,6 @@ spec:
       params:
         - name: requester
           value: testuser-rpm
-        - name: requestTimeout
-          value: "1800"
         - name: pipelineRunUid
           value: $(context.pipelineRun.uid)
         - name: dataPath
@@ -168,9 +136,19 @@ spec:
       params:
         - name: sourceDataArtifact
           value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: signedRpmsOciArtifacts
+          value: "$(tasks.run-task.results.signedRpmsOciArtifacts)"
+      runAfter:
+        - run-task
       taskSpec:
         params:
           - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+          - name: signedRpmsOciArtifacts
             type: string
         volumes:
           - name: workdir
@@ -199,94 +177,54 @@ spec:
             image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
             script: |
               #!/usr/bin/env bash
-              set -eux
+              set -ex
 
-              internalRequests="$(kubectl get internalrequest -o json --sort-by=.metadata.creationTimestamp | jq -c)"
-              irsLength=$(jq ".items | length" <<< "${internalRequests}" )
+              request_file="$(params.dataDir)/$(context.pipelineRun.uid)/internal-request.json"
+              if [ ! -f "${request_file}" ]; then
+                echo "rh_sign_rpm did not create an InternalRequest"
+                exit 1
+              fi
+              request=$(cat "${request_file}")
 
-              echo "Found ${irsLength} internal requests"
+              jq -e --arg uid "$(context.pipelineRun.uid)" '
+                .pipeline == "direct-rpm-signing" and
+                .params.oci_storage == "$(params.ociStorage)" and
+                .params.kerberos_principal == "test-principal@REDHAT.COM" and
+                .params.kerberos_keytab == "test-keytab" and
+                .params.kerberos_keytab_secret == "test-keytab-secret" and
+                .params.signing_alias == "devkey1" and
+                .params.artifact_storage_secret == "signing-artifact-storage-preprod" and
+                .params.destination_artifact_storage_domain == "rok-storage" and
+                .params.use_target_arch_repo == "false" and
+                .params.skip_upload_to_pulp == "false" and
+                .params.create_oci_artifact == "false" and
+                .params.requester == "testuser-rpm" and
+                .params.force == "false" and
+                .params.taskGitUrl == "https://gitlab.cee.redhat.com/signing/signing.git" and
+                .params.taskGitRevision == "845e5e2e1a625ea84fec4aed50c05c0313890a1f" and
+                .params.oci_artifact_expires_after == "$(params.ociArtifactExpiresAfter)" and
+                .labels == {"internal-services.appstudio.openshift.io/pipelinerun-uid": $uid} and
+                .sync == true and
+                .timeout == 4500 and
+                .service_account == "release-service-account" and
+                .pipeline_timeout == "1h10m0s" and
+                .task_timeout == "1h0m0s"
+              ' <<< "${request}"
 
-              # We expect 1 internal request
-              if [ "${irsLength}" != "1" ]; then
-                echo "Expected 1 internal request, found ${irsLength}"
+              artifact_json=$(jq -r '.params.artifact_json' <<< "${request}")
+              decoded=$(echo "${artifact_json}" | base64 -d | gunzip)
+
+              expected_sha=$(jq -r '.artifacts["test-rpm-1.0-1.el9.x86_64.rpm"].sha256' <<< "${decoded}")
+              if [ "${expected_sha}" != "abc123def456" ]; then
+                echo "artifact_json does not contain the expected artifacts.json content"
                 exit 1
               fi
 
-              params=$(jq -r ".items[0].spec.params" <<< "${internalRequests}")
-
-              # Verify parameters passed to internal-request
-              requester=$(jq -r '.requester' <<< "${params}")
-              if [ "${requester}" != "testuser-rpm" ]; then
-                echo "requester does not match: expected 'testuser-rpm', got '${requester}'"
+              if [ "$(params.signedRpmsOciArtifacts)" != "oci://registry.example.com/signed-rpms@sha256:abc123" ]; then
+                echo "rh-sign-rpm did not set the expected signedRpmsOciArtifacts result"
                 exit 1
               fi
 
-              kerberosKeytab=$(jq -r '.kerberos_keytab' <<< "${params}")
-              if [ "${kerberosKeytab}" != "test-keytab" ]; then
-                echo "kerberos_keytab does not match"
-                exit 1
-              fi
-
-              signingAlias=$(jq -r '.signing_alias' <<< "${params}")
-              if [ "${signingAlias}" != "devkey1" ]; then
-                echo "signing_alias does not match: expected 'devkey1', got '${signingAlias}'"
-                exit 1
-              fi
-
-              kerberosPrincipal=$(jq -r '.kerberos_principal' <<< "${params}")
-              if [ "${kerberosPrincipal}" != "test-principal@REDHAT.COM" ]; then
-                echo "kerberos_principal does not match:" \
-                  "expected 'test-principal@REDHAT.COM', got '${kerberosPrincipal}'"
-                exit 1
-              fi
-
-              kerberosKeytabSecret=$(jq -r '.kerberos_keytab_secret' <<< "${params}")
-              if [ "${kerberosKeytabSecret}" != "test-keytab-secret" ]; then
-                echo "kerberos_keytab_secret does not match:" \
-                  "expected 'test-keytab-secret', got '${kerberosKeytabSecret}'"
-                exit 1
-              fi
-
-              artifactStorageSecret=$(jq -r '.artifact_storage_secret' <<< "${params}")
-              if [ "${artifactStorageSecret}" != "signing-artifact-storage-preprod" ]; then
-                echo "artifact_storage_secret does not match:" \
-                  "expected 'signing-artifact-storage-preprod'," \
-                  "got '${artifactStorageSecret}'"
-                exit 1
-              fi
-
-              destinationDomain=$(jq -r '.destination_artifact_storage_domain' <<< "${params}")
-              if [ "${destinationDomain}" != "rok-storage" ]; then
-                echo "destination_artifact_storage_domain does not match:" \
-                  "expected 'rok-storage', got '${destinationDomain}'"
-                exit 1
-              fi
-
-              force=$(jq -r '.force' <<< "${params}")
-              if [ "${force}" != "false" ]; then
-                echo "force does not match: expected 'false', got '${force}'"
-                exit 1
-              fi
-
-              artifactJson=$(jq -r '.artifact_json' <<< "${params}")
-              # artifact_json is gzipped+base64-encoded content - decode and verify it's valid JSON with artifacts
-              decodedArtifact=$(base64 -d <<< "${artifactJson}" | gunzip)
-              if ! jq -e '.artifacts' > /dev/null 2>&1 <<< "${decodedArtifact}"; then
-                echo "artifact_json does not decode to valid JSON with .artifacts key"
-                exit 1
-              fi
-
-              echo "Test passed: InternalRequest created correctly with all required parameters"
+              echo "All checks passed"
       runAfter:
         - run-task
-  finally:
-    - name: cleanup
-      taskSpec:
-        steps:
-          - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
-            script: |
-              #!/usr/bin/env bash
-              set -eux
-
-              kubectl delete internalrequests --all
