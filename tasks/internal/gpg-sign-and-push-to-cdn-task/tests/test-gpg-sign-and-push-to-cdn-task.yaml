@@ -1,0 +1,75 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-gpg-sign-and-push-to-cdn-task
+spec:
+  description: |
+    Happy-path test for the gpg-sign-and-push-to-cdn-task Python entrypoint.
+    Logic correctness is covered by unit tests in release-service-utils;
+    this test verifies that the task wires up and succeeds end-to-end.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: gpg-sign-and-push-to-cdn-task
+      params:
+        - name: snapshot_json
+          value: >-
+            {
+              "application": "test-app",
+              "components": [
+                {
+                  "containerImage": "quay.io/test/image@sha256:abc123",
+                  "name": "test-component",
+                  "files": [
+                    {
+                      "source": "/releases/test-binary-linux-amd64.tar.gz",
+                      "os": "linux",
+                      "arch": "amd64"
+                    }
+                  ],
+                  "contentGateway": {
+                    "productName": "Test Product",
+                    "productCode": "TestProd",
+                    "productVersionName": "1.0",
+                    "contentType": "binary"
+                  }
+                }
+              ]
+            }
+        - name: signed_artifacts_json
+          value: >-
+            {
+              "test-component": [
+                "oci://quay.io/test/signed@sha256:signed1"
+              ]
+            }
+        - name: exodusGwSecret
+          value: "test-exodus-secret"
+        - name: exodusGwEnv
+          value: "pre"
+        - name: cgwHostname
+          value: "https://content-gateway.test.com"
+        - name: cgwSecret
+          value: "test-cgw-secret"
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils:on-pr-d8e01994f25a41ef3919398ff7e889cacf4efcbf
+            script: |
+              #!/usr/bin/env bash
+              set -ex
+
+              if [[ "$(params.result)" != "Success" ]]; then
+                echo "Error: result expected 'Success' but got: $(params.result)"
+                exit 1
+              fi
