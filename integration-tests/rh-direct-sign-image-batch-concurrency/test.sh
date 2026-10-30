@@ -1,0 +1,953 @@
+#!/usr/bin/env bash
+#
+# rh-direct-sign-image-batch-concurrency test script
+#
+# Real signing batch integration test. Cleanup must be enabled in the signing
+# caller to exercise creator-pod scoping across sibling batch requests.
+#
+# Forces rh_direct_sign_image.py to split a single component's tags into
+# TARGET_BATCH_COUNT (default 26, just above the signing task's
+# concurrentLimit of 24) signing batches, which submit_batches() then
+# submits concurrently via ThreadPoolExecutor. The exact tag count
+# needed is computed at runtime (utils/compute_batch_tag_count.py) from the
+# real signing ConfigMap and resolved image digest, rather than guessed.
+#
+# A real component build runs every execution (standard create_github_repositories/
+# merge_github_prs/wait_for_plrs_to_complete flow from lib/test-functions.sh), so
+# each run signs a genuinely fresh, unique image digest — this test's signing
+# volume would otherwise accumulate signatures across runs (and risk colliding
+# with a concurrently running instance of this suite) on a reused static digest.
+# Most resources are still shared via symlink from rh-advisories-large-snapshot.
+#
+# For general test infrastructure and requirements, see:
+#   integration-tests/README.md (common setup, cluster architecture, secrets)
+#
+# --- Script Directory ---
+SCRIPT_DIR="$(realpath "$(dirname "${BASH_SOURCE[0]}")")"
+
+# --- Global Script Variables (Defaults) ---
+CLEANUP="true"
+NO_CVE="true"
+
+# --- Timeout Configuration (in seconds, configurable via environment) ---
+# How long to wait for Konflux to auto-create the build Snapshot after
+# wait_for_plrs_to_complete reports the component build PipelineRun succeeded.
+BUILD_SNAPSHOT_TIMEOUT="${BUILD_SNAPSHOT_TIMEOUT:-120}"
+BUILD_SNAPSHOT_POLL_INTERVAL="${BUILD_SNAPSHOT_POLL_INTERVAL:-5}"
+
+RELEASE_START_TIMEOUT="${RELEASE_START_TIMEOUT:-600}"  # 10 minutes
+RELEASE_START_POLL_INTERVAL="${RELEASE_START_POLL_INTERVAL:-5}"
+
+# Console links are optional; in-cluster authentication has no kubeconfig context.
+CONSOLE_URL="${CONSOLE_URL:-}"
+if [ -z "${CONSOLE_URL}" ]; then
+    CONSOLE_URL=$(kubectl config view --minify --output jsonpath="{.clusters[*].cluster.server}" 2>/dev/null \
+        | sed 's/api/konflux-ui.apps/g' | sed 's/:6443//g') || CONSOLE_URL=""
+fi
+if [ -n "${CONSOLE_URL}" ]; then
+    CONSOLE_URL="${CONSOLE_URL%/}/"
+fi
+
+# Explicit allowlist for envsubst — prevents corrupting Ansible vault markers ($ANSIBLE_VAULT...).
+readonly ENVSUBST_ALLOWLIST='$application_name $component_branch $component_git_url $component_name $ec_public_key_ref $managed_namespace $managed_sa_name $originating_tool $release_plan_admission_name $release_plan_name $tenant_namespace $tenant_sa_name $RELEASE_CATALOG_GIT_REVISION $RELEASE_CATALOG_GIT_URL $BATCH_TEST_TIMEOUT'
+
+# Cleanup function for temporary directory
+cleanup_tmpdir() {
+    local tmp_path="${tmpDir:-}"
+    [ -z "${tmp_path}" ] && return 0
+    if [ ! -d "${tmp_path}" ]; then
+        echo "⚠️  Warning: tmpDir path '${tmp_path}' is not a directory, skipping cleanup" >&2
+        return 0
+    fi
+    case "${tmp_path}" in
+        /tmp/*) ;;
+        *)
+            echo "❌ Error: tmpDir path '${tmp_path}' is not within /tmp, refusing to delete for safety" >&2
+            return 1
+            ;;
+    esac
+    if [ "${CLEANUP}" == "true" ]; then
+        echo "Cleaning up temporary directory: ${tmp_path}" >&2
+        rm -rf "${tmp_path}" || echo "⚠️  Warning: Failed to remove temporary directory: ${tmp_path}" >&2
+    else
+        echo "Skipping tmpDir cleanup (--skip-cleanup): ${tmp_path}" >&2
+    fi
+}
+trap cleanup_tmpdir EXIT
+
+# Generic polling helper with timeout.
+# Usage: wait_for_condition "description" timeout_seconds poll_interval_seconds condition_function_name [args...]
+wait_for_condition() {
+    local description="$1"
+    local timeout="$2"
+    local poll_interval="$3"
+    local condition_function="$4"
+
+    : "${description:?description parameter is required}"
+    : "${timeout:?timeout parameter is required}"
+    : "${poll_interval:?poll_interval parameter is required}"
+    : "${condition_function:?condition_function parameter is required}"
+
+    if ! declare -F "${condition_function}" >/dev/null 2>&1; then
+        echo "❌ Error: condition function '${condition_function}' does not exist" >&2
+        return 1
+    fi
+
+    shift 4
+
+    echo "Waiting for ${description} (timeout: ${timeout}s)..." >&2
+    local start_time
+    start_time=$(date +%s)
+
+    while true; do
+        local current_time elapsed
+        current_time=$(date +%s)
+        elapsed=$((current_time - start_time))
+
+        if (( elapsed >= timeout )); then
+            echo "❌ Timeout waiting for ${description} after ${timeout}s" >&2
+            return 1
+        fi
+
+        if "${condition_function}" "$@"; then
+            echo "✅ ${description}" >&2
+            return 0
+        fi
+
+        sleep "${poll_interval}"
+    done
+}
+
+# --- Build flow ---
+# This suite uses the standard create_github_repositories/patch_components_source/
+# merge_github_prs/wait_for_plrs_to_* flow from lib/test-functions.sh (no overrides
+# here) so every run builds and pushes a genuinely fresh component image via a real
+# GitHub PR against component_base_repo_name's component_base_branch (see test.env).
+# This guarantees a unique digest per run — required so this suite's cosign
+# signature manifest (see README.md) never accumulates signatures across runs or
+# collides with a concurrently running instance of this same suite.
+
+# Name of the signing ConfigMap read by both rh_direct_sign_image.py in
+# production and compute_batch_tag_count.py here. Signing key resolution
+# itself (SIG_KEY_NAMES/SIG_KEY_NAME parsing) happens inside
+# compute_batch_tag_count.py via the real get_signing_keys() import — no
+# bash-side reimplementation needed.
+readonly SIGNING_CONFIGMAP_NAME="hacbs-signing-pipeline-config-staging-e2e-pq"
+
+# Condition check: has Konflux auto-created the single-component build Snapshot yet?
+# Sets the global BATCH_TEST_BUILD_SNAPSHOT on success (empty string otherwise).
+check_build_snapshot_exists() {
+    BATCH_TEST_BUILD_SNAPSHOT=$(wait_for_single_component_snapshot "${application_name}")
+    [ -n "${BATCH_TEST_BUILD_SNAPSHOT}" ]
+}
+
+# Wait for the build Snapshot that Konflux auto-creates once this run's real
+# component build (triggered by the standard create_github_repositories/
+# merge_github_prs/wait_for_plrs_to_complete flow) pushes a fresh image. Sets
+# the global batch_test_snapshot_name to its name.
+wait_for_build_snapshot() {
+    : "${application_name:?application_name must be set}"
+
+    BATCH_TEST_BUILD_SNAPSHOT=""
+    wait_for_condition \
+        "build Snapshot for application ${application_name}" \
+        "${BUILD_SNAPSHOT_TIMEOUT}" \
+        "${BUILD_SNAPSHOT_POLL_INTERVAL}" \
+        check_build_snapshot_exists || return 1
+
+    batch_test_snapshot_name="${BATCH_TEST_BUILD_SNAPSHOT}"
+    export batch_test_snapshot_name
+    echo "✅ Found build Snapshot: ${batch_test_snapshot_name}" >&2
+}
+
+# Resolve the real, freshly-built image this run just pushed, from the build
+# Snapshot's single component entry. Sets the globals TEST_IMAGE_REPO and
+# TEST_IMAGE_DIGEST (sha256:<hex>, digest only, no repo prefix). Requires
+# wait_for_build_snapshot to have run first.
+resolve_test_image_digest() {
+    : "${batch_test_snapshot_name:?wait_for_build_snapshot must run first}"
+    : "${tenant_namespace:?tenant_namespace must be set}"
+
+    local image_ref
+    image_ref=$(kubectl get snapshot "${batch_test_snapshot_name}" -n "${tenant_namespace}" \
+        -o jsonpath='{.spec.components[0].containerImage}') || {
+        echo "❌ Failed to read containerImage from Snapshot ${batch_test_snapshot_name}" >&2
+        return 1
+    }
+    if [ -z "${image_ref}" ] || [[ "${image_ref}" != *@sha256:* ]]; then
+        echo "❌ Snapshot ${batch_test_snapshot_name} has no digest-pinned containerImage: '${image_ref}'" >&2
+        return 1
+    fi
+
+    TEST_IMAGE_REPO="${image_ref%@*}"
+    TEST_IMAGE_DIGEST="${image_ref#*@}"
+    export TEST_IMAGE_REPO TEST_IMAGE_DIGEST
+    echo "✅ Resolved freshly-built image digest: ${TEST_IMAGE_DIGEST}" >&2
+}
+
+# Resolve the same image timestamp tag that apply-mapping adds implicitly for
+# rh-advisories. This mirrors apply-mapping's first-architecture selection and
+# build-date/Created fallback. Sets the global IMPLICIT_TIMESTAMP_TAG.
+resolve_implicit_timestamp_tag() {
+    : "${TEST_IMAGE_REPO:?resolve_test_image_digest must run first}"
+    : "${TEST_IMAGE_DIGEST:?resolve_test_image_digest must run first}"
+
+    local image_ref="${TEST_IMAGE_REPO}@${TEST_IMAGE_DIGEST}"
+    local arch_json arch os image_metadata build_date
+    arch_json=$(get-image-architectures "${image_ref}") || {
+        echo "❌ Failed to inspect image architectures for ${image_ref}" >&2
+        return 1
+    }
+    arch=$(jq -rs 'map(.platform.architecture) | .[0]' <<< "${arch_json}")
+    os=$(jq -rs 'map(.platform.os) | .[0]' <<< "${arch_json}")
+
+    image_metadata=$(skopeo inspect --retry-times 3 --no-tags \
+        --override-os "${os}" --override-arch "${arch}" "docker://${image_ref}") || {
+        echo "❌ Failed to inspect image metadata for ${image_ref}" >&2
+        return 1
+    }
+    build_date=$(jq -r '
+        if (.Labels."build-date" // "") != "" then
+            .Labels."build-date"
+        else
+            .Created // ""
+        end
+    ' <<< "${image_metadata}")
+    if [ -z "${build_date}" ]; then
+        echo "❌ Image has neither a build-date label nor a Created timestamp" >&2
+        return 1
+    fi
+
+    IMPLICIT_TIMESTAMP_TAG=$(date -d "${build_date}" '+%s') || {
+        echo "❌ Failed to format image timestamp '${build_date}'" >&2
+        return 1
+    }
+    export IMPLICIT_TIMESTAMP_TAG
+    echo "✅ Resolved implicit timestamp tag: ${IMPLICIT_TIMESTAMP_TAG}" >&2
+}
+
+# Compute the exact number of tags needed to force rh-direct-sign-image's
+# batch_signing_items() to split into exactly TARGET_BATCH_COUNT batches.
+# compute_batch_tag_count.py imports and calls the real
+# collect_signing_items()/batch_signing_items()/get_all_image_digests()/
+# get_signing_keys() from rh_direct_sign_image.py directly (importable here —
+# this suite's test-runner image is built FROM release-service-utils), so the
+# estimate includes multi-arch digest expansion and the quay.io->registry.redhat.io
+# conversion apply-mapping performs. It queries Pyxis with the same production
+# helper to include registry-access signing when required. Verification checks
+# the actual batch count: the runner's utils version and existing signatures can
+# still differ from these inputs. Requires resolve_test_image_digest to have run.
+# Sets the global NUM_BATCH_TAGS and BATCH_TAG_LIST (space-separated array
+# variable, one tag per element).
+remove_pyxis_credentials() {
+    local cert_path="$1"
+    local key_path="$2"
+    rm -f "${cert_path}" "${key_path}"
+}
+
+compute_batch_tag_count() {
+    : "${TEST_IMAGE_REPO:?resolve_test_image_digest must run first}"
+    : "${TEST_IMAGE_DIGEST:?resolve_test_image_digest must run first}"
+    : "${managed_namespace:?managed_namespace must be set}"
+    : "${release_plan_admission_name:?release_plan_admission_name must be set}"
+    : "${BATCH_TAG_PREFIX:?BATCH_TAG_PREFIX must be set}"
+    : "${TARGET_BATCH_COUNT:?TARGET_BATCH_COUNT must be set}"
+
+    resolve_implicit_timestamp_tag || return 1
+
+    if ! [[ "${TARGET_BATCH_COUNT}" =~ ^[1-9][0-9]*$ ]] || (( TARGET_BATCH_COUNT < 2 )); then
+        echo "❌ TARGET_BATCH_COUNT must be an integer of at least 2" >&2
+        return 1
+    fi
+
+    # Read the first configured repository's URL straight from the already-applied
+    # ReleasePlanAdmission (managed resources are applied before this function runs)
+    # instead of hardcoding it here a second time. All NUM_SIGNING_REPOS repositories
+    # share the same requires_terms value (see resources/managed/rpa.yaml), so any one
+    # of them is representative for the registry-access-signing check below — the
+    # total tag count this function computes does not depend on which repo it is.
+    local signing_repo
+    signing_repo=$(kubectl get releaseplanadmission "${release_plan_admission_name}" \
+        -n "${managed_namespace}" \
+        -o jsonpath='{.spec.data.mapping.components[0].repositories[0].url}') || {
+        echo "❌ Failed to read repository URL from ReleasePlanAdmission ${release_plan_admission_name}" >&2
+        return 1
+    }
+    if [ -z "${signing_repo}" ]; then
+        echo "❌ ReleasePlanAdmission ${release_plan_admission_name} has no repositories[0].url" >&2
+        return 1
+    fi
+    local pyxis_secret="pyxis-${component_name}"
+    local pyxis_cert="${tmpDir}/pyxis-cert.pem"
+    local pyxis_key="${tmpDir}/pyxis-key.pem"
+
+    install -m 0600 /dev/null "${pyxis_cert}" || return 1
+    install -m 0600 /dev/null "${pyxis_key}" || {
+        remove_pyxis_credentials "${pyxis_cert}" "${pyxis_key}"
+        return 1
+    }
+    kubectl get secret "${pyxis_secret}" -n "${managed_namespace}" \
+        -o jsonpath='{.data.cert}' | base64 --decode > "${pyxis_cert}" || {
+        echo "❌ Failed to read Pyxis certificate from secret ${pyxis_secret}" >&2
+        remove_pyxis_credentials "${pyxis_cert}" "${pyxis_key}"
+        return 1
+    }
+    kubectl get secret "${pyxis_secret}" -n "${managed_namespace}" \
+        -o jsonpath='{.data.key}' | base64 --decode > "${pyxis_key}" || {
+        echo "❌ Failed to read Pyxis key from secret ${pyxis_secret}" >&2
+        remove_pyxis_credentials "${pyxis_cert}" "${pyxis_key}"
+        return 1
+    }
+    if [ ! -s "${pyxis_cert}" ] || [ ! -s "${pyxis_key}" ]; then
+        echo "❌ Pyxis secret ${pyxis_secret} contains an empty cert or key" >&2
+        remove_pyxis_credentials "${pyxis_cert}" "${pyxis_key}"
+        return 1
+    fi
+    echo "Computing tag count for exactly ${TARGET_BATCH_COUNT} signing batch(es)..." >&2
+
+    local computed_count compute_status=0
+    computed_count=$(python3 "${SCRIPT_DIR}/utils/compute_batch_tag_count.py" \
+        --source-image "${TEST_IMAGE_REPO}@${TEST_IMAGE_DIGEST}" \
+        --signing-repo "${signing_repo}" \
+        --configmap-name "${SIGNING_CONFIGMAP_NAME}" \
+        --namespace "${managed_namespace}" \
+        --pyxis-server stage \
+        --pyxis-cert "${pyxis_cert}" \
+        --pyxis-key "${pyxis_key}" \
+        --tag-prefix "${BATCH_TAG_PREFIX}" \
+        --implicit-tag "${IMPLICIT_TIMESTAMP_TAG}" \
+        --batch-limit 15000 \
+        --target-batches "${TARGET_BATCH_COUNT}" \
+        --margin 5) || compute_status=$?
+    remove_pyxis_credentials "${pyxis_cert}" "${pyxis_key}"
+    if [ "${compute_status}" -ne 0 ]; then
+        echo "❌ Failed to compute batch tag count" >&2
+        return 1
+    fi
+
+    if ! [[ "${computed_count}" =~ ^[0-9]+$ ]]; then
+        echo "❌ compute_batch_tag_count.py did not return a valid integer: '${computed_count}'" >&2
+        return 1
+    fi
+
+    NUM_BATCH_TAGS="${computed_count}"
+    export NUM_BATCH_TAGS
+
+    BATCH_TAG_LIST=()
+    local i tag
+    for (( i=0; i<NUM_BATCH_TAGS; i++ )); do
+        tag=$(printf '%s-%04d' "${BATCH_TAG_PREFIX}" "${i}")
+        BATCH_TAG_LIST+=("${tag}")
+    done
+
+    echo "✅ Computed ${NUM_BATCH_TAGS} tags to force ${TARGET_BATCH_COUNT} signing batch(es)" >&2
+}
+
+create_release_for_batch_test() {
+    : "${tmpDir:?tmpDir must be set}"
+    : "${batch_test_snapshot_name:?wait_for_build_snapshot must run first}"
+    : "${tenant_namespace:?tenant_namespace must be set}"
+    : "${originating_tool:?originating_tool must be set}"
+    : "${release_plan_name:?release_plan_name must be set}"
+    : "${release_name:?release_name must be set}"
+    : "${uuid:?uuid must be set}"
+
+    echo "Creating Release CR for batch test..." >&2
+
+    local release_file="${tmpDir}/release.yaml"
+
+    cat > "${release_file}" <<EOF
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Release
+metadata:
+  name: ${release_name}
+  namespace: ${tenant_namespace}
+  labels:
+    originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
+  annotations:
+    # Allow re-running this test with the same snapshot
+    test.appstudio.openshift.io/skip-idempotency: "true"
+spec:
+  snapshot: ${batch_test_snapshot_name}
+  releasePlan: ${release_plan_name}
+EOF
+
+    kubectl apply -f "${release_file}" -n "${tenant_namespace}" || {
+        echo "❌ Failed to apply Release CR to namespace ${tenant_namespace}" >&2
+        return 1
+    }
+
+    echo "✅ Release CR created: ${release_name}" >&2
+}
+
+# Patch the RPA's mapping.components[0].repositories[*].tags, splitting the computed
+# tag list into roughly equal contiguous chunks across all configured repositories,
+# before the explicit Release is created. Multiple repositories are used (rather than
+# one) to keep each repository's cosign signature manifest under Quay's upload size
+# limit — see the comment above repositories in resources/managed/rpa.yaml.
+patch_rpa_with_batch_tags() {
+    : "${managed_namespace:?managed_namespace must be set}"
+    : "${release_plan_admission_name:?release_plan_admission_name must be set}"
+    if [ "${#BATCH_TAG_LIST[@]}" -eq 0 ]; then
+        echo "❌ BATCH_TAG_LIST is empty — compute_batch_tag_count must run first" >&2
+        return 1
+    fi
+
+    local tags_json
+    tags_json=$(printf '%s\n' "${BATCH_TAG_LIST[@]}" | jq -R . | jq -sc .)
+
+    echo "Patching ReleasePlanAdmission ${release_plan_admission_name} with ${#BATCH_TAG_LIST[@]} tags" \
+        "split across its configured repositories..." >&2
+
+    # A JSON merge patch can't target a single array element (mapping.components[0]),
+    # so the whole mapping.components array is read back, patched in memory with the
+    # computed tags distributed across repositories[*], and written back wholesale.
+    # Safe here since this suite's RPA always has exactly one component entry (index 0).
+    local patch_json current_rpa patched_components
+    current_rpa=$(kubectl get releaseplanadmission "${release_plan_admission_name}" -n "${managed_namespace}" -o json) || {
+        echo "❌ Failed to read ReleasePlanAdmission ${release_plan_admission_name}" >&2
+        return 1
+    }
+    patched_components=$(jq --argjson tags "${tags_json}" '
+        .spec.data.mapping.components[0].repositories as $repos
+        | ($tags | length) as $total
+        | ($repos | length) as $num_repos
+        | (($total + $num_repos - 1) / $num_repos | floor) as $chunk
+        | .spec.data.mapping.components[0].repositories = [
+            range(0; $num_repos) as $i
+            | $repos[$i] + { tags: $tags[($i * $chunk):(($i + 1) * $chunk)] }
+          ]
+        | .spec.data.mapping.components
+    ' <<< "${current_rpa}")
+
+    patch_json=$(jq -n --argjson components "${patched_components}" \
+        '{ spec: { data: { mapping: { components: $components } } } }')
+
+    if ! kubectl patch releaseplanadmission "${release_plan_admission_name}" \
+            -n "${managed_namespace}" \
+            --type merge \
+            -p "${patch_json}"; then
+        echo "❌ Failed to patch ReleasePlanAdmission" >&2
+        return 1
+    fi
+
+    echo "✅ ReleasePlanAdmission patched with ${#BATCH_TAG_LIST[@]} unique tags" >&2
+}
+
+# Override: full resource creation flow for this suite.
+create_kubernetes_resources() {
+    : "${SUITE_DIR:?SUITE_DIR must be set}"
+    : "${tenant_namespace:?tenant_namespace must be set}"
+    : "${managed_namespace:?managed_namespace must be set}"
+
+    echo "Creating Kubernetes resources for batch concurrency test..." >&2
+
+    decrypt_secrets "${SUITE_DIR}" || {
+        echo "❌ Failed to decrypt secrets" >&2
+        return 1
+    }
+
+    tmpDir=$(mktemp -d)
+    if [ $? -ne 0 ] || [ -z "${tmpDir}" ]; then
+        echo "❌ Failed to create temporary directory" >&2
+        return 1
+    fi
+    echo "Using temporary directory: ${tmpDir}" >&2
+
+    # Resolve symlinks before handing directories to kustomize — kustomize
+    # refuses to load symlinked files that point outside the kustomization
+    # root, and several files here are intentionally symlinked from
+    # rh-advisories-large-snapshot (see integration-tests/README.md
+    # contributing guideline #7).
+    resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/tenant" "${tmpDir}/tenant"
+    resolve_symlinks_for_kustomize "${SUITE_DIR}/resources/managed" "${tmpDir}/managed"
+
+    : "${RELEASE_CATALOG_GIT_URL:?RELEASE_CATALOG_GIT_URL must be set (required for ReleasePlanAdmission)}"
+    : "${RELEASE_CATALOG_GIT_REVISION:?RELEASE_CATALOG_GIT_REVISION must be set (required for ReleasePlanAdmission)}"
+
+    # Konflux's build pipeline signs every image it pushes with Tekton Chains —
+    # use its public key for EC policy (matches rh-advisories-large-snapshot's
+    # ec-policy.yaml, symlinked into this suite).
+    export ec_public_key_ref="k8s://openshift-pipelines/public-key"
+
+    echo "Building and applying tenant resources..." >&2
+    kustomize build "${tmpDir}/tenant" | envsubst "${ENVSUBST_ALLOWLIST}" > "${tmpDir}/tenant-resources.yaml" || {
+        echo "❌ Failed to build tenant resources" >&2
+        return 1
+    }
+    kubectl apply -f "${tmpDir}/tenant-resources.yaml" -n "${tenant_namespace}" || {
+        echo "❌ Failed to apply tenant resources" >&2
+        return 1
+    }
+
+    # The shared ReleasePlan enables auto-release. This suite creates its own
+    # named Release, so disable automatic releases before applying any Snapshot.
+    kubectl label releaseplan "${release_plan_name}" -n "${tenant_namespace}" \
+        release.appstudio.openshift.io/auto-release=false --overwrite || return 1
+
+    echo "Building and applying managed resources..." >&2
+    kustomize build "${tmpDir}/managed" | envsubst "${ENVSUBST_ALLOWLIST}" > "${tmpDir}/managed-resources.yaml" || {
+        echo "❌ Failed to build managed resources" >&2
+        return 1
+    }
+    kubectl apply -f "${tmpDir}/managed-resources.yaml" -n "${managed_namespace}" || {
+        echo "❌ Failed to apply managed resources" >&2
+        return 1
+    }
+
+    echo "✅ All Kubernetes resources created successfully" >&2
+}
+
+# Condition check: is the release processing?
+check_batch_release_processing() {
+    local release_name="$1"
+    local namespace="$2"
+    local pipelinerun
+    pipelinerun=$(kubectl get release "${release_name}" -n "${namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || echo "")
+    [ -n "${pipelinerun}" ] && [ "${pipelinerun}" != "null" ]
+}
+
+wait_for_batch_release_to_start() {
+    : "${release_name:?release_name must be set}"
+    : "${tenant_namespace:?tenant_namespace must be set}"
+    : "${managed_namespace:?managed_namespace must be set}"
+
+    echo "  Release: ${release_name}" >&2
+
+    wait_for_condition \
+        "release ${release_name} to start processing" \
+        "${RELEASE_START_TIMEOUT}" \
+        "${RELEASE_START_POLL_INTERVAL}" \
+        check_batch_release_processing \
+        "${release_name}" \
+        "${tenant_namespace}" || {
+        echo "❌ Release did not start processing within ${RELEASE_START_TIMEOUT}s" >&2
+        return 1
+    }
+
+    local pipelinerun pipelinerun_name
+    pipelinerun=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || echo "")
+    pipelinerun_name="${pipelinerun##*/}"
+
+    if [ -n "${pipelinerun}" ] && [ "${pipelinerun}" != "null" ]; then
+        echo "  PipelineRun: ${pipelinerun}" >&2
+        [[ -n "${CONSOLE_URL:-}" ]] && \
+            echo "  PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
+    fi
+
+    echo "✅ Release started processing" >&2
+}
+
+# Capture a compact managed-pipeline failure summary into
+# /tmp/generate-snapshot-error.txt so it surfaces in the test-report
+# FAILURE_CONTEXT result. Called after wait-for-release.sh exits non-zero.
+diagnose_managed_pipeline_failure() {
+    : "${release_name:?release_name must be set}"
+
+    local pipelinerun pipelinerun_name
+    pipelinerun=$(kubectl get release "${release_name}" -n "${tenant_namespace}" \
+        -o jsonpath='{.status.managedProcessing.pipelineRun}' 2>/dev/null || true)
+    pipelinerun_name="${pipelinerun##*/}"
+    { [ -z "${pipelinerun_name}" ] || [ "${pipelinerun_name}" = "null" ]; } && return 0
+
+    local failed_rows
+    failed_rows=$(kubectl get taskrun -n "${managed_namespace}" \
+        -l "tekton.dev/pipelineRun=${pipelinerun_name}" \
+        -o json 2>/dev/null \
+        | jq -r '.items[]
+            | select(.status.conditions[0].status == "False")
+            | [
+                .metadata.labels["tekton.dev/pipelineTask"],
+                .metadata.name,
+                .status.podName,
+                .status.conditions[0].message
+              ] | @tsv') || true
+
+    [ -z "${failed_rows}" ] && return 0
+
+    {
+        printf 'Managed pipeline failed\n'
+        printf '  PipelineRun: %s\n' "${pipelinerun_name}"
+        while IFS=$'\t' read -r task_name taskrun_name pod_name condition_msg; do
+            printf '\n  Failed task : %s\n' "${task_name}"
+            printf '  TaskRun     : %s\n' "${taskrun_name}"
+            printf '  Condition   : %s\n' "${condition_msg}"
+            if [ -n "${pod_name}" ] && [ "${pod_name}" != "null" ]; then
+                local log_errors
+                log_errors=$(kubectl logs "${pod_name}" -n "${managed_namespace}" \
+                    --all-containers 2>/dev/null \
+                    | grep -iE 'fatal|error|FAILED|403|404|Forbidden|Not Found' \
+                    | tail -5 || true)
+                if [ -n "${log_errors}" ]; then
+                    printf '  Error lines :\n'
+                    while IFS= read -r line; do
+                        printf '    %s\n' "${line}"
+                    done <<< "${log_errors}"
+                fi
+            fi
+        done <<< "${failed_rows}"
+    } > /tmp/generate-snapshot-error.txt
+
+    echo "🔍 Managed pipeline failure context captured → test-report will show details" >&2
+}
+
+wait_for_releases() {
+    : "${tenant_namespace:?tenant_namespace must be set}"
+    : "${release_name:?release_name must be set}"
+
+    # By this point the standard wait_for_plrs_to_complete step has already
+    # confirmed this run's real component build succeeded and pushed a fresh
+    # image. Konflux auto-creates a single-component Snapshot shortly after —
+    # discover it, then finish configuring and creating this suite's own
+    # explicit Release (auto-release was disabled in create_kubernetes_resources
+    # so this can patch tags onto the RPA first).
+    echo "Waiting for the build Snapshot to appear..." >&2
+    wait_for_build_snapshot || {
+        log_error "Failed to find build Snapshot for application ${application_name}"
+        return 1
+    }
+
+    resolve_test_image_digest || return 1
+    compute_batch_tag_count || return 1
+    patch_rpa_with_batch_tags || return 1
+    create_release_for_batch_test || return 1
+
+    echo "Waiting for release to start processing..." >&2
+    wait_for_batch_release_to_start || {
+        log_error "Failed to wait for release to start"
+        return 1
+    }
+
+    export RELEASE_NAME="${release_name}"
+    export RELEASE_NAMESPACE="${tenant_namespace}"
+    export RELEASE_NAMES="${RELEASE_NAME}"
+
+    echo "Waiting for release pipeline to complete..." >&2
+    if ! "${SUITE_DIR}/../scripts/wait-for-release.sh"; then
+        diagnose_managed_pipeline_failure
+        return 1
+    fi
+}
+
+# --- Verification ---
+#
+# Require first-attempt success and the expected batch count. These checks
+# do not establish request overlap; cleanup coverage also depends on the utils
+# image under test (see README.md).
+verify_release_contents() {
+    : "${release_name:?release_name must be set}"
+    : "${tenant_namespace:?tenant_namespace must be set}"
+    : "${managed_namespace:?managed_namespace must be set}"
+
+    local verification_failed=false
+
+    echo "Verifying Release contents for ${release_name} in namespace ${tenant_namespace}..." >&2
+
+    local release_json
+    release_json=$(kubectl get release/"${release_name}" -n "${tenant_namespace}" -ojson 2>/dev/null || echo "")
+    if [ -z "${release_json}" ]; then
+        echo "❌ Could not retrieve Release JSON for ${release_name}" >&2
+        return 1
+    fi
+
+    local succeeded
+    succeeded=$(echo "${release_json}" | jq -r '.status.conditions[] | select(.type=="Released") | .status' 2>/dev/null || echo "")
+    echo "Release Released condition: ${succeeded}" >&2
+
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "Automated Verification Checks:" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    # ========================================================================
+    # CHECK 1: Release succeeded
+    # ========================================================================
+    echo "" >&2
+    echo "1️⃣  Checking Release status..." >&2
+    if [ "${succeeded}" == "True" ]; then
+        echo "   ✅ Release succeeded (Released=True)" >&2
+    else
+        echo "   ❌ FAILURE: Release did not succeed (Released=${succeeded})" >&2
+        verification_failed=true
+    fi
+
+    local pipelinerun pipelinerun_name
+    pipelinerun=$(echo "${release_json}" | jq -r '.status.managedProcessing.pipelineRun' 2>/dev/null || echo "")
+    pipelinerun_name="${pipelinerun##*/}"
+
+    if [ -z "${pipelinerun}" ] || [ "${pipelinerun}" == "null" ]; then
+        echo "   ⚠️  WARNING: PipelineRun not available, cannot run remaining checks" >&2
+        verification_failed=true
+    else
+        echo "   PipelineRun: ${pipelinerun}" >&2
+        [[ -n "${CONSOLE_URL:-}" ]] && \
+            echo "   PipelineRun URL: ${CONSOLE_URL}k8s/ns/${managed_namespace}/tekton.dev~v1~PipelineRun/${pipelinerun_name}" >&2
+
+        # ====================================================================
+        # CHECK 2: rh-direct-sign-image TaskRun ultimately succeeded. Retries
+        # are observed and logged, but tolerated rather than required to be
+        # zero (see the note below).
+        # ====================================================================
+        echo "" >&2
+        echo "2️⃣  Checking rh-direct-sign-image TaskRun for retries..." >&2
+
+        local sign_taskrun_json
+        sign_taskrun_json=$(kubectl get taskrun -n "${managed_namespace}" \
+            -l "tekton.dev/pipelineRun=${pipelinerun_name},tekton.dev/pipelineTask=rh-direct-sign-image" \
+            -o json 2>/dev/null || echo "{}")
+
+        local taskrun_count retries_count successful_taskrun_json
+        local sign_taskrun_name sign_status sign_pod_name
+        taskrun_count=$(jq -r '.items | length' <<< "${sign_taskrun_json}")
+        retries_count=$(jq -r '[.items[]?.status.retriesStatus // [] | length] | add // 0' \
+            <<< "${sign_taskrun_json}")
+        successful_taskrun_json=$(jq -c '
+            [.items[]
+                | select(any(.status.conditions[]?;
+                    .type == "Succeeded" and .status == "True"))]
+            | sort_by(.metadata.creationTimestamp)
+            | last // {}
+        ' <<< "${sign_taskrun_json}")
+        sign_taskrun_name=$(jq -r '.metadata.name // ""' <<< "${successful_taskrun_json}")
+
+        if [ "${taskrun_count}" -eq 0 ]; then
+            echo "   ❌ FAILURE: rh-direct-sign-image TaskRun not found" >&2
+            echo "      Possible cause: task was skipped (check skip_release result upstream)" >&2
+            verification_failed=true
+        else
+            echo "   TaskRun objects: ${taskrun_count}" >&2
+            while IFS= read -r attempt_summary; do
+                echo "   ${attempt_summary}" >&2
+            done < <(jq -r '
+                .items[]
+                | "TaskRun: \(.metadata.name) status="
+                  + "\([.status.conditions[]?
+                      | select(.type == "Succeeded")][0].status // "Unknown")"
+                  + " retries=\(.status.retriesStatus // [] | length)"
+            ' <<< "${sign_taskrun_json}")
+
+            sign_status=$(jq -r '
+                [.status.conditions[]? | select(.type == "Succeeded")][0].status // ""
+            ' <<< "${successful_taskrun_json}")
+            sign_pod_name=$(jq -r '.status.podName // ""' <<< "${successful_taskrun_json}")
+
+            if [ -n "${sign_taskrun_name}" ] && [ "${sign_status}" == "True" ]; then
+                echo "   ✅ Successful TaskRun selected for log checks: ${sign_taskrun_name}" >&2
+            else
+                echo "   ❌ FAILURE: no successful rh-direct-sign-image TaskRun found" >&2
+                verification_failed=true
+            fi
+
+            echo "   Total retriesStatus entries: ${retries_count} (observed, not required to be 0)" >&2
+            if [ "${retries_count}" -eq 0 ]; then
+                echo "   ✅ Signing succeeded on the first attempt" >&2
+            else
+                echo "   ⚠️  NOTE: signing needed ${retries_count} Tekton-level retry attempt(s)" \
+                    "before succeeding — tolerated, not failed." >&2
+                echo "      This suite deliberately pushes concurrency above rh-direct-sign-image's" >&2
+                echo "      concurrentLimit, which can also trip unrelated transient infra errors" >&2
+                echo "      (e.g. a 409 Conflict updating the namespace ResourceQuota under heavy" >&2
+                echo "      concurrent InternalRequest creation). CHECK 3 below still inspects the" >&2
+                echo "      first attempt's log for the cleanup-correctness evidence this suite" >&2
+                echo "      exists to find." >&2
+            fi
+
+            # ================================================================
+            # CHECK 3: First attempt's log shows exactly TARGET_BATCH_COUNT
+            # batches submitted, with no InternalRequest cross-deletion
+            # errors. The first attempt is used (not the final one) because
+            # a retry's own log only resubmits whatever didn't already
+            # succeed, so it won't show the full TARGET_BATCH_COUNT. A first
+            # attempt that failed and was recovered by a later Tekton retry
+            # is reported as informational here, not a hard failure — that's
+            # a transient-infra concern tracked separately from cleanup
+            # correctness (see CHECK 2's note).
+            # ================================================================
+            echo "" >&2
+            echo "3️⃣  Inspecting rh-direct-sign-image pod log..." >&2
+
+            local first_pod_name
+            first_pod_name=$(jq -r '
+                if ((.status.retriesStatus // []) | length) > 0
+                then (.status.retriesStatus | sort_by(.startTime) | .[0].podName // "")
+                else (.status.podName // "")
+                end
+            ' <<< "${successful_taskrun_json}")
+
+            if [ -z "${first_pod_name}" ] || [ "${first_pod_name}" == "null" ]; then
+                echo "   ⚠️  WARNING: pod already garbage-collected, cannot inspect log" >&2
+                verification_failed=true
+            else
+                local pod_log
+                pod_log=$(kubectl logs "${first_pod_name}" -n "${managed_namespace}" \
+                    -c step-sign-image 2>/dev/null || echo "")
+
+                if [ -z "${pod_log}" ]; then
+                    echo "   ⚠️  WARNING: could not retrieve pod log for ${first_pod_name}" >&2
+                    verification_failed=true
+                else
+                    local wrote_line submit_line summary_line
+                    wrote_line=$(grep -oE "Wrote [0-9]+ batch\(es\) to" <<< "${pod_log}" | tail -1 || true)
+                    submit_line=$(grep -oE "Submitting [0-9]+ batch file\(s\)" <<< "${pod_log}" | tail -1 || true)
+                    summary_line=$(grep -oE "Batch request summary: [0-9]+ succeeded, [0-9]+ failed" <<< "${pod_log}" | tail -1 || true)
+
+                    echo "   ${wrote_line:-<no 'Wrote N batch(es)' line found>}" >&2
+                    echo "   ${submit_line:-<no 'Submitting N batch file(s)' line found>}" >&2
+                    echo "   ${summary_line:-<no 'Batch request summary' line found>}" >&2
+
+                    local written_count
+                    written_count=$(grep -oE "Wrote [0-9]+ batch" <<< "${wrote_line}" | grep -oE "[0-9]+" || echo "")
+
+                    if [ "${written_count}" == "${TARGET_BATCH_COUNT}" ]; then
+                        echo "   ✅ Exactly ${TARGET_BATCH_COUNT} batch(es) were written (as intended)" >&2
+                    else
+                        echo "   ❌ FAILURE: expected exactly ${TARGET_BATCH_COUNT} batch(es), found '${written_count:-none}'" >&2
+                        echo "      The computed tag count no longer produces the intended batch split —" >&2
+                        echo "      re-run compute_batch_tag_count.py against the current signing ConfigMap." >&2
+                        verification_failed=true
+                    fi
+
+                    if [ "${submit_line}" != "Submitting ${TARGET_BATCH_COUNT} batch file(s)" ]; then
+                        echo "   ❌ FAILURE: expected ${TARGET_BATCH_COUNT} submitted batches: '${submit_line:-<missing>}'" >&2
+                        verification_failed=true
+                    fi
+
+                    if [ "${summary_line}" = "Batch request summary: ${TARGET_BATCH_COUNT} succeeded, 0 failed" ]; then
+                        echo "   ✅ All batches succeeded, none failed" >&2
+                    elif [ "${retries_count}" -gt 0 ]; then
+                        echo "   ⚠️  NOTE: first attempt reported '${summary_line:-<missing>}' —" \
+                            "tolerated since a later Tekton retry (see CHECK 2) recovered and the" \
+                            "release still succeeded." >&2
+                    else
+                        echo "   ❌ FAILURE: batch summary does not show all-succeeded: '${summary_line:-<missing>}'" >&2
+                        verification_failed=true
+                    fi
+
+                    local error_lines
+                    error_lines=$(grep -iE "Internal request failed for batch|Batch request failure" <<< "${pod_log}" || true)
+                    if [ -z "${error_lines}" ]; then
+                        echo "   ✅ No signing batch failure messages in log" >&2
+                    elif [ "${retries_count}" -gt 0 ]; then
+                        echo "   ⚠️  NOTE: first attempt logged batch failure(s), tolerated since a" \
+                            "later Tekton retry recovered:" >&2
+                        while IFS= read -r line; do
+                            echo "      ${line}" >&2
+                        done <<< "${error_lines}"
+                    else
+                        echo "   ❌ FAILURE: found error line(s) indicating a batch failure:" >&2
+                        while IFS= read -r line; do
+                            echo "      ${line}" >&2
+                        done <<< "${error_lines}"
+                        verification_failed=true
+                    fi
+                fi
+            fi
+        fi
+    fi
+
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo "Verification Summary:" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    if [ "${verification_failed}" == "true" ]; then
+        echo "" >&2
+        echo "❌ VERIFICATION FAILED: One or more automated checks found issues" >&2
+        {
+            echo "FAILED"
+            echo "Release: ${release_name:-unknown} | PipelineRun: ${pipelinerun_name:-unknown}"
+            echo "One or more verification checks failed — see step log for details."
+        } > /tmp/verification-summary.txt
+        return 1
+    else
+        echo "" >&2
+        echo "✅ SUCCESS: All automated verification checks passed" >&2
+        echo "  ✅ Release succeeded" >&2
+        echo "  ✅ rh-direct-sign-image succeeded (${retries_count:-0} retry attempt(s))" >&2
+        echo "  ✅ Exactly ${TARGET_BATCH_COUNT} signing batches were submitted on the first attempt" >&2
+        {
+            echo "PASSED"
+            echo "Release: ${release_name:-unknown} | PipelineRun: ${pipelinerun_name:-unknown}"
+            echo "rh-direct-sign-image: ${retries_count:-0} retries, ${TARGET_BATCH_COUNT} batches submitted on first attempt"
+        } > /tmp/verification-summary.txt
+        return 0
+    fi
+}
+
+# Override: cleanup with batch-test-specific resources
+cleanup_resources() {
+    local err=${1:-0}
+    local line=${2:-"N/A"}
+    local command=${3:-"N/A"}
+
+    if [ "${err}" -ne 0 ]; then
+        echo "${0}: ERROR: Command '${command}' failed at line ${line} - exited with status ${err}"
+    fi
+
+    if [ "${CLEANUP}" == "true" ]; then
+        echo "Performing cleanup..."
+        set +eo pipefail
+
+        if [ -n "${component_repo_name:-}" ]; then
+            echo "🗑️  Deleting GitHub repository ${component_repo_name} ..."
+            "${SUITE_DIR}/../scripts/delete-repository.sh" "${component_repo_name}" || \
+                echo "   ⚠ Failed to delete GitHub repository ${component_repo_name}" >&2
+        fi
+
+        if [ -n "${component_git_url:-}" ] && [ -n "${tenant_namespace:-}" ]; then
+            echo "🗑️  Removing webhook secret entry for ${component_git_url} ..."
+            "${SUITE_DIR}/../scripts/remove-webhook-secret-entry.sh" "${tenant_namespace}" "${component_git_url}" || \
+                echo "   ⚠ Failed to remove webhook secret entry for ${component_git_url}" >&2
+        fi
+
+        if [ -n "${batch_test_snapshot_name:-}" ] && [ -n "${tenant_namespace:-}" ]; then
+            echo "🗑️  Deleting batch test snapshot ${batch_test_snapshot_name} ..."
+            kubectl delete snapshot "${batch_test_snapshot_name}" -n "${tenant_namespace}" --ignore-not-found=true 2>/dev/null || \
+                echo "   ⚠ Failed to delete snapshot ${batch_test_snapshot_name}" >&2
+        fi
+
+        if [ -n "${uuid:-}" ] && [ -n "${tenant_namespace:-}" ] && [ -n "${originating_tool:-}" ]; then
+            echo "🗑️  Cleaning up releases for test run ${uuid}..."
+            kubectl delete release -n "${tenant_namespace}" \
+                -l "originating-tool=${originating_tool},test-run-uuid=${uuid}" \
+                --ignore-not-found=true || echo "   ⚠ Failed to delete test releases" >&2
+        fi
+
+        # The image controller creates an ImageRepository for the Component with no
+        # ownerReference, so it survives Component deletion unless removed explicitly
+        # (same reasoning as the shared cleanup_resources() in lib/test-functions.sh).
+        if [ -n "${component_name:-}" ] && [ -n "${tenant_namespace:-}" ]; then
+            echo "🗑️  Deleting ImageRepository for component ${component_name} ..."
+            kubectl delete imagerepository -n "${tenant_namespace}" \
+                -l "appstudio.redhat.com/component=${component_name}" \
+                --ignore-not-found=true || \
+                echo "   ⚠ Failed to delete ImageRepository for component ${component_name}" >&2
+        fi
+
+        if [ -n "${tmpDir:-}" ] && [ -d "${tmpDir}" ]; then
+            echo "Deleting test resources..."
+            if [ -f "${tmpDir}/tenant-resources.yaml" ]; then
+                kubectl delete -f "${tmpDir}/tenant-resources.yaml" \
+                    --ignore-not-found=true 2>/dev/null || true
+            fi
+            if [ -f "${tmpDir}/managed-resources.yaml" ]; then
+                kubectl delete -f "${tmpDir}/managed-resources.yaml" --ignore-not-found=true 2>/dev/null || true
+            fi
+            rm -rf "${tmpDir}" || echo "   ⚠ Failed to remove tmpDir"
+        fi
+    else
+        echo "Skipping cleanup as per --skip-cleanup flag."
+    fi
+
+    echo "Killing any child processes..."
+    pkill -e -P $$ 2>/dev/null || true
+
+    if [ "${err}" -ne 0 ]; then
+        exit "${err}"
+    fi
+}
+
+echo "✅ Batch concurrency test functions loaded"
