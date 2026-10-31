@@ -160,5 +160,5 @@ setup_trusted_artifacts_docker_config() {
     export TRUSTED_ARTIFACTS_REGISTRY_CONFIG
     _ta_restore_xtrace
 
-    echo "✅ Trusted-artifacts registry auth configured from ${source_desc}"
+    echo "✅ Trusted-artifacts registry auth configured from ${source_desc}" >&2
 }
