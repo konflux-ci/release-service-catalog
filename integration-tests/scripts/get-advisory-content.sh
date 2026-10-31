@@ -26,12 +26,19 @@
 #   RELEASE_CATALOG_GIT_REVISION (optional) - The Git revision (branch, tag, or commit SHA)
 #                                           of the release service catalog to use.
 #                                           Defaults to "development".
+#   MANAGED_SECRETS_YAML (optional)       - Path to decrypted managed-secrets.yaml. Used
+#                                           as a fallback when the cluster pull secret
+#                                           cannot be read for local oras blob fetch.
 #
 # Dependencies:
 #   kubectl, jq, mktemp, uuidgen (or a command that provides similar functionality like 'uuid'),
 #   oras (for fetching OCI artifacts), tkn (optional, for displaying PipelineRun logs, fallback provided).
 
 set -eo pipefail
+
+_this_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=setup-trusted-artifacts-docker-config.sh
+source "${_this_dir}/setup-trusted-artifacts-docker-config.sh"
 
 # Function to print error messages and exit
 error_exit() {
@@ -200,7 +207,10 @@ fetch_and_extract_artifact() {
     error_exit "oras command not found. Please install oras to fetch the artifact."
   fi
 
-  oras blob fetch "${oci_artifact}" --output - | tar -C "${output_dir_param}" --no-overwrite-dir -zxmf -
+  setup_trusted_artifacts_docker_config "${managed_namespace_param}" "${managed_sa_name}"
+  trap cleanup_trusted_artifacts_docker_config EXIT
+  oras blob fetch --registry-config "${TRUSTED_ARTIFACTS_REGISTRY_CONFIG}" \
+    "${oci_artifact}" --output - | tar -C "${output_dir_param}" --no-overwrite-dir -zxmf -
   echo "✅️ Restored artifact ${oci_artifact} to ${output_dir_param}"
 }
 

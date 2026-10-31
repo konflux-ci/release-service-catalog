@@ -17,9 +17,15 @@
 #
 # Environment Variables:
 #   KUBECONFIG (optional) - Path to the kubeconfig file
+#   MANAGED_SECRETS_YAML (optional) - Path to decrypted managed-secrets.yaml,
+#                                     used if the cluster pull secret cannot be read
 #
 
 set -euo pipefail
+
+_this_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=setup-trusted-artifacts-docker-config.sh
+source "${_this_dir}/setup-trusted-artifacts-docker-config.sh"
 
 log() {
     echo "$@" >&2
@@ -101,18 +107,26 @@ if ! command -v oras &> /dev/null; then
     error_exit "oras command not found. Please install oras to fetch the artifact."
 fi
 
+SA_NAME="$(kubectl get pipelinerun "$PLR_NAME" -n "$NAMESPACE" -o json | jq -r '
+    .spec.taskRunTemplate.serviceAccountName // .spec.serviceAccountName // empty
+')"
+setup_trusted_artifacts_docker_config "$NAMESPACE" "$SA_NAME"
+trap cleanup_trusted_artifacts_docker_config EXIT
+
 # Fetch and extract the artifact
 # Trusted artifacts are stored as blobs, need to fetch the blob
 log "Fetching artifact with oras..."
 
 # Try to pull the artifact - trusted artifacts use a specific format
 # First, try oras blob fetch (for single blob artifacts)
-if oras blob fetch "$OCI_REF" --output - 2>/dev/null | tar -C "$OUTPUT_DIR" --no-overwrite-dir -zxmf - 2>/dev/null; then
+if oras blob fetch --registry-config "${TRUSTED_ARTIFACTS_REGISTRY_CONFIG}" \
+    "$OCI_REF" --output - | tar -C "$OUTPUT_DIR" --no-overwrite-dir -zxmf -; then
     log "✅ Extracted artifact using oras blob fetch"
 else
     # Fallback: try oras pull (for manifest-based artifacts)
     log "Trying oras pull..."
-    if oras pull "$OCI_REF" -o "$OUTPUT_DIR" 2>/dev/null; then
+    if oras pull --registry-config "${TRUSTED_ARTIFACTS_REGISTRY_CONFIG}" \
+        "$OCI_REF" -o "$OUTPUT_DIR"; then
         log "✅ Extracted artifact using oras pull"
     else
         error_exit "Failed to fetch artifact from $OCI_REF"

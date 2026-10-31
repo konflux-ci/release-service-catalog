@@ -30,6 +30,9 @@ NO_CVE="true" # Default to false
 # Pyxis API base URL
 PYXIS_URL="https://pyxis.preprod.api.redhat.com/"
 
+# shellcheck source=../scripts/setup-trusted-artifacts-docker-config.sh
+source "${SCRIPT_DIR}/scripts/setup-trusted-artifacts-docker-config.sh"
+
 # Merge two base64-encoded .dockerconfigjson payloads; keeps the first config and unions auths.
 merge_push_docker_configjson_from_b64() {
     local local_b64="${1}" shared_b64="${2}"
@@ -273,8 +276,10 @@ get_pyxis_image_ids_from_release() {
     # The subshell ensures the temp directory is removed even on early exit,
     # and the trap is scoped to the subshell only.
     image_ids="$(
-        trap 'rm -rf "${oci_artifact_dir}"' EXIT
-        oras blob fetch "${oci_artifact}" --output - | tar -C "${oci_artifact_dir}" --no-overwrite-dir -zxmf -
+        trap 'rm -rf "${oci_artifact_dir}"; cleanup_trusted_artifacts_docker_config' EXIT
+        setup_trusted_artifacts_docker_config "${managed_namespace}" "${managed_sa_name}"
+        oras blob fetch --registry-config "${TRUSTED_ARTIFACTS_REGISTRY_CONFIG}" \
+            "${oci_artifact}" --output - | tar -C "${oci_artifact_dir}" --no-overwrite-dir -zxmf -
 
         mapfile -t pyxis_files < <(find "${oci_artifact_dir}" -name "pyxis.json")
         if (( ${#pyxis_files[@]} != 1 )); then
