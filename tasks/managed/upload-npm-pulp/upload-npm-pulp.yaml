@@ -7,18 +7,32 @@ spec:
   description: |
     Upload npm package tarballs to a Pulp npm repository via the synchronous
     content upload API. Sets tl.compliance_level from adjacent
-    *.tl-compliance.json sidecars when present. Idempotent: skips packages
-    already present with matching sha256; fails if the same name/version
-    exists with different content. On skip, still applies compliance labels
-    (and best-effort sidecar upload to optional PULP_FILE_REPOSITORY) so
-    reruns can correct metadata. Requires at least one .tgz under FILES_DIR.
-    Business logic runs as a single plumbing-utils command (npm-release-upload)
+    *.tl-compliance.json sidecars when present. When ATTESTATION_IMAGE_PREFIX
+    (or COMPLIANCE_IMAGE_PREFIX) is set, signs adjacent .tgz with cosign
+    (generate-and-sign-npm-attestations), pushes attestation OCI to Quay, and
+    sets tl.oci_registry_base / tl.attestation_oci_digest /
+    tl.attestation_predicate_type. Idempotent: skips packages already present
+    with matching sha256; fails if the same name/version exists with different
+    content. On skip, still applies compliance and attestation labels so
+    reruns can attach metadata. Requires at least one .tgz under FILES_DIR.
+    Business logic runs as npm-release-upload in the slan-cuan image.
   params:
     - name: SERVICE_ACCOUNT_SECRET_NAME
       type: string
       description: >-
         Secret with Pulp username/password keys (same as Python wheel release)
       default: rhtl-pulp-credentials-secret
+    - name: COSIGN_SECRET_NAME
+      type: string
+      description: >-
+        Secret with cosign.key or SIGN_KEY + AWS_* for package attestations.
+        Attestation is skipped when signing material is absent unless
+        REQUIRE_ATTESTATIONS=true
+      default: konflux-cosign-signing-production
+    - name: REQUIRE_ATTESTATIONS
+      type: string
+      description: When true, fail if signing material or .att files are missing
+      default: "false"
     - name: PULP_BASE_URL
       type: string
       description: The base URL of the Pulp server
@@ -37,6 +51,18 @@ spec:
       description: >
         Optional Pulp file repository for adjacent *.tl-compliance.json uploads.
         When empty, sidecar file uploads are skipped (compliance labels still apply)
+      default: ""
+    - name: COMPLIANCE_IMAGE_PREFIX
+      type: string
+      description: >
+        Quay repository prefix used for attestation OCI (and shared
+        tl.oci_registry_base). Empty skips sign + attestation publish
+      default: ""
+    - name: ATTESTATION_IMAGE_PREFIX
+      type: string
+      description: >
+        Optional override for attestation OCI repo. Defaults to
+        COMPLIANCE_IMAGE_PREFIX when empty
       default: ""
     - name: sourceDataArtifact
       type: string
@@ -80,12 +106,19 @@ spec:
     - name: service-account-secret
       secret:
         secretName: $(params.SERVICE_ACCOUNT_SECRET_NAME)
+    - name: cosign-secret
+      secret:
+        secretName: $(params.COSIGN_SECRET_NAME)
+        optional: true
     - name: workdir
       emptyDir: {}
   stepTemplate:
     securityContext:
       runAsUser: 1001
     env:
+      # Writable HOME so Tekton creds-init can copy SA dockerconfig secrets for Quay.
+      - name: HOME
+        value: /var/workdir
       - name: PULP_BASE_URL
         value: $(params.PULP_BASE_URL)
       - name: PULP_API_ROOT
@@ -96,6 +129,12 @@ spec:
         value: $(params.PULP_REPOSITORY)
       - name: PULP_FILE_REPOSITORY
         value: $(params.PULP_FILE_REPOSITORY)
+      - name: COMPLIANCE_IMAGE_PREFIX
+        value: $(params.COMPLIANCE_IMAGE_PREFIX)
+      - name: ATTESTATION_IMAGE_PREFIX
+        value: $(params.ATTESTATION_IMAGE_PREFIX)
+      - name: REQUIRE_ATTESTATIONS
+        value: $(params.REQUIRE_ATTESTATIONS)
       - name: FILES_DIR
         value: $(params.dataDir)/$(params.filesDir)
       - name: IMAGE_EXPIRES_AFTER
@@ -130,16 +169,19 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: upload
-      image: quay.io/redhat-user-workloads/calunga-tenant/plumbing-utils@sha256:ffabc1416ebb96382a73279ee022de1e9cd9b33a6fdc8c85db9bd073a74be238
+      image: quay.io/light-castle/slan-cuan@sha256:2b370a9d6dc59257e0176a472b98d052d2994d87115e04a546a8cb07c3861825
       volumeMounts:
         - name: service-account-secret
           mountPath: "/etc/service-account-secret"
           readOnly: true
+        - name: cosign-secret
+          mountPath: "/etc/cosign-secret"
+          readOnly: true
       computeResources:
         limits:
-          memory: 256Mi
+          memory: 512Mi
         requests:
-          memory: 256Mi
+          memory: 512Mi
           cpu: 100m
       command: ["npm-release-upload"]
     - name: create-trusted-artifact
