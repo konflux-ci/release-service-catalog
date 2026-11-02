@@ -13,6 +13,9 @@
 CLEANUP="true"
 NO_CVE="true"
 
+# shellcheck source=../scripts/setup-trusted-artifacts-docker-config.sh
+source "${SCRIPT_DIR}/scripts/setup-trusted-artifacts-docker-config.sh"
+
 # --- Snapshot and Release Management ---
 
 wait_for_releases() {
@@ -120,7 +123,16 @@ verify_release_contents() {
 
     local oci_artifact_dir
     oci_artifact_dir=$(mktemp -d -p "$(pwd)")
-    oras blob fetch "${oci_artifact}" --output - | tar -C "${oci_artifact_dir}" --no-overwrite-dir -zxmf -
+    setup_trusted_artifacts_docker_config "${managed_namespace}" "${managed_sa_name}"
+    if ! oras blob fetch --registry-config "${TRUSTED_ARTIFACTS_REGISTRY_CONFIG}" \
+        "${oci_artifact}" --output - | tar -C "${oci_artifact_dir}" --no-overwrite-dir -zxmf -; then
+        cleanup_trusted_artifacts_docker_config
+        echo "🔴 Failed to fetch trusted artifact ${oci_artifact}"
+        failures=$((failures+1))
+        echo "🔴 Test has FAILED with ${failures} failure(s)!"
+        exit 1
+    fi
+    cleanup_trusted_artifacts_docker_config
     echo "Restored artifact to ${oci_artifact_dir}"
 
     local pyxisDataFile
