@@ -33,6 +33,10 @@
 
 set -eo pipefail
 
+_this_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=setup-trusted-artifacts-docker-config.sh
+source "${_this_dir}/setup-trusted-artifacts-docker-config.sh"
+
 # Function to print error messages and exit
 error_exit() {
   echo "🔴 error: $1" >&2
@@ -200,7 +204,10 @@ fetch_and_extract_artifact() {
     error_exit "oras command not found. Please install oras to fetch the artifact."
   fi
 
-  oras blob fetch "${oci_artifact}" --output - | tar -C "${output_dir_param}" --no-overwrite-dir -zxmf -
+  setup_trusted_artifacts_docker_config "${managed_namespace_param}" "${managed_sa_name}"
+  trap cleanup_trusted_artifacts_docker_config EXIT
+  oras blob fetch --registry-config "${TRUSTED_ARTIFACTS_REGISTRY_CONFIG}" \
+    "${oci_artifact}" --output - | tar -C "${output_dir_param}" --no-overwrite-dir -zxmf -
   echo "✅️ Restored artifact ${oci_artifact} to ${output_dir_param}"
 }
 
