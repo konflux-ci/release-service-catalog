@@ -41,10 +41,12 @@ The following scenarios are tested
 - multi opt-in components happy path (`multi-optin`)
 
 Which scenarios run is controlled by `PTSV_FBC_SCENARIOS` in `test.env` (a
-space- or comma-separated list of scenario keys). When set, it enables exactly
-those scenarios and skips change-detection; leave it empty to fall back to
-change-detection. The same variable can be supplied via the ITS
-`PIPELINE_TEST_SUITE_VARS` (it is `PTSV_`-prefixed).
+space- or comma-separated list of scenario keys). When set, that list is the
+upper bound. On a PR, change-detection may drop scenarios the changed files do
+not require, or skip the suite (exit 99) when a grouped check has no overlap.
+Periodic/local runs without PR files keep the requested set. Leave the variable
+empty to use change-detection only. The same variable can be supplied via the
+ITS `PIPELINE_TEST_SUITE_VARS` (it is `PTSV_`-prefixed).
 
 Only the components used by the **enabled** scenarios are built each run:
 `select_components_for_matrix()` in `test.sh` narrows `PTSV_COMPONENTS` to that
