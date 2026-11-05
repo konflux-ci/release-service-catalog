@@ -1,0 +1,64 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: get-iib-builds-load
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/tags: release
+spec:
+  description: |
+    Gets the number of in-progress IIB builds submitted by the given user for each given from_index, using
+    the IIB url from the iib-services-config secret. A from_index whose count can't be fetched is left out
+    of the loads result.
+    The task will always exit 0 even if something fails. This is because the task result will not be
+    set if the task fails, and the task result should always be set and propagated back to the cluster
+    that creates the internal request. The success/failure is handled in the task creating the internal
+    request.
+  params:
+    - name: fromIndexes
+      type: string
+      description: JSON array of from_index pullspecs to get the in-progress build count for
+    - name: user
+      type: string
+      description: IIB user whose in-progress builds are counted
+  results:
+    - name: result
+      description: Success if the task succeeds, the error otherwise
+    - name: loads
+      description: |-
+        JSON object mapping each from_index to its number of in-progress IIB builds,
+        e.g. {"registry.io/index:v4.18": 3}
+  volumes:
+    - name: iib-services-config-vol
+      secret:
+        secretName: iib-services-config
+        defaultMode: 0444
+  stepTemplate:
+    securityContext:
+      runAsUser: 1001
+  steps:
+    - name: get-iib-builds-load
+      image: quay.io/konflux-ci/release-service-utils@sha256:f14b718756c7ebfc6a9686ad4fd66b9f8e536aac39b32741e4d1f98c10599980
+      computeResources:
+        limits:
+          memory: 128Mi
+        requests:
+          memory: 128Mi
+          cpu: 100m
+      volumeMounts:
+        - name: iib-services-config-vol
+          mountPath: /mnt/iib-services-config
+      env:
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+        - name: RESULT_LOADS
+          value: $(results.loads.path)
+      command: ["python3"]
+      args:
+        - -m
+        - release_service_utils.tasks.internal.get_iib_builds_load
+        - --from-indexes
+        - $(params.fromIndexes)
+        - --user
+        - $(params.user)
