@@ -5,7 +5,8 @@ Publish TL npm closure metadata after Pulp upload: for each assess
 OCI and update the global closure index on Quay. COMPLIANCE_IMAGE_PREFIX,
 CLOSURE_INDEX_IMAGE, and TL_NPM_REGISTRY_URL are task params (defaults keep
 calunga npm PoC behaviour). Requires Pulp credentials (same secret as
-upload-npm-pulp). Business logic runs as npm-release-closure-update.
+upload-npm-pulp). Business logic runs as npm-release-closure-update in the
+slan-cuan image.
 
 ## Parameters
 
