@@ -949,6 +949,96 @@ select_components_for_matrix() {
     echo "🔧 Components selected for enabled scenarios: ${PTSV_COMPONENTS}"
 }
 
+# Overrides the shared create_github_repositories (lib/test-functions.sh).
+# fbc-release runs as several grouped ITS at once, all with the same bot token,
+# so their repo creates/pushes hit GitHub concurrently and intermittently fail
+# server-side (create "Server Error", push "fatal error in commit_refs_rules").
+# Start after a random delay and retry each copy with jittered backoff. A copy
+# whose branch landed despite the error counts as done; otherwise re-running it
+# is safe, since copy-branch-to-repo-git.sh skips creating an existing repo.
+create_github_repositories() {
+    local max_attempts=5
+    local delay=$((RANDOM % 15))
+    echo "🔨 Creating repositories (waiting ${delay}s first so parallel fbc ITS don't start together)..."
+    sleep "${delay}"
+    for component in ${PTSV_COMPONENTS}; do
+        local _v="${component}_repo_name"
+        local _component_repo_name="${!_v}"
+        _v="${component}_branch"
+        local _component_branch="${!_v}"
+        _v="${component}_base_repo_name"
+        local _component_base_repo_name="${!_v}"
+        _v="${component}_base_branch"
+        local _component_base_branch="${!_v}"
+        local create_repo_output_file
+        local create_repo_status=0
+        local create_repo_message
+        local attempt
+
+        create_repo_output_file=$(mktemp)
+        for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            echo "Creating component repository ${_component_repo_name} branch ${_component_branch} from ${_component_base_repo_name} branch ${_component_base_branch} (attempt ${attempt}/${max_attempts})"
+            if "${SUITE_DIR}/../scripts/copy-branch-to-repo-git.sh" \
+              "${_component_base_repo_name}" "${_component_base_branch}" \
+              "${_component_repo_name}" "${_component_branch}" 2>&1 | tee "${create_repo_output_file}"; then
+                create_repo_status=0
+                break
+            else
+                create_repo_status=${PIPESTATUS[0]}
+            fi
+            if git ls-remote --heads "https://${GITHUB_TOKEN}@github.com/${_component_repo_name}.git" \
+              "${_component_branch}" 2>/dev/null | grep -q .; then
+                echo "✅ Branch ${_component_branch} exists in ${_component_repo_name} despite the error"
+                create_repo_status=0
+                break
+            fi
+            if [ "${attempt}" -lt "${max_attempts}" ]; then
+                delay=$((attempt * 10 + RANDOM % 10))
+                echo "⚠️  Repository copy failed, retrying in ${delay}s..."
+                sleep "${delay}"
+            fi
+        done
+
+        if [ "${create_repo_status}" -ne 0 ]; then
+            create_repo_message=$(sed -n \
+                -e 's/^Error message: //p' \
+                -e 's/^🔴 error: //p' \
+                "${create_repo_output_file}" | tail -1)
+            if [ -n "${create_repo_message}" ]; then
+                export RUN_TEST_FAILURE_MESSAGE="${create_repo_message}"
+            fi
+            rm -f "${create_repo_output_file}"
+            return "${create_repo_status}"
+        fi
+        rm -f "${create_repo_output_file}"
+    done
+}
+
+# Hook called by run-test.sh before create_kubernetes_resources renders the
+# tenant Components. Replaces test.env's random OCP versions with versions on the
+# least-loaded IIB queues: each OCP_VER slot this run's enabled scenarios use gets
+# a different version, on its own queue where possible, weighted by how many IIB
+# requests the slot sends (one per scenario and component). Falls back to random
+# if the selection fails.
+pre_create_kubernetes_resources() {
+    local -a weights=(0 0 0 0 0 0)
+    local scenario comp selected
+    for scenario in "${!GLOBAL_TEST_MATRIX[@]}"; do
+        [ "${GLOBAL_TEST_MATRIX[$scenario]}" = "enabled" ] || continue
+        for comp in ${SCENARIO_COMPONENTS[$scenario]:-}; do
+            weights[${COMPONENT_OCP_SLOT[$comp]}]=$(( weights[${COMPONENT_OCP_SLOT[$comp]}] + 1 ))
+        done
+    done
+    if ! selected=$("${SUITE_DIR}/../scripts/select-least-loaded-ocp-versions.sh" \
+        "$(IFS=,; echo "${weights[*]}")" "${OCP_VERSIONS[@]}"); then
+        echo "⚠️  Could not select OCP versions by IIB load, keeping random: ${OCP_VER[*]}"
+        return 0
+    fi
+    readarray -t OCP_VER <<< "${selected}"
+    export_ocp_versions "${OCP_VER[@]}"
+    echo "🔧 OCP versions selected: ${OCP_VER[*]} (IIB requests per slot: ${weights[*]})"
+}
+
 # Hook called by create_kubernetes_resources (shared lib) after the tenant
 # resources are copied to tmpDir and before `kustomize build`. Removes the
 # Component files of components not in PTSV_COMPONENTS so only the enabled
