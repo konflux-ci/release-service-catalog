@@ -16,6 +16,8 @@ function mktemp() {
     dir=$(/usr/bin/mktemp -d)
     echo -e "---\n" > "${dir}/advisory.yaml"
     echo "${dir}"
+  elif [[ $# -eq 0 ]]; then
+    /usr/bin/mktemp
   else
     echo Error: Unexpected call
     exit 1
@@ -25,7 +27,8 @@ function mktemp() {
 function curl() {
   echo "Mock curl called with: $*" >&2
 
-  if [[ "$*" == *"-sL --fail-with-body https://some-url.com/advisory.yaml -o"* ]]
+  if [[ "$*" == *"-sL --fail-with-body -K "* && \
+        "$*" == *"https://some-url.com/api/v4/projects/group%2Fproject/repository/files/path%2Fto%2Fadvisory.yaml/raw?ref=main -o"* ]]
   then
     echo "mock" >&2
   else
