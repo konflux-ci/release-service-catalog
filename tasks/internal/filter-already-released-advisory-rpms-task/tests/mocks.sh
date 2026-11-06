@@ -29,7 +29,7 @@ function git() {
   echo "Mock git called with: $*"
 
   if [[ "$1" == "clone" ]]; then
-    mkdir -p "$6"
+    mkdir -p "$5"
   elif [[ "$1" == "sparse-checkout" ]]; then
     :
   elif [[ "$1" == "checkout" ]]; then
