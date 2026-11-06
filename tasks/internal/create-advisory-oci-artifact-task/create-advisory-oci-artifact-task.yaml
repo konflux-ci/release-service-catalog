@@ -17,6 +17,9 @@ spec:
     - name: advisory_url
       type: string
       description: the url of the advisory
+    - name: advisory_secret_name
+      type: string
+      description: Name of the secret containing advisory GitLab metadata
     - name: internalRequestPipelineRunName
       type: string
       description: Name of the PipelineRun that called this task
@@ -42,6 +45,10 @@ spec:
     - name: internalRequestTaskRunName
       description: Name of this Task Run to be made available to caller
   volumes:
+    - name: advisory-secret
+      secret:
+        secretName: $(params.advisory_secret_name)
+        defaultMode: 0444
     - name: trusted-artifacts-dockerconfig-secret
       secret:
         optional: true
@@ -72,6 +79,8 @@ spec:
       securityContext:
         runAsUser: 1001
       volumeMounts:
+        - name: advisory-secret
+          mountPath: /mnt/advisory_secret
         - name: trusted-artifacts-dockerconfig-secret
           mountPath: /mnt/trusted_artifacts_dockerconfig
       script: |
@@ -115,11 +124,35 @@ spec:
         fi
         ##
 
+        # Write the token to a curl config file rather than passing it on the
+        # command line, so it never appears in argv or in the `set -x` trace
+        # output below.
+        ACCESS_TOKEN="$(cat /mnt/advisory_secret/gitlab_access_token)"
+        CURL_CONFIG="$(mktemp)"
+        printf 'header = "PRIVATE-TOKEN: %s"\n' "${ACCESS_TOKEN}" > "${CURL_CONFIG}"
+
         set -x
         echo "advisory_url: $(params.advisory_url)"
+
+        # GitLab's "-/raw/" web route doesn't reliably honor a PRIVATE-TOKEN
+        # header: for a private project it redirects to the sign-in page and
+        # returns that HTML with a 200, which --fail-with-body doesn't catch.
+        # The REST API's raw-file endpoint does respect the header, so
+        # translate the "-/raw/" URL into the equivalent API URL.
+        rawUrl="$(params.advisory_url)"
+        if [[ ! "${rawUrl}" =~ ^https://([^/]+)/(.+)/-/raw/([^/]+)/(.+)$ ]]; then
+          echo "advisory_url is not a GitLab raw-file URL: ${rawUrl}"
+          exit 1
+        fi
+        gitlabHost="${BASH_REMATCH[1]}"
+        projectPath="${BASH_REMATCH[2]}"
+        gitRef="${BASH_REMATCH[3]}"
+        filePath="${BASH_REMATCH[4]}"
+        apiUrl="https://${gitlabHost}/api/v4/projects/${projectPath//\//%2F}/repository/files/${filePath//\//%2F}/raw?ref=${gitRef}"
+
         yamlFile=$(mktemp -d)/advisory.yaml
-        if ! curl -sL --fail-with-body "$(params.advisory_url)" -o "${yamlFile}" ; then
-          echo "Failed to download advisory yaml file: $(params.advisory_url)"
+        if ! curl -sL --fail-with-body -K "${CURL_CONFIG}" "${apiUrl}" -o "${yamlFile}" ; then
+          echo "Failed to download advisory yaml file: ${apiUrl}"
           exit 1
         fi
         cat "${yamlFile}"
