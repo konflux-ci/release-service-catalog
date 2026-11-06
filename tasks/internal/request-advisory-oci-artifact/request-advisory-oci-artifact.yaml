@@ -38,6 +38,9 @@ spec:
     - description: Produced advisory oci artifact pullspec
       name: advisory-oci-artifact
       type: string
+    - description: The result of the task
+      name: result
+      type: string
   volumes:
     - name: workdir
       emptyDir: {}
@@ -62,53 +65,30 @@ spec:
       runAsUser: 1001
   steps:
     - name: request-advisory-oci-artifact
-      image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+      image: quay.io/konflux-ci/release-service-utils@sha256:4755f5b71a4d7ba7d7d9c9f36dec12b73c49179a927e92547843db5be983bbad
       computeResources:
         limits:
           memory: 512Mi
         requests:
           memory: 512Mi
           cpu: 100m
-      script: |
-        #!/usr/bin/env bash
-        set -x
-
-        # only 2 gitlab instances are permitted...prod and staging
-        # we are using staging for this test
-        #
-        advisorySecretName="create-advisory-stage-secret"
-
-        PIPELINERUN_LABEL="internal-services.appstudio.openshift.io/pipelinerun-uid"
-
-        IR_FILE="$(mktemp -d)/ir-result.txt"
-
-        internal-request --pipeline "create-advisory-oci-artifact" \
-            -p advisory_url="$(params.advisory_url)" \
-            -p advisory_secret_name="${advisorySecretName}" \
-            -p taskGitUrl="$(params.taskGitUrl)" \
-            -p taskGitRevision="$(params.taskGitRevision)" \
-            -l ${PIPELINERUN_LABEL}="$(params.pipelineRunUid)" \
-            -t "$(params.requestTimeout)" \
-            -s true \
-            > "$IR_FILE" || \
-            (grep "^\[" "$IR_FILE" | jq . && exit 1)
-
-        internalRequest=$(awk -F"'" '/created/ { print $2 }' "$IR_FILE")
-        echo "done (${internalRequest})"
-
-        results=$(kubectl get internalrequest "$internalRequest" -o=jsonpath='{.status.results}')
-        internalRequestPipelineRunName="$(jq -jr '.internalRequestPipelineRunName // ""' <<< "${results}")"
-        internalRequestTaskRunName="$(jq -jr '.internalRequestTaskRunName // ""' <<< "${results}")"
-
-        echo "** internalRequestPipelineRunName: ${internalRequestPipelineRunName}"
-        echo "** internalRequestTaskRunName: ${internalRequestTaskRunName}"
-
-        if [[ "$(echo "${results}" | jq -r '.result')" == "Success" ]]; then
-          ADVISORY_OCI_ARTIFACT=$(jq -r '.advisory_oci_artifact' <<< "$results")
-          echo "Got ADVISORY_OCI_ARTIFACT: ${ADVISORY_OCI_ARTIFACT}"
-          echo -n "${ADVISORY_OCI_ARTIFACT}" > "$(results.advisory-oci-artifact.path)"
-        else
-          echo "The InternalRequest to find the ADVISORY_OCI_ARTIFACT was unsuccessful"
-          jq -r '.result' <<< "$results"
-          exit 1
-        fi
+      env:
+        - name: PARAM_ADVISORY_URL
+          value: $(params.advisory_url)
+        - name: PARAM_REQUEST_TIMEOUT
+          value: $(params.requestTimeout)
+        - name: PARAM_PIPELINE_RUN_UID
+          value: $(params.pipelineRunUid)
+        - name: PARAM_TASK_GIT_URL
+          value: $(params.taskGitUrl)
+        - name: PARAM_TASK_GIT_REVISION
+          value: $(params.taskGitRevision)
+        - name: RESULT_ADVISORY_OCI_ARTIFACT
+          value: $(results.advisory-oci-artifact.path)
+        - name: RESULT_RESULT
+          value: $(results.result.path)
+      command: ["python3"]
+      args:
+        - -u
+        - -m
+        - release_service_utils.tasks.internal.request_advisory_oci_artifact
