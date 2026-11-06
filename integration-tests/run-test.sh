@@ -248,7 +248,7 @@ current_task_failure_label() {
         patch_components_source|patch_components_source_before_merge)
             echo "component source setup"
             ;;
-        setup_namespaces|create_kubernetes_resources|post_create_kubernetes_resources)
+        setup_namespaces|pre_create_kubernetes_resources|create_kubernetes_resources|post_create_kubernetes_resources)
             echo "release test setup"
             ;;
         cleanup_old_resources)
@@ -721,6 +721,13 @@ set_current_step "setup" "setup_namespaces"
 setup_namespaces # Ensures correct context before resource creation
 set_current_step "setup" "cleanup_old_resources"
 cleanup_old_resources "${originating_tool}"
+
+# Call pre_create_kubernetes_resources hook if defined (for test-specific setup)
+if type pre_create_kubernetes_resources &>/dev/null; then
+    set_current_step "setup" "pre_create_kubernetes_resources"
+    pre_create_kubernetes_resources
+fi
+
 set_current_step "setup" "create_kubernetes_resources"
 create_kubernetes_resources # tmpDir is set here
 

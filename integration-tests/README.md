@@ -72,6 +72,7 @@ Each test suite follows a consistent structure:
 - **`test.sh`** - Contains test-specific variables and functions (may vary by test)
   - Optional hooks invoked by `run-test.sh` / `cleanup_resources` (define only if needed):
     - `patch_managed_secrets_after_decrypt` — after vault decrypt
+    - `pre_create_kubernetes_resources` — after namespace setup, before Kubernetes resources are rendered and applied
     - `post_create_kubernetes_resources` — after Kubernetes resources are applied
     - `suite_exit_cleanup` — on script exit, before GitHub/Kubernetes cleanup (e.g. remove temp credential files)
   - Do not replace the runner’s EXIT trap from `test.sh`; use `suite_exit_cleanup` or a subshell with its own EXIT trap.

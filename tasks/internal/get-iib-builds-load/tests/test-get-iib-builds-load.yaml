@@ -1,0 +1,54 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-get-iib-builds-load
+spec:
+  description: |
+    Run get-iib-builds-load for two from_indexes against a mock IIB.
+    Expects result Success and a loads result with the count of each.
+  tasks:
+    - name: run-task
+      taskRef:
+        name: get-iib-builds-load
+      params:
+        - name: fromIndexes
+          value: >-
+            ["registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.18",
+            "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.19"]
+        - name: user
+          value: iib-bot@REDHAT.COM
+    - name: check-result
+      runAfter:
+        - run-task
+      params:
+        - name: result
+          value: $(tasks.run-task.results.result)
+        - name: loads
+          value: $(tasks.run-task.results.loads)
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: loads
+            type: string
+        steps:
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              if [ "$(params.result)" != Success ]; then
+                echo Error: result task result is not correct
+                exit 1
+              fi
+
+              expected='{
+                "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.18": 3,
+                "registry-proxy.engineering.redhat.com/rh-osbs/iib-preview-rhtap:v4.19": 0
+              }'
+              if ! jq -e --argjson expected "${expected}" '. == $expected' <<< '$(params.loads)'; then
+                echo Error: loads task result is not correct
+                exit 1
+              fi
