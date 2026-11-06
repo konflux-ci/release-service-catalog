@@ -5,7 +5,8 @@ Release pipeline for Lightwell Java artifacts (slan-cuan).
 This pipeline orchestrates the complete release workflow for Java artifacts built by
 PNC (Project Newcastle). All per-release configuration (image reference, signing key,
 Pulp target) is derived from the Snapshot and ReleasePlanAdmission data
-via collect-data (including the optional GitHub OSV publication target under `.githubOsv`),
+via collect-data (including the VEX Pulp repository under `.pulp.vexRepository` and
+the optional GitHub OSV publication target under `.githubOsv`),
 and the signing requester identity is extracted from Release attribution
 via extract-requester-from-release, so no pipeline parameters need to be supplied at invocation time.
 
