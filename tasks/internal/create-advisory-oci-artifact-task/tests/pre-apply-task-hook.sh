@@ -6,6 +6,10 @@ SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 # Add mocks to the beginning of task step script
 yq -i '.spec.steps[0].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[0].script' "$TASK_PATH"
 
+kubectl delete secret create-advisory-oci-artifact-test-secret --ignore-not-found
+kubectl create secret generic create-advisory-oci-artifact-test-secret \
+  --from-literal=gitlab_access_token=abc
+
 kubectl delete secret quay-token-konflux-release-trusted-artifacts-secret --ignore-not-found
 
 if [ -z "${DOCKER_CONFIG_JSON}" ]; then
