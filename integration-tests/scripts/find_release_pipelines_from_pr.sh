@@ -161,6 +161,9 @@ _emit_integration_testcase_string() {
       "push-artifacts-to-cdn")
         TEMP_MANAGED_PIPELINENAMES+=("push-artifacts-to-cdn")
         ;;
+      "gpg-sign-and-push-to-cdn")
+        TEMP_MANAGED_PIPELINENAMES+=("gpg-sign-and-push-to-cdn")
+        ;;
       "push-disk-images")
         TEMP_MANAGED_PIPELINENAMES+=("push-disk-images" "push-disk-images-to-cdn")
         ;;
@@ -224,7 +227,7 @@ _emit_integration_testcase_string() {
   "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io" \
   "rh-push-to-external-registry" "rh-push-to-external-registry-multi-component" \
   "push-to-addons-registry" \
-  "push-rpms-to-pulp" "push-artifacts-to-cdn" "push-disk-images")
+  "push-rpms-to-pulp" "push-artifacts-to-cdn" "gpg-sign-and-push-to-cdn" "push-disk-images")
 
   declare -a SELECTED_TESTCASES=()
 
