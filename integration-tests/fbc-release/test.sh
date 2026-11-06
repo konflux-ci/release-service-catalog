@@ -89,30 +89,26 @@ show_enabled_scenarios(){
 
 # --- GitHub API Integration (Works within existing pipeline) ---
 
-# Use GitHub API to detect changed task names (PR_NUMBER and GITHUB_TOKEN available)
+# Use GitHub API to detect changed task and pipeline directories
+# (PR_NUMBER and GITHUB_TOKEN available). Logs go to stderr so the
+# returned value is only the comma-separated path prefixes.
 get_changed_files() {
     if [[ -n "${PR_NUMBER:-}" ]] && [[ -n "${GITHUB_TOKEN:-}" ]]; then
-        echo "🔍 Detecting changed task directories from PR #${PR_NUMBER}..."
+        echo "🔍 Detecting changed task/pipeline directories from PR #${PR_NUMBER}..." >&2
         curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
             "https://api.github.com/repos/konflux-ci/release-service-catalog/pulls/${PR_NUMBER}/files?per_page=100" | \
             jq -r '.[].filename' | \
-            grep '^tasks/' | \
+            grep -E '^(tasks|pipelines)/' | \
             cut -d'/' -f1-3 | \
             sort -u | \
-            tr '\n' ','
+            tr '\n' ',' || true
     else
-        echo "⚠️  No PR context available, using full test matrix"
+        echo "⚠️  No PR context available, using full test matrix" >&2
         echo ""
     fi
 }
 
-# Dynamic test matrix configuration based on changed files
-configure_test_matrix() {
-    local changed_files=$(get_changed_files)
-    
-    echo "🔍 Changed task directories: $changed_files"
-    
-    # Initialize test matrix with all tests disabled by default
+_reset_fbc_test_matrix() {
     GLOBAL_TEST_MATRIX=(
         ["single-happy"]="disabled"
         ["single-staged"]="disabled"
@@ -123,7 +119,89 @@ configure_test_matrix() {
         ["multi-staged"]="disabled"
         ["multi-optin"]="disabled"
     )
+}
 
+_print_final_test_matrix() {
+    echo "📋 Final test matrix:"
+    local key
+    for key in "${!GLOBAL_TEST_MATRIX[@]}"; do
+        echo "  $key: ${GLOBAL_TEST_MATRIX[$key]}"
+    done
+}
+
+# Enable scenarios from changed task/pipeline prefixes. Sets tests_enabled=true
+# when any pattern matches. Does not apply the unmatched fallback.
+_enable_scenarios_from_changed_files() {
+    local changed_files=$1
+
+    # Note: Layer 1 (find_release_pipelines_from_pr.sh) still decides whether
+    # the fbc-release suite runs at all. This only scopes scenarios inside it.
+    if [[ "$changed_files" =~ tasks/managed/direct-sign-index-image ]] || \
+       [[ "$changed_files" =~ tasks/managed/rh-sign-image-cosign ]]; then
+        echo "🎯 Detected signing task changes - enabling core scenarios"
+        GLOBAL_TEST_MATRIX["single-happy"]="enabled"
+        GLOBAL_TEST_MATRIX["single-staged"]="enabled"
+        GLOBAL_TEST_MATRIX["single-prega"]="enabled"
+        tests_enabled=true
+        show_enabled_scenarios "Signing changes enabled" GLOBAL_TEST_MATRIX
+    fi
+
+    if [[ "$changed_files" =~ pipelines/managed/fbc-release ]] || \
+       [[ "$changed_files" =~ tasks/managed/prepare-fbc-parameters ]] || \
+       [[ "$changed_files" =~ tasks/managed/prepare-fbc-snapshot ]] || \
+       [[ "$changed_files" =~ tasks/managed/filter-published-fbc-images ]] || \
+       [[ "$changed_files" =~ tasks/managed/add-fbc-contribution ]] || \
+       [[ "$changed_files" =~ tasks/internal/check-fbc-opt-in ]] || \
+       [[ "$changed_files" =~ tasks/internal/update-fbc-catalog-task ]] || \
+       [[ "$changed_files" =~ pipelines/internal/check-fbc-opt-in ]] || \
+       [[ "$changed_files" =~ pipelines/internal/update-fbc-catalog ]] || \
+       [[ "$changed_files" =~ pipelines/internal/publish-index-image-pipeline ]]; then
+        echo "🎯 Detected batching/publishing pipeline changes"
+        GLOBAL_TEST_MATRIX["single-happy"]="enabled"
+        GLOBAL_TEST_MATRIX["single-staged"]="enabled"
+        GLOBAL_TEST_MATRIX["single-prega"]="enabled"
+        GLOBAL_TEST_MATRIX["single-optin"]="enabled"
+        GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
+        tests_enabled=true
+        show_enabled_scenarios "Batching changes enabled" GLOBAL_TEST_MATRIX
+    fi
+}
+
+_enable_requested_scenarios() {
+    local requested=$1
+    local scenario _enabled_any=false
+    for scenario in ${requested//,/ }; do
+        if [ -n "${GLOBAL_TEST_MATRIX[$scenario]+x}" ]; then
+            GLOBAL_TEST_MATRIX["$scenario"]="enabled"
+            _enabled_any=true
+        else
+            echo "⚠️  Unknown scenario in PTSV_FBC_SCENARIOS: '${scenario}' (ignored)"
+        fi
+    done
+    if [ "${_enabled_any}" = false ]; then
+        echo "🔴 ERROR: PTSV_FBC_SCENARIOS='${requested}' enabled no known scenarios" >&2
+        exit 1
+    fi
+}
+
+_any_scenario_enabled() {
+    local scenario
+    for scenario in "${!GLOBAL_TEST_MATRIX[@]}"; do
+        if [ "${GLOBAL_TEST_MATRIX[$scenario]}" = "enabled" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Dynamic test matrix configuration based on changed files
+configure_test_matrix() {
+    local changed_files
+    changed_files=$(get_changed_files)
+
+    echo "🔍 Changed task/pipeline directories: $changed_files"
+
+    _reset_fbc_test_matrix
     local tests_enabled=false
 
     # Group selector: PTSV_FBC_SCENARIO_GROUP (space/comma list of group names from
@@ -149,73 +227,48 @@ configure_test_matrix() {
         echo "🎯 PTSV_FBC_SCENARIO_GROUP=${PTSV_FBC_SCENARIO_GROUP} -> scenarios: ${PTSV_FBC_SCENARIOS}"
     fi
 
-    # Explicit override: if PTSV_FBC_SCENARIOS is set (space- or comma-separated
-    # scenario keys, e.g. "single-happy single-staged"), enable exactly those and
-    # skip change detection. Lets test.env (or the ITS PIPELINE_TEST_SUITE_VARS)
-    # pick the scenarios. Unknown keys are warned about and ignored.
+    # Explicit override: PTSV_FBC_SCENARIOS is the upper bound (test.env, ITS
+    # PIPELINE_TEST_SUITE_VARS, or a group expansion). On a PR, intersect with
+    # change-detection so grouped checks skip when none of their scenarios are
+    # required. Periodic/local runs (no changed files) keep the requested set.
     if [ -n "${PTSV_FBC_SCENARIOS:-}" ]; then
-        echo "🎯 PTSV_FBC_SCENARIOS set - enabling only: ${PTSV_FBC_SCENARIOS}"
-        local scenario _enabled_any=false
-        for scenario in ${PTSV_FBC_SCENARIOS//,/ }; do
-            if [ -n "${GLOBAL_TEST_MATRIX[$scenario]+x}" ]; then
-                GLOBAL_TEST_MATRIX["$scenario"]="enabled"
-                _enabled_any=true
+        echo "🎯 PTSV_FBC_SCENARIOS set - requested: ${PTSV_FBC_SCENARIOS}"
+        local requested="${PTSV_FBC_SCENARIOS}"
+        _enable_requested_scenarios "${requested}"
+
+        if [ -n "${changed_files}" ]; then
+            _reset_fbc_test_matrix
+            tests_enabled=false
+            _enable_scenarios_from_changed_files "${changed_files}"
+            if [ "$tests_enabled" = true ]; then
+                local scenario
+                for scenario in "${!GLOBAL_TEST_MATRIX[@]}"; do
+                    if [ "${GLOBAL_TEST_MATRIX[$scenario]}" = "enabled" ]; then
+                        if [[ " ${requested//,/ } " != *" ${scenario} "* ]]; then
+                            GLOBAL_TEST_MATRIX["$scenario"]="disabled"
+                        fi
+                    fi
+                done
+                if ! _any_scenario_enabled; then
+                    echo "⏭️  Requested scenarios are not required for this PR; skipping"
+                    return 99
+                fi
+                show_enabled_scenarios "PR change-detection ∩ requested" GLOBAL_TEST_MATRIX
             else
-                echo "⚠️  Unknown scenario in PTSV_FBC_SCENARIOS: '${scenario}' (ignored)"
+                echo "🎯 No specific patterns detected - keeping requested scenarios"
+                _reset_fbc_test_matrix
+                _enable_requested_scenarios "${requested}"
+                show_enabled_scenarios "PTSV_FBC_SCENARIOS fallback" GLOBAL_TEST_MATRIX
             fi
-        done
-        # Fail loudly if the requested selection enabled nothing, rather than
-        # running zero scenarios and passing vacuously.
-        if [ "${_enabled_any}" = false ]; then
-            echo "🔴 ERROR: PTSV_FBC_SCENARIOS='${PTSV_FBC_SCENARIOS}' enabled no known scenarios" >&2
-            exit 1
+        else
+            show_enabled_scenarios "PTSV_FBC_SCENARIOS enabled" GLOBAL_TEST_MATRIX
         fi
-        show_enabled_scenarios "PTSV_FBC_SCENARIOS enabled" GLOBAL_TEST_MATRIX
-        return
+        _print_final_test_matrix
+        return 0
     fi
-    
-    # Enable specific tests based on detected task directory patterns
-    # Note: This logic only applies when the unified fbc test suite is triggered
-    # The existing pipeline selection logic in find_release_pipelines_from_pr.sh determines
-    # when to run fbc tests (currently both fbc-release and fbc-release-multi-component)
-    
-    # These conditions are additive - multiple patterns can match and enable their respective tests
-    
-    if [[ "$changed_files" =~ tasks/managed/direct-sign-index-image ]] || \
-       [[ "$changed_files" =~ tasks/managed/rh-sign-image-cosign ]]; then
-        echo "🎯 Detected signing task changes - enabling core scenarios"
-        GLOBAL_TEST_MATRIX["single-happy"]="enabled"
-        GLOBAL_TEST_MATRIX["single-staged"]="enabled"
-        GLOBAL_TEST_MATRIX["single-prega"]="enabled"
-        #GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        #GLOBAL_TEST_MATRIX["single-optin"]="enabled"
-        tests_enabled=true
 
-        show_enabled_scenarios "Signing changes enabled" GLOBAL_TEST_MATRIX
-    fi
-    
-    if [[ "$changed_files" =~ pipelines/managed/fbc-release ]] || \
-       [[ "$changed_files" =~ tasks/managed/prepare-fbc-parameters ]] || \
-       [[ "$changed_files" =~ tasks/managed/add-fbc-contribution ]] || \
-       [[ "$changed_files" =~ tasks/internal/check-fbc-opt-in ]] || \
-       [[ "$changed_files" =~ tasks/internal/update-fbc-catalog-task ]] || \
-       [[ "$changed_files" =~ pipelines/internal/check-fbc-opt-in ]] || \
-       [[ "$changed_files" =~ pipelines/internal/update-fbc-catalog ]] || \
-       [[ "$changed_files" =~ pipelines/internal/publish-index-image-pipeline ]]; then
-        echo "🎯 Detected batching/publishing pipeline changes - enabling multi-component focused tests"
-        GLOBAL_TEST_MATRIX["single-happy"]="enabled"
-        GLOBAL_TEST_MATRIX["single-staged"]="enabled"
-        GLOBAL_TEST_MATRIX["single-prega"]="enabled"
-        #GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        #GLOBAL_TEST_MATRIX["single-optin"]="enabled"
-        #GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
-        #GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
-        #GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
-        tests_enabled=true
+    _enable_scenarios_from_changed_files "${changed_files}"
 
-        show_enabled_scenarios "Batching changes enabled" GLOBAL_TEST_MATRIX
-    fi
-    
     # If no specific patterns matched, enable all standard tests (fallback)
     # In this case, we are trusting that this test was executed for a reason.
     if [ "$tests_enabled" = false ]; then
@@ -223,19 +276,10 @@ configure_test_matrix() {
         GLOBAL_TEST_MATRIX["single-happy"]="enabled"
         GLOBAL_TEST_MATRIX["single-staged"]="enabled"
         GLOBAL_TEST_MATRIX["single-prega"]="enabled"
-        #GLOBAL_TEST_MATRIX["single-hotfix"]="enabled"
-        #GLOBAL_TEST_MATRIX["single-optin"]="enabled"
-        #GLOBAL_TEST_MATRIX["multi-happy"]="enabled"
-        #GLOBAL_TEST_MATRIX["multi-staged"]="enabled"
-        #GLOBAL_TEST_MATRIX["multi-optin"]="enabled"
-
         show_enabled_scenarios "Enabled" GLOBAL_TEST_MATRIX
     fi
-    
-    echo "📋 Final test matrix:"
-    for key in "${!GLOBAL_TEST_MATRIX[@]}"; do
-        echo "  $key: ${GLOBAL_TEST_MATRIX[$key]}"
-    done
+
+    _print_final_test_matrix
 }
 
 # --- Snapshot Management ---
@@ -917,7 +961,9 @@ verify_release_contents() {
     fi
 }
 
-# Configure test matrix early for consistency
+# Configure test matrix early for consistency.
+# Returns 99 from configure_test_matrix when a grouped PR check is not
+# required; with run-test.sh's set -e that becomes a skipped ITS.
 configure_test_matrix_early() {
     echo "🔧 Configuring test matrix early for consistency..."
     configure_test_matrix
