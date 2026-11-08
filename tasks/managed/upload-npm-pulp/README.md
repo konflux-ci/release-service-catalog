@@ -6,11 +6,13 @@ content upload API. Sets tl.compliance_level from adjacent
 (or COMPLIANCE_IMAGE_PREFIX) is set, signs adjacent .tgz with cosign
 (generate-and-sign-npm-attestations), pushes attestation OCI to Quay, and
 sets tl.oci_registry_base / tl.attestation_oci_digest /
-tl.attestation_predicate_type. Idempotent: skips packages already present
-with matching sha256; fails if the same name/version exists with different
-content. On skip, still applies compliance and attestation labels so
-reruns can attach metadata. Requires at least one .tgz under FILES_DIR.
-Business logic runs as npm-release-upload in the slan-cuan image.
+tl.attestation_predicate_type.     Idempotent: skips packages already present
+with matching sha256. Same name/version with different content fails unless
+ALLOW_CONTENT_REPLACE=true (then remove → destroy holding versions →
+orphan-cleanup that content href → re-upload). On skip, still applies
+compliance and attestation labels so reruns can attach metadata. Requires
+at least one .tgz under FILES_DIR. Business logic runs as npm-release-upload
+in the slan-cuan image.
 
 ## Parameters
 
@@ -19,6 +21,7 @@ Business logic runs as npm-release-upload in the slan-cuan image.
 | SERVICE_ACCOUNT_SECRET_NAME | Secret with Pulp username/password keys (same as Python wheel release)                                                                                       | Yes      | rhtl-pulp-credentials-secret      |
 | COSIGN_SECRET_NAME          | Secret with cosign.key or SIGN_KEY + AWS_* for package attestations. Attestation is skipped when signing material is absent unless REQUIRE_ATTESTATIONS=true | Yes      | konflux-cosign-signing-production |
 | REQUIRE_ATTESTATIONS        | When true, fail if signing material or .att files are missing                                                                                                | Yes      | false                             |
+| ALLOW_CONTENT_REPLACE       | When true, replace same name@version in Pulp when the local tarball sha256 differs (targeted orphan cleanup of that content unit only)                       | Yes      | false                             |
 | PULP_BASE_URL               | The base URL of the Pulp server                                                                                                                              | No       | -                                 |
 | PULP_API_ROOT               | The API root path of the Pulp server                                                                                                                         | Yes      | /api/                             |
 | PULP_DOMAIN                 | The domain to use for Pulp operations                                                                                                                        | No       | -                                 |
