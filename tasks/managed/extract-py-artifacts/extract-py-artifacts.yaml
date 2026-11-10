@@ -55,6 +55,24 @@ spec:
     - name: sourceDataArtifact
       description: Produced trusted data artifact
       type: string
+    - name: sourceType
+      description: >-
+        The upstream source route used to build the extracted image(s), e.g.
+        "pypi-sdist" (legacy/default) or "git" (python-git-ingest). Derived
+        from the first Chains SLSA provenance's build parameters; defaults to
+        "pypi-sdist" when the provenance has no such parameter (legacy
+        images).
+      type: string
+    - name: upstreamUrl
+      description: >-
+        The upstream git repository URL used to build the image(s), when
+        sourceType is "git". Empty for pypi-sdist route images.
+      type: string
+    - name: upstreamRef
+      description: >-
+        The upstream git ref/commit used to build the image(s), when
+        sourceType is "git". Empty for pypi-sdist route images.
+      type: string
   volumes:
     - name: workdir
       emptyDir: {}
@@ -360,6 +378,41 @@ spec:
 
         echo "Chains provenance files:"
         ls -la "${PROVENANCE_DIR}"
+
+        # Surface sourceType/upstreamUrl/upstreamRef from the first Chains
+        # provenance file. All images in a Snapshot come from the same build
+        # pipeline, so one provenance file's build parameters are sufficient
+        # to determine the source route for the whole release.
+        #
+        # ASSUMPTION PENDING CONFIRMATION: the field path below
+        # (predicate.invocation.parameters.<NAME>) matches Tekton Chains'
+        # SLSA v0.2 "slsaprovenance" predicate format (what cosign's
+        # --type=slsaprovenance flag above requests), where the triggering
+        # PipelineRun's params are recorded as a flat map keyed by param name
+        # -- see https://github.com/tektoncd/chains/issues/306 (fixed by #307)
+        # and the SLSA v0.2 spec's `invocation.parameters` definition. This
+        # same path is already relied on by
+        # tasks/managed/rh-sign-python-wheels's Chains-provenance consumption
+        # logic (`.invocation.parameters`). It has NOT yet been confirmed
+        # against a live attestation from a python-git-ingest pipeline run in
+        # this codebase -- a later live pilot task will confirm it. The jq
+        # `//` fallbacks below fail safe to the legacy pypi-sdist route if
+        # this path is wrong or the provenance has no such parameters.
+        FIRST_PROVENANCE_FILE=$(find "${PROVENANCE_DIR}" -maxdepth 1 -name '*.json' | sort | head -n1)
+
+        SOURCE_TYPE="pypi-sdist"
+        UPSTREAM_URL=""
+        UPSTREAM_REF=""
+        if [[ -n "${FIRST_PROVENANCE_FILE}" ]]; then
+          SOURCE_TYPE=$(jq -r '.predicate.invocation.parameters.SOURCE_TYPE // "pypi-sdist"' "${FIRST_PROVENANCE_FILE}")
+          UPSTREAM_URL=$(jq -r '.predicate.invocation.parameters.UPSTREAM_URL // ""' "${FIRST_PROVENANCE_FILE}")
+          UPSTREAM_REF=$(jq -r '.predicate.invocation.parameters.UPSTREAM_REF // ""' "${FIRST_PROVENANCE_FILE}")
+        fi
+
+        echo "Resolved sourceType=${SOURCE_TYPE} upstreamUrl=${UPSTREAM_URL} upstreamRef=${UPSTREAM_REF}"
+        echo -n "${SOURCE_TYPE}" > "$(results.sourceType.path)"
+        echo -n "${UPSTREAM_URL}" > "$(results.upstreamUrl.path)"
+        echo -n "${UPSTREAM_REF}" > "$(results.upstreamRef.path)"
 
     - name: create-trusted-artifact
       computeResources:

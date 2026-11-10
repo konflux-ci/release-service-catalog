@@ -80,6 +80,46 @@ function cosign() {
   echo "Mock cosign called with: $*" >&2
 
   if [[ "$1" == "verify-attestation" ]]; then
+    if [[ -f "${TRUSTED_ARTIFACTS_EXTRACT_DIR}/.mock_git_source_provenance" ]]; then
+      # SLSA v0.2 "slsaprovenance" predicate shape (the format cosign's
+      # --type=slsaprovenance flag actually requests), where Tekton Chains
+      # records the triggering PipelineRun's params as a flat map at
+      # predicate.invocation.parameters, keyed by param name. Used by the
+      # git-source fixture test to simulate a python-git-ingest build.
+      local statement
+      statement=$(jq -nc '{
+        "_type": "https://in-toto.io/Statement/v0.1",
+        "predicateType": "https://slsa.dev/provenance/v0.2",
+        "subject": [{"name": "test", "digest": {"sha256": "abc123"}}],
+        "predicate": {
+          "builder": {"id": "https://konflux-ci.dev/chains/v2"},
+          "buildType": "https://tekton.dev/chains/v2/slsa",
+          "invocation": {
+            "configSource": {},
+            "parameters": {
+              "SOURCE_TYPE": "git",
+              "UPSTREAM_URL": "https://github.com/test-org/test-package",
+              "UPSTREAM_REF": "v1.2.3",
+              "PACKAGES": ["test_package==1.0.0"]
+            },
+            "environment": {}
+          },
+          "metadata": {
+            "buildInvocationId": "calunga-tenant/build-run-mock",
+            "buildStartedOn": "2026-02-19T21:40:00Z",
+            "buildFinishedOn": "2026-02-19T21:51:09Z"
+          },
+          "materials": [
+            {"uri": "git+https://github.com/test-org/test-package.git", "digest": {"sha1": "abc123def456"}}
+          ]
+        }
+      }')
+      local payload
+      payload=$(echo -n "${statement}" | base64 -w0)
+      echo "{\"payloadType\":\"application/vnd.in-toto+json\",\"payload\":\"${payload}\",\"signatures\":[{\"keyid\":\"\",\"sig\":\"mock-signature\"}]}"
+      return 0
+    fi
+
     # Real cosign verify-attestation outputs a DSSE envelope with a base64-encoded payload.
     # The payload decodes to the in-toto Statement containing predicateType and predicate
     local statement='{"_type":"https://in-toto.io/Statement/v0.1","predicateType":"https://slsa.dev/provenance/v1","subject":[{"name":"test","digest":{"sha256":"abc123"}}],"predicate":{"buildDefinition":{"buildType":"https://tekton.dev/chains/v2/slsa","externalParameters":{"runSpec":{"pipelineRef":{"name":"build-python-wheels-oci-ta"},"params":[{"name":"PACKAGES","value":["test_package==1.0.0"]}]}},"internalParameters":{},"resolvedDependencies":[{"uri":"git+https://github.com/calungaproject/index.git","digest":{"sha1":"abc123def456"}}]},"runDetails":{"builder":{"id":"https://konflux-ci.dev/chains/v2"},"metadata":{"invocationId":"calunga-tenant/build-run-mock","startedOn":"2026-02-19T21:40:00Z","finishedOn":"2026-02-19T21:51:09Z"}}}}'

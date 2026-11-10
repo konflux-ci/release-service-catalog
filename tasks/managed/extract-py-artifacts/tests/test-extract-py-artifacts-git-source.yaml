@@ -1,0 +1,220 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-extract-py-artifacts-git-source
+spec:
+  description: |
+    Test that extract-py-artifacts surfaces sourceType/upstreamUrl/upstreamRef
+    task results from the Chains SLSA provenance of a git-source
+    (python-git-ingest) build, rather than defaulting to the legacy
+    pypi-sdist route.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+      default: /var/workdir/content
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+
+              # Tell the mocked cosign to return a git-source-shaped Chains
+              # provenance predicate (predicate.invocation.parameters) instead
+              # of the default fixture.
+              touch "$(params.dataDir)/.mock_git_source_provenance"
+
+              # Create a mock snapshot spec with container images
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << 'EOF'
+              {
+                "application": "test-app",
+                "components": [
+                  {
+                    "name": "test-component",
+                    "containerImage": "quay.io/test/test-package@sha256:abc123"
+                  }
+                ]
+              }
+              EOF
+
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << 'EOF'
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test_package"
+                    }
+                  ]
+                },
+                "releaseNotes": {
+                  "product_id": [123],
+                  "type": "RHBA",
+                  "synopsis": "Test advisory",
+                  "content": {
+                    "artifacts": []
+                  }
+                }
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: extract-py-artifacts
+      params:
+        - name: SNAPSHOT_PATH
+          value: $(context.pipelineRun.uid)/snapshot_spec.json
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: filesDir
+          value: files
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: ociArtifactExpiresAfter
+          value: $(params.ociArtifactExpiresAfter)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: dataPath
+          value: $(context.pipelineRun.uid)/data.json
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: sourceType
+          value: $(tasks.run-task.results.sourceType)
+        - name: upstreamUrl
+          value: $(tasks.run-task.results.upstreamUrl)
+        - name: upstreamRef
+          value: $(tasks.run-task.results.upstreamRef)
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: sourceType
+            type: string
+          - name: upstreamUrl
+            type: string
+          - name: upstreamRef
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:2f9e6863e82bbc9ddce5a290f3fd0e87657c475e3de8a832b2ef7f8d0671e7d3
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+
+              FILES_DIR="$(params.dataDir)/files"
+
+              # Check that Chains provenance was fetched
+              PROV_DIR="${FILES_DIR}/chains-provenance"
+              if [ ! -d "${PROV_DIR}" ]; then
+                echo "ERROR: chains-provenance directory not found"
+                exit 1
+              fi
+
+              # Check the new sourceType/upstreamUrl/upstreamRef task results
+              # were correctly extracted from the git-source provenance fixture.
+              EXPECTED_SOURCE_TYPE="git"
+              EXPECTED_UPSTREAM_URL="https://github.com/test-org/test-package"
+              EXPECTED_UPSTREAM_REF="v1.2.3"
+
+              if [ "$(params.sourceType)" != "${EXPECTED_SOURCE_TYPE}" ]; then
+                echo "ERROR: sourceType result mismatch. Got '$(params.sourceType)', expected '${EXPECTED_SOURCE_TYPE}'"
+                exit 1
+              fi
+
+              if [ "$(params.upstreamUrl)" != "${EXPECTED_UPSTREAM_URL}" ]; then
+                echo "ERROR: upstreamUrl result mismatch."
+                echo "  Got: '$(params.upstreamUrl)', expected: '${EXPECTED_UPSTREAM_URL}'"
+                exit 1
+              fi
+
+              if [ "$(params.upstreamRef)" != "${EXPECTED_UPSTREAM_REF}" ]; then
+                echo "ERROR: upstreamRef result mismatch."
+                echo "  Got: '$(params.upstreamRef)', expected: '${EXPECTED_UPSTREAM_REF}'"
+                exit 1
+              fi
+
+              echo "All git-source checks passed!"
+      runAfter:
+        - run-task
