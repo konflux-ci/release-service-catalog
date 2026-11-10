@@ -391,22 +391,44 @@ spec:
         # PipelineRun's params are recorded as a flat map keyed by param name
         # -- see https://github.com/tektoncd/chains/issues/306 (fixed by #307)
         # and the SLSA v0.2 spec's `invocation.parameters` definition. This
-        # same path is already relied on by
+        # same path is used as a v0.2 fallback by
         # tasks/managed/rh-sign-python-wheels's Chains-provenance consumption
-        # logic (`.invocation.parameters`). It has NOT yet been confirmed
-        # against a live attestation from a python-git-ingest pipeline run in
-        # this codebase -- a later live pilot task will confirm it. The jq
-        # `//` fallbacks below fail safe to the legacy pypi-sdist route if
-        # this path is wrong or the provenance has no such parameters.
-        FIRST_PROVENANCE_FILE=$(find "${PROVENANCE_DIR}" -maxdepth 1 -name '*.json' | sort | head -n1)
+        # logic (`.invocation.parameters`), whose primary branch reads the v1
+        # `buildDefinition.externalParameters` shape instead. It has NOT yet
+        # been confirmed against a live attestation from a python-git-ingest
+        # pipeline run in this codebase -- a later live pilot task will
+        # confirm it. The jq `//` fallbacks below fail safe to the legacy
+        # pypi-sdist route if this path is wrong or the provenance has no
+        # such parameters. The `?` optional-chaining operators guard against
+        # a pathological attestation where `.predicate` or `.invocation` is a
+        # non-object (jq would otherwise exit 5 with "Cannot index string").
+        PROV_FILE=$(find "${PROVENANCE_DIR}" -maxdepth 1 -name '*.json' | sort | head -n1)
 
         SOURCE_TYPE="pypi-sdist"
         UPSTREAM_URL=""
         UPSTREAM_REF=""
-        if [[ -n "${FIRST_PROVENANCE_FILE}" ]]; then
-          SOURCE_TYPE=$(jq -r '.predicate.invocation.parameters.SOURCE_TYPE // "pypi-sdist"' "${FIRST_PROVENANCE_FILE}")
-          UPSTREAM_URL=$(jq -r '.predicate.invocation.parameters.UPSTREAM_URL // ""' "${FIRST_PROVENANCE_FILE}")
-          UPSTREAM_REF=$(jq -r '.predicate.invocation.parameters.UPSTREAM_REF // ""' "${FIRST_PROVENANCE_FILE}")
+        if [[ -n "${PROV_FILE}" ]]; then
+          SOURCE_TYPE=$(jq -r '.predicate?.invocation?.parameters?.SOURCE_TYPE? // "pypi-sdist"' "${PROV_FILE}")
+          UPSTREAM_URL=$(jq -r '.predicate?.invocation?.parameters?.UPSTREAM_URL? // ""' "${PROV_FILE}")
+          UPSTREAM_REF=$(jq -r '.predicate?.invocation?.parameters?.UPSTREAM_REF? // ""' "${PROV_FILE}")
+        fi
+
+        # Normalize explicitly: jq's `//` only substitutes on null/false, not
+        # on an empty string, so an attestation with SOURCE_TYPE explicitly
+        # set to "" would otherwise bypass the "pypi-sdist" default above.
+        if [[ -z "${SOURCE_TYPE}" ]]; then
+          SOURCE_TYPE="pypi-sdist"
+        fi
+
+        # Fail closed: a git-source build with missing upstream coordinates
+        # would otherwise flow silently into archive-sources with nothing to
+        # mirror, violating this plan's fail-closed principle elsewhere.
+        if [[ "${SOURCE_TYPE}" == "git" ]]; then
+          if [[ -z "${UPSTREAM_URL}" || -z "${UPSTREAM_REF}" ]]; then
+            echo "ERROR: SOURCE_TYPE is 'git' but upstreamUrl/upstreamRef are missing from the Chains provenance" \
+              "(upstreamUrl='${UPSTREAM_URL}', upstreamRef='${UPSTREAM_REF}')"
+            exit 1
+          fi
         fi
 
         echo "Resolved sourceType=${SOURCE_TYPE} upstreamUrl=${UPSTREAM_URL} upstreamRef=${UPSTREAM_REF}"
