@@ -4,72 +4,123 @@ kind: Pipeline
 metadata:
   name: test-push-oot-kmods-to-git
 spec:
-  description: Simplified test for Git push task - validates parameter parsing only.
+  description: |
+    Happy-path test for push-oot-kmods-to-git with a multi-architecture
+    build. The git mock verifies the pushed artifacts pushed to correct path
+    for each architecture, plus the multi-arch summary.
   params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
     - name: dataDir
       description: The location where data will be stored
       type: string
-      default: "/var/workdir/release"
     - name: taskGitUrl
       type: string
-      default: "https://github.com/konflux-ci/release-service-catalog.git"
+      default: "http://localhost"
     - name: taskGitRevision
       type: string
       default: "main"
   tasks:
-    - name: setup-and-validate
+    - name: setup
       taskSpec:
         params:
           - name: dataDir
             type: string
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
         steps:
-          - name: setup-and-validate
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+          - name: setup-values
+            image: quay.io/redhat-user-workloads-stage/konflux-release-service-tenant/release-service-utils:on-pr-86cbf6218d76ec34202bc34b1e886a9b20002701
             script: |
               #!/usr/bin/env bash
               set -eux
 
-              # Create single architecture structure
-              mkdir -p "$(params.dataDir)"
-              SIGNED_KMODS_PATH="$(params.dataDir)/signed-kmods"
-              mkdir -p "$SIGNED_KMODS_PATH"
+              SIGNED_KMODS="$(params.dataDir)/signed-kmods"
 
-              # Create test .ko files
-              echo "SIGNED_MODULE1_CONTENT" > "$SIGNED_KMODS_PATH/mod1.ko"
-              echo "SIGNED_MODULE2_CONTENT" > "$SIGNED_KMODS_PATH/mod2.ko"
-
-              # Create envfile with required variables
-              cat > "$SIGNED_KMODS_PATH/envfile" << 'EOF'
+              for arch in x86_64 aarch64; do
+                ARCH_DIR="${SIGNED_KMODS}/${arch}"
+                mkdir -p "${ARCH_DIR}/driver/subdir"
+                echo "MODULE1" > "${ARCH_DIR}/mod1.ko"
+                echo "NESTED" > "${ARCH_DIR}/driver/subdir/nested.ko"
+                cat > "${ARCH_DIR}/envfile" << EOF
+              DRIVER_VENDOR=mocked-vendor
               DRIVER_VERSION=1.0.0
-              DRIVER_VENDOR=test-vendor
-              KERNEL_VERSION=6.5.0-test
+              KERNEL_VERSION=6.5.0.${arch}
               EOF
+                cd "${ARCH_DIR}"
+                sha256sum mod1.ko driver/subdir/nested.ko > "signed_kmods_checksums_${arch}.txt"
+              done
 
-              # Create checksums file
-              cd "$SIGNED_KMODS_PATH" && sha256sum ./*.ko > signed_kmods_checksums.txt && cd -
+              echo "signed by vendor CI" > "${SIGNED_KMODS}/signing_summary.txt"
+              echo "extracted x86_64 and aarch64" > "${SIGNED_KMODS}/extraction_summary.txt"
 
-              echo "Git test setup completed successfully"
-
-              # Validate single architecture structure
-              [ -f "$SIGNED_KMODS_PATH/mod1.ko" ] || { echo "ERROR: mod1.ko missing"; exit 1; }
-              [ -f "$SIGNED_KMODS_PATH/mod2.ko" ] || { echo "ERROR: mod2.ko missing"; exit 1; }
-              [ -f "$SIGNED_KMODS_PATH/envfile" ] || { echo "ERROR: envfile missing"; exit 1; }
-              [ -f "$SIGNED_KMODS_PATH/signed_kmods_checksums.txt" ] || { echo "ERROR: checksums missing"; exit 1; }
-
-              # Parse envfile content explicitly
-              DRIVER_VENDOR=$(grep "^DRIVER_VENDOR=" "$SIGNED_KMODS_PATH/envfile" | cut -d= -f2)
-              DRIVER_VERSION=$(grep "^DRIVER_VERSION=" "$SIGNED_KMODS_PATH/envfile" | cut -d= -f2)
-              KERNEL_VERSION=$(grep "^KERNEL_VERSION=" "$SIGNED_KMODS_PATH/envfile" | cut -d= -f2)
-
-              [ -n "$DRIVER_VENDOR" ] || { echo "ERROR: DRIVER_VENDOR not set"; exit 1; }
-              [ -n "$DRIVER_VERSION" ] || { echo "ERROR: DRIVER_VERSION not set"; exit 1; }
-              [ -n "$KERNEL_VERSION" ] || { echo "ERROR: KERNEL_VERSION not set"; exit 1; }
-
-              # Verify checksums work
-              cd "$SIGNED_KMODS_PATH" && sha256sum -c signed_kmods_checksums.txt && cd -
-
-              echo "SUCCESS: All validation checks passed"
-              echo "Task would push to Git repository: $DRIVER_VENDOR/$DRIVER_VERSION/$KERNEL_VERSION/"
+              cd "$(params.dataDir)"
+              tar -czf signed-kmods.tar.gz signed-kmods
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
       params:
         - name: dataDir
           value: $(params.dataDir)
+    - name: run-task
+      taskRef:
+        name: push-oot-kmods-to-git
+      params:
+        - name: signedKmodsPath
+          value: signed-kmods
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: gitRepoUrl
+          value: "gitlab.example.com/group/kmods.git"
+        - name: gitBranch
+          value: main
+        - name: gitTokenSecret
+          value: git-token-mock
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: $(params.taskGitUrl)
+        - name: taskGitRevision
+          value: $(params.taskGitRevision)
+      runAfter:
+        - setup
