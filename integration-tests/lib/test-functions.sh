@@ -424,16 +424,21 @@ create_kubernetes_resources() {
 
     echo "Building and applying tenant resources..."
     kustomize build "$tmpDir/tenant" | envsubst > "$tmpDir/tenant-resources.yaml"
+    # Omit an unset pipeline override so Build Service selects its default.
+    # kubectl 1.27 apply drops all annotations when any value is null.
+    yq -i 'del(select(.kind == "Component") |
+        .metadata.annotations."build.appstudio.openshift.io/pipeline" |
+        select(. == null or . == ""))' "$tmpDir/tenant-resources.yaml"
     local max_retries=5
     local attempt
     for attempt in $(seq 1 "${max_retries}"); do
-        if kubectl create -f "$tmpDir/tenant-resources.yaml" -n "${tenant_namespace}"; then
+        if kubectl apply -f "$tmpDir/tenant-resources.yaml" -n "${tenant_namespace}"; then
             break
         fi
         if [ "${attempt}" -eq "${max_retries}" ]; then
-            log_error "kubectl create tenant resources failed after ${max_retries} attempts"
+            log_error "kubectl apply tenant resources failed after ${max_retries} attempts"
         fi
-        echo "Retrying kubectl create tenant resources (attempt ${attempt}/${max_retries})..."
+        echo "Retrying kubectl apply tenant resources (attempt ${attempt}/${max_retries})..."
         sleep "$((1 + RANDOM % 3))"
     done
 
