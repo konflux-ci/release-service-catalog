@@ -2,31 +2,36 @@
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
 
-# Override wait_for_component_initialization to also wait for the ImageRepository
-# to become ready (quay repo created, push secret linked to build SA).
-eval "$(declare -f wait_for_component_initialization \
-  | sed '1s/wait_for_component_initialization/_base_wait_for_component_initialization/')"
+# Wait before merging the build PR so the clone pod gets the repository's push credentials.
+eval "$(declare -f wait_for_components_initialization \
+  | sed '1s/wait_for_components_initialization/_base_wait_for_components_initialization/')"
 
-wait_for_component_initialization() {
-    _base_wait_for_component_initialization
+wait_for_components_initialization() {
+    _base_wait_for_components_initialization
 
-    echo "Waiting for ImageRepository ${image_repository_name} to be ready..."
+    local build_sa="build-pipeline-${component_name}"
+    local push_secret="${image_repository_name}-image-push"
+    echo "Waiting for ImageRepository ${image_repository_name} and push credentials on ${build_sa}..."
     local ir_attempts=0
     local ir_max=30
-    while [ $ir_attempts -lt $ir_max ]; do
+    while [ "${ir_attempts}" -lt "${ir_max}" ]; do
         local ir_state
         ir_state=$(kubectl get imagerepository/"${image_repository_name}" \
             -n "${tenant_namespace}" -o jsonpath='{.status.state}' 2>/dev/null || true)
-        if [ "${ir_state}" = "ready" ]; then
-            echo "✅ ImageRepository is ready"
+        if [ "${ir_state}" = "ready" ] && \
+            kubectl get serviceaccount "${build_sa}" -n "${tenant_namespace}" -o json 2>/dev/null \
+                | jq -e --arg secret "${push_secret}" \
+                    'any(.secrets[]?; .name == $secret)' >/dev/null; then
+            echo "✅ ImageRepository is ready and push credentials are linked to ${build_sa}"
             return 0
         fi
         ir_attempts=$((ir_attempts + 1))
-        echo "  ImageRepository state: ${ir_state:-pending} (attempt ${ir_attempts}/${ir_max})"
+        echo "  Waiting for repository/push credentials (state: ${ir_state:-pending}, ${ir_attempts}/${ir_max})"
         sleep 5
     done
-    echo "🔴 ImageRepository ${image_repository_name} did not become ready after $((ir_max * 5))s"
+    echo "🔴 Repository/push credentials for ${image_repository_name} not ready after $((ir_max * 5))s"
     kubectl get imagerepository/"${image_repository_name}" -n "${tenant_namespace}" -o yaml 2>&1 || true
+    kubectl get serviceaccount "${build_sa}" -n "${tenant_namespace}" -o yaml 2>&1 || true
     exit 1
 }
 
