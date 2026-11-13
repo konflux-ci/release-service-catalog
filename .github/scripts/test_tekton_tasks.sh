@@ -471,6 +471,40 @@ do
           echo "    Taskrun failed as expected"
         fi
 
+        ASSERT_STEP_FAILURE=$(yq '.metadata.annotations.test/assert-step-failure' < "$TEST_PATH")
+        ASSERT_FAILURE_MESSAGE=$(yq '.metadata.annotations.test/assert-failure-message' < "$TEST_PATH")
+        if [ "$ASSERT_STEP_FAILURE" != "null" ] && [ -n "$ASSERT_STEP_FAILURE" ]
+        then
+          STEP_JSON=$(kubectl get tr "$TASKRUN" -o json | jq -c --arg step "$ASSERT_STEP_FAILURE" \
+            '.status.steps[] | select(.name == $step)')
+          STEP_EXIT=$(jq -r '.terminated.exitCode // "missing"' <<< "$STEP_JSON")
+          if [ "$STEP_EXIT" = "missing" ] || [ "$STEP_EXIT" = "null" ] || [ "$STEP_EXIT" = "0" ]
+          then
+            echo "    Step ${ASSERT_STEP_FAILURE} did not fail (exit ${STEP_EXIT})"
+            kubectl get tr "$TASKRUN" -o json
+            exit 1
+          fi
+          echo "    Step ${ASSERT_STEP_FAILURE} failed as expected (exit ${STEP_EXIT})"
+
+          if [ "$ASSERT_FAILURE_MESSAGE" != "null" ] && [ -n "$ASSERT_FAILURE_MESSAGE" ]
+          then
+            POD=$(kubectl get tr "$TASKRUN" -o jsonpath='{.status.podName}')
+            STEP_CONTAINER=$(jq -r '.container // empty' <<< "$STEP_JSON")
+            if [ -z "$STEP_CONTAINER" ]
+            then
+              STEP_CONTAINER="step-${ASSERT_STEP_FAILURE}"
+            fi
+            STEP_LOGS=$(kubectl logs "$POD" -c "$STEP_CONTAINER" 2>/dev/null || true)
+            if ! grep -F -- "$ASSERT_FAILURE_MESSAGE" <<< "$STEP_LOGS"
+            then
+              echo "    Step ${ASSERT_STEP_FAILURE} log did not contain: ${ASSERT_FAILURE_MESSAGE}"
+              echo "$STEP_LOGS"
+              exit 1
+            fi
+            echo "    Step log contained the expected failure"
+          fi
+        fi
+
       fi
     else
       if [ "$PR_STATUS" == "True" ]
