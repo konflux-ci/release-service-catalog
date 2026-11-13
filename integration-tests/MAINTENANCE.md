@@ -2,10 +2,8 @@
 
 ## Rotating the Github secret
 
-Some suites use dedicated bot accounts instead of the shared token:
-  * `rhtap-service-push` uses `rhtap-service-push-e2e-bot` (vault: `stonesoup/staging/release/e2e/rhtap-service-push-e2e-bot`)
-  * `fbc-release` uses `fbc-release-e2e-bot` (vault: `stonesoup/staging/release/e2e/fbc-release-e2e-bot`)
-  * All other suites use the shared token (vault: `stonesoup/staging/release/e2e/e2e-base-github-token`)
+All suites use dedicated bot accounts instead of a shared token:
+  * Github BOT account login, 2fa and tokens are stored in Release Team BitWarden Collection
 
 All tokens (shared and per-suite) require these classic PAT scopes:
   * repo
