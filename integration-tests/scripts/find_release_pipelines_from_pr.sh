@@ -224,7 +224,7 @@ _emit_integration_testcase_string() {
   "rhtap-service-push" "rh-push-to-registry-redhat-io" "rh-push-helm-chart-to-registry-redhat-io" \
   "rh-push-to-external-registry" "rh-push-to-external-registry-multi-component" \
   "push-to-addons-registry" \
-  "push-rpms-to-pulp" "push-artifacts-to-cdn" "push-disk-images")
+  "push-rpms-to-pulp" "push-artifacts-to-cdn" "push-disk-images" "push-to-cspv2")
 
   declare -a SELECTED_TESTCASES=()
 
