@@ -5,7 +5,9 @@ metadata:
   name: test-promote-koji-draft-build
 spec:
   description: |
-    Test the promote-koji-draft-build task.
+    Test the promote-koji-draft-build task. pipelineImage is an older utils
+    image that does not ship the Python module, so the copy-python-module
+    step must stage it for PYTHONPATH.
   params:
     - name: ociStorage
       description: The OCI repository where the Trusted Artifacts are stored.
@@ -51,7 +53,7 @@ spec:
             runAsUser: 1001
         steps:
           - name: setup-values
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            image: quay.io/lgallovi-test/release-service-utils@sha256:62a01e58b9b536cc876756e3edd20fefd32626475e690cf74378d5808bcc04c8
             script: |
               set -eux
 
@@ -208,12 +210,20 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            image: quay.io/lgallovi-test/release-service-utils@sha256:62a01e58b9b536cc876756e3edd20fefd32626475e690cf74378d5808bcc04c8
             script: |
               #!/usr/bin/env bash
               set -euo pipefail
 
               exit_code=0
+
+              # The module is staged at /var/workdir/python-packages, outside dataDir.
+              # create-trusted-artifact archives dataDir, so it must not come back.
+              if find "$(params.dataDir)" \( -name python-packages -o -name release_service_utils \) \
+                  -print -quit | grep -q .; then
+                  echo "TEST FAILED: The Python module was published in the trusted artifact."
+                  exit 1
+              fi
 
               function assert_cmd_called_with() {
                   calls_file="$(params.dataDir)/${1}_calls.txt"
@@ -243,7 +253,7 @@ spec:
 
               function test_list_builds() {
                   url=$1
-                  if assert_cmd_called_with koji --profile=koji call --json-output listBuilds \
+                  if assert_cmd_called_with koji --profile=koji --plugin-paths= call --json-output listBuilds \
                       userID=test \
                       state=1 \
                       source="$url" \
@@ -258,7 +268,7 @@ spec:
 
               function test_promote() {
                   build_id=$1
-                  if assert_cmd_called_with koji --profile=koji call promoteBuild "$build_id"
+                  if assert_cmd_called_with koji --profile=koji --plugin-paths= call promoteBuild "$build_id"
                   then
                       echo "TEST PASSED: Koji build $build_id was promoted."
                   else
@@ -268,10 +278,13 @@ spec:
               }
 
               function test_kinit() {
-                  if assert_cmd_called_with kinit -kt "\./test.keytab" "test@test\.com"; then
+                  calls_file="$(params.dataDir)/kinit_calls.txt"
+                  if grep -qE '^kinit test@test.com -k -t .+/test\.keytab$' "$calls_file"; then
                       echo "TEST PASSED: kinit was called."
                   else
-                      echo "TEST PASSED: kinit was not called."
+                      echo "TEST FAILED: kinit was not called."
+                      echo "Actual calls:"
+                      sed 's/^/  /' "$calls_file"
                       exit_code=1
                   fi
               }
@@ -291,8 +304,8 @@ spec:
               test_promote 2001
               test_list_builds 'git+https://gitlab.example.com/rpms/test-foo#12345'
               test_list_builds 'git+https://gitlab.example.com/rpms/test-bar#12345'
-              test_cmd_count 2 koji --profile=koji call promoteBuild
-              test_cmd_count 3 kinit -kt
+              test_cmd_count 2 koji --profile=koji --plugin-paths= call promoteBuild
+              test_cmd_count 3 kinit test@test.com -k -t
               test_kinit
 
               exit $exit_code
