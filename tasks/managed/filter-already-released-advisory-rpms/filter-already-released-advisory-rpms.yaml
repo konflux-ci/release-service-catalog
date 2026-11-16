@@ -172,13 +172,13 @@ spec:
         - name: sourceDataArtifact
           value: $(params.sourceDataArtifact)
     - name: filter
-      image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+      image: quay.io/lgallovi-test/release-service-utils@sha256:c0b6f5242f3e3379fafbfa87e147e0700024aab8d1517ea9a1191dc9894c441d
       computeResources:
         limits:
-          memory: 768Mi
+          memory: 1Gi
         requests:
-          memory: 768Mi
-          cpu: 450m
+          memory: 1Gi
+          cpu: 500m
       volumeMounts:
         - name: pulp-secret-name-vol
           mountPath: "/etc/secrets"
@@ -193,6 +193,8 @@ spec:
           value: "/etc/secrets/cli.toml"
         - name: PULP_DOMAIN
           value: "$(params.PULP_DOMAIN)"
+        - name: SIGNED_PULP_DOMAIN
+          value: "$(params.signedPulpDomain)"
         - name: DEFAULT_EXCLUDES
           value: "$(params.DEFAULT_EXCLUDES)"
         - name: DEFAULT_ARCHITECTURES
@@ -217,101 +219,7 @@ spec:
           value: "$(results.latest_advisory_url.path)"
         - name: RESULT_LATEST_ADVISORY_INTERNAL_URL
           value: "$(results.latest_advisory_internal_url.path)"
-      command: ["python3", "-m", "filter_already_released_advisory_rpms"]
-    - name: guard-signed-rpms
-      image: >-
-        quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
-      computeResources:
-        limits:
-          memory: 256Mi
-        requests:
-          memory: 256Mi
-          cpu: 100m
-      volumeMounts:
-        - name: pulp-secret-name-vol
-          mountPath: /etc/secrets
-      env:
-        - name: SNAPSHOT_FILE
-          value: "$(params.dataDir)/$(params.snapshotPath)"
-        - name: PULP_CONFIG_FILE
-          value: /etc/secrets/cli.toml
-        - name: SIGNED_PULP_DOMAIN
-          value: $(params.signedPulpDomain)
-        - name: RESULT_SKIP_RELEASE
-          value: $(results.skip_release.path)
-      script: |
-        #!/usr/bin/env python3
-        import json
-        import os
-        from pathlib import Path
-        from urllib.parse import quote, urlencode
-
-        from release_service_utils.helpers import http_client
-        from release_service_utils.helpers.pulp_client import (
-            PulpAuth,
-            PulpClient,
-            PulpDigestStatus,
-            parse_pulp_config,
-        )
-
-        domain = os.environ["SIGNED_PULP_DOMAIN"]
-        if domain and Path(os.environ["RESULT_SKIP_RELEASE"]).read_text().strip() == "false":
-            snapshot = json.loads(Path(os.environ["SNAPSHOT_FILE"]).read_text())
-            config = parse_pulp_config(Path(os.environ["PULP_CONFIG_FILE"]))
-            session = http_client.get_retry_session(
-                total=3, connect=3, read=3, status=2, allowed_methods=frozenset({"GET"})
-            )
-            session.auth = PulpAuth(config)
-            pulp = PulpClient(session, config["base_url"], domain)
-
-            def exists_in_latest_version(repo_name, rpm):
-                repo_url = (
-                    f"{config['base_url']}/api/pulp/{quote(domain, safe='')}"
-                    f"/api/v3/repositories/rpm/rpm/?name={quote(repo_name, safe='')}"
-                )
-                repos = pulp.get_json(repo_url).get("results", [])
-                if len(repos) != 1 or repos[0].get("name") != repo_name:
-                    raise RuntimeError(f"Cannot identify signed Pulp repository {domain}/{repo_name}")
-                repo_href = repos[0].get("pulp_href")
-                if not repo_href:
-                    raise RuntimeError(f"Missing Pulp href for signed repository {domain}/{repo_name}")
-                version = pulp.get_json(f"{config['base_url']}{repo_href}").get("latest_version_href")
-                if not version:
-                    return False
-                query = urlencode({
-                    "repository_version": version,
-                    "name": rpm["rpmname"],
-                    "epoch": str(rpm["epoch"]),
-                    "version": rpm["version"],
-                    "release": rpm["release"],
-                    "arch": rpm["arch"],
-                })
-                content_url = (
-                    f"{config['base_url']}/api/pulp/{quote(domain, safe='')}"
-                    f"/api/v3/content/rpm/packages/?{query}"
-                )
-                count = pulp.get_json(content_url).get("count")
-                if not isinstance(count, int):
-                    raise RuntimeError(f"Invalid signed Pulp package response for {rpm['rpm']}")
-                return count > 0
-
-            for component in snapshot["components"]:
-                for rpm in component.get("rpmsToPublish", []):
-                    for repo in rpm["targetRepos"]:
-                        repo_name = repo["repository_name"]
-                        # Signed RPMs have a different SHA from the unsigned snapshot RPMs.
-                        # Any match in either the published or latest version must stop a new signing run.
-                        status = pulp.check_digest(
-                            repo_name, rpm["rpmname"], str(rpm["epoch"]),
-                            rpm["version"], rpm["release"], rpm["arch"], rpm["sha256"],
-                        )
-                        if status != PulpDigestStatus.NOT_FOUND or exists_in_latest_version(repo_name, rpm):
-                            raise RuntimeError(
-                                f"{rpm['rpm']} is already in signed Pulp domain {domain}/{repo_name} "
-                                "while this release still needs an advisory. Stop before re-signing. "
-                                "Use the original signed RPMs to finish missing advisories; "
-                                "this pipeline cannot resume a partial release."
-                            )
+      command: ["python3", "-m", "release_service_utils.tasks.managed.filter_already_released_advisory_rpms"]
     - name: create-trusted-artifact
       computeResources:
         limits:
