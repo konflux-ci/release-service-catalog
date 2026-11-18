@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-TASK_PATH="$1"
-SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+TASK_PATH="${1}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
 # Add mocks to the beginning of task step script
-yq -i '.spec.steps[1].script = load_str("'$SCRIPT_DIR'/mocks.sh") + .spec.steps[1].script' "$TASK_PATH"
+yq -i '.spec.steps[1].script = load_str("'"${SCRIPT_DIR}"'/mocks.sh") + .spec.steps[1].script' \
+    "${TASK_PATH}"
 
 # 1. Define the secret name used in your test YAML
 MARKETPLACE_SECRET="marketplacesvm-test-secret"
