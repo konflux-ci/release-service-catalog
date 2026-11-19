@@ -67,6 +67,14 @@ spec:
       type: string
       description: The name of the key in the ConfigMap that contains the CA bundle data
       default: ca-bundle.crt
+    - name: mergeRequestId
+      type: string
+      description: |
+        Optional merge request ID to filter builds. If provided, only builds
+        matching this MR ID in their custom_user_metadata will be considered.
+        This ensures the correct build is promoted when multiple builds exist
+        for the same commit hash across different RHEL versions
+      default: ""
   results:
     - name: sourceDataArtifact
       type: string
@@ -219,6 +227,7 @@ spec:
               continue
           fi
 
+          # Step 1: Get all builds for the commit hash
           builds=$(
             koji-cmd call --json-output listBuilds \
               userID="$USER_NAME" \
@@ -226,9 +235,54 @@ spec:
               source="$commitUrl" \
               draft=True
           )
-          # Get the latest build ID
+
+          # Step 2: Filter by MR ID if provided
+          MR_ID="$(params.mergeRequestId)"
+
+          if [ -n "$MR_ID" ]; then
+            printf "Filtering builds by MR ID: %s\n" "$MR_ID"
+
+            # Filter builds to keep only those that:
+            # 1. Have matching MR ID, OR
+            # 2. Have no MR ID in metadata (null/empty)
+            # This excludes builds with DIFFERENT MR IDs
+            filtered_builds=$(jq --arg mr_id "$MR_ID" '
+              map(
+                select(
+                  (.extra.custom_user_metadata.osci.merge_request_iid // "") as $build_mr |
+                  $build_mr == "" or ($build_mr | tostring) == $mr_id
+                )
+              )
+            ' <<< "$builds")
+
+            # Count filtered results
+            filtered_count=$(jq 'length' <<< "$filtered_builds")
+            total_count=$(jq 'length' <<< "$builds")
+            excluded_count=$((total_count - filtered_count))
+
+            printf "Found %s builds total, filtered to %s builds (excluded %s with different MR IDs)\n" \
+              "$total_count" "$filtered_count" "$excluded_count"
+
+            # Use the filtered list
+            builds="$filtered_builds"
+
+            if [ "$filtered_count" -eq 0 ]; then
+              printf "ERROR: All builds have different MR IDs than requested (%s)\n" "$MR_ID"
+              exit 1
+            fi
+          else
+            printf "No MR ID provided, using all builds for commit hash\n"
+          fi
+
+          # Step 3: Get the latest build from the (possibly filtered) list
           build_id=$(jq -r 'max_by(.creation_time).build_id' <<< "$builds")
 
+          if [ -z "$build_id" ] || [ "$build_id" = "null" ]; then
+            printf "ERROR: No valid build found for component %s\n" "$componentName"
+            exit 1
+          fi
+
+          printf "Selected build %s for component %s\n" "$build_id" "$componentName"
           printf "Promoting build %s ...\n" "$build_id"
           koji-cmd call promoteBuild "$build_id"
         done
