@@ -45,8 +45,10 @@ EOF
 function koji() {
     echo "koji $@" >> "$(params.dataDir)/koji_calls.txt"
     if [[ "$*" == *listBuilds*source=git+https://gitlab.example.com/rpms/test-foo* ]]; then
-        echo '[{"build_id": 1002, "creation_time": "2025-01-01 01:00:00.000000"}, {"build_id": 1001, "creation_time": "2025-01-01 00:00:00.000000"}]'
+        # Return builds with MR metadata for testing MR ID filtering
+        echo '[{"build_id": 1002, "creation_time": "2025-01-01 01:00:00.000000", "extra": {"custom_user_metadata": {"osci": {"merge_request_iid": "42"}}}}, {"build_id": 1001, "creation_time": "2025-01-01 00:00:00.000000", "extra": {"custom_user_metadata": {"osci": {"merge_request_iid": "41"}}}}]'
     elif [[ "$*" == *listBuilds*source=git+https://gitlab.example.com/rpms/test-bar* ]]; then
+        # Return build without MR metadata for backwards compatibility testing
         echo '[{"build_id": 2001, "creation_time": "2025-01-01 00:00:00.000000"}]'
     fi
 }
