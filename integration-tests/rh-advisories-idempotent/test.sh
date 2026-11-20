@@ -286,6 +286,7 @@ verify_release_contents() {
         "publish-pyxis-repository"
         "push-rpm-data-to-pyxis"
         "process-component-sbom"
+        "process-component-cbom"
         "process-product-sbom"
         "run-file-updates"
         "check-data-keys"
