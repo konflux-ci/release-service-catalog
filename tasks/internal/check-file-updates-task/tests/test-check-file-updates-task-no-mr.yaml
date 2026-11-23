@@ -1,0 +1,67 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-check-file-updates-task-no-mr
+spec:
+  description: |
+    Verify check-file-updates-task handles the case where no matching fileUpdates MR exists
+    for the given componentGroup (GitLab returns an empty list). The task should succeed
+    with result=Success, file_updates_complete=false (the default set at task start), and
+    merge_request_url empty.
+  tasks:
+    - name: run-check
+      taskRef:
+        name: check-file-updates-task
+      params:
+        - name: upstream_repo
+          value: "https://gitlab.example.com/group/project.git"
+        - name: componentGroup
+          value: "no-mr-app"
+        - name: file_updates_secret
+          value: "file-updates-secret"
+        - name: internalRequestPipelineRunName
+          value: "test"
+    - name: verify
+      runAfter:
+        - run-check
+      params:
+        - name: result
+          value: "$(tasks.run-check.results.result)"
+        - name: complete
+          value: "$(tasks.run-check.results.file_updates_complete)"
+        - name: mr
+          value: "$(tasks.run-check.results.merge_request_url)"
+      taskSpec:
+        params:
+          - name: result
+            type: string
+          - name: complete
+            type: string
+          - name: mr
+            type: string
+        steps:
+          - name: verify
+            image: quay.io/konflux-ci/release-service-utils:cee1fd0191e750b0736d8197701d91ce2f308e03
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              if [ "$(params.result)" != "Success" ]; then
+                echo "ERROR: expected result=Success, got: $(params.result)"
+                exit 1
+              fi
+
+              if [ "$(params.complete)" != "false" ]; then
+                echo "ERROR: expected file_updates_complete=false when no MR exists," \
+                  "got: $(params.complete)"
+                exit 1
+              fi
+
+              if [ -n "$(params.mr)" ]; then
+                echo "ERROR: expected merge_request_url to be empty when no MR exists," \
+                  "got: $(params.mr)"
+                exit 1
+              fi
+
+              echo "PASS: task correctly handled missing fileUpdates MR (result=Success, file_updates_complete=false)"
