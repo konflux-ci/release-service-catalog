@@ -31,6 +31,11 @@ This task supports variable expansion in tag values from the mapping. The curren
 
 You can also expand image labels, e.g. "{{ labels.mylabel }}" -> The value of image label "mylabel"
 
+You can also expand OCI manifest annotations, e.g. "{{ annotations.mykey }}" -> The value of
+annotation "mykey" (keys may use letters, digits, `.`, `_`, and `-`). This is the primary
+mechanism for Helm chart artifacts, which do not support container-style labels. Prefer
+"{{ oci_version }}" for chart versions (it applies + → _ sanitization).
+
 ## Parameters
 
 | Name                    | Description                                                                                                                                                                                                                                | Optional | Default value                 |
