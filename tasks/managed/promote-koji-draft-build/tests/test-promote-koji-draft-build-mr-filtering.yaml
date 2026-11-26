@@ -1,0 +1,238 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-promote-koji-draft-build-mr-filtering
+spec:
+  description: |
+    Test the promote-koji-draft-build task with MR ID filtering.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+    - name: dataDir
+      description: The location where data will be stored
+      type: string
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          # Use the same security context as the main task to avoid permission issues
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            script: |
+              set -eux
+
+              mkdir -p "$(params.dataDir)/$(context.pipelineRun.uid)"
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/data.json" << EOF
+              {
+                "mapping": {
+                  "components": [
+                    {
+                      "name": "test-foo",
+                      "pushSourceContainer": false,
+                      "repository": "quay.io/test/test-foo"
+                    }
+                  ]
+                },
+                "pushOptions": {
+                  "koji_profile": "koji",
+                  "koji_import_draft": true,
+                  "koji_tags": [
+                    "test-rpm"
+                  ],
+                  "pushKeytab": {
+                    "name": "test.keytab",
+                    "principal": "test@test.com",
+                    "secret": "test-secrets"
+                  },
+                  "pushPipelineImage": "test-image"
+                }
+              }
+              EOF
+              cat > "$(params.dataDir)/$(context.pipelineRun.uid)/snapshot_spec.json" << EOF
+              {
+                "application": "rpms",
+                "artifacts": {},
+                "components": [
+                  {
+                    "containerImage": "quay.io/test/test-foo@sha256:12345",
+                    "name": "test-foo",
+                    "source": {
+                      "git": {
+                        "context": "./",
+                        "dockerfileUrl": "Containerfile",
+                        "revision": "12345",
+                        "url": "https://gitlab.example.com/rpms/test-foo"
+                      }
+                    }
+                  }
+                ]
+              }
+              EOF
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: promote-koji-draft-build
+      params:
+        - name: snapshotPath
+          value: "$(context.pipelineRun.uid)/snapshot_spec.json"
+        - name: dataPath
+          value: "$(context.pipelineRun.uid)/data.json"
+        - name: pushSecret
+          value: "push-koji-test"
+        - name: pipelineImage
+          value: "quay.io/konflux-ci/release-service-utils@sha256:f10b4ad888634a7633f76ede29003ce1471aec2b76a7d9e01ad282a3011eb78f"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: mergeRequestId
+          value: "42"
+      runAfter:
+        - setup
+    - name: check-result
+      params:
+        - name: sourceDataArtifact
+          value: "$(tasks.run-task.results.sourceDataArtifact)=$(params.dataDir)"
+        - name: dataDir
+          value: $(params.dataDir)
+      runAfter:
+        - run-task
+      taskSpec:
+        params:
+          - name: sourceDataArtifact
+            type: string
+          - name: dataDir
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          # Use the same security context as the main task to avoid permission issues
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: use-trusted-artifact
+            ref:
+              name: use-trusted-artifact
+            params:
+              - name: workDir
+                value: $(params.dataDir)
+              - name: sourceDataArtifact
+                value: $(params.sourceDataArtifact)
+          - name: check-result
+            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            script: |
+              #!/usr/bin/env bash
+              set -euo pipefail
+
+              exit_code=0
+
+              function assert_cmd_called_with() {
+                  calls_file="$(params.dataDir)/${1}_calls.txt"
+                  if ! grep -q "^$*$" "$calls_file"; then
+                      echo "Command call not found:"
+                      echo "  $*"
+                      echo "Actual calls:"
+                      sed 's/^/  /' "$calls_file"
+                      return 1
+                  fi
+              }
+
+              function test_promote() {
+                  build_id=$1
+                  if assert_cmd_called_with koji --profile=koji call promoteBuild "$build_id"
+                  then
+                      echo "TEST PASSED: Koji build $build_id was promoted."
+                  else
+                      echo "TEST FAILED: Koji build $build_id was not promoted."
+                      exit_code=1
+                  fi
+              }
+
+              function test_promote_not_called() {
+                  build_id=$1
+                  calls_file="$(params.dataDir)/koji_calls.txt"
+                  if grep -q "promoteBuild $build_id" "$calls_file"; then
+                      echo "TEST FAILED: Koji build $build_id should not have been promoted."
+                      exit_code=1
+                  else
+                      echo "TEST PASSED: Koji build $build_id was correctly not promoted."
+                  fi
+              }
+
+              # Test that build 1002 (with MR ID 42, newest) was promoted
+              test_promote 1002
+
+              # Test that build 1001 (with MR ID 41, older) was NOT promoted
+              test_promote_not_called 1001
+
+              echo ""
+              echo "MR ID Filtering Test Summary:"
+              echo "- Build 1002 (MR=42, newest) should be promoted ✓"
+              echo "- Build 1001 (MR=41, older) should NOT be promoted ✓"
+              echo ""
+
+              exit $exit_code
