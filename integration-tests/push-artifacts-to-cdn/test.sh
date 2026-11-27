@@ -33,9 +33,129 @@ EOF
 
     export RELEASE_NAME=${release_name}
     export RELEASE_NAMESPACE=${tenant_namespace}
+
+    # wait-for-release.sh exits 1 when the Release fails, before
+    # verify_release_contents can run. Collect the CDN task logs first:
+    # the finally cleanup deletes the managed PipelineRun.
+    local wait_status=0
+    local had_errexit=false
+    if [[ "$-" == *e* ]]; then
+        had_errexit=true
+    fi
+    set +e
     "${SUITE_DIR}/../scripts/wait-for-release.sh"
+    wait_status=$?
+    if [ "${had_errexit}" = true ]; then
+        set -e
+    fi
+    if [ "${wait_status}" -ne 0 ]; then
+        collect_cdn_failure_logs || true
+        exit "${wait_status}"
+    fi
 
     export RELEASE_NAMES="${release_name}"
+}
+
+# Print a failed push-artifacts-to-cdn TaskRun's condition and recent pod logs.
+# Arguments:
+#   $1: TaskRun name
+#   $2: TaskRun list JSON from the managed PipelineRun
+_print_push_artifacts_taskrun_logs() {
+    local tr_name="$1"
+    local taskruns_json="$2"
+    local status message pod_name log_target
+
+    status=$(jq -r --arg name "${tr_name}" '
+        .items[]
+        | select(.metadata.name == $name)
+        | first(.status.conditions[]? | select(.type == "Succeeded") | .status) // ""' \
+        <<< "${taskruns_json}")
+    message=$(jq -r --arg name "${tr_name}" '
+        .items[]
+        | select(.metadata.name == $name)
+        | first(.status.conditions[]? | select(.type == "Succeeded") | .message) // ""' \
+        <<< "${taskruns_json}")
+    pod_name=$(jq -r --arg name "${tr_name}" '
+        .items[]
+        | select(.metadata.name == $name)
+        | .status.podName // ""' <<< "${taskruns_json}")
+    log_target="${pod_name:-${tr_name}}"
+
+    echo ""
+    echo "=== collect cdn task logs: ${tr_name} (status=${status:-unknown}) ==="
+    if [ -n "${message}" ]; then
+        echo "message: ${message}"
+    fi
+    echo "pod: ${log_target} (last 200 lines)"
+    kubectl logs "${log_target}" -n "${managed_namespace}" --all-containers --tail=200 2>&1 \
+        || echo "Could not read logs for ${log_target}"
+    echo "=== end cdn task logs: ${tr_name} ==="
+}
+
+# Print logs for every push-artifacts-to-cdn TaskRun that did not succeed.
+# The task retries, so a failed release can have more than one TaskRun.
+# When none of those TaskRuns exist, diagnose the managed PipelineRun instead.
+# Arguments:
+#   $1: managed PipelineRun name
+collect_push_artifacts_task_logs() {
+    local managed_plr_name="$1"
+    local taskruns_json names tr_name status printed
+
+    echo ""
+    echo "Collecting push-artifacts-to-cdn logs for PipelineRun ${managed_plr_name}..."
+
+    taskruns_json=$(kubectl get taskrun -n "${managed_namespace}" \
+        -l "tekton.dev/pipelineRun=${managed_plr_name}" -o json 2>/dev/null || echo '{"items":[]}')
+    names=$(jq -r '
+        .items[]
+        | select(.metadata.labels."tekton.dev/pipelineTask" == "push-artifacts-to-cdn")
+        | .metadata.name' <<< "${taskruns_json}" || true)
+
+    printed=false
+    while IFS= read -r tr_name; do
+        [ -z "${tr_name}" ] && continue
+        status=$(jq -r --arg name "${tr_name}" '
+            .items[]
+            | select(.metadata.name == $name)
+            | first(.status.conditions[]? | select(.type == "Succeeded") | .status) // ""' \
+            <<< "${taskruns_json}")
+        if [ "${status}" = "True" ]; then
+            echo "TaskRun ${tr_name} succeeded; skipping its logs"
+            continue
+        fi
+        _print_push_artifacts_taskrun_logs "${tr_name}" "${taskruns_json}"
+        printed=true
+    done <<< "${names}"
+
+    if [ "${printed}" != true ]; then
+        echo "No failed push-artifacts-to-cdn TaskRun found."
+        diagnose_failed_pipelinerun "${managed_plr_name}" "${managed_namespace}"
+    fi
+}
+
+# Load the Release and collect logs from its managed PipelineRun.
+collect_cdn_failure_logs() {
+    local release_json managed_plr managed_plr_name
+
+    if [ -z "${RELEASE_NAME:-}" ] || [ -z "${RELEASE_NAMESPACE:-}" ]; then
+        echo "Release name is unset; skipping CDN task log collection"
+        return 0
+    fi
+
+    release_json=$(kubectl get release/"${RELEASE_NAME}" -n "${RELEASE_NAMESPACE}" -o json 2>/dev/null || true)
+    if [ -z "${release_json}" ]; then
+        echo "Could not load Release ${RELEASE_NAME}; skipping CDN task log collection"
+        return 0
+    fi
+
+    managed_plr=$(jq -r '.status.managedProcessing.pipelineRun // ""' <<< "${release_json}")
+    if [ -z "${managed_plr}" ] || [ "${managed_plr}" = "null" ]; then
+        echo "No managed PipelineRun on ${RELEASE_NAME}; CDN task logs are not available"
+        return 0
+    fi
+
+    managed_plr_name=$(basename "${managed_plr}")
+    collect_push_artifacts_task_logs "${managed_plr_name}"
 }
 
 # --- Release Verification ---
@@ -52,6 +172,7 @@ verify_release_contents() {
     jq '.status' <<< "${release_json}"
 
     local failures=0
+    local managed_plr_name=""
 
     local managed_plr_full
     managed_plr_full=$(jq -r '.status.managedProcessing.pipelineRun // ""' <<< "${release_json}")
@@ -59,7 +180,6 @@ verify_release_contents() {
         echo "🔴 managedProcessing.pipelineRun is empty for ${RELEASE_NAME}"
         failures=$((failures + 1))
     else
-        local managed_plr_name
         managed_plr_name=$(basename "${managed_plr_full}")
         echo "Managed PipelineRun: ${managed_plr_name}"
 
@@ -99,6 +219,9 @@ verify_release_contents() {
     _print_pulp_state
 
     if [ "${failures}" -gt 0 ]; then
+        if [ -n "${managed_plr_name}" ]; then
+            collect_push_artifacts_task_logs "${managed_plr_name}" || true
+        fi
         echo "🔴 Test has FAILED with ${failures} failure(s)!"
         exit 1
     fi

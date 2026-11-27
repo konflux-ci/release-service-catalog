@@ -19,8 +19,9 @@ Auto-release is disabled. The test waits for all three component builds to compl
 creates a Release against the multi-component Snapshot. After the release pipeline succeeds:
 
 1. Asserts the `push-artifacts-to-cdn` TaskRun succeeded.
-2. Prints the current file list from the CGW staging API for this product/version.
-3. Prints the current file list from the Pulp staging repository (informational).
+2. On failure, prints each failed `push-artifacts-to-cdn` TaskRun condition and the last 200 lines of its pod logs, including retry attempts, before cleanup deletes the PipelineRun.
+3. Prints the current file list from the CGW staging API for this product/version.
+4. Prints the current file list from the Pulp staging repository (informational).
 
 ## Test-Specific Dependencies
 
@@ -149,6 +150,7 @@ With debug (skip cleanup on failure):
      pushes checksum file to CGW.
 7. **Verification**:
    - Asserts the `push-artifacts-to-cdn` TaskRun succeeded.
+   - On failure, prints the failed TaskRun condition and recent pod logs.
    - Prints the current file list from the CGW staging API (informational).
    - Prints the current file list from the Pulp staging API (informational).
 
@@ -157,6 +159,7 @@ With debug (skip cleanup on failure):
 `verify_release_contents()` asserts the following hard pass/fail condition:
 
 - **push-artifacts-to-cdn TaskRun** — succeeded (status=True).
+  When it does not, the test prints that TaskRun's condition message and recent pod logs.
 
 After that assertion, the test prints the current state of both downstream systems as
 diagnostic output but does **not** fail based on their content.
