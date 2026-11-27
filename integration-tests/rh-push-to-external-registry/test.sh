@@ -396,6 +396,18 @@ verify_single_release() {
         failures=$((failures + 1))
     fi
 
+    # Check that collect-data merged the repositories tags from the RP and RPA
+    echo ""
+    echo "Checking that collect-data merged the repositories tags and both were pushed..."
+    local pushed_urls
+    pushed_urls="$(jq -r '.status.artifacts.images[0]?.urls[]? // empty' <<< "${release_json}")"
+    if grep -q ':rp-tag$' <<< "${pushed_urls}" && grep -q ':rpa-tag$' <<< "${pushed_urls}"; then
+        echo "✅ rp-tag and rpa-tag were both pushed"
+    else
+        echo "🔴 Missing rp-tag or rpa-tag in pushed image urls: ${pushed_urls}"
+        failures=$((failures + 1))
+    fi
+
     # Check both the outer failures count and per-image failures tracked in failed_releases
     if [ "${failures}" -gt 0 ] || [[ -n "${failed_releases}" ]]; then
         echo "🔴 Release verification FAILED!"
