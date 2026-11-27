@@ -45,7 +45,7 @@ spec:
               value: "$(params.trustedArtifactsDebug)"
         steps:
           - name: create-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            image: quay.io/konflux-ci/release-service-utils@sha256:a10c2599393995f249ab30e7b6c7643980fec7ad49e8d8cb93caa2028decd7bd
             script: |
               #!/usr/bin/env bash
               set -eux
@@ -64,11 +64,17 @@ spec:
                 data:
                   rkey: rvalue
                   foo: shouldGetOverwritten
+                  mapping:
+                    components:
+                      - name: coo-1-5-cluster-observability-operator
+                        componentTags: [v1.5.6]
+                      - name: external-secrets-1-1-external-secrets-operator
+                        componentTags: [v1.1.1]
               EOF
               kubectl apply -f release
 
               collectors='
-                {"collectors":{"managed":{"foo":{"releaseNotes":{"cves":[{"key":"FOO-3444","component":"my-component"}]}},
+                {"collectors":{"managed":{"foo":{"releaseNotes":{"cves":[{"key":"CVE-2026-3444","component":"my-component"}]}},
                 "bar":{"releaseNotes":{"issues":{"fixed":[{"id":"FOO-1234","source":"redhat.atlassian.net"}]}}}},
                 "tenant":{"foobar":{"releaseNotes":{"foobar":[{"key":"FOO-4333","component":"my-component"}]}}}}}
               '
@@ -87,6 +93,17 @@ spec:
                 data:
                   foo: bar
                   one: one
+                  mapping:
+                    components:
+                      - name: coo-1-5-cluster-observability-operator
+                        componentTags: [configured-operator-tag]
+                        repositories:
+                          - url: quay.io/example/coo-current
+                            tags: [rp-repo-tag]
+                    rpm-repositories:
+                      - name: shared-repo
+                        arch: x86_64
+                        repository_id: repo-x86_64
               EOF
               kubectl apply -f releaseplan
 
@@ -102,6 +119,29 @@ spec:
                 origin: foo
                 data:
                   singleComponentMode: true
+                  mapping:
+                    defaults:
+                      tags: [configured-stage-tag]
+                      pushSourceContainer: true
+                    components:
+                      - name: coo-1-5-cluster-observability-operator
+                        canonicalName: example/coo
+                        repositories:
+                          - url: quay.io/example/coo-removed
+                            tags: [rpa-repo-tag]
+                      - name: external-secrets-1-1-external-secrets-operator
+                        repositories:
+                          - url: quay.io/example/eso
+                      - name: operand
+                        repositories:
+                          - url: quay.io/example/operand
+                    rpm-repositories:
+                      - name: shared-repo
+                        arch: x86_64
+                        repository_id: repo-x86_64
+                      - name: shared-repo
+                        arch: aarch64
+                        repository_id: repo-aarch64
                   one:
                     two: three
                     four:
@@ -120,6 +160,11 @@ spec:
                         value: pipeline
               EOF
               kubectl apply -f releaseplanadmission
+
+              # Simulate an RPA edit after the tags-only Release was created.
+              kubectl patch releaseplanadmission releaseplanadmission-with-data-sample --type=json --patch \
+                '[{"op":"replace","path":"/spec/data/mapping/components/0/repositories/0/url",
+                  "value":"quay.io/example/coo-current"}]'
 
               cat > releaseserviceconfig << EOF
               apiVersion: appstudio.redhat.com/v1alpha1
@@ -221,18 +266,42 @@ spec:
               - name: sourceDataArtifact
                 value: $(params.sourceDataArtifact)
           - name: check-result
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            image: quay.io/konflux-ci/release-service-utils@sha256:a10c2599393995f249ab30e7b6c7643980fec7ad49e8d8cb93caa2028decd7bd
             script: |
               #!/usr/bin/env bash
               set -eux
 
               echo Test that data result was set properly
-              test "$(jq -cr --sort-keys . "$(params.dataDir)/$(params.data)")" \
-               == "$(jq -cr --sort-keys <<< '{"releaseNotes":{"cves":[{"component":"my-component","key":"FOO-3444"}],
+              test "$(jq -cr --sort-keys 'del(.mapping)' "$(params.dataDir)/$(params.data)")" \
+               == "$(jq -cr --sort-keys <<< '{"releaseNotes":{"cves":[{"component":"my-component",
+                  "key":"CVE-2026-3444"}],
                   "foobar":[{"component":"my-component",
                   "key":"FOO-4333"}],"issues":{"fixed":[{"id":"FOO-1234",
                   "source":"redhat.atlassian.net"}]}},"foo":"bar","rkey":"rvalue","one":{"four":["five","six"],
                   "two":"three"},"singleComponentMode":true}')"
+
+              echo Test that operator CSV tags merge with the live RPA repositories
+              jq -e '
+                .mapping as $mapping |
+                ($mapping.components | length == 3) and
+                ($mapping.defaults == {"tags":["configured-stage-tag"],"pushSourceContainer":true}) and
+                ([$mapping.components[] | select(.name == "coo-1-5-cluster-observability-operator")] | .[0] |
+                  .componentTags == ["configured-operator-tag","v1.5.6"] and
+                  .canonicalName == "example/coo" and
+                  .repositories == [{"url":"quay.io/example/coo-current","tags":["rp-repo-tag","rpa-repo-tag"]}]) and
+                ([$mapping.components[] | select(.name == "external-secrets-1-1-external-secrets-operator")] | .[0] |
+                  .componentTags == ["v1.1.1"] and .repositories == [{"url":"quay.io/example/eso"}]) and
+                ([$mapping.components[] | select(.name == "operand")] | .[0] |
+                  .repositories == [{"url":"quay.io/example/operand"}] and (has("componentTags") | not)) and
+                ($mapping["rpm-repositories"] | sort_by(.arch) == [
+                  {"name":"shared-repo","arch":"aarch64","repository_id":"repo-aarch64"},
+                  {"name":"shared-repo","arch":"x86_64","repository_id":"repo-x86_64"}])
+              ' "$(params.dataDir)/$(params.data)"
+
+              echo Test that the merged component entries satisfy the mapping schema
+              jq '.systems = [{"systemName":"mapping"}]' \
+                "$(params.dataDir)/$(params.data)" > "$(params.dataDir)/mapping-data.json"
+              check-jsonschema --schemafile /home/schemas/dataKeys.json "$(params.dataDir)/mapping-data.json"
 
               echo Test that the singleComponentMode result was properly set
               test "$(params.singleComponentMode)" == "true"
@@ -242,7 +311,7 @@ spec:
       taskSpec:
         steps:
           - name: delete-crs
-            image: quay.io/konflux-ci/release-service-utils@sha256:6d4dee971855fe55724c16b049e21a396287b53766ffd3fa984ee91895e9f099
+            image: quay.io/konflux-ci/release-service-utils@sha256:a10c2599393995f249ab30e7b6c7643980fec7ad49e8d8cb93caa2028decd7bd
             script: |
               #!/usr/bin/env sh
               set -eux
