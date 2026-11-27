@@ -4,8 +4,12 @@
 
 Stress test for the `rh-advisories` release pipeline using a **static pool of
 200 pre-built single-arch images** (`resources/static-image-pool-stable.txt`).
-There is no image build step — images already exist in Quay and are selected
-directly from the pool.
+There is no image build step during the test: **all 200 images must already exist**
+in stage Quay and be listed in the pool file before you run
+`/test-large-snapshot`. The test only reads that list; it does not build images.
+
+How to manually create or refresh the pool:
+[static-image-pool.md](static-image-pool.md).
 
 | Property | Value |
 |---|---|
