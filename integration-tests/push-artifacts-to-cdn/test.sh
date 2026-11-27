@@ -9,7 +9,7 @@ PTSV_COMPONENTS="component component2 component3"
 
 wait_for_releases() {
     local snapshot_name
-    snapshot_name=$(wait_for_multi_component_snapshot)
+    snapshot_name=$(wait_for_components_snapshot)
     if [ -z "$snapshot_name" ]; then
         echo "Could not find multi-component snapshot"
         exit 1

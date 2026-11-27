@@ -13,6 +13,41 @@
 # --- Global Script Variables (Defaults) ---
 CLEANUP="true"
 
+# Create the Release manually, since this suite supports multi-component
+# runs and must wait for all component builds to complete first.
+wait_for_releases() {
+    local expected_count
+    expected_count="$(wc -w <<< "${PTSV_COMPONENTS}")"
+
+    local snapshot_name
+    snapshot_name=$(wait_for_components_snapshot "" "${expected_count}")
+    if [ -z "${snapshot_name}" ]; then
+        echo "Could not find matching snapshot"
+        exit 1
+    fi
+
+    local release_name="idempotent-${uuid}"
+
+    cat <<EOF | kubectl apply -f -
+apiVersion: appstudio.redhat.com/v1alpha1
+kind: Release
+metadata:
+  name: ${release_name}
+  namespace: ${tenant_namespace}
+  labels:
+    originating-tool: "${originating_tool}"
+    test-run-uuid: "${uuid}"
+spec:
+  snapshot: ${snapshot_name}
+  releasePlan: ${release_plan_name}
+EOF
+
+    export RELEASE_NAME=${release_name}
+    export RELEASE_NAMESPACE=${tenant_namespace}
+    "${SUITE_DIR}/../scripts/wait-for-release.sh"
+
+    export RELEASE_NAMES="${release_name}"
+}
 
 patch_component_source_before_merge() {
     if [[ "${PTSV_BUILD_PIPELINE}" != "docker-build-multi-platform-oci-ta" ]] \

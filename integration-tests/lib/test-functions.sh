@@ -1599,10 +1599,11 @@ handle_test_failure() {
     return 1
 }
 
-wait_for_multi_component_snapshot() {
+wait_for_components_snapshot() {
     local application_name="${1:-${application_name}}"
+    local expected_count="${2:-2}"
 
-    echo "📸 Looking for multi-component snapshot..." >&2
+    echo "📸 Looking for a snapshot with at least ${expected_count} component(s)..." >&2
     echo "🔍 DEBUG: Search context - namespace: ${tenant_namespace}, application: ${application_name}" >&2
 
     local max_attempts=24
@@ -1610,7 +1611,7 @@ wait_for_multi_component_snapshot() {
     local snapshot_name=""
 
     while [ $attempt -le $max_attempts ] && [ -z "$snapshot_name" ]; do
-        echo "🔍 DEBUG: Multi-component snapshot search attempt ${attempt}/${max_attempts}" >&2
+        echo "🔍 DEBUG: Snapshot search attempt ${attempt}/${max_attempts}" >&2
 
         local all_snapshots=""
         if ! all_snapshots=$(kubectl get snapshots -n "$tenant_namespace" \
@@ -1630,18 +1631,18 @@ wait_for_multi_component_snapshot() {
         echo "$all_snapshots" | jq -r \
             '.items[] | "  - \(.metadata.name): \(.spec.components | length) components (\(.spec.components | map(.name // "unknown") | join(", ")))"' >&2
 
-        snapshot_name=$(echo "$all_snapshots" | jq -r \
-            '.items[] | select(.spec.components | length > 1) | .metadata.name' | tail -1)
+        snapshot_name=$(echo "$all_snapshots" | jq -r --argjson expected "${expected_count}" \
+            '.items[] | select((.spec.components | length) >= $expected) | .metadata.name' | tail -1)
 
         if [ -n "$snapshot_name" ]; then
-            echo "🔍 DEBUG: Found multi-component snapshot: $snapshot_name" >&2
+            echo "🔍 DEBUG: Found matching snapshot: $snapshot_name" >&2
             local snapshot_details
             snapshot_details=$(echo "$all_snapshots" | jq -r --arg name "$snapshot_name" '.items[] | select(.metadata.name == $name)')
             echo "$snapshot_details" | jq -r '"  - Created: \(.metadata.creationTimestamp)"' >&2
             echo "$snapshot_details" | jq -r '"  - Components: \(.spec.components | map(.name) | join(", "))"' >&2
             break
         else
-            echo "🔍 DEBUG: No multi-component snapshot found yet (need > 1 component)" >&2
+            echo "🔍 DEBUG: No matching snapshot found yet (need >= ${expected_count} component(s))" >&2
             if [ $attempt -lt $max_attempts ]; then
                 echo "🔍 DEBUG: Waiting 30 seconds before retry..." >&2
                 sleep 30
@@ -1652,9 +1653,9 @@ wait_for_multi_component_snapshot() {
     done
 
     if [ -z "$snapshot_name" ]; then
-        echo "🔴 DEBUG: Failed to find multi-component snapshot after ${max_attempts} attempts (~$(( max_attempts * 30 / 60 )) minutes)" >&2
+        echo "🔴 DEBUG: Failed to find a matching snapshot after ${max_attempts} attempts (~$(( max_attempts * 30 / 60 )) minutes)" >&2
         echo "🔴 DEBUG: This may indicate:" >&2
-        echo "    - Multi-component snapshots are not being created" >&2
+        echo "    - The expected snapshot is not being created" >&2
         echo "    - Snapshot creation is slower than expected" >&2
         echo "    - Component builds may have failed or not completed properly" >&2
     fi
