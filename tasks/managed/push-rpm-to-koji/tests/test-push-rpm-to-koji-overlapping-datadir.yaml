@@ -1,0 +1,99 @@
+---
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: test-push-rpm-to-koji-overlapping-datadir
+  annotations:
+    test/assert-task-failure: run-task
+    test/assert-step-failure: copy-python-module
+    test/assert-failure-message: "overlaps dataDir /var/workdir/python-packages; 1 restored files remain"
+spec:
+  description: |
+    Run push-rpm-to-koji with dataDir set to the Python module staging
+    directory. copy-python-module must fail with the overlap error while
+    the restored marker file is still present.
+  params:
+    - name: ociStorage
+      description: The OCI repository where the Trusted Artifacts are stored.
+      type: string
+    - name: ociArtifactExpiresAfter
+      description: Expiration date for the trusted artifacts created in the
+        OCI repository. An empty string means the artifacts do not expire.
+      type: string
+      default: "1d"
+    - name: orasOptions
+      description: oras options to pass to Trusted Artifacts calls
+      type: string
+      default: "--insecure"
+    - name: trustedArtifactsDebug
+      description: Flag to enable debug logging in trusted artifacts. Set to a non-empty string to enable.
+      type: string
+      default: ""
+  tasks:
+    - name: setup
+      taskSpec:
+        results:
+          - name: sourceDataArtifact
+            type: string
+        volumes:
+          - name: workdir
+            emptyDir: {}
+        stepTemplate:
+          volumeMounts:
+            - mountPath: /var/workdir
+              name: workdir
+          env:
+            - name: IMAGE_EXPIRES_AFTER
+              value: $(params.ociArtifactExpiresAfter)
+            - name: "ORAS_OPTIONS"
+              value: "$(params.orasOptions)"
+            - name: "DEBUG"
+              value: "$(params.trustedArtifactsDebug)"
+          securityContext:
+            runAsUser: 1001
+        steps:
+          - name: setup-values
+            image: quay.io/konflux-ci/release-service-utils@sha256:ed0063f570ee7cc563b81e768303204b94446960159b1907e6128cb62d4f262f
+            script: |
+              #!/usr/bin/env bash
+              set -eux
+              mkdir -p /var/workdir/python-packages/marker
+              echo kept > /var/workdir/python-packages/marker/data.txt
+          - name: create-trusted-artifact
+            ref:
+              name: create-trusted-artifact
+            params:
+              - name: ociStorage
+                value: $(params.ociStorage)
+              - name: workDir
+                value: /var/workdir/python-packages
+              - name: sourceDataArtifact
+                value: $(results.sourceDataArtifact.path)
+    - name: run-task
+      taskRef:
+        name: push-rpm-to-koji
+      params:
+        - name: snapshotPath
+          value: marker/snapshot_spec.json
+        - name: dataPath
+          value: marker/data.txt
+        - name: pushSecret
+          value: "push-koji-test"
+        - name: ociStorage
+          value: $(params.ociStorage)
+        - name: orasOptions
+          value: $(params.orasOptions)
+        - name: sourceDataArtifact
+          value: "$(tasks.setup.results.sourceDataArtifact)=/var/workdir/python-packages"
+        - name: dataDir
+          value: /var/workdir/python-packages
+        - name: trustedArtifactsDebug
+          value: $(params.trustedArtifactsDebug)
+        - name: taskGitUrl
+          value: "http://localhost"
+        - name: taskGitRevision
+          value: "main"
+        - name: pipelineImage
+          value: registry.access.redhat.com/ubi9/python-312:latest
+      runAfter:
+        - setup
